@@ -2,6 +2,14 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **STATUS (recorded 2026-09-09): DELIVERED, and its UI has since been REPLACED. Zero of
+> its 31 boxes were ticked; they are NOT a progress signal.** Schema v4's card library
+> and named playlists shipped. The 2026-09-06 one-loop change then removed the library
+> and named playlists *from the UI* on owner direction: the schema still carries
+> `playlists[]` and `active_playlist_id` and older multi-playlist files round-trip
+> unchanged, but the app exposes exactly one playlist and never creates another. Do not
+> read this plan as a description of the current window.
+
 **Goal:** Replace the per-card `presence` tri-state and global carousel with a card
 library plus named playlists (one active), schema v4, without moving the wire
 protocol.

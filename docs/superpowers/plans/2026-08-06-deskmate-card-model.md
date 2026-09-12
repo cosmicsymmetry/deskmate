@@ -2,6 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **STATUS (recorded 2026-09-09): DELIVERED. 90 of its 99 boxes were never ticked and
+> are NOT a progress signal.** The card model shipped as schema v3 (`cards[]`,
+> `presence`, `alert`, `carousel.advance`) and has since been carried through v4, v5 and
+> v6 — `app-core/src/config.rs`'s `CURRENT_SCHEMA_VERSION` is 6. It was physically
+> verified 2026-08-06 (eight of nine checks; `docs/hardware/board-notes.md`). Read the
+> commits and CLAUDE.md, not the boxes.
+
 **Goal:** Replace the v2 `widgets[]`/`screens[]`/size-class/dashboard authoring model with one ordered `cards[]` array, host-driven timed rotation, and a bounded two-trigger alert mechanic — without changing the wire protocol or firmware.
 
 **Architecture:** `AppConfig` gains `cards: Vec<CardSettings>` and loses `widgets`, `screens`, and all size classes. Each card carries `presence` (in-rotation / alert-only / off) and `alert` (none / on-timer-finish / before-event). `AppConfig::compile` lowers `cards[]` into the *unchanged* frozen `ApplyConfig { widgets, screens, rotation, revision }` wire shape, pinning `SizeClass::Full` and deriving each screen ID from its card ID. Timed rotation and alert triggers are evaluated entirely in the Rust runtime, which already owns time, provider data, and pomodoro state; the firmware receives only `ActivateScreen` and `TriggerInterrupt` as it does today. The companion webview collapses to a single card list plus a preview that renders from real last-good field values delivered over widened typed IPC.

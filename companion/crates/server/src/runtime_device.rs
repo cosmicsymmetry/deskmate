@@ -18,9 +18,9 @@ use device::{DeviceError, ReceivedEvent, SessionDiagnostics, TransportError};
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use protocol::{
-    Ack, ActivateScreen, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, AssetRelease, ErrorCode,
-    ErrorResponse, Field, Message, NetworkConfig, PushData, PushScene, RequestIdAllocator,
-    ScreenConfig, StatusResponse, TimeSync, TriggerInterrupt, WidgetConfig,
+    Ack, ActivateCard, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, AssetRelease, CardConfig,
+    ErrorCode, ErrorResponse, Message, NetworkConfig, PushScene, PushTimer, RequestIdAllocator,
+    StatusResponse, TimeSync, TriggerInterrupt,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
@@ -30,11 +30,50 @@ use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
 /// both implementations the same device-facing failure threshold.
 const REQUEST_TIMEOUT: Duration = device::DEFAULT_REQUEST_TIMEOUT;
 
+/// `AssetRelease` is not like the other requests. Its handler runs the
+/// mark-dead scan and then COMPACTS the flash blob region, moving every
+/// surviving asset's bytes, and flash erase-and-write is slow enough that the
+/// ordinary two-second budget is simply the wrong number for it.
+///
+/// This was observed rather than reasoned about. A picture card's 329,740-byte
+/// frame made compaction move far more than the curated fonts ever did, and
+/// `AssetRelease` began timing out while the device reported `dropped_responses`,
+/// `malformed_frames` and `crc_errors` all at zero -- the reply was late, not
+/// lost. The many-round-trip chunk phase, which does no bulk flash work,
+/// succeeded in the same pass.
+///
+/// It stays comfortably under [`IDLE_TIMEOUT`], so a slow compaction cannot be
+/// mistaken for a dead peer, and a test pins that ordering.
+const ASSET_RELEASE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How long this particular request may take. Everything except the one
+/// message with a bulk-flash handler keeps the ordinary budget.
+fn request_timeout(message: &protocol::Message) -> Duration {
+    match message {
+        protocol::Message::AssetRelease(_) => ASSET_RELEASE_TIMEOUT,
+        _ => REQUEST_TIMEOUT,
+    }
+}
+
 /// How long the blocking [`RuntimeDevice`] caller waits for the socket actor.
 /// This must stay strictly greater than [`REQUEST_TIMEOUT`]: the actor must
 /// expire and remove its pending request before the caller can submit another,
 /// or a late response could be attributed to the next command.
 const RESPONSE_WAIT_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// How much longer the blocking caller waits than the actor does, for the same
+/// request. The ordering above is what stops a late response being attributed
+/// to the next command, so it has to hold for EVERY message -- including the
+/// one with its own longer budget, which is why this is a margin rather than a
+/// second fixed number that could drift out of order.
+const RESPONSE_WAIT_MARGIN: Duration =
+    Duration::from_secs(RESPONSE_WAIT_TIMEOUT.as_secs() - REQUEST_TIMEOUT.as_secs());
+
+/// The blocking caller's budget for this request, always strictly greater than
+/// [`request_timeout`] for the same message.
+fn response_wait_timeout(message: &protocol::Message) -> Duration {
+    request_timeout(message) + RESPONSE_WAIT_MARGIN
+}
 
 /// Bounds every WebSocket send, including requests, keepalives, and close
 /// frames. A peer that stops reading would otherwise park the socket actor and
@@ -238,13 +277,13 @@ impl EventRouter {
                 )
                 && replay.config.as_ref().is_some_and(|config| {
                     config
-                        .screens
+                        .cards
                         .iter()
-                        .any(|screen| screen.screen_id == event.screen_id)
+                        .any(|card| card.card_id == event.card_id)
                 })
             {
-                replay.active_screen = Some(ActivateScreen {
-                    screen_id: event.screen_id.clone(),
+                replay.active_card = Some(ActivateCard {
+                    card_id: event.card_id.clone(),
                 });
             }
             if event.kind == protocol::EventKind::InterruptDismissed
@@ -283,8 +322,8 @@ impl EventRouter {
 struct ReplayState {
     time_sync: Option<(TimeSync, std::time::Instant)>,
     config: Option<ApplyConfig>,
-    pushes: Vec<PushData>,
-    active_screen: Option<ActivateScreen>,
+    pushes: Vec<PushTimer>,
+    active_card: Option<ActivateCard>,
     interrupts: Vec<TriggerInterrupt>,
 }
 
@@ -401,13 +440,16 @@ impl WebSocketRuntimeDevice {
             return Err(DeviceError::NoDevice);
         }
         let (response_sender, response_receiver) = mpsc::sync_channel(1);
+        // Computed before the message is moved into the request, and always
+        // strictly longer than the actor's own deadline for it.
+        let wait_timeout = response_wait_timeout(&message);
         commands
             .send(DeviceRequest {
                 message,
                 response: response_sender,
             })
             .map_err(|_| DeviceError::Transport(TransportError::Disconnected))?;
-        match response_receiver.recv_timeout(RESPONSE_WAIT_TIMEOUT) {
+        match response_receiver.recv_timeout(wait_timeout) {
             Ok(response) => response.map(|message| (generation, message)),
             Err(RecvTimeoutError::Timeout) => Err(DeviceError::Timeout),
             Err(RecvTimeoutError::Disconnected) => {
@@ -465,25 +507,25 @@ impl WebSocketRuntimeDevice {
                 if changes_live_model {
                     replay.pushes.clear();
                     replay.interrupts.clear();
-                    if replay.active_screen.as_ref().is_some_and(|active| {
+                    if replay.active_card.as_ref().is_some_and(|active| {
                         !config
-                            .screens
+                            .cards
                             .iter()
-                            .any(|screen| screen.screen_id == active.screen_id)
+                            .any(|card| card.card_id == active.card_id)
                     }) {
-                        replay.active_screen = None;
+                        replay.active_card = None;
                     }
                 }
             }
-            Message::PushData(push) => {
+            Message::PushTimer(push) => {
                 replay
                     .pushes
-                    .retain(|cached| cached.widget_id != push.widget_id);
+                    .retain(|cached| cached.card_id != push.card_id);
                 replay.pushes.push(push.clone());
                 replay.pushes.sort_unstable_by_key(|cached| cached.revision);
             }
-            Message::ActivateScreen(activation) => {
-                replay.active_screen = Some(activation.clone());
+            Message::ActivateCard(activation) => {
+                replay.active_card = Some(activation.clone());
             }
             Message::TriggerInterrupt(interrupt) => {
                 replay
@@ -508,20 +550,10 @@ impl WebSocketRuntimeDevice {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        if let Some(config) = &replay.config {
-            let required = protocol::CAPABILITY_CORE_WIDGETS
-                | if config.rotation == 270 {
-                    protocol::CAPABILITY_CONFIG_ROTATION
-                } else {
-                    0
-                };
-            if status.capabilities & required != required {
-                return Err(DeviceError::MissingCapabilities {
-                    required,
-                    available: status.capabilities,
-                });
-            }
-        }
+        // Protocol v2 has no capability a card list can require: the bits that
+        // described template rendering and rotation support are gone, and a
+        // scene arrives already laid out for the mount. There is nothing to
+        // re-check before replaying a config.
 
         self.latest_data_revision = status.latest_revision;
         self.latest_config_revision = status.config_revision;
@@ -571,18 +603,18 @@ impl WebSocketRuntimeDevice {
                     .ok_or(DeviceError::RevisionExhausted)?;
             }
             let (_, response) =
-                self.request_on_generation(Some(generation), Message::PushData(push.clone()))?;
-            Self::require_ack(&response, protocol::TYPE_PUSH_DATA, Some(push.revision))?;
+                self.request_on_generation(Some(generation), Message::PushTimer(push.clone()))?;
+            Self::require_ack(&response, protocol::TYPE_PUSH_TIMER, Some(push.revision))?;
             data_revision = push.revision;
         }
         self.latest_data_revision = data_revision;
 
-        if let Some(activation) = &replay.active_screen {
+        if let Some(activation) = &replay.active_card {
             let (_, response) = self.request_on_generation(
                 Some(generation),
-                Message::ActivateScreen(activation.clone()),
+                Message::ActivateCard(activation.clone()),
             )?;
-            Self::require_ack(&response, protocol::TYPE_ACTIVATE_SCREEN, None)?;
+            Self::require_ack(&response, protocol::TYPE_ACTIVATE_CARD, None)?;
         }
         for interrupt in &replay.interrupts {
             let (_, response) = self.request_on_generation(
@@ -673,33 +705,19 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
         Ok(())
     }
 
-    fn apply_layout(
-        &mut self,
-        rotation: u16,
-        widgets: Vec<WidgetConfig>,
-        screens: Vec<ScreenConfig>,
-    ) -> Result<(), DeviceError> {
+    fn apply_layout(&mut self, rotation: u16, cards: Vec<CardConfig>) -> Result<(), DeviceError> {
         if self.connected_generation.is_none() {
             return Err(DeviceError::NoDevice);
         }
-        let required = protocol::CAPABILITY_CORE_WIDGETS
-            | if rotation == 270 {
-                protocol::CAPABILITY_CONFIG_ROTATION
-            } else {
-                0
-            };
-        if self.capabilities & required != required {
-            return Err(DeviceError::MissingCapabilities {
-                required,
-                available: self.capabilities,
-            });
-        }
+        // Protocol v2 retired every capability that described rendering a
+        // template, and rotation is no longer one a device can lack: a scene
+        // arrives already laid out for the mount. Nothing in a card list is
+        // still capability-gated, so there is nothing to check here.
         let revision = Self::next_revision(self.latest_config_revision)?;
         let request = Message::ApplyConfig(ApplyConfig {
             revision,
             rotation,
-            widgets,
-            screens,
+            cards,
         });
         let response = self.connected_request(request.clone())?;
         Self::require_ack(&response, protocol::TYPE_APPLY_CONFIG, Some(revision))?;
@@ -708,15 +726,23 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
         Ok(())
     }
 
-    fn push_fields(&mut self, widget_id: String, fields: Vec<Field>) -> Result<(), DeviceError> {
+    fn push_timer(
+        &mut self,
+        card_id: String,
+        total_ms: u32,
+        remaining_ms: u32,
+        running: bool,
+    ) -> Result<(), DeviceError> {
         let revision = Self::next_revision(self.latest_data_revision)?;
-        let request = Message::PushData(PushData {
-            widget_id,
+        let request = Message::PushTimer(PushTimer {
+            card_id,
             revision,
-            fields,
+            total_ms,
+            remaining_ms,
+            running,
         });
         let response = self.connected_request(request.clone())?;
-        Self::require_ack(&response, protocol::TYPE_PUSH_DATA, Some(revision))?;
+        Self::require_ack(&response, protocol::TYPE_PUSH_TIMER, Some(revision))?;
         self.latest_data_revision = revision;
         self.remember_success(&request);
         Ok(())
@@ -738,10 +764,10 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
         Self::require_ack(&response, protocol::TYPE_PUSH_SCENE, Some(revision))
     }
 
-    fn activate_screen(&mut self, screen_id: String) -> Result<(), DeviceError> {
-        let request = Message::ActivateScreen(ActivateScreen { screen_id });
+    fn activate_card(&mut self, card_id: String) -> Result<(), DeviceError> {
+        let request = Message::ActivateCard(ActivateCard { card_id });
         let response = self.connected_request(request.clone())?;
-        Self::require_ack(&response, protocol::TYPE_ACTIVATE_SCREEN, None)?;
+        Self::require_ack(&response, protocol::TYPE_ACTIVATE_CARD, None)?;
         self.remember_success(&request);
         Ok(())
     }
@@ -757,7 +783,7 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
     /// Unlike `provision`/`factory_reset`, asset transfer is not cable-only:
     /// the server owning the device over the tunnel is the entire point of
     /// networked tier, so this is a plain request/reply exactly like
-    /// `push_fields`. Not part of reconnect replay (`remember_success`) --
+    /// `push_timer`. Not part of reconnect replay (`remember_success`) --
     /// `AssetSync` re-derives its own state from `already_present`
     /// on every pass rather than trusting a stale replay log.
     fn send_asset_begin(&mut self, begin: AssetBegin) -> Result<Ack, DeviceError> {
@@ -873,7 +899,7 @@ impl SocketPeer {
                     pending = Some(PendingRequest {
                         request_id,
                         expected_type,
-                        deadline: Instant::now() + REQUEST_TIMEOUT,
+                        deadline: Instant::now() + request_timeout(&command.message),
                         response: command.response,
                     });
                 }
@@ -1032,8 +1058,7 @@ mod tests {
     use app_core::RuntimeDevice;
     use device::DeviceError;
     use protocol::{
-        Ack, ErrorCode, Field, FieldValue, Message, NetworkConfig, OtaState, StatusResponse, Tier,
-        TimeSync, WifiState,
+        Ack, ErrorCode, Message, NetworkConfig, OtaState, StatusResponse, Tier, TimeSync, WifiState,
     };
 
     use super::{PendingRequest, SocketPeer};
@@ -1093,6 +1118,52 @@ mod tests {
         assert!(
             super::RESPONSE_WAIT_TIMEOUT > super::REQUEST_TIMEOUT,
             "the actor must clear a pending request before its caller can time out"
+        );
+    }
+
+    #[test]
+    fn every_message_lets_the_actor_expire_before_the_caller_gives_up() {
+        use protocol::{AssetRelease, Message};
+
+        // The invariant that stops a late reply being attributed to the NEXT
+        // command has to hold for the long-budget message too, not just the
+        // default one -- a 20 s actor deadline behind a 4 s caller wait is
+        // exactly the cascade `95ed9eb` fixed.
+        for message in [
+            Message::StatusRequest,
+            Message::AssetRelease(AssetRelease {
+                digests: Vec::new(),
+            }),
+        ] {
+            assert!(
+                super::response_wait_timeout(&message) > super::request_timeout(&message),
+                "actor must expire first for {message:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn asset_release_gets_longer_than_a_normal_request_but_less_than_the_idle_reap() {
+        // Its handler compacts the flash blob region, so two seconds is the
+        // wrong budget -- but a value past the idle timeout would have the
+        // server reap the link while waiting for its own request.
+        assert!(super::ASSET_RELEASE_TIMEOUT > super::REQUEST_TIMEOUT);
+        assert!(super::ASSET_RELEASE_TIMEOUT < super::IDLE_TIMEOUT);
+    }
+
+    #[test]
+    fn only_asset_release_gets_the_longer_budget() {
+        use protocol::{AssetRelease, Message};
+
+        assert_eq!(
+            super::request_timeout(&Message::AssetRelease(AssetRelease {
+                digests: Vec::new()
+            })),
+            super::ASSET_RELEASE_TIMEOUT
+        );
+        assert_eq!(
+            super::request_timeout(&Message::StatusRequest),
+            super::REQUEST_TIMEOUT
         );
     }
 
@@ -1193,20 +1264,12 @@ mod tests {
                 utc_offset_minutes: 0,
             })
             .expect("initial time sync");
+        device.apply_layout(90, Vec::new()).expect("initial layout");
         device
-            .apply_layout(90, Vec::new(), Vec::new())
-            .expect("initial layout");
+            .push_timer("pomodoro".into(), 60_000, 30_000, false)
+            .expect("initial timer");
         device
-            .push_fields(
-                "pomodoro".into(),
-                vec![Field {
-                    key: "remaining_seconds".into(),
-                    value: FieldValue::Integer(30),
-                }],
-            )
-            .expect("initial fields");
-        device
-            .activate_screen("pomodoro".into())
+            .activate_card("pomodoro".into())
             .expect("initial activation");
 
         let second_actor = spawn_test_actor(connector.attach());
@@ -1219,8 +1282,8 @@ mod tests {
         assert!(matches!(replayed.first(), Some(Message::StatusRequest)));
         assert!(matches!(replayed.get(1), Some(Message::TimeSync(_))));
         assert!(matches!(replayed.get(2), Some(Message::ApplyConfig(_))));
-        assert!(matches!(replayed.get(3), Some(Message::PushData(_))));
-        assert!(matches!(replayed.get(4), Some(Message::ActivateScreen(_))));
+        assert!(matches!(replayed.get(3), Some(Message::PushTimer(_))));
+        assert!(matches!(replayed.get(4), Some(Message::ActivateCard(_))));
         assert_eq!(replayed.len(), 5);
     }
 
@@ -1352,13 +1415,13 @@ mod tests {
                         revision: Some(config.revision),
                         already_present: None,
                     }),
-                    Message::PushData(push) => Message::Ack(Ack {
-                        acknowledged_type: protocol::TYPE_PUSH_DATA,
+                    Message::PushTimer(push) => Message::Ack(Ack {
+                        acknowledged_type: protocol::TYPE_PUSH_TIMER,
                         revision: Some(push.revision),
                         already_present: None,
                     }),
-                    Message::ActivateScreen(_) => Message::Ack(Ack {
-                        acknowledged_type: protocol::TYPE_ACTIVATE_SCREEN,
+                    Message::ActivateCard(_) => Message::Ack(Ack {
+                        acknowledged_type: protocol::TYPE_ACTIVATE_CARD,
                         revision: None,
                         already_present: None,
                     }),
@@ -1384,10 +1447,7 @@ mod tests {
         StatusResponse {
             protocol_version: protocol::PROTOCOL_VERSION,
             max_protocol_version: protocol::MAX_PROTOCOL_VERSION,
-            capabilities: protocol::CAPABILITY_CORE_WIDGETS
-                | protocol::CAPABILITY_CONFIG_ROTATION
-                | protocol::CAPABILITY_EXTENDED_TEMPLATES
-                | protocol::CAPABILITY_SCENE_RENDER,
+            capabilities: protocol::CURRENT_CAPABILITIES,
             firmware_version: "test-device".into(),
             uptime_ms: 1_234,
             free_heap: 5_678,

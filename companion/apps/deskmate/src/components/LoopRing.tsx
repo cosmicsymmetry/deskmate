@@ -1,23 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  activePlaylist,
-  filmstripAdvance,
-  filmstripDeadline,
-  filmstripSegments,
+  loopAdvance,
+  loopDeadline,
+  loopSegments,
   formatDuration,
   issuesForPath,
   loopSeconds,
-  setPlaylistAdvance,
+  setAdvance,
 } from "../lib/configDraft";
-import type { AppConfig, PluginCatalog, ValidationIssue } from "../lib/types";
+import type { AppConfig, ValidationIssue } from "../lib/types";
 import { FieldIssues } from "./FieldIssues";
 
 interface LoopRingProps {
   config: AppConfig;
   issues: ValidationIssue[];
-  /** The server's plugin registry, so a plugin arc is named the same here as elsewhere. */
-  catalog: PluginCatalog | null;
   selectedCardId: string | null;
   onSelect: (cardId: string) => void;
   onChange: (config: AppConfig) => void;
@@ -32,7 +29,7 @@ const GAP_DEGREES = 2.4;
 /**
  * A segment's position along the `--arc-a` → `--arc-b` ramp, as 0–1.
  *
- * This used to be `index % 4`, which repeated every fifth entry — and a playlist holds
+ * This used to be `index % 4`, which repeated every fifth entry — and the loop holds
  * up to eight. Two arcs sharing a colour breaks the only mapping there is from an arc
  * back to its name in the legend.
  */
@@ -54,14 +51,13 @@ function compactDuration(totalSeconds: number): string {
 }
 
 /**
- * The loop ring: one arc per active-playlist entry, its sweep proportional to that
+ * The loop ring: one arc per card, its sweep proportional to that
  * entry's resolved dwell, with the on-panel entry at full luminance and a marker
- * riding it. It is the successor to the filmstrip and keeps the same truth —
- * a card's share of the loop, which no other control shows — in the form the rest
- * of this world is built from.
+ * riding it. It carries the one truth no other control shows: a card's share of
+ * the loop.
  *
  * All the arithmetic still comes from the pure helpers in `configDraft`
- * (`filmstripSegments`, `loopSeconds`, `filmstripAdvance`, `filmstripDeadline`), so
+ * (`loopSegments`, `loopSeconds`, `loopAdvance`, `loopDeadline`), so
  * the ring and any other consumer of loop length can never drift apart. This
  * component only maps those numbers onto a circle and wires the events.
  *
@@ -70,22 +66,17 @@ function compactDuration(totalSeconds: number): string {
 export function LoopRing({
   config,
   issues,
-  catalog,
   selectedCardId,
   onSelect,
   onChange,
 }: LoopRingProps) {
-  const playlist = activePlaylist(config);
-  const playlistIndex = config.playlists.findIndex(
-    (candidate) => candidate.id === config.active_playlist_id,
-  );
-  const isTimed = playlist?.advance.kind === "timed";
-  const segments = useMemo(() => filmstripSegments(config, catalog), [config, catalog]);
-  const total = playlist ? loopSeconds(config, playlist.id) : null;
+  const isTimed = config.advance.kind === "timed";
+  const segments = useMemo(() => loopSegments(config), [config]);
+  const total = loopSeconds(config);
   const [isPlaying, setIsPlaying] = useState(false);
   const [reducedMotion, setReducedMotion] = useState(false);
   const configuredDefaultDwell =
-    playlist?.advance.kind === "timed" ? String(playlist.advance.default_dwell_seconds) : "";
+    config.advance.kind === "timed" ? String(config.advance.default_dwell_seconds) : "";
   const [defaultDwellInput, setDefaultDwellInput] = useState(configuredDefaultDwell);
 
   useEffect(() => {
@@ -116,7 +107,7 @@ export function LoopRing({
   segmentsRef.current = segments;
   const deadlineRef = useRef<number | null>(null);
 
-  // Primitive deps only, for the same reason the filmstrip had them: `segments` and
+  // Primitive deps only: `segments` and
   // `activeSegment` are freshly allocated every render, so depending on them tore
   // down and re-armed the interval on every unrelated re-render — and a running
   // pomodoro re-renders this component once a second, which meant a 20-45s dwell
@@ -129,12 +120,12 @@ export function LoopRing({
     if (reducedMotion) {
       return;
     }
-    deadlineRef.current = filmstripDeadline(Date.now(), activeDwellSeconds);
+    deadlineRef.current = loopDeadline(Date.now(), activeDwellSeconds);
     const interval = window.setInterval(() => {
       if (deadlineRef.current === null) {
         return;
       }
-      const result = filmstripAdvance(
+      const result = loopAdvance(
         segmentsRef.current,
         activeCardId,
         deadlineRef.current,
@@ -158,10 +149,9 @@ export function LoopRing({
     onSelect,
   ]);
 
-  const advanceIssues =
-    playlistIndex < 0 ? [] : issuesForPath(issues, `playlists[${playlistIndex}].advance`);
-  const defaultDwellPath = `playlists[${playlistIndex}].advance.default_dwell_seconds`;
-  const pacing = playlist && (
+  const advanceIssues = issuesForPath(issues, "advance");
+  const defaultDwellPath = "advance.default_dwell_seconds";
+  const pacing = (
     <>
       <fieldset className="loop__pacing">
         <legend className="sr-only">Pacing</legend>
@@ -172,7 +162,7 @@ export function LoopRing({
           onClick={() => {
             if (!isTimed) {
               onChange(
-                setPlaylistAdvance(config, playlist.id, {
+                setAdvance(config, {
                   kind: "timed",
                   default_dwell_seconds: DEFAULT_DWELL_SECONDS,
                 }),
@@ -188,14 +178,14 @@ export function LoopRing({
           aria-pressed={!isTimed}
           onClick={() => {
             if (isTimed) {
-              onChange(setPlaylistAdvance(config, playlist.id, { kind: "manual" }));
+              onChange(setAdvance(config, { kind: "manual" }));
             }
           }}
         >
           Manual
         </button>
       </fieldset>
-      {playlist.advance.kind === "timed" && (
+      {config.advance.kind === "timed" && (
         <label className="loop__dwell">
           <span className="sr-only">Default dwell in seconds</span>
           <input
@@ -215,7 +205,7 @@ export function LoopRing({
               const parsed = Number(raw);
               if (Number.isFinite(parsed)) {
                 onChange(
-                  setPlaylistAdvance(config, playlist.id, {
+                  setAdvance(config, {
                     kind: "timed",
                     default_dwell_seconds: parsed,
                   }),

@@ -8,12 +8,11 @@ import type {
   ConfigApplyResult,
   DraftValidation,
   IpcError,
+  MintedImageSource,
   NetworkSettings,
-  PluginCatalog,
   PomodoroAction,
   PreviewFrame,
   ProvisionDeviceInput,
-  ServerCardState,
 } from "./types";
 
 export const APP_STATE_EVENT = "app-state";
@@ -29,7 +28,6 @@ const IPC_ERROR_CATEGORIES = new Set<IpcError["category"]>([
   "incompatible-server",
   "not-found",
   "device",
-  "provider",
   "autostart",
   "window",
   "internal",
@@ -145,19 +143,11 @@ export function resumePushing(): Promise<void> {
   return invokeTyped("resume_pushing");
 }
 
-export function controlPomodoro(widgetId: string, action: PomodoroAction): Promise<void> {
+export function controlPomodoro(cardId: string, action: PomodoroAction): Promise<void> {
   return invokeTyped("control_pomodoro", {
-    target: { widget_id: widgetId },
+    target: { card_id: cardId },
     action,
   });
-}
-
-export function refreshProvider(widgetId: string): Promise<void> {
-  return invokeTyped("refresh_provider", { target: { widget_id: widgetId } });
-}
-
-export function chooseIcsFile(): Promise<string | null> {
-  return invokeTyped("choose_ics_file");
 }
 
 export function getAutostartStatus(): Promise<AutostartStatus> {
@@ -172,12 +162,8 @@ export function renderCardPreview(cardId: string): Promise<PreviewFrame> {
   return invokeTyped("render_card_preview", { cardId });
 }
 
-export function getServerPlugins(): Promise<PluginCatalog> {
-  return invokeTyped("get_server_plugins");
-}
-
-export function getServerCardState(): Promise<ServerCardState[]> {
-  return invokeTyped("get_server_card_state");
+export function mintImageSource(name: string): Promise<MintedImageSource> {
+  return invokeTyped("mint_image_source", { sourceName: name });
 }
 
 export function listenToAppState(onSnapshot: (snapshot: AppSnapshot) => void): Promise<UnlistenFn> {

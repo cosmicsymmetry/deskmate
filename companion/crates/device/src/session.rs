@@ -1,18 +1,16 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use protocol::{
-    Ack, ActivateScreen, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, AssetRelease,
-    CAPABILITY_CONFIG_ROTATION, CAPABILITY_CORE_WIDGETS, Deframer, DeviceEvent, EventAction,
-    EventKind, Field, HeartbeatAck, Message, NetworkConfig, PushData, PushScene,
-    RequestIdAllocator, ScreenConfig, StatusResponse, TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG,
+    Ack, ActivateCard, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, AssetRelease, CardConfig,
+    Deframer, DeviceEvent, EventAction, EventKind, HeartbeatAck, Message, NetworkConfig, PushScene,
+    PushTimer, RequestIdAllocator, StatusResponse, TYPE_ACTIVATE_CARD, TYPE_APPLY_CONFIG,
     TYPE_ASSET_BEGIN, TYPE_ASSET_CHUNK, TYPE_ASSET_COMMIT, TYPE_ASSET_RELEASE, TYPE_FACTORY_RESET,
-    TYPE_NETWORK_CONFIG, TYPE_PUSH_DATA, TYPE_PUSH_SCENE, TYPE_TIME_SYNC, TYPE_TRIGGER_INTERRUPT,
-    TimeSync, TriggerInterrupt, WidgetConfig, decode_message, encode_message,
-    expected_response_type,
+    TYPE_NETWORK_CONFIG, TYPE_PUSH_SCENE, TYPE_PUSH_TIMER, TYPE_TIME_SYNC, TYPE_TRIGGER_INTERRUPT,
+    TimeSync, TriggerInterrupt, decode_message, encode_message, expected_response_type,
 };
 
 use crate::{
@@ -24,6 +22,18 @@ pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(3);
 pub const DEFAULT_EVENT_QUEUE_CAPACITY: usize = 32;
 const COMMAND_QUEUE_CAPACITY: usize = 8;
 const IDLE_READ_PAUSE: Duration = Duration::from_millis(1);
+
+/// How long a caller waits for the session worker's reply, as a multiple of
+/// `request_timeout`.
+///
+/// The worker owes every request an answer within `request_timeout`, because
+/// `SessionConnection::transact` enforces that deadline itself. It can only fail
+/// to do so when a transport read blocks: `transact` checks the deadline *between*
+/// reads, so a read that never returns makes it unreachable. Waiting twice the
+/// transaction budget absorbs scheduling jitter and one transaction already in
+/// flight ahead of this one, while still bounding the wait -- an unbounded one
+/// hands a stuck cable the power to freeze every caller above it.
+const REPLY_TIMEOUT_FACTOR: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionOptions {
@@ -103,8 +113,8 @@ enum WorkerCommand<T> {
 struct ReplayState {
     time_sync: Option<(TimeSync, Instant)>,
     config: Option<ApplyConfig>,
-    pushes: Vec<PushData>,
-    active_screen: Option<ActivateScreen>,
+    pushes: Vec<PushTimer>,
+    active_card: Option<ActivateCard>,
     interrupts: Vec<TriggerInterrupt>,
 }
 
@@ -116,6 +126,16 @@ pub struct DeviceSession<T: Transport + Send + 'static> {
     capabilities: Arc<AtomicU64>,
     diagnostics: Arc<DiagnosticCounters>,
     worker: Option<JoinHandle<()>>,
+    request_timeout: Duration,
+    /// Closed by the worker as it returns. `Drop` waits on this rather than
+    /// joining, so a worker still inside a transport read is told apart from one
+    /// that has finished.
+    finished: Receiver<()>,
+    /// Set once a reply misses its deadline. The worker is then blocked in a
+    /// transport read the operating system will not interrupt, so the session is
+    /// finished: later requests fail immediately instead of each paying the full
+    /// wait, and `Drop` stops short of joining a thread that cannot return.
+    stalled: AtomicBool,
 }
 
 impl<T: Transport + Send + 'static> DeviceSession<T> {
@@ -151,9 +171,15 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
             replay: ReplayState::default(),
             last_device_uptime_ms: initial_status.uptime_ms,
         };
+        let (finished_sender, finished_receiver) = mpsc::sync_channel::<()>(1);
         let worker = thread::Builder::new()
             .name("deskmate-device-session".into())
-            .spawn(move || run_worker(connection, &command_receiver))
+            .spawn(move || {
+                // Moved in so it is dropped exactly when the worker returns;
+                // closing the channel is the signal `Drop` waits for.
+                let _finished = finished_sender;
+                run_worker(connection, &command_receiver);
+            })
             .expect("failed to spawn Deskmate device-session worker");
         Self {
             command_sender,
@@ -163,10 +189,16 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
             capabilities,
             diagnostics,
             worker: Some(worker),
+            request_timeout: options.request_timeout,
+            finished: finished_receiver,
+            stalled: AtomicBool::new(false),
         }
     }
 
     fn request(&self, message: Message) -> Result<Message, DeviceError> {
+        if self.stalled.load(Ordering::Acquire) {
+            return Err(DeviceError::Transport(TransportError::Disconnected));
+        }
         let (response_sender, response_receiver) = mpsc::sync_channel(1);
         self.command_sender
             .send(WorkerCommand::Request {
@@ -174,9 +206,22 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
                 response: response_sender,
             })
             .map_err(|_| DeviceError::Transport(TransportError::Disconnected))?;
-        response_receiver
-            .recv()
-            .map_err(|_| DeviceError::Transport(TransportError::Disconnected))?
+        match response_receiver.recv_timeout(self.request_timeout * REPLY_TIMEOUT_FACTOR) {
+            Ok(result) => result,
+            Err(RecvTimeoutError::Timeout) => {
+                // Reported as a disconnection rather than `Timeout` on purpose.
+                // `Timeout` means the device did not answer over a link that is
+                // still good, so a caller retries on the same session; this means
+                // the session itself will never answer again, and only a
+                // disconnection makes app-core drop it and reconnect. The
+                // physical cause is a cable that went away mid-read.
+                self.stalled.store(true, Ordering::Release);
+                Err(DeviceError::Transport(TransportError::Disconnected))
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                Err(DeviceError::Transport(TransportError::Disconnected))
+            }
+        }
     }
 
     fn allocate_revision(counter: &AtomicU32) -> Result<u32, DeviceError> {
@@ -227,11 +272,11 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         }
     }
 
-    pub fn push_data(&self, push: PushData) -> Result<Ack, DeviceError> {
+    pub fn push_timer(&self, push: PushTimer) -> Result<Ack, DeviceError> {
         let revision = push.revision;
-        match self.request(Message::PushData(push))? {
+        match self.request(Message::PushTimer(push))? {
             Message::Ack(ack)
-                if ack.acknowledged_type == TYPE_PUSH_DATA && ack.revision == Some(revision) =>
+                if ack.acknowledged_type == TYPE_PUSH_TIMER && ack.revision == Some(revision) =>
             {
                 self.latest_data_revision
                     .fetch_max(revision, Ordering::AcqRel);
@@ -241,23 +286,29 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         }
     }
 
-    pub fn push_fields(
+    pub fn push_next_timer(
         &self,
-        widget_id: impl Into<String>,
-        fields: Vec<Field>,
+        card_id: impl Into<String>,
+        total_ms: u32,
+        remaining_ms: u32,
+        running: bool,
     ) -> Result<Ack, DeviceError> {
         let revision = Self::allocate_revision(&self.latest_data_revision)?;
-        self.push_data(PushData {
-            widget_id: widget_id.into(),
+        self.push_timer(PushTimer {
+            card_id: card_id.into(),
             revision,
-            fields,
+            total_ms,
+            remaining_ms,
+            running,
         })
     }
 
     pub fn apply_config(&self, config: ApplyConfig) -> Result<Ack, DeviceError> {
-        let required = required_config_capabilities(&config);
-        let available = self.capabilities();
-        ensure_capabilities(required, available)?;
+        // Protocol v2 has no capability a card list can require. The v1 bits
+        // that gated this -- "core widgets" and a separate one for a
+        // 270-degree rotation -- both described a device that rendered
+        // templates; a v2 device renders scenes and accepts either mounting
+        // unconditionally.
         let revision = config.revision;
         match self.request(Message::ApplyConfig(config))? {
             Message::Ack(ack)
@@ -274,22 +325,20 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
     pub fn apply_next_config(
         &self,
         rotation: u16,
-        widgets: Vec<WidgetConfig>,
-        screens: Vec<ScreenConfig>,
+        cards: Vec<CardConfig>,
     ) -> Result<Ack, DeviceError> {
         let revision = Self::allocate_revision(&self.latest_config_revision)?;
         self.apply_config(ApplyConfig {
             revision,
             rotation,
-            widgets,
-            screens,
+            cards,
         })
     }
 
-    pub fn activate_screen(&self, activation: ActivateScreen) -> Result<Ack, DeviceError> {
-        match self.request(Message::ActivateScreen(activation))? {
+    pub fn activate_card(&self, activation: ActivateCard) -> Result<Ack, DeviceError> {
+        match self.request(Message::ActivateCard(activation))? {
             Message::Ack(ack)
-                if ack.acknowledged_type == TYPE_ACTIVATE_SCREEN && ack.revision.is_none() =>
+                if ack.acknowledged_type == TYPE_ACTIVATE_CARD && ack.revision.is_none() =>
             {
                 Ok(ack)
             }
@@ -433,11 +482,21 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         self.diagnostics.snapshot()
     }
 
+    /// Whether this session's worker has stopped answering. Such a session can
+    /// never be revived -- `reconnect` hands the new transport to that same
+    /// worker -- so a caller holding one must discard it and open another.
+    pub fn is_stalled(&self) -> bool {
+        self.stalled.load(Ordering::Acquire)
+    }
+
     pub fn reconnect(
         &self,
         transport: T,
         initial_status: StatusResponse,
     ) -> Result<(), DeviceError> {
+        if self.stalled.load(Ordering::Acquire) {
+            return Err(DeviceError::Transport(TransportError::Disconnected));
+        }
         let capabilities = initial_status.capabilities;
         let (response_sender, response_receiver) = mpsc::sync_channel(1);
         self.command_sender
@@ -447,9 +506,19 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
                 response: response_sender,
             })
             .map_err(|_| DeviceError::Transport(TransportError::Disconnected))?;
-        let result = response_receiver
-            .recv()
-            .map_err(|_| DeviceError::Transport(TransportError::Disconnected))?;
+        let result =
+            match response_receiver.recv_timeout(self.request_timeout * REPLY_TIMEOUT_FACTOR) {
+                Ok(result) => result,
+                // The worker never took the transport, so its capabilities are not
+                // this session's -- return before publishing them.
+                Err(RecvTimeoutError::Timeout) => {
+                    self.stalled.store(true, Ordering::Release);
+                    return Err(DeviceError::Transport(TransportError::Disconnected));
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(DeviceError::Transport(TransportError::Disconnected));
+                }
+            };
         // The worker has replaced its transport even when replay is rejected. Publish
         // that device's capabilities so every later request is gated against the
         // actual connection rather than the previous firmware.
@@ -460,10 +529,35 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
 
 impl<T: Transport + Send + 'static> Drop for DeviceSession<T> {
     fn drop(&mut self) {
-        let _ = self.command_sender.send(WorkerCommand::Shutdown);
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+        let Some(worker) = self.worker.take() else {
+            return;
+        };
+        if self.stalled.load(Ordering::Acquire) {
+            // The worker is inside a transport read that will not return until
+            // the operating system releases it, so both the queued shutdown and
+            // the join would block here for as long as that takes. Detach it and
+            // let it end on its own: joining a thread that cannot return is what
+            // once left the desktop app unable to quit after the board was
+            // unplugged.
+            let _ = self.command_sender.try_send(WorkerCommand::Shutdown);
+            return;
         }
+        let _ = self.command_sender.send(WorkerCommand::Shutdown);
+        // Bounded on purpose. A worker can be blocked inside a transport read the
+        // operating system will not interrupt even when no request ever timed out
+        // -- an idle session whose cable was pulled -- and `stalled` is only set
+        // by a request that missed its deadline. Waiting for the worker to close
+        // `finished`, rather than joining it outright, keeps a thread that cannot
+        // return from holding up the caller: joining one is what left the desktop
+        // app still running after "Quit Deskmate".
+        if self
+            .finished
+            .recv_timeout(self.request_timeout * REPLY_TIMEOUT_FACTOR)
+            == Err(RecvTimeoutError::Timeout)
+        {
+            return;
+        }
+        let _ = worker.join();
     }
 }
 
@@ -646,13 +740,13 @@ impl<T: Transport> SessionConnection<T> {
             )
             && self.replay.config.as_ref().is_some_and(|config| {
                 config
-                    .screens
+                    .cards
                     .iter()
-                    .any(|screen| screen.screen_id == event.screen_id)
+                    .any(|card| card.card_id == event.card_id)
             })
         {
-            self.replay.active_screen = Some(ActivateScreen {
-                screen_id: event.screen_id.clone(),
+            self.replay.active_card = Some(ActivateCard {
+                card_id: event.card_id.clone(),
             });
         }
         if event.kind == EventKind::InterruptDismissed
@@ -694,22 +788,22 @@ impl<T: Transport> SessionConnection<T> {
                 if changes_live_model {
                     self.replay.pushes.clear();
                     self.replay.interrupts.clear();
-                    if self.replay.active_screen.as_ref().is_some_and(|active| {
+                    if self.replay.active_card.as_ref().is_some_and(|active| {
                         !config
-                            .screens
+                            .cards
                             .iter()
-                            .any(|screen| screen.screen_id == active.screen_id)
+                            .any(|card| card.card_id == active.card_id)
                     }) {
-                        self.replay.active_screen = None;
+                        self.replay.active_card = None;
                     }
                 }
                 self.latest_config_revision
                     .fetch_max(config.revision, Ordering::AcqRel);
             }
-            Message::PushData(push) => {
+            Message::PushTimer(push) => {
                 self.replay
                     .pushes
-                    .retain(|cached| cached.widget_id != push.widget_id);
+                    .retain(|cached| cached.card_id != push.card_id);
                 self.replay.pushes.push(push.clone());
                 self.replay
                     .pushes
@@ -717,8 +811,8 @@ impl<T: Transport> SessionConnection<T> {
                 self.latest_data_revision
                     .fetch_max(push.revision, Ordering::AcqRel);
             }
-            Message::ActivateScreen(activation) => {
-                self.replay.active_screen = Some(activation.clone());
+            Message::ActivateCard(activation) => {
+                self.replay.active_card = Some(activation.clone());
             }
             Message::TriggerInterrupt(interrupt) => {
                 self.replay
@@ -735,9 +829,6 @@ impl<T: Transport> SessionConnection<T> {
 
     fn replay_after_reconnect(&mut self, status: &StatusResponse) -> Result<(), DeviceError> {
         let mut replay = self.replay.clone();
-        if let Some(config) = &replay.config {
-            ensure_capabilities(required_config_capabilities(config), status.capabilities)?;
-        }
         let powered_session_reset = status.uptime_ms < self.last_device_uptime_ms
             || (status.latest_revision == 0
                 && status.config_revision == 0
@@ -797,8 +888,8 @@ impl<T: Transport> SessionConnection<T> {
                     .ok_or(DeviceError::RevisionExhausted)?;
             }
             Self::require_ack(
-                &self.transact(&Message::PushData(push.clone()))?,
-                TYPE_PUSH_DATA,
+                &self.transact(&Message::PushTimer(push.clone()))?,
+                TYPE_PUSH_TIMER,
                 Some(push.revision),
             )?;
             data_revision = push.revision;
@@ -806,10 +897,10 @@ impl<T: Transport> SessionConnection<T> {
         self.latest_data_revision
             .store(data_revision, Ordering::Release);
 
-        if let Some(activation) = &replay.active_screen {
+        if let Some(activation) = &replay.active_card {
             Self::require_ack(
-                &self.transact(&Message::ActivateScreen(activation.clone()))?,
-                TYPE_ACTIVATE_SCREEN,
+                &self.transact(&Message::ActivateCard(activation.clone()))?,
+                TYPE_ACTIVATE_CARD,
                 None,
             )?;
         }
@@ -838,15 +929,6 @@ impl<T: Transport> SessionConnection<T> {
             _ => Err(DeviceError::UnexpectedMessage),
         }
     }
-}
-
-fn required_config_capabilities(config: &ApplyConfig) -> u64 {
-    CAPABILITY_CORE_WIDGETS
-        | if config.rotation == 270 {
-            CAPABILITY_CONFIG_ROTATION
-        } else {
-            0
-        }
 }
 
 fn ensure_capabilities(required: u64, available: u64) -> Result<(), DeviceError> {
@@ -964,10 +1046,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    use protocol::{
-        EventAction, InterruptPolicy, PROTOCOL_VERSION, SizeClass, TapAction, TemplateKind,
-        decode_wire_frame,
-    };
+    use protocol::{EventAction, PROTOCOL_VERSION, TapAction, decode_wire_frame};
 
     use super::*;
 
@@ -1125,8 +1204,8 @@ mod tests {
                 revision: None,
                 already_present: None,
             }),
-            Message::PushData(push) => Message::Ack(Ack {
-                acknowledged_type: TYPE_PUSH_DATA,
+            Message::PushTimer(push) => Message::Ack(Ack {
+                acknowledged_type: TYPE_PUSH_TIMER,
                 revision: Some(push.revision),
                 already_present: None,
             }),
@@ -1135,8 +1214,8 @@ mod tests {
                 revision: Some(config.revision),
                 already_present: None,
             }),
-            Message::ActivateScreen(_) => Message::Ack(Ack {
-                acknowledged_type: TYPE_ACTIVATE_SCREEN,
+            Message::ActivateCard(_) => Message::Ack(Ack {
+                acknowledged_type: TYPE_ACTIVATE_CARD,
                 revision: None,
                 already_present: None,
             }),
@@ -1180,8 +1259,7 @@ mod tests {
         DeviceEvent {
             sequence,
             kind,
-            widget_id: "timer".into(),
-            screen_id: "timer-screen".into(),
+            card_id: "timer".into(),
             action: if kind == EventKind::InterruptDismissed {
                 EventAction::DismissInterrupt
             } else {
@@ -1195,16 +1273,9 @@ mod tests {
         ApplyConfig {
             revision,
             rotation: 90,
-            widgets: vec![WidgetConfig {
-                widget_id: "timer".into(),
-                template: TemplateKind::ProgressRing,
-                size_class: SizeClass::Standard,
+            cards: vec![CardConfig {
+                card_id: "timer".into(),
                 tap_action: TapAction::StartPause,
-                interrupt_policy: InterruptPolicy::Enabled,
-            }],
-            screens: vec![ScreenConfig {
-                screen_id: "timer-screen".into(),
-                widget_id: "timer".into(),
             }],
         }
     }
@@ -1379,11 +1450,13 @@ mod tests {
             &status(41, 0, 100),
             options(Duration::from_mins(1), 8),
         );
-        let ack = session.push_fields("timer", Vec::new()).unwrap();
+        let ack = session
+            .push_next_timer("timer", 60_000, 60_000, false)
+            .unwrap();
         assert_eq!(ack.revision, Some(42));
         assert!(matches!(
             state.lock().unwrap().requests.last(),
-            Some(Message::PushData(PushData { revision: 42, .. }))
+            Some(Message::PushTimer(PushTimer { revision: 42, .. }))
         ));
     }
 
@@ -1423,7 +1496,7 @@ mod tests {
             .unwrap()
             .reply_modes
             .push_back(ReplyMode::Response(Message::Ack(Ack {
-                acknowledged_type: TYPE_PUSH_DATA,
+                acknowledged_type: TYPE_PUSH_TIMER,
                 revision: Some(7),
                 already_present: None,
             })));
@@ -1456,61 +1529,6 @@ mod tests {
                 .iter()
                 .all(|request| !matches!(request, Message::PushScene(_)))
         );
-    }
-
-    #[test]
-    fn legacy_firmware_rejects_rotated_config_before_any_wire_mutation() {
-        let mut legacy = status(0, 0, 100);
-        legacy.capabilities = protocol::LEGACY_CAPABILITIES;
-        let (transport, state) = FakeTransport::new(legacy.clone());
-        let session =
-            DeviceSession::with_options(transport, &legacy, options(Duration::from_mins(1), 8));
-        let mut rotated = config(1);
-        rotated.rotation = 270;
-
-        assert_eq!(
-            session.apply_config(rotated),
-            Err(DeviceError::MissingCapabilities {
-                required: protocol::CAPABILITY_CORE_WIDGETS | protocol::CAPABILITY_CONFIG_ROTATION,
-                available: protocol::LEGACY_CAPABILITIES,
-            })
-        );
-        assert!(state.lock().unwrap().requests.is_empty());
-        assert_eq!(session.latest_config_revision(), 0);
-    }
-
-    #[test]
-    fn reconnect_preflights_replay_before_time_or_config_mutation() {
-        let (transport, _) = FakeTransport::new(status(0, 0, 100));
-        let session = DeviceSession::with_options(
-            transport,
-            &status(0, 0, 100),
-            options(Duration::from_mins(1), 8),
-        );
-        session
-            .time_sync(TimeSync {
-                unix_seconds: 1_800_000_000,
-                utc_offset_minutes: 240,
-            })
-            .unwrap();
-        let mut rotated = config(1);
-        rotated.rotation = 270;
-        session.apply_config(rotated).unwrap();
-
-        let mut legacy = status(0, 0, 10);
-        legacy.capabilities = protocol::LEGACY_CAPABILITIES;
-        let (legacy_transport, legacy_state) = FakeTransport::new(legacy.clone());
-        assert!(matches!(
-            session.reconnect(legacy_transport, legacy),
-            Err(DeviceError::MissingCapabilities {
-                required,
-                available: protocol::LEGACY_CAPABILITIES,
-            }) if required
-                == protocol::CAPABILITY_CORE_WIDGETS | protocol::CAPABILITY_CONFIG_ROTATION
-        ));
-        assert!(legacy_state.lock().unwrap().requests.is_empty());
-        assert_eq!(session.latest_config_revision(), 1);
-        assert_eq!(session.capabilities(), protocol::LEGACY_CAPABILITIES);
     }
 
     #[test]
@@ -1558,15 +1576,17 @@ mod tests {
             options(Duration::from_mins(1), 8),
         );
         session.apply_config(config(4)).unwrap();
-        session.push_fields("timer", Vec::new()).unwrap();
         session
-            .activate_screen(ActivateScreen {
-                screen_id: "timer-screen".into(),
+            .push_next_timer("timer", 60_000, 60_000, false)
+            .unwrap();
+        session
+            .activate_card(ActivateCard {
+                card_id: "timer".into(),
             })
             .unwrap();
         session
             .trigger_interrupt(TriggerInterrupt {
-                widget_id: "timer".into(),
+                card_id: "timer".into(),
                 token: 1,
                 reason: "done".into(),
             })
@@ -1587,8 +1607,8 @@ mod tests {
             .unwrap();
         let replayed = second_state.lock().unwrap().requests.clone();
         assert!(matches!(replayed.first(), Some(Message::ApplyConfig(_))));
-        assert!(matches!(replayed.get(1), Some(Message::PushData(_))));
-        assert!(matches!(replayed.get(2), Some(Message::ActivateScreen(_))));
+        assert!(matches!(replayed.get(1), Some(Message::PushTimer(_))));
+        assert!(matches!(replayed.get(2), Some(Message::ActivateCard(_))));
         assert!(matches!(
             replayed.get(3),
             Some(Message::TriggerInterrupt(_))
@@ -1599,7 +1619,7 @@ mod tests {
     }
 
     #[test]
-    fn local_navigation_updates_the_screen_replayed_after_power_reset() {
+    fn local_navigation_updates_the_card_replayed_after_power_reset() {
         let (first_transport, first_state) = FakeTransport::new(status(0, 0, 1_000));
         let session = DeviceSession::with_options(
             first_transport,
@@ -1607,21 +1627,14 @@ mod tests {
             options(Duration::from_mins(1), 8),
         );
         let mut layout = config(1);
-        layout.widgets.push(WidgetConfig {
-            widget_id: "calendar".into(),
-            template: TemplateKind::RowList,
-            size_class: SizeClass::Standard,
+        layout.cards.push(CardConfig {
+            card_id: "calendar".into(),
             tap_action: TapAction::None,
-            interrupt_policy: InterruptPolicy::Disabled,
-        });
-        layout.screens.push(ScreenConfig {
-            screen_id: "calendar-screen".into(),
-            widget_id: "calendar".into(),
         });
         session.apply_config(layout).unwrap();
         session
-            .activate_screen(ActivateScreen {
-                screen_id: "timer-screen".into(),
+            .activate_card(ActivateCard {
+                card_id: "timer".into(),
             })
             .unwrap();
 
@@ -1630,8 +1643,7 @@ mod tests {
             [DeviceEvent {
                 sequence: 1,
                 kind: EventKind::Navigation,
-                widget_id: "calendar".into(),
-                screen_id: "calendar-screen".into(),
+                card_id: "calendar".into(),
                 action: EventAction::NavigateNext,
                 interrupt_token: None,
             }],
@@ -1643,8 +1655,8 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .event
-                .screen_id,
-            "calendar-screen"
+                .card_id,
+            "calendar"
         );
 
         first_state
@@ -1664,8 +1676,8 @@ mod tests {
         assert!(second_state.lock().unwrap().requests.iter().any(|request| {
             matches!(
                 request,
-                Message::ActivateScreen(ActivateScreen { screen_id })
-                    if screen_id == "calendar-screen"
+                Message::ActivateCard(ActivateCard { card_id })
+                    if card_id == "calendar"
             )
         }));
     }
@@ -1679,7 +1691,9 @@ mod tests {
             options(Duration::from_mins(1), 8),
         );
         session.apply_config(config(4)).unwrap();
-        session.push_fields("timer", Vec::new()).unwrap();
+        session
+            .push_next_timer("timer", 60_000, 60_000, false)
+            .unwrap();
 
         let (second_transport, second_state) = FakeTransport::new(status(8, 4, 2_000));
         session
@@ -1730,6 +1744,239 @@ mod tests {
         assert_eq!(
             state.lock().unwrap().requests.last(),
             Some(&Message::FactoryReset)
+        );
+    }
+
+    /// A transport whose `read` blocks and never returns -- the shape a macOS USB
+    /// serial port takes when the board detaches with a read already in flight.
+    /// `SessionConnection::transact` checks its deadline only *between* reads, so
+    /// `request_timeout` is unreachable in that state and the worker never answers.
+    struct StalledTransport {
+        released: Arc<AtomicBool>,
+        /// Set as the read begins. A test that acts before the worker is actually
+        /// inside the read is testing the wrong thing: the worker would still be
+        /// at its command channel and would answer normally.
+        reading: Arc<AtomicBool>,
+    }
+
+    impl Transport for StalledTransport {
+        fn write(&mut self, bytes: &[u8]) -> Result<usize, TransportError> {
+            Ok(bytes.len())
+        }
+
+        fn read(&mut self, _bytes: &mut [u8]) -> Result<usize, TransportError> {
+            self.reading.store(true, Ordering::Release);
+            while !self.released.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(TransportError::Disconnected)
+        }
+    }
+
+    /// Blocks until the session worker is inside `StalledTransport::read`, so a
+    /// test acts on a worker that genuinely cannot answer rather than racing it.
+    /// Bounded by its own assertion, so it can never hang the suite.
+    fn wait_until_blocked_in_read(reading: &AtomicBool) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !reading.load(Ordering::Acquire) {
+            assert!(
+                Instant::now() < deadline,
+                "the session worker never reached its transport read"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// A stalled transport must not be able to wedge the caller. `request` waits on
+    /// the worker's reply, and the worker is the very thing a blocking read stops;
+    /// without a deadline of its own that wait is unbounded, and one detached cable
+    /// freezes every caller above it -- in the desktop app, the whole app-core
+    /// runtime worker, which then fails every command with `ResponseTimeout` and
+    /// makes saving impossible.
+    #[test]
+    fn a_transport_read_that_never_returns_cannot_wedge_the_caller() {
+        let released = Arc::new(AtomicBool::new(false));
+        let reading = Arc::new(AtomicBool::new(false));
+        let transport = StalledTransport {
+            released: Arc::clone(&released),
+            reading: Arc::clone(&reading),
+        };
+        let session = DeviceSession::with_options(
+            transport,
+            &status(0, 0, 100),
+            SessionOptions {
+                request_timeout: Duration::from_millis(100),
+                ..SessionOptions::default()
+            },
+        );
+
+        let (done_sender, done_receiver) = mpsc::sync_channel(1);
+        let caller = thread::spawn(move || {
+            let started = Instant::now();
+            let outcome = session.status();
+            let _ = done_sender.send((outcome.is_err(), started.elapsed()));
+            // Handed back so the session is dropped only once the read is released:
+            // `Drop` joins the worker, which is itself stuck in that read.
+            session
+        });
+
+        let observed = done_receiver.recv_timeout(Duration::from_secs(2));
+        released.store(true, Ordering::Release);
+        drop(caller.join().expect("the calling thread must not panic"));
+
+        let (failed, elapsed) =
+            observed.expect("`request` must answer within its own deadline, but it hung");
+        assert!(failed, "a stalled transport must not report success");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "`request` answered only after {elapsed:?}"
+        );
+    }
+
+    /// Dropping a stalled session must not join the worker, because the worker is
+    /// exactly the thread that cannot return. Joining it is what left the desktop
+    /// app running after "Quit Deskmate" once the board was unplugged: `Drop`
+    /// waited on a blocked read, and the process only exited when the operating
+    /// system finally tore the device node down.
+    #[test]
+    fn dropping_a_stalled_session_does_not_wait_for_a_thread_that_cannot_return() {
+        let released = Arc::new(AtomicBool::new(false));
+        let reading = Arc::new(AtomicBool::new(false));
+        let session = DeviceSession::with_options(
+            StalledTransport {
+                released: Arc::clone(&released),
+                reading: Arc::clone(&reading),
+            },
+            &status(0, 0, 100),
+            SessionOptions {
+                request_timeout: Duration::from_millis(100),
+                ..SessionOptions::default()
+            },
+        );
+
+        // Armed before the first request, not after it: every wait this test can
+        // regress into -- the request's and the drop's -- is then released on its
+        // own, so a regression fails an assertion instead of hanging the suite.
+        let watchdog = {
+            let released = Arc::clone(&released);
+            thread::spawn(move || {
+                thread::sleep(Duration::from_secs(2));
+                released.store(true, Ordering::Release);
+            })
+        };
+
+        assert!(
+            session.status().is_err(),
+            "a stalled transport must not report success"
+        );
+        assert!(
+            session.status().is_err(),
+            "a session already known to be stalled must keep refusing"
+        );
+
+        let started = Instant::now();
+        drop(session);
+        let elapsed = started.elapsed();
+
+        watchdog.join().expect("the watchdog must not panic");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "dropping a stalled session blocked for {elapsed:?}"
+        );
+    }
+
+    /// `reconnect` hands a fresh transport to the *existing* worker, so a worker
+    /// stuck in a read can never take it -- and waiting for its reply is the same
+    /// unbounded wait `request` used to have. app-core reconnects on a timer after
+    /// a disconnection, so leaving this one unbounded would re-wedge the runtime
+    /// moments after the first stall released it.
+    #[test]
+    fn reconnecting_a_stalled_session_does_not_wait_on_a_worker_that_cannot_answer() {
+        let released = Arc::new(AtomicBool::new(false));
+        let reading = Arc::new(AtomicBool::new(false));
+        let session = DeviceSession::with_options(
+            StalledTransport {
+                released: Arc::clone(&released),
+                reading: Arc::clone(&reading),
+            },
+            &status(0, 0, 100),
+            SessionOptions {
+                request_timeout: Duration::from_millis(100),
+                ..SessionOptions::default()
+            },
+        );
+        // Without this the worker may still be at its command channel, take the
+        // Reconnect, and answer -- which tests nothing.
+        wait_until_blocked_in_read(&reading);
+        let watchdog = {
+            let released = Arc::clone(&released);
+            thread::spawn(move || {
+                thread::sleep(Duration::from_secs(2));
+                released.store(true, Ordering::Release);
+            })
+        };
+
+        let started = Instant::now();
+        let outcome = session.reconnect(
+            StalledTransport {
+                released: Arc::clone(&released),
+                reading: Arc::clone(&reading),
+            },
+            status(0, 0, 100),
+        );
+        let elapsed = started.elapsed();
+
+        watchdog.join().expect("the watchdog must not panic");
+        assert!(
+            outcome.is_err(),
+            "a worker that cannot answer must not report a reconnection"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "`reconnect` waited {elapsed:?} on a worker that cannot answer"
+        );
+    }
+
+    /// The same hang, reached without a single request: a session sitting idle
+    /// reads the transport between keepalives, so a cable pulled while nothing is
+    /// in flight blocks the worker with no request to time out and nothing to set
+    /// `stalled`. Dropping it must still not wait on that thread.
+    #[test]
+    fn dropping_an_idle_session_blocked_in_a_read_does_not_wait_for_it() {
+        let released = Arc::new(AtomicBool::new(false));
+        let reading = Arc::new(AtomicBool::new(false));
+        let session = DeviceSession::with_options(
+            StalledTransport {
+                released: Arc::clone(&released),
+                reading: Arc::clone(&reading),
+            },
+            &status(0, 0, 100),
+            SessionOptions {
+                request_timeout: Duration::from_millis(100),
+                ..SessionOptions::default()
+            },
+        );
+        wait_until_blocked_in_read(&reading);
+        let watchdog = {
+            let released = Arc::clone(&released);
+            thread::spawn(move || {
+                thread::sleep(Duration::from_secs(2));
+                released.store(true, Ordering::Release);
+            })
+        };
+        assert!(
+            !session.is_stalled(),
+            "no request was made, so nothing can have marked this session stalled"
+        );
+
+        let started = Instant::now();
+        drop(session);
+        let elapsed = started.elapsed();
+
+        watchdog.join().expect("the watchdog must not panic");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "dropping an idle blocked session waited {elapsed:?}"
         );
     }
 }

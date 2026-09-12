@@ -1,7 +1,7 @@
 //! Ownership, exercised with a fake device socket rather than a board.
 
 use futures_util::SinkExt;
-use protocol::{DeviceEvent, EventAction, EventKind, FieldValue, Message};
+use protocol::{DeviceEvent, EventAction, EventKind, Message};
 use server::{ServerState, app};
 use sha2::{Digest, Sha256};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -512,8 +512,8 @@ async fn config_written_by_admin_reaches_the_device() {
     let response = response.expect("admin request");
     assert_eq!(response.status(), 200);
 
-    assert_eq!(applied.widgets.len(), 1);
-    assert_eq!(applied.widgets[0].widget_id, "clock-1");
+    assert_eq!(applied.cards.len(), 1);
+    assert_eq!(applied.cards[0].card_id, "clock-1");
 
     // The config transaction ends at activation. Scene negotiation is the
     // event-driven follow-up: it must still happen, but its ACK must not hold
@@ -760,27 +760,12 @@ async fn running_pomodoro_survives_link_close_and_reattach() {
     let mut second = connect_after_release(&host, &identity.token).await;
     let replayed = support::drive_until_config(&mut second, "pomodoro").await;
     assert!(
-        replayed
-            .widgets
-            .iter()
-            .any(|widget| widget.widget_id == "pomodoro"),
+        replayed.cards.iter().any(|card| card.card_id == "pomodoro"),
         "reattach did not replay the layout"
     );
     let current_push = support::drive_until_push(&mut second, "pomodoro").await;
-    assert!(
-        current_push
-            .fields
-            .iter()
-            .any(|field| { field.key == "running" && field.value == FieldValue::Boolean(true) })
-    );
-    let replayed_remaining = current_push
-        .fields
-        .iter()
-        .find_map(|field| match (&*field.key, &field.value) {
-            ("remaining_seconds", FieldValue::Integer(remaining)) => u64::try_from(*remaining).ok(),
-            _ => None,
-        })
-        .expect("reattach push omitted remaining_seconds");
+    assert!(current_push.running);
+    let replayed_remaining = u64::from(current_push.remaining_ms) / 1_000;
 
     let after = wait_for_pomodoro(&client, &host, &identity.device_id, &admin_token, |timer| {
         timer["state"] == "running"
@@ -853,8 +838,7 @@ async fn start_pomodoro(socket: &mut support::DeviceSocket) {
                 &Message::DeviceEvent(DeviceEvent {
                     sequence: 1,
                     kind: EventKind::Tap,
-                    widget_id: "pomodoro".into(),
-                    screen_id: "pomodoro".into(),
+                    card_id: "pomodoro".into(),
                     action: EventAction::StartPause,
                     interrupt_token: None,
                 }),
@@ -901,7 +885,7 @@ async fn wait_for_pomodoro(
                 .expect("status JSON");
         if let Some(timer) = status["snapshot"]["pomodoros"]
             .as_array()
-            .and_then(|timers| timers.iter().find(|timer| timer["widget_id"] == "pomodoro"))
+            .and_then(|timers| timers.iter().find(|timer| timer["card_id"] == "pomodoro"))
             && predicate(timer)
         {
             return timer.clone();
@@ -1057,8 +1041,9 @@ async fn invalid_config_is_typed_and_does_not_replace_last_good() {
 
     let mut invalid: serde_json::Value = serde_json::from_str(&valid).unwrap();
     invalid["cards"][0]["id"] = "not-last-good".into();
-    invalid["playlists"][0]["entries"][0]["card_id"] = "not-last-good".into();
-    invalid["active_playlist_id"] = "missing-playlist".into();
+    // A dwell below MIN_DWELL_SECONDS: since schema v10 dwell is a card field,
+    // so this is the invalid document a playlist reference used to be.
+    invalid["cards"][0]["dwell_seconds"] = 1.into();
     let rejected = client
         .put(format!(
             "http://{host}/v1/devices/{}/config",
@@ -1078,19 +1063,19 @@ async fn invalid_config_is_typed_and_does_not_replace_last_good() {
     assert!(error["issues"].as_array().is_some_and(|issues| {
         issues
             .iter()
-            .any(|issue| issue["path"] == "active_playlist_id")
+            .any(|issue| issue["path"] == "cards[0].dwell_seconds")
     }));
 
     let mut socket = connect_device(&host, &identity.token)
         .await
         .expect("connect after invalid write");
     let applied = support::drive_until_config(&mut socket, "clock-1").await;
-    assert_eq!(applied.widgets[0].widget_id, "clock-1");
+    assert_eq!(applied.cards[0].card_id, "clock-1");
     assert!(
         applied
-            .widgets
+            .cards
             .iter()
-            .all(|widget| widget.widget_id != "not-last-good"),
+            .all(|card| card.card_id != "not-last-good"),
         "the invalid config displaced the genuine last-good config"
     );
 }
@@ -1184,7 +1169,7 @@ async fn admin_status_reports_defaults_used_after_stored_config_validation_failu
         .expect("fixture"),
     )
     .expect("fixture JSON");
-    invalid["active_playlist_id"] = "missing-playlist".into();
+    invalid["cards"][0]["dwell_seconds"] = 1.into();
     std::fs::write(
         config_root.join(format!("{}.json", identity.device_id)),
         serde_json::to_vec(&invalid).expect("invalid config JSON"),

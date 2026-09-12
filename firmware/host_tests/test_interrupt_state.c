@@ -6,12 +6,12 @@
 
 static interrupt_state_t s_state;
 
-static protocol_trigger_interrupt_t trigger(const char *widget_id,
+static protocol_trigger_interrupt_t trigger(const char *card_id,
                                              uint32_t token,
                                              const char *reason)
 {
     protocol_trigger_interrupt_t value = {.token = token};
-    strcpy(value.widget_id, widget_id);
+    strcpy(value.card_id, card_id);
     strcpy(value.reason, reason);
     return value;
 }
@@ -25,10 +25,10 @@ static void test_active_pending_busy_and_restore(void)
     assert(interrupt_state_trigger(&s_state, &first, "pomodoro") ==
            INTERRUPT_TRIGGER_ACTIVATED);
     assert(interrupt_state_latest_token(&s_state) == 10U);
-    assert(strcmp(s_state.saved_screen_id, "pomodoro") == 0);
+    assert(strcmp(s_state.saved_card_id, "pomodoro") == 0);
     assert(interrupt_state_trigger(&s_state, &second, "ignored") ==
            INTERRUPT_TRIGGER_QUEUED);
-    assert(interrupt_state_set_saved_screen(&s_state, "calendar"));
+    assert(interrupt_state_set_saved_card(&s_state, "calendar"));
     assert(interrupt_state_trigger(&s_state, &third, "ignored") ==
            INTERRUPT_TRIGGER_BUSY);
     assert(interrupt_state_latest_token(&s_state) == 11U);
@@ -37,7 +37,7 @@ static void test_active_pending_busy_and_restore(void)
     interrupt_dismissal_t dismissal;
     assert(interrupt_state_dismiss(&s_state, &dismissal));
     assert(dismissal.token == 10U && dismissal.promoted_pending);
-    assert(!dismissal.restore_saved_screen);
+    assert(!dismissal.restore_saved_card);
     assert(interrupt_state_active(&s_state)->token == 11U);
     assert(!s_state.pending.occupied);
 
@@ -47,8 +47,8 @@ static void test_active_pending_busy_and_restore(void)
     assert(interrupt_state_dismiss(&s_state, &dismissal));
     assert(dismissal.token == 11U && dismissal.promoted_pending);
     assert(interrupt_state_dismiss(&s_state, &dismissal));
-    assert(dismissal.token == 12U && dismissal.restore_saved_screen);
-    assert(strcmp(dismissal.saved_screen_id, "calendar") == 0);
+    assert(dismissal.token == 12U && dismissal.restore_saved_card);
+    assert(strcmp(dismissal.saved_card_id, "calendar") == 0);
     assert(interrupt_state_active(&s_state) == NULL);
 }
 

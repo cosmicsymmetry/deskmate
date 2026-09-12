@@ -1,12 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 
+use crate::state::{CardField, CardFieldValue};
 use chrono::{DateTime, Offset, Utc};
-pub use protocol::MAX_WIDGET_ID_LEN;
-use protocol::{
-    ApplyConfig, Field, FieldValue, InterruptPolicy, PushData, ScreenConfig, TapAction,
-    TemplateKind, WidgetConfig,
-};
+pub use protocol::MAX_CARD_ID_LEN;
+use protocol::{ApplyConfig, CardConfig, PushTimer, TapAction};
 use serde::{Deserialize, Deserializer, Serialize};
 
 // Helper module for strict deserialization of internally tagged enums
@@ -25,13 +23,7 @@ mod strict_tagged_enum {
     #[serde(tag = "kind", rename_all = "kebab-case")]
     pub enum CardAlertInner {
         None,
-        OnTimerFinish {
-            hold: super::AlertHold,
-        },
-        BeforeEvent {
-            lead_minutes: u16,
-            hold: super::AlertHold,
-        },
+        OnTimerFinish { hold: super::AlertHold },
     }
 
     #[derive(Debug, Serialize, Deserialize)]
@@ -43,7 +35,7 @@ mod strict_tagged_enum {
 
     /// Serde's `deny_unknown_fields` no-op on internally tagged enums affects unit
     /// variants just as much as struct variants (`DigitalClock`, not just
-    /// `IconBadgeText`), so `DisplayTemplate` needs the same treatment as the
+    /// `AnalogClock`), so `DisplayTemplate` needs the same treatment as the
     /// card-behaviour types above.
     #[derive(Debug, Serialize, Deserialize)]
     #[serde(tag = "kind", rename_all = "kebab-case")]
@@ -51,9 +43,6 @@ mod strict_tagged_enum {
         DigitalClock,
         AnalogClock,
         ProgressRing,
-        RowList,
-        BigNumberLabel,
-        IconBadgeText { icon_asset_id: Option<String> },
     }
 
     #[derive(Debug, Serialize, Deserialize)]
@@ -77,7 +66,7 @@ mod strict_tagged_enum {
 
     /// Mirrors `super::AssetKind`. The device now rasterizes any size from a TTF
     /// at runtime, so `font` carries no pixel size and no glyph ranges; `icon-font`
-    /// carries a TTF plus a name→codepoint map so a plugin can write a symbolic
+    /// carries a TTF plus a name→codepoint map so a scene can write a symbolic
     /// icon name instead of a raw codepoint; `image` carries no extra fields
     /// because the host converts the source to an LVGL binary image itself.
     #[derive(Debug, Serialize, Deserialize)]
@@ -106,6 +95,7 @@ mod strict_tagged_enum {
             tap_action: super::WidgetTapAction,
             refresh: super::RefreshPolicy,
             alert: super::CardAlert,
+            dwell_seconds: Option<u16>,
         },
         Pomodoro {
             id: String,
@@ -115,57 +105,16 @@ mod strict_tagged_enum {
             tap_action: super::WidgetTapAction,
             refresh: super::RefreshPolicy,
             alert: super::CardAlert,
+            dwell_seconds: Option<u16>,
         },
-        Calendar {
+        Picture {
             id: String,
             title: String,
-            source: super::CalendarSource,
-            template: super::DisplayTemplate,
+            source_id: String,
             tap_action: super::WidgetTapAction,
             refresh: super::RefreshPolicy,
             alert: super::CardAlert,
-        },
-        Weather {
-            id: String,
-            title: String,
-            location: String,
-            units: super::WeatherUnits,
-            template: super::DisplayTemplate,
-            tap_action: super::WidgetTapAction,
-            refresh: super::RefreshPolicy,
-            alert: super::CardAlert,
-        },
-        JsonFeed {
-            id: String,
-            title: String,
-            url: String,
-            mappings: Vec<super::JsonFieldMapping>,
-            template: super::DisplayTemplate,
-            tap_action: super::WidgetTapAction,
-            refresh: super::RefreshPolicy,
-            alert: super::CardAlert,
-        },
-        Rss {
-            id: String,
-            title: String,
-            url: String,
-            max_items: u8,
-            template: super::DisplayTemplate,
-            tap_action: super::WidgetTapAction,
-            refresh: super::RefreshPolicy,
-            alert: super::CardAlert,
-        },
-        /// A plugin card names a curated plugin by id and renders whatever its
-        /// manifest compiles to (a host-pushed scene), not one of the six
-        /// built-in `DisplayTemplate`s -- deliberately absent here, see
-        /// `super::CardSettings::Plugin`.
-        Plugin {
-            id: String,
-            title: String,
-            plugin_id: String,
-            tap_action: super::WidgetTapAction,
-            refresh: super::RefreshPolicy,
-            alert: super::CardAlert,
+            dwell_seconds: Option<u16>,
         },
     }
 
@@ -190,7 +139,6 @@ mod strict_tagged_enum {
             match kind {
                 "none" => Some(&["kind"]),
                 "on-timer-finish" => Some(&["kind", "hold"]),
-                "before-event" => Some(&["kind", "lead_minutes", "hold"]),
                 _ => None,
             }
         }
@@ -209,9 +157,7 @@ mod strict_tagged_enum {
     impl ValidatingDeserialize for DisplayTemplateInner {
         fn allowed_fields(kind: &str) -> Option<&'static [&'static str]> {
             match kind {
-                "digital-clock" | "analog-clock" | "progress-ring" | "row-list"
-                | "big-number-label" => Some(&["kind"]),
-                "icon-badge-text" => Some(&["kind", "icon_asset_id"]),
+                "digital-clock" | "analog-clock" | "progress-ring" => Some(&["kind"]),
                 _ => None,
             }
         }
@@ -260,6 +206,7 @@ mod strict_tagged_enum {
                     "tap_action",
                     "refresh",
                     "alert",
+                    "dwell_seconds",
                 ]),
                 "pomodoro" => Some(&[
                     "kind",
@@ -270,58 +217,17 @@ mod strict_tagged_enum {
                     "tap_action",
                     "refresh",
                     "alert",
+                    "dwell_seconds",
                 ]),
-                "calendar" => Some(&[
+                "picture" => Some(&[
                     "kind",
                     "id",
                     "title",
-                    "source",
-                    "template",
+                    "source_id",
                     "tap_action",
                     "refresh",
                     "alert",
-                ]),
-                "weather" => Some(&[
-                    "kind",
-                    "id",
-                    "title",
-                    "location",
-                    "units",
-                    "template",
-                    "tap_action",
-                    "refresh",
-                    "alert",
-                ]),
-                "json-feed" => Some(&[
-                    "kind",
-                    "id",
-                    "title",
-                    "url",
-                    "mappings",
-                    "template",
-                    "tap_action",
-                    "refresh",
-                    "alert",
-                ]),
-                "rss" => Some(&[
-                    "kind",
-                    "id",
-                    "title",
-                    "url",
-                    "max_items",
-                    "template",
-                    "tap_action",
-                    "refresh",
-                    "alert",
-                ]),
-                "plugin" => Some(&[
-                    "kind",
-                    "id",
-                    "title",
-                    "plugin_id",
-                    "tap_action",
-                    "refresh",
-                    "alert",
+                    "dwell_seconds",
                 ]),
                 _ => None,
             }
@@ -352,19 +258,10 @@ mod strict_tagged_enum {
     }
 }
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 6;
-pub(crate) const DEFAULT_PLAYLIST_ID: &str = "my-playlist";
-pub(crate) const DEFAULT_PLAYLIST_NAME: &str = "My playlist";
+pub const CURRENT_SCHEMA_VERSION: u32 = 10;
 pub const MAX_WIDGET_TITLE_LEN: usize = 64;
 pub const MAX_TIMEZONE_LEN: usize = 64;
-pub const MAX_ICS_SOURCE_LEN: usize = 2_048;
-pub const MAX_PROVIDER_URL_LEN: usize = 2_048;
-pub const MAX_PROVIDER_RESPONSE_BYTES: usize = providers::MAX_PROVIDER_RESPONSE_BYTES;
-pub const MAX_PROVIDER_REDIRECTS: u8 = providers::MAX_PROVIDER_REDIRECTS;
-pub const PROVIDER_REQUEST_TIMEOUT_SECONDS: u64 = providers::PROVIDER_REQUEST_TIMEOUT.as_secs();
-pub const MAX_LOCATION_LEN: usize = 128;
-pub const MAX_JSON_PATH_LEN: usize = 256;
-pub const MAX_JSON_MAPPINGS: usize = 16;
+pub const MAX_ACTION_URL_LEN: usize = 2_048;
 pub const MAX_ASSETS: usize = 16;
 pub const MAX_ASSET_SOURCE_LEN: usize = 2_048;
 pub const MAX_ASSET_BYTES: u32 = 262_144;
@@ -372,109 +269,26 @@ pub const MAX_TOTAL_ASSET_BYTES: u32 = 1_048_576;
 pub const MAX_ICON_GLYPHS: usize = 256;
 pub const MAX_ICON_GLYPH_NAME_LEN: usize = 64;
 pub const MAX_HOST_ACTION_TARGET_LEN: usize = 2_048;
-pub const MAX_RSS_ITEMS: u8 = 5;
-/// Bound for a `plugin` card's `plugin_id`, which names a curated plugin by its
-/// manifest's own `name` field. This mirrors `plugin::manifest::MAX_NAME_LEN`
-/// (64 bytes) rather than importing it: the `plugin` crate depends on `app-core`
-/// (it compiles a manifest against `providers`/`app-core` types), so the reverse
-/// dependency would be circular. Keep this value equal to that one by hand.
-pub const MAX_PLUGIN_ID_LEN: usize = 64;
 pub const MIN_POMODORO_SECONDS: u32 = 1;
 pub const MAX_POMODORO_SECONDS: u32 = 86_400;
-pub const MIN_CALENDAR_REFRESH_MINUTES: u16 = 1;
-pub const MIN_WEATHER_REFRESH_MINUTES: u16 = 10;
-pub const MAX_CALENDAR_REFRESH_MINUTES: u16 = 1_440;
+pub const MIN_CARD_REFRESH_MINUTES: u16 = 1;
+pub const MAX_CARD_REFRESH_MINUTES: u16 = 1_440;
 pub const MAX_CONFIG_CARDS: usize = 8;
-pub const MAX_PLAYLISTS: usize = 8;
-pub const MAX_PLAYLIST_ENTRIES: usize = 8;
 pub const MAX_PLAYLIST_NAME_LEN: usize = 48;
+/// How many named image sources one configuration may declare.
+///
+/// Eight frames is about 2.6 MB of the 6 MB `assets` partition and eight of the
+/// device's durable digest budget. Raising it needs the flash budget re-checked,
+/// not just this number.
+pub const MAX_IMAGE_SOURCES: usize = 8;
+pub const MAX_IMAGE_SOURCE_NAME_LEN: usize = 48;
 // Every compiled card can lower to one wire widget, so the card cap must never exceed
 // what the protocol's `ApplyConfig` encoder accepts.
-const _: () = assert!(MAX_CONFIG_CARDS <= protocol::MAX_CONFIG_WIDGETS);
+const _: () = assert!(MAX_CONFIG_CARDS <= protocol::MAX_CONFIG_CARDS);
 pub const MIN_DWELL_SECONDS: u16 = 5;
 pub const MAX_DWELL_SECONDS: u16 = 3_600;
-pub const MIN_ALERT_LEAD_MINUTES: u16 = 1;
-pub const MAX_ALERT_LEAD_MINUTES: u16 = 60;
 pub const MIN_ALERT_HOLD_SECONDS: u16 = 5;
 pub const MAX_ALERT_HOLD_SECONDS: u16 = 600;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Playlist {
-    pub id: String,
-    pub name: String,
-    pub advance: CarouselAdvance,
-    pub entries: Vec<PlaylistEntry>,
-}
-
-impl<'de> Deserialize<'de> for Playlist {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Fields {
-            id: String,
-            name: String,
-            advance: CarouselAdvance,
-            entries: Vec<PlaylistEntry>,
-        }
-
-        let value = serde_json::Value::deserialize(deserializer)?;
-        let object = value
-            .as_object()
-            .ok_or_else(|| serde::de::Error::custom("playlist must be an object"))?;
-        for key in object.keys() {
-            if !["id", "name", "advance", "entries"].contains(&key.as_str()) {
-                return Err(serde::de::Error::custom(format!(
-                    "unknown playlist field: {key}"
-                )));
-            }
-        }
-        let fields: Fields = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-        Ok(Self {
-            id: fields.id,
-            name: fields.name,
-            advance: fields.advance,
-            entries: fields.entries,
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct PlaylistEntry {
-    pub card_id: String,
-    pub dwell_seconds: Option<u16>,
-}
-
-impl<'de> Deserialize<'de> for PlaylistEntry {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Fields {
-            card_id: String,
-            dwell_seconds: Option<u16>,
-        }
-
-        let value = serde_json::Value::deserialize(deserializer)?;
-        let object = value
-            .as_object()
-            .ok_or_else(|| serde::de::Error::custom("playlist entry must be an object"))?;
-        for key in object.keys() {
-            if !["card_id", "dwell_seconds"].contains(&key.as_str()) {
-                return Err(serde::de::Error::custom(format!(
-                    "unknown playlist entry field: {key}"
-                )));
-            }
-        }
-        let fields: Fields = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-        Ok(Self {
-            card_id: fields.card_id,
-            dwell_seconds: fields.dwell_seconds,
-        })
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -482,9 +296,18 @@ pub struct AppConfig {
     pub schema_version: u32,
     pub preferences: AppPreferences,
     pub cards: Vec<CardSettings>,
+    /// Named image sources. `#[serde(default)]` is load-bearing: the migration
+    /// path parses a v4/v5/v6 document straight into this struct, and those
+    /// documents have no such key. Without the default every saved config on
+    /// earth fails to parse and the user is told their settings are invalid.
+    #[serde(default)]
+    pub image_sources: Vec<ImageSource>,
     pub assets: Vec<AssetSettings>,
-    pub playlists: Vec<Playlist>,
-    pub active_playlist_id: String,
+    /// How the loop advances. `cards` IS the loop, in order, so this is one
+    /// setting for the whole document rather than a property of a named
+    /// grouping -- schema v10 removed `playlists`, which the product never
+    /// let anyone create more than one of.
+    pub advance: CarouselAdvance,
     pub updater: UpdaterSettings,
 }
 
@@ -501,18 +324,11 @@ impl Default for AppConfig {
                 tap_action: WidgetTapAction::None,
                 refresh: RefreshPolicy::DeviceLocal,
                 alert: CardAlert::None,
+                dwell_seconds: None,
             }],
+            image_sources: Vec::new(),
             assets: Vec::new(),
-            playlists: vec![Playlist {
-                id: DEFAULT_PLAYLIST_ID.into(),
-                name: DEFAULT_PLAYLIST_NAME.into(),
-                advance: CarouselAdvance::Manual,
-                entries: vec![PlaylistEntry {
-                    card_id: "clock".into(),
-                    dwell_seconds: None,
-                }],
-            }],
-            active_playlist_id: DEFAULT_PLAYLIST_ID.into(),
+            advance: CarouselAdvance::Manual,
             updater: UpdaterSettings::default(),
         }
     }
@@ -548,7 +364,7 @@ impl AppConfig {
             validate_identifier(
                 &format!("{path}.id"),
                 card.id(),
-                MAX_WIDGET_ID_LEN,
+                MAX_CARD_ID_LEN,
                 &mut issues,
             );
             if !card_ids.insert(card.id()) {
@@ -562,158 +378,73 @@ impl AppConfig {
             validate_card_behaviour(&path, card, &mut issues);
         }
 
-        validate_collection_bounds(
-            "playlists",
-            self.playlists.len(),
-            MAX_PLAYLISTS,
-            &mut issues,
-        );
-        let mut playlist_ids = HashSet::with_capacity(self.playlists.len());
-        let mut playlist_names = HashSet::with_capacity(self.playlists.len());
-        for (index, playlist) in self.playlists.iter().enumerate() {
-            let path = format!("playlists[{index}]");
-            validate_identifier_with_context(
+        if self.image_sources.len() > MAX_IMAGE_SOURCES {
+            issues.push(ValidationIssue::new(
+                "image_sources",
+                ValidationCode::TooMany,
+                format!("at most {MAX_IMAGE_SOURCES} image_sources entries are supported"),
+            ));
+        }
+        let mut seen_source_ids: BTreeSet<&str> = BTreeSet::new();
+        for (index, source) in self.image_sources.iter().enumerate() {
+            let path = format!("image_sources[{index}]");
+            validate_identifier(
                 &format!("{path}.id"),
-                &playlist.id,
-                MAX_WIDGET_ID_LEN,
-                &format!("playlist ID {:?}", playlist.id),
+                &source.id,
+                MAX_CARD_ID_LEN,
                 &mut issues,
             );
-            if !playlist_ids.insert(playlist.id.as_str()) {
+            validate_text(
+                &format!("{path}.name"),
+                &source.name,
+                MAX_IMAGE_SOURCE_NAME_LEN,
+                true,
+                &mut issues,
+            );
+            if !seen_source_ids.insert(source.id.as_str()) {
                 issues.push(ValidationIssue::new(
                     format!("{path}.id"),
                     ValidationCode::DuplicateId,
-                    format!("playlist ID {:?} is duplicated", playlist.id),
+                    format!("image source {:?} is declared more than once", source.id),
                 ));
-            }
-            if playlist.name.trim().is_empty() {
-                issues.push(ValidationIssue::new(
-                    format!("{path}.name"),
-                    ValidationCode::Empty,
-                    format!("playlist {:?} name must not be empty", playlist.id),
-                ));
-            }
-            if playlist.name.chars().count() > MAX_PLAYLIST_NAME_LEN {
-                issues.push(ValidationIssue::new(
-                    format!("{path}.name"),
-                    ValidationCode::TooLong,
-                    format!(
-                        "playlist {:?} name must be at most {MAX_PLAYLIST_NAME_LEN} characters",
-                        playlist.id
-                    ),
-                ));
-            }
-            if !playlist_names.insert(playlist.name.trim()) {
-                issues.push(ValidationIssue::new(
-                    format!("{path}.name"),
-                    ValidationCode::DuplicateId,
-                    format!(
-                        "playlist {:?} duplicates the name {:?}",
-                        playlist.id, playlist.name
-                    ),
-                ));
-            }
-
-            if playlist.entries.is_empty() {
-                let (code, message) =
-                    if playlist.id == self.active_playlist_id && !self.cards.is_empty() {
-                        (
-                            ValidationCode::OutOfRange,
-                            format!(
-                                "active playlist {:?} must contain at least one card",
-                                playlist.id
-                            ),
-                        )
-                    } else {
-                        (
-                            ValidationCode::Empty,
-                            format!("playlist {:?} must contain at least one entry", playlist.id),
-                        )
-                    };
-                issues.push(ValidationIssue::new(
-                    format!("{path}.entries"),
-                    code,
-                    message,
-                ));
-            } else if playlist.entries.len() > MAX_PLAYLIST_ENTRIES {
-                issues.push(ValidationIssue::new(
-                    format!("{path}.entries"),
-                    ValidationCode::TooMany,
-                    format!(
-                        "playlist {:?} supports at most {MAX_PLAYLIST_ENTRIES} entries",
-                        playlist.id
-                    ),
-                ));
-            }
-
-            if let CarouselAdvance::Timed {
-                default_dwell_seconds,
-            } = playlist.advance
-                && !(MIN_DWELL_SECONDS..=MAX_DWELL_SECONDS).contains(&default_dwell_seconds)
-            {
-                issues.push(ValidationIssue::new(
-                    format!("{path}.advance.default_dwell_seconds"),
-                    ValidationCode::OutOfRange,
-                    format!(
-                        "playlist {:?} default dwell must be {MIN_DWELL_SECONDS}..={MAX_DWELL_SECONDS} seconds",
-                        playlist.id
-                    ),
-                ));
-            }
-
-            let mut entry_card_ids = HashSet::with_capacity(playlist.entries.len());
-            for (entry_index, entry) in playlist.entries.iter().enumerate() {
-                let entry_path = format!("{path}.entries[{entry_index}]");
-                validate_identifier_with_context(
-                    &format!("{entry_path}.card_id"),
-                    &entry.card_id,
-                    MAX_WIDGET_ID_LEN,
-                    &format!("card ID {:?} in playlist {:?}", entry.card_id, playlist.id),
-                    &mut issues,
-                );
-                if !card_ids.contains(entry.card_id.as_str()) {
-                    issues.push(ValidationIssue::new(
-                        format!("{entry_path}.card_id"),
-                        ValidationCode::MissingReference,
-                        format!(
-                            "card {:?} referenced by playlist {:?} does not exist",
-                            entry.card_id, playlist.id
-                        ),
-                    ));
-                }
-                if !entry_card_ids.insert(entry.card_id.as_str()) {
-                    issues.push(ValidationIssue::new(
-                        format!("{entry_path}.card_id"),
-                        ValidationCode::DuplicateId,
-                        format!(
-                            "card {:?} appears more than once in playlist {:?}",
-                            entry.card_id, playlist.id
-                        ),
-                    ));
-                }
-                if let Some(dwell_seconds) = entry.dwell_seconds
-                    && !(MIN_DWELL_SECONDS..=MAX_DWELL_SECONDS).contains(&dwell_seconds)
-                {
-                    issues.push(ValidationIssue::new(
-                        format!("{entry_path}.dwell_seconds"),
-                        ValidationCode::OutOfRange,
-                        format!(
-                            "card {:?} in playlist {:?} must dwell for {MIN_DWELL_SECONDS}..={MAX_DWELL_SECONDS} seconds",
-                            entry.card_id, playlist.id
-                        ),
-                    ));
-                }
             }
         }
-        if self.active_playlist().is_none() {
+        for (index, card) in self.cards.iter().enumerate() {
+            if let CardSettings::Picture { source_id, .. } = card
+                && !seen_source_ids.contains(source_id.as_str())
+            {
+                issues.push(ValidationIssue::new(
+                    format!("cards[{index}].source_id"),
+                    ValidationCode::MissingReference,
+                    format!("image source {source_id:?} does not exist"),
+                ));
+            }
+        }
+
+        if let CarouselAdvance::Timed {
+            default_dwell_seconds,
+        } = self.advance
+            && !(MIN_DWELL_SECONDS..=MAX_DWELL_SECONDS).contains(&default_dwell_seconds)
+        {
             issues.push(ValidationIssue::new(
-                "active_playlist_id",
-                ValidationCode::MissingReference,
-                format!(
-                    "active playlist {:?} does not exist",
-                    self.active_playlist_id
-                ),
+                "advance.default_dwell_seconds",
+                ValidationCode::OutOfRange,
+                format!("default dwell must be {MIN_DWELL_SECONDS}..={MAX_DWELL_SECONDS} seconds"),
             ));
+        }
+        for (index, card) in self.cards.iter().enumerate() {
+            if let Some(dwell_seconds) = card.dwell_seconds()
+                && !(MIN_DWELL_SECONDS..=MAX_DWELL_SECONDS).contains(&dwell_seconds)
+            {
+                issues.push(ValidationIssue::new(
+                    format!("cards[{index}].dwell_seconds"),
+                    ValidationCode::OutOfRange,
+                    format!(
+                        "card {:?} must dwell for {MIN_DWELL_SECONDS}..={MAX_DWELL_SECONDS} seconds",
+                        card.id()
+                    ),
+                ));
+            }
         }
         if self.compiled_card_ids().len() > MAX_CONFIG_CARDS {
             issues.push(ValidationIssue::new(
@@ -754,29 +485,6 @@ impl AppConfig {
                 format!("asset budget must not exceed {MAX_TOTAL_ASSET_BYTES} bytes"),
             ));
         }
-        for (index, card) in self.cards.iter().enumerate() {
-            if let Some(DisplayTemplate::IconBadgeText {
-                icon_asset_id: Some(asset_id),
-            }) = card.template()
-            {
-                match assets_by_id.get(asset_id.as_str()) {
-                    None => issues.push(ValidationIssue::new(
-                        format!("cards[{index}].template.icon_asset_id"),
-                        ValidationCode::MissingReference,
-                        format!("asset {asset_id:?} does not exist"),
-                    )),
-                    Some(kind) if !matches!(kind, AssetKind::IconFont { .. }) => {
-                        issues.push(ValidationIssue::new(
-                            format!("cards[{index}].template.icon_asset_id"),
-                            ValidationCode::InvalidComposition,
-                            "icon template must reference an icon-font asset",
-                        ));
-                    }
-                    Some(_) => {}
-                }
-            }
-        }
-
         if issues.is_empty() {
             Ok(())
         } else {
@@ -784,32 +492,13 @@ impl AppConfig {
         }
     }
 
-    pub fn active_playlist(&self) -> Option<&Playlist> {
-        self.playlists
-            .iter()
-            .find(|playlist| playlist.id == self.active_playlist_id)
-    }
-
-    /// Card ids the compiled widget set will contain: active-playlist entries
-    /// (in entry order) followed by alert-capable cards outside it (by id).
+    /// Card ids the compiled widget set will contain, in loop order.
+    ///
+    /// Since schema v10 that is simply the card order: `cards` IS the loop, so
+    /// there is no longer a set of cards inside it and a set of alert-capable
+    /// cards outside it to concatenate.
     pub fn compiled_card_ids(&self) -> Vec<&str> {
-        let mut card_ids = Vec::with_capacity(self.cards.len());
-        let mut active_card_ids = HashSet::new();
-        if let Some(playlist) = self.active_playlist() {
-            for entry in &playlist.entries {
-                card_ids.push(entry.card_id.as_str());
-                active_card_ids.insert(entry.card_id.as_str());
-            }
-        }
-
-        let mut alert_outsiders: Vec<&CardSettings> = self
-            .cards
-            .iter()
-            .filter(|card| !card.alert().is_none() && !active_card_ids.contains(card.id()))
-            .collect();
-        alert_outsiders.sort_by(|left, right| left.id().cmp(right.id()));
-        card_ids.extend(alert_outsiders.into_iter().map(CardSettings::id));
-        card_ids
+        self.cards.iter().map(CardSettings::id).collect()
     }
 
     pub fn compile(&self, revision: u32) -> Result<CompiledAppConfig, ConfigValidationError> {
@@ -825,111 +514,55 @@ impl AppConfig {
         }
 
         let mut compatibility_issues = Vec::new();
-        let mut widgets = Vec::with_capacity(self.cards.len());
-        let mut screens = Vec::with_capacity(self.cards.len());
-        let active_playlist = self
-            .active_playlist()
-            .expect("validated active playlist must exist");
-        let active_card_ids: HashSet<&str> = active_playlist
-            .entries
-            .iter()
-            .map(|entry| entry.card_id.as_str())
-            .collect();
-        let compiled_card_ids = self.compiled_card_ids();
-        for card_id in &compiled_card_ids {
-            let (index, card) = self
-                .cards
-                .iter()
-                .enumerate()
-                .find(|(_, card)| card.id() == *card_id)
-                .expect("validated compiled card must exist");
-            let Some(widget) = card.wire_config() else {
+        let mut cards = Vec::with_capacity(self.cards.len());
+        for (index, card) in self.cards.iter().enumerate() {
+            let Some(wire) = card.wire_config() else {
                 compatibility_issues.push(ValidationIssue::new(
                     format!("cards[{index}]"),
                     ValidationCode::RequiresCapability,
-                    "card provider/template/action is not implemented by this build",
+                    "card kind/action is not implemented by this build",
                 ));
                 continue;
             };
-            if active_card_ids.contains(*card_id) {
-                // The screen ID is the card ID. The protocol treats widget and screen
-                // IDs as distinct namespaces, so reuse is legal, and compilation still
-                // invents no identifiers.
-                screens.push(ScreenConfig {
-                    screen_id: card.id().to_owned(),
-                    widget_id: card.id().to_owned(),
-                });
-            }
-            widgets.push(widget);
+            cards.push(wire);
         }
         if !compatibility_issues.is_empty() {
             return Err(ConfigValidationError {
                 issues: compatibility_issues,
             });
         }
-        let initial_pushes = compiled_card_ids
-            .into_iter()
-            .map(|card_id| {
-                self.cards
-                    .iter()
-                    .find(|card| card.id() == card_id)
-                    .expect("validated compiled card must exist")
-            })
-            .map(|card| PushData {
-                widget_id: card.id().into(),
-                revision,
-                fields: card.initial_fields(),
-            })
+        // Protocol v2 replaced the initial field bag with a timer, which only a
+        // pomodoro has. Everything else a face shows arrives as a scene.
+        let initial_timers = self
+            .cards
+            .iter()
+            .filter_map(|card| card.initial_timer(revision))
             .collect();
 
         Ok(CompiledAppConfig {
             layout: ApplyConfig {
                 revision,
                 rotation: self.preferences.orientation.rotation_degrees(),
-                widgets,
-                screens,
+                cards,
             },
-            initial_pushes,
+            initial_timers,
             assets: self.assets.clone(),
             required_capabilities: self.required_device_capabilities(),
         })
     }
 
+    /// Capability bits this configuration needs from the device.
+    ///
+    /// Protocol v2 retired the bits that described template rendering, so what
+    /// is left is asset transfer -- the only thing a configuration can still
+    /// ask a device to be able to do. Rotation, tap actions and templates all
+    /// went with the concepts behind them.
     pub fn required_device_capabilities(&self) -> u64 {
-        let mut required = protocol::CAPABILITY_CORE_WIDGETS;
-        if self.preferences.orientation == DisplayOrientation::LandscapeFlipped {
-            required |= protocol::CAPABILITY_CONFIG_ROTATION;
+        if self.assets.is_empty() {
+            0
+        } else {
+            protocol::CAPABILITY_ASSET_TRANSFER
         }
-        if self.cards.iter().any(|card| {
-            // A plugin card's `template()` is `None`: it does not use any built-in
-            // template, extended or otherwise, so it does not itself require this
-            // capability (see `wire_config`'s comment for what it puts on the wire).
-            matches!(
-                card.template(),
-                Some(t) if !matches!(
-                    t,
-                    DisplayTemplate::DigitalClock
-                        | DisplayTemplate::ProgressRing
-                        | DisplayTemplate::RowList
-                )
-            )
-        }) {
-            required |= protocol::CAPABILITY_EXTENDED_TEMPLATES;
-        }
-        if self.cards.iter().any(|card| {
-            matches!(
-                card.tap_action(),
-                WidgetTapAction::Dismiss
-                    | WidgetTapAction::OpenUrl { .. }
-                    | WidgetTapAction::OpenApplication { .. }
-            )
-        }) {
-            required |= protocol::CAPABILITY_HOST_TAP_ACTIONS;
-        }
-        if !self.assets.is_empty() {
-            required |= protocol::CAPABILITY_ASSET_TRANSFER;
-        }
-        required
     }
 }
 
@@ -998,9 +631,6 @@ pub enum DisplayTemplate {
     DigitalClock,
     AnalogClock,
     ProgressRing,
-    RowList,
-    BigNumberLabel,
-    IconBadgeText { icon_asset_id: Option<String> },
 }
 
 impl<'de> Deserialize<'de> for DisplayTemplate {
@@ -1016,11 +646,6 @@ impl<'de> Deserialize<'de> for DisplayTemplate {
             strict_tagged_enum::DisplayTemplateInner::DigitalClock => Self::DigitalClock,
             strict_tagged_enum::DisplayTemplateInner::AnalogClock => Self::AnalogClock,
             strict_tagged_enum::DisplayTemplateInner::ProgressRing => Self::ProgressRing,
-            strict_tagged_enum::DisplayTemplateInner::RowList => Self::RowList,
-            strict_tagged_enum::DisplayTemplateInner::BigNumberLabel => Self::BigNumberLabel,
-            strict_tagged_enum::DisplayTemplateInner::IconBadgeText { icon_asset_id } => {
-                Self::IconBadgeText { icon_asset_id }
-            }
         })
     }
 }
@@ -1122,7 +747,6 @@ impl<'de> Deserialize<'de> for AlertHold {
 pub enum CardAlert {
     None,
     OnTimerFinish { hold: AlertHold },
-    BeforeEvent { lead_minutes: u16, hold: AlertHold },
 }
 
 impl<'de> Deserialize<'de> for CardAlert {
@@ -1139,9 +763,6 @@ impl<'de> Deserialize<'de> for CardAlert {
             strict_tagged_enum::CardAlertInner::OnTimerFinish { hold } => {
                 CardAlert::OnTimerFinish { hold }
             }
-            strict_tagged_enum::CardAlertInner::BeforeEvent { lead_minutes, hold } => {
-                CardAlert::BeforeEvent { lead_minutes, hold }
-            }
         })
     }
 }
@@ -1154,7 +775,7 @@ impl CardAlert {
     pub const fn hold(self) -> Option<AlertHold> {
         match self {
             Self::None => None,
-            Self::OnTimerFinish { hold } | Self::BeforeEvent { hold, .. } => Some(hold),
+            Self::OnTimerFinish { hold } => Some(hold),
         }
     }
 }
@@ -1197,20 +818,6 @@ impl CarouselAdvance {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum WeatherUnits {
-    Metric,
-    Imperial,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct JsonFieldMapping {
-    pub field: String,
-    pub path: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum CardSettings {
@@ -1222,6 +829,7 @@ pub enum CardSettings {
         tap_action: WidgetTapAction,
         refresh: RefreshPolicy,
         alert: CardAlert,
+        dwell_seconds: Option<u16>,
     },
     Pomodoro {
         id: String,
@@ -1231,59 +839,21 @@ pub enum CardSettings {
         tap_action: WidgetTapAction,
         refresh: RefreshPolicy,
         alert: CardAlert,
+        dwell_seconds: Option<u16>,
     },
-    Calendar {
+    /// A card whose face is a PNG an external producer pushed to a named image
+    /// source. It carries no `template` field: the picture *is*
+    /// the layout, so there is nothing to select among. `source_id` names the
+    /// source; the server resolves it to a resident asset digest and pushes a
+    /// single full-canvas image scene.
+    Picture {
         id: String,
         title: String,
-        source: CalendarSource,
-        template: DisplayTemplate,
+        source_id: String,
         tap_action: WidgetTapAction,
         refresh: RefreshPolicy,
         alert: CardAlert,
-    },
-    Weather {
-        id: String,
-        title: String,
-        location: String,
-        units: WeatherUnits,
-        template: DisplayTemplate,
-        tap_action: WidgetTapAction,
-        refresh: RefreshPolicy,
-        alert: CardAlert,
-    },
-    JsonFeed {
-        id: String,
-        title: String,
-        url: String,
-        mappings: Vec<JsonFieldMapping>,
-        template: DisplayTemplate,
-        tap_action: WidgetTapAction,
-        refresh: RefreshPolicy,
-        alert: CardAlert,
-    },
-    Rss {
-        id: String,
-        title: String,
-        url: String,
-        max_items: u8,
-        template: DisplayTemplate,
-        tap_action: WidgetTapAction,
-        refresh: RefreshPolicy,
-        alert: CardAlert,
-    },
-    /// Renders from a curated plugin's manifest-compiled scene rather than one
-    /// of the six built-in `DisplayTemplate`s, so it carries no `template`
-    /// field: there is nothing to select among. `plugin_id` names the plugin
-    /// (matching its manifest's own `name`); the server resolves it to a
-    /// manifest, fetches its data source, and pushes the resulting scene
-    /// (Task 7). `title` is the card's own label, same as every other kind.
-    Plugin {
-        id: String,
-        title: String,
-        plugin_id: String,
-        tap_action: WidgetTapAction,
-        refresh: RefreshPolicy,
-        alert: CardAlert,
+        dwell_seconds: Option<u16>,
     },
 }
 
@@ -1306,6 +876,7 @@ impl<'de> Deserialize<'de> for CardSettings {
                 tap_action,
                 refresh,
                 alert,
+                dwell_seconds,
             } => CardSettings::Clock {
                 id,
                 title,
@@ -1314,6 +885,7 @@ impl<'de> Deserialize<'de> for CardSettings {
                 tap_action,
                 refresh,
                 alert,
+                dwell_seconds,
             },
             strict_tagged_enum::CardSettingsInner::Pomodoro {
                 id,
@@ -1323,6 +895,7 @@ impl<'de> Deserialize<'de> for CardSettings {
                 tap_action,
                 refresh,
                 alert,
+                dwell_seconds,
             } => CardSettings::Pomodoro {
                 id,
                 label,
@@ -1331,95 +904,24 @@ impl<'de> Deserialize<'de> for CardSettings {
                 tap_action,
                 refresh,
                 alert,
+                dwell_seconds,
             },
-            strict_tagged_enum::CardSettingsInner::Calendar {
+            strict_tagged_enum::CardSettingsInner::Picture {
                 id,
                 title,
-                source,
-                template,
+                source_id,
                 tap_action,
                 refresh,
                 alert,
-            } => CardSettings::Calendar {
+                dwell_seconds,
+            } => CardSettings::Picture {
                 id,
                 title,
-                source,
-                template,
+                source_id,
                 tap_action,
                 refresh,
                 alert,
-            },
-            strict_tagged_enum::CardSettingsInner::Weather {
-                id,
-                title,
-                location,
-                units,
-                template,
-                tap_action,
-                refresh,
-                alert,
-            } => CardSettings::Weather {
-                id,
-                title,
-                location,
-                units,
-                template,
-                tap_action,
-                refresh,
-                alert,
-            },
-            strict_tagged_enum::CardSettingsInner::JsonFeed {
-                id,
-                title,
-                url,
-                mappings,
-                template,
-                tap_action,
-                refresh,
-                alert,
-            } => CardSettings::JsonFeed {
-                id,
-                title,
-                url,
-                mappings,
-                template,
-                tap_action,
-                refresh,
-                alert,
-            },
-            strict_tagged_enum::CardSettingsInner::Rss {
-                id,
-                title,
-                url,
-                max_items,
-                template,
-                tap_action,
-                refresh,
-                alert,
-            } => CardSettings::Rss {
-                id,
-                title,
-                url,
-                max_items,
-                template,
-                tap_action,
-                refresh,
-                alert,
-            },
-            strict_tagged_enum::CardSettingsInner::Plugin {
-                id,
-                title,
-                plugin_id,
-                tap_action,
-                refresh,
-                alert,
-            } => CardSettings::Plugin {
-                id,
-                title,
-                plugin_id,
-                tap_action,
-                refresh,
-                alert,
+                dwell_seconds,
             },
         })
     }
@@ -1428,13 +930,7 @@ impl<'de> Deserialize<'de> for CardSettings {
 impl CardSettings {
     pub fn id(&self) -> &str {
         match self {
-            Self::Clock { id, .. }
-            | Self::Pomodoro { id, .. }
-            | Self::Calendar { id, .. }
-            | Self::Weather { id, .. }
-            | Self::JsonFeed { id, .. }
-            | Self::Rss { id, .. }
-            | Self::Plugin { id, .. } => id,
+            Self::Clock { id, .. } | Self::Pomodoro { id, .. } | Self::Picture { id, .. } => id,
         }
     }
 
@@ -1442,11 +938,7 @@ impl CardSettings {
         match self {
             Self::Clock { alert, .. }
             | Self::Pomodoro { alert, .. }
-            | Self::Calendar { alert, .. }
-            | Self::Weather { alert, .. }
-            | Self::JsonFeed { alert, .. }
-            | Self::Rss { alert, .. }
-            | Self::Plugin { alert, .. } => *alert,
+            | Self::Picture { alert, .. } => *alert,
         }
     }
 
@@ -1454,30 +946,29 @@ impl CardSettings {
         match self {
             Self::Clock { refresh, .. }
             | Self::Pomodoro { refresh, .. }
-            | Self::Calendar { refresh, .. }
-            | Self::Weather { refresh, .. }
-            | Self::JsonFeed { refresh, .. }
-            | Self::Rss { refresh, .. }
-            | Self::Plugin { refresh, .. } => *refresh,
+            | Self::Picture { refresh, .. } => *refresh,
         }
     }
 
-    /// `None` for a plugin card: it has no `DisplayTemplate` to select among
-    /// because it renders from its manifest-compiled scene, not one of the six
-    /// built-in templates. Callers that only care about the built-in surface
-    /// (the `IconBadgeText` asset check, the extended-templates capability
-    /// gate) already treat `None` as "nothing to check here"; callers that
-    /// need a wire `TemplateKind` regardless (`wire_config`) pick an inert
-    /// placeholder explicitly, with their own comment.
+    /// `None` for picture cards: the picture is already the complete face, so
+    /// there is no `DisplayTemplate` to select.
+    ///
+    /// Since protocol v2 this is purely host state -- it selects which scene
+    /// builder draws the card -- and the wire carries no template at all.
     pub fn template(&self) -> Option<&DisplayTemplate> {
         match self {
-            Self::Clock { template, .. }
-            | Self::Pomodoro { template, .. }
-            | Self::Calendar { template, .. }
-            | Self::Weather { template, .. }
-            | Self::JsonFeed { template, .. }
-            | Self::Rss { template, .. } => Some(template),
-            Self::Plugin { .. } => None,
+            Self::Clock { template, .. } | Self::Pomodoro { template, .. } => Some(template),
+            Self::Picture { .. } => None,
+        }
+    }
+
+    /// How long this card stays on the panel before the loop advances, or
+    /// `None` to use `AppConfig::advance`'s default.
+    pub const fn dwell_seconds(&self) -> Option<u16> {
+        match self {
+            Self::Clock { dwell_seconds, .. }
+            | Self::Pomodoro { dwell_seconds, .. }
+            | Self::Picture { dwell_seconds, .. } => *dwell_seconds,
         }
     }
 
@@ -1485,11 +976,7 @@ impl CardSettings {
         match self {
             Self::Clock { tap_action, .. }
             | Self::Pomodoro { tap_action, .. }
-            | Self::Calendar { tap_action, .. }
-            | Self::Weather { tap_action, .. }
-            | Self::JsonFeed { tap_action, .. }
-            | Self::Rss { tap_action, .. }
-            | Self::Plugin { tap_action, .. } => tap_action,
+            | Self::Picture { tap_action, .. } => tap_action,
         }
     }
 
@@ -1512,7 +999,7 @@ impl CardSettings {
                 );
                 validate_composition(
                     path,
-                    ProviderKind::Clock,
+                    CardBehavior::Clock,
                     Some(template),
                     tap_action,
                     *refresh,
@@ -1545,179 +1032,16 @@ impl CardSettings {
                 }
                 validate_composition(
                     path,
-                    ProviderKind::Pomodoro,
+                    CardBehavior::Pomodoro,
                     Some(template),
                     tap_action,
                     *refresh,
                     issues,
                 );
             }
-            Self::Calendar {
+            Self::Picture {
                 title,
-                source,
-                template,
-                tap_action,
-                refresh,
-                ..
-            } => {
-                validate_text(
-                    &format!("{path}.title"),
-                    title,
-                    MAX_WIDGET_TITLE_LEN,
-                    false,
-                    issues,
-                );
-                source.validate(&format!("{path}.source"), issues);
-                validate_composition(
-                    path,
-                    ProviderKind::Calendar,
-                    Some(template),
-                    tap_action,
-                    *refresh,
-                    issues,
-                );
-            }
-            Self::Weather {
-                title,
-                location,
-                template,
-                tap_action,
-                refresh,
-                ..
-            } => {
-                validate_text(
-                    &format!("{path}.title"),
-                    title,
-                    MAX_WIDGET_TITLE_LEN,
-                    false,
-                    issues,
-                );
-                validate_text(
-                    &format!("{path}.location"),
-                    location,
-                    MAX_LOCATION_LEN,
-                    true,
-                    issues,
-                );
-                validate_composition(
-                    path,
-                    ProviderKind::Weather,
-                    Some(template),
-                    tap_action,
-                    *refresh,
-                    issues,
-                );
-                if let RefreshPolicy::Interval { minutes } = refresh
-                    && *minutes < MIN_WEATHER_REFRESH_MINUTES
-                {
-                    issues.push(ValidationIssue::new(
-                        format!("{path}.refresh.minutes"),
-                        ValidationCode::OutOfRange,
-                        format!(
-                            "weather refresh interval must be at least {MIN_WEATHER_REFRESH_MINUTES} minutes"
-                        ),
-                    ));
-                }
-            }
-            Self::JsonFeed {
-                title,
-                url,
-                mappings,
-                template,
-                tap_action,
-                refresh,
-                ..
-            } => {
-                validate_text(
-                    &format!("{path}.title"),
-                    title,
-                    MAX_WIDGET_TITLE_LEN,
-                    false,
-                    issues,
-                );
-                validate_http_url(&format!("{path}.url"), url, issues);
-                validate_collection_bounds(
-                    &format!("{path}.mappings"),
-                    mappings.len(),
-                    MAX_JSON_MAPPINGS,
-                    issues,
-                );
-                let mut fields = HashSet::with_capacity(mappings.len());
-                for (index, mapping) in mappings.iter().enumerate() {
-                    let mapping_path = format!("{path}.mappings[{index}]");
-                    validate_identifier(
-                        &format!("{mapping_path}.field"),
-                        &mapping.field,
-                        protocol::MAX_FIELD_KEY_LEN,
-                        issues,
-                    );
-                    validate_text(
-                        &format!("{mapping_path}.path"),
-                        &mapping.path,
-                        MAX_JSON_PATH_LEN,
-                        true,
-                        issues,
-                    );
-                    if providers::json_feed::is_reserved_field(&mapping.field) {
-                        issues.push(ValidationIssue::new(
-                            format!("{mapping_path}.field"),
-                            ValidationCode::InvalidComposition,
-                            "JSON mapping field is reserved for provider metadata",
-                        ));
-                    }
-                    if !fields.insert(mapping.field.as_str()) {
-                        issues.push(ValidationIssue::new(
-                            format!("{mapping_path}.field"),
-                            ValidationCode::DuplicateId,
-                            "JSON mapping field is duplicated",
-                        ));
-                    }
-                }
-                validate_composition(
-                    path,
-                    ProviderKind::JsonFeed,
-                    Some(template),
-                    tap_action,
-                    *refresh,
-                    issues,
-                );
-            }
-            Self::Rss {
-                title,
-                url,
-                max_items,
-                template,
-                tap_action,
-                refresh,
-                ..
-            } => {
-                validate_text(
-                    &format!("{path}.title"),
-                    title,
-                    MAX_WIDGET_TITLE_LEN,
-                    false,
-                    issues,
-                );
-                validate_http_url(&format!("{path}.url"), url, issues);
-                if !(1..=MAX_RSS_ITEMS).contains(max_items) {
-                    issues.push(ValidationIssue::new(
-                        format!("{path}.max_items"),
-                        ValidationCode::OutOfRange,
-                        format!("RSS item count must be 1..={MAX_RSS_ITEMS}"),
-                    ));
-                }
-                validate_composition(
-                    path,
-                    ProviderKind::Rss,
-                    Some(template),
-                    tap_action,
-                    *refresh,
-                    issues,
-                );
-            }
-            Self::Plugin {
-                title,
-                plugin_id,
+                source_id,
                 tap_action,
                 refresh,
                 ..
@@ -1730,14 +1054,14 @@ impl CardSettings {
                     issues,
                 );
                 validate_identifier(
-                    &format!("{path}.plugin_id"),
-                    plugin_id,
-                    MAX_PLUGIN_ID_LEN,
+                    &format!("{path}.source_id"),
+                    source_id,
+                    MAX_CARD_ID_LEN,
                     issues,
                 );
                 validate_composition(
                     path,
-                    ProviderKind::Plugin,
+                    CardBehavior::Picture,
                     None,
                     tap_action,
                     *refresh,
@@ -1747,37 +1071,15 @@ impl CardSettings {
         }
         self.tap_action()
             .validate(&format!("{path}.tap_action"), issues);
-        if let Some(DisplayTemplate::IconBadgeText {
-            icon_asset_id: Some(asset_id),
-        }) = self.template()
-        {
-            validate_identifier(
-                &format!("{path}.template.icon_asset_id"),
-                asset_id,
-                MAX_WIDGET_ID_LEN,
-                issues,
-            );
-        }
     }
 
-    fn wire_config(&self) -> Option<WidgetConfig> {
-        let template = match self.template() {
-            // A plugin card (`None`) carries no `DisplayTemplate`: it renders from a
-            // host-pushed scene (`PushScene`), not any of the six built-in C
-            // templates. Firmware no longer switches on this field to choose a
-            // renderer at all (stage 3a retired every built-in template in favour of
-            // scenes for every card), so this byte is inert for a plugin card;
-            // `DigitalClock` is picked arbitrarily to keep `WidgetConfig` fully
-            // populated for older tooling that still reads it. Do not read rendering
-            // meaning into it for a plugin card, and do not read the merge with the
-            // real digital-clock arm below as anything but that shared byte value.
-            Some(DisplayTemplate::DigitalClock) | None => TemplateKind::DigitalClock,
-            Some(DisplayTemplate::ProgressRing) => TemplateKind::ProgressRing,
-            Some(DisplayTemplate::RowList) => TemplateKind::RowList,
-            Some(DisplayTemplate::AnalogClock) => TemplateKind::AnalogClock,
-            Some(DisplayTemplate::BigNumberLabel) => TemplateKind::BigNumberLabel,
-            Some(DisplayTemplate::IconBadgeText { .. }) => TemplateKind::IconBadgeText,
-        };
+    /// This card as protocol v2's `CardConfig`.
+    ///
+    /// v2 carries only what the device decides for itself. The template, the
+    /// size class and the interrupt policy all described a device that
+    /// rendered the face; it has drawn only host-pushed scenes since stage 3a,
+    /// and the host decides which cards can alert.
+    fn wire_config(&self) -> Option<CardConfig> {
         let tap_action = match self.tap_action() {
             WidgetTapAction::None => TapAction::None,
             WidgetTapAction::StartPause => TapAction::StartPause,
@@ -1786,20 +1088,20 @@ impl CardSettings {
             | WidgetTapAction::OpenUrl { .. }
             | WidgetTapAction::OpenApplication { .. } => return None,
         };
-        Some(WidgetConfig {
-            widget_id: self.id().into(),
-            template,
-            size_class: protocol::SizeClass::Full,
+        Some(CardConfig {
+            card_id: self.id().into(),
             tap_action,
-            interrupt_policy: if self.alert().is_none() {
-                InterruptPolicy::Disabled
-            } else {
-                InterruptPolicy::Enabled
-            },
         })
     }
 
-    fn initial_fields(&self) -> Vec<Field> {
+    /// The host-side data a card's face starts from, before any provider or
+    /// timer has run.
+    ///
+    /// Protocol v1 sent this bag to the device as `PushData` and seeded the
+    /// host's own copy from the same value. Protocol v2's device has no field
+    /// model, so this is now purely host state: the input the scene builders
+    /// read, and what the settings window shows as the card's data.
+    pub(crate) fn initial_fields(&self) -> Vec<CardField> {
         match self {
             Self::Clock {
                 title,
@@ -1823,85 +1125,31 @@ impl CardSettings {
                 bool_field("stale", false),
                 text_field("error", ""),
             ],
-            Self::Calendar { title, .. } => {
-                let mut fields = Vec::with_capacity(13);
-                fields.push(text_field("title", title));
-                for row in 0..5 {
-                    fields.push(text_field(&format!("row{row}_title"), ""));
-                    fields.push(text_field(&format!("row{row}_time"), ""));
-                }
-                fields.push(bool_field("stale", true));
-                fields.push(text_field("error", "Waiting for calendar refresh"));
-                fields
-            }
-            // A plugin's own fields are named by its manifest (`field.*` bindings),
-            // which app-core does not parse -- that is the plugin crate's job, and
-            // the manifest lives in a file this crate never reads. Only the
-            // housekeeping fields every provider-backed card carries are known here
-            // (the same set weather uses); the server pushes the plugin's real
-            // fields once it resolves the manifest and fetches the first snapshot
-            // (Task 7).
-            Self::Weather { title, .. } | Self::Plugin { title, .. } => vec![
+            // Picture uses this placeholder shape until its first frame arrives.
+            Self::Picture { title, .. } => vec![
                 text_field("title", title),
                 bool_field("stale", true),
-                text_field("error", "Waiting for provider refresh"),
+                text_field("error", "Waiting for picture"),
             ],
-            Self::JsonFeed {
-                title, mappings, ..
-            } => {
-                let mut fields = Vec::with_capacity(protocol::MAX_FIELD_COUNT);
-                fields.push(text_field("title", title));
-                fields.extend(
-                    mappings
-                        .iter()
-                        .filter(|mapping| {
-                            !matches!(mapping.field.as_str(), "title" | "stale" | "error")
-                        })
-                        .take(protocol::MAX_FIELD_COUNT - 3)
-                        .map(|mapping| text_field(&mapping.field, "")),
-                );
-                fields.push(bool_field("stale", true));
-                fields.push(text_field("error", "Waiting for provider refresh"));
-                fields
-            }
-            Self::Rss { title, .. } => {
-                let mut fields = Vec::with_capacity(13);
-                fields.push(text_field("title", title));
-                for row in 0..5 {
-                    fields.push(text_field(&format!("row{row}_title"), ""));
-                    fields.push(text_field(&format!("row{row}_time"), ""));
-                }
-                fields.push(bool_field("stale", true));
-                fields.push(text_field("error", "Waiting for provider refresh"));
-                fields
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "kind",
-    content = "value",
-    rename_all = "kebab-case",
-    deny_unknown_fields
-)]
-pub enum CalendarSource {
-    File(String),
-    Url(String),
-}
-
-impl CalendarSource {
-    pub fn value(&self) -> &str {
-        match self {
-            Self::File(value) | Self::Url(value) => value,
         }
     }
 
-    fn validate(&self, path: &str, issues: &mut Vec<ValidationIssue>) {
+    /// The timer this card's `timer.*` scene bindings start from, or `None`
+    /// for a card that has no timer. Replaces protocol v1's initial field bag.
+    fn initial_timer(&self, revision: u32) -> Option<PushTimer> {
         match self {
-            Self::File(file) => validate_text(path, file, MAX_ICS_SOURCE_LEN, true, issues),
-            Self::Url(url) => validate_http_url(path, url, issues),
+            Self::Pomodoro {
+                id,
+                duration_seconds,
+                ..
+            } => Some(PushTimer {
+                card_id: id.clone(),
+                revision,
+                total_ms: duration_seconds.saturating_mul(1_000),
+                remaining_ms: duration_seconds.saturating_mul(1_000),
+                running: false,
+            }),
+            Self::Clock { .. } | Self::Picture { .. } => None,
         }
     }
 }
@@ -1913,6 +1161,19 @@ pub struct AssetSettings {
     pub source: AssetSource,
     pub kind: AssetKind,
     pub maximum_bytes: u32,
+}
+
+/// A named destination an external producer pushes pictures to.
+///
+/// Authoring identity and nothing else. The credential that authorizes a push
+/// is **not** here and never enters a configuration: the server keeps a SHA-256
+/// digest keyed by `id`, exactly as it does for device identities, and the
+/// plaintext token is returned once at mint and never persisted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageSource {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1934,7 +1195,7 @@ pub enum AssetSource {
 pub enum AssetKind {
     /// A TTF/OTF text font. Size is chosen per text node at render time.
     Font,
-    /// A TTF/OTF icon font plus a name→codepoint map, so a plugin can write
+    /// A TTF/OTF icon font plus a name→codepoint map, so a scene can write
     /// `icon: "cloud-rain"` instead of a raw codepoint.
     IconFont { glyphs: Vec<IconGlyphMapping> },
     /// An LVGL binary image, converted host-side so the device needs no PNG
@@ -2000,7 +1261,7 @@ pub enum UpdateCheckPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledAppConfig {
     pub layout: ApplyConfig,
-    pub initial_pushes: Vec<PushData>,
+    pub initial_timers: Vec<PushTimer>,
     pub assets: Vec<AssetSettings>,
     pub required_capabilities: u64,
 }
@@ -2081,29 +1342,6 @@ fn validate_identifier(path: &str, value: &str, maximum: usize, issues: &mut Vec
     validate_text(path, value, maximum, true, issues);
 }
 
-fn validate_identifier_with_context(
-    path: &str,
-    value: &str,
-    maximum: usize,
-    context: &str,
-    issues: &mut Vec<ValidationIssue>,
-) {
-    if value.trim().is_empty() {
-        issues.push(ValidationIssue::new(
-            path,
-            ValidationCode::Empty,
-            format!("{context} must not be empty"),
-        ));
-    }
-    if value.len() > maximum {
-        issues.push(ValidationIssue::new(
-            path,
-            ValidationCode::TooLong,
-            format!("{context} must be at most {maximum} UTF-8 bytes"),
-        ));
-    }
-}
-
 fn validate_text(
     path: &str,
     value: &str,
@@ -2138,96 +1376,62 @@ fn validate_timezone(timezone: &str, issues: &mut Vec<ValidationIssue>) {
 }
 
 #[derive(Clone, Copy)]
-enum ProviderKind {
+enum CardBehavior {
     Clock,
     Pomodoro,
-    Calendar,
-    Weather,
-    JsonFeed,
-    Rss,
-    Plugin,
+    Picture,
 }
 
 fn validate_composition(
     path: &str,
-    provider: ProviderKind,
+    behavior: CardBehavior,
     template: Option<&DisplayTemplate>,
     tap_action: &WidgetTapAction,
     refresh: RefreshPolicy,
     issues: &mut Vec<ValidationIssue>,
 ) {
-    // `template` is `None` only for `ProviderKind::Plugin`: a plugin card renders
-    // from its manifest-compiled scene, not one of the six built-in
-    // `DisplayTemplate`s, so there is no template/provider field-compatibility
-    // pairing to check and no template-gated tap-action rule to enforce here. The
-    // provider-gated tap-action check and the refresh-policy checks below still
-    // apply to every provider, plugin included.
+    // `template` is `None` only for picture cards: they render from a host-built
+    // scene, not one of the six built-in `DisplayTemplate`s, so there
+    // is no template/card field-compatibility pairing to check and no
+    // template-gated tap-action rule to enforce here. The card-gated tap-action
+    // and refresh-policy checks below still apply to every kind.
     if let Some(template) = template {
-        // A pairing is allowed only when the provider actually populates the fields
+        // A pairing is allowed only when the card actually populates the fields
         // the template declares (`firmware/main/core/template_fields.c`). A template
-        // whose renderable fields the provider never sends draws its placeholders
-        // forever, and every field the provider sends that the template does not
+        // whose renderable fields the card never sends draws its placeholders
+        // forever, and every field the card sends that the template does not
         // declare is counted in the device's `unknown_field_count` on EVERY refresh —
         // degrading the diagnostic that exists to catch real host/firmware schema
         // drift.
-        let template_supported = match provider {
+        let template_supported = match behavior {
             // Clock sends only title/show_seconds; `big-number-label`'s `value` would
             // never be written and the card would show a permanent "--".
-            ProviderKind::Clock => matches!(
+            CardBehavior::Clock => matches!(
                 template,
                 DisplayTemplate::DigitalClock | DisplayTemplate::AnalogClock
             ),
             // Pomodoro sends `label`, `duration_seconds`, `remaining_seconds` and
             // `running`; `big-number-label` declares only `label` out of those, so its
             // hero `value` stayed "--" forever while the other three counted as
-            // unknown on EVERY tick — a continuous drip, worse than the calendar case
-            // above. Unlike weather's `row-list` this strands no saved configuration:
+            // unknown on EVERY tick — a continuous diagnostic drip. This strands no
+            // saved configuration:
             // v0/v1 migration hard-codes pomodoro to `ProgressRing`, and while v2
             // migration copies `template` verbatim, no v2 file could hold
             // `big-number-label` on a pomodoro card because `save_and_apply` compiled
             // before persisting and `wire_config()` refused to lower that template at
             // the time.
-            ProviderKind::Pomodoro => matches!(template, DisplayTemplate::ProgressRing),
-            // Calendar and RSS send `title` plus ten `rowN_*` fields, which only
-            // `row-list` declares. On `icon-badge-text` all ten counted as unknown on
-            // every refresh and the card rendered the hollow `unknown` ring and "--".
-            ProviderKind::Calendar | ProviderKind::Rss => {
-                matches!(template, DisplayTemplate::RowList)
-            }
-            // `icon-badge-text` is what weather's field set was designed for and
-            // `big-number-label` renders its `title`/`value`/`label` subset. `RowList`
-            // must stay: `validate()` runs on config LOAD, cards are never migrated to
-            // a new template, and every weather card saved before the extended
-            // templates shipped is still on `row-list` (it was the only weather-legal
-            // template `wire_config()` could lower back then). Removing it would make
-            // those saved configurations fail to load.
-            ProviderKind::Weather => matches!(
-                template,
-                DisplayTemplate::BigNumberLabel
-                    | DisplayTemplate::IconBadgeText { .. }
-                    | DisplayTemplate::RowList
-            ),
-            // Every json-feed field is user-mapped by name, so the user can populate
-            // any template's declared text fields, including `row-list`'s `rowN_*`
-            // set.
-            ProviderKind::JsonFeed => matches!(
-                template,
-                DisplayTemplate::BigNumberLabel
-                    | DisplayTemplate::IconBadgeText { .. }
-                    | DisplayTemplate::RowList
-            ),
-            // A plugin card never passes `Some(template)` — see the comment above. This
-            // arm is unreachable by construction today, but the function validates
-            // untrusted config content, so it returns a safe `false` (an
-            // `InvalidComposition` issue) rather than panicking if that ever stops
-            // being true.
-            ProviderKind::Plugin => false,
+            CardBehavior::Pomodoro => matches!(template, DisplayTemplate::ProgressRing),
+            // Picture cards never pass `Some(template)` — see the comment
+            // above. This arm is unreachable by construction today, but the function
+            // validates untrusted config content, so it returns a safe `false` (an
+            // `InvalidComposition` issue) rather than panicking if that ever changes.
+            CardBehavior::Picture => false,
         };
         if !template_supported {
             issues.push(ValidationIssue::new(
                 format!("{path}.template"),
                 ValidationCode::InvalidComposition,
-                "display template is incompatible with this provider",
+                "display template is incompatible with this card kind",
             ));
         }
 
@@ -2252,24 +1456,20 @@ fn validate_composition(
     if matches!(
         tap_action,
         WidgetTapAction::StartPause | WidgetTapAction::Reset
-    ) && !matches!(provider, ProviderKind::Pomodoro)
+    ) && !matches!(behavior, CardBehavior::Pomodoro)
     {
         issues.push(ValidationIssue::new(
             format!("{path}.tap_action"),
             ValidationCode::InvalidComposition,
-            "start/pause and reset actions require a pomodoro provider",
+            "start/pause and reset actions require a pomodoro card",
         ));
     }
 
-    let refresh_supported = match provider {
-        ProviderKind::Clock | ProviderKind::Pomodoro => {
+    let refresh_supported = match behavior {
+        CardBehavior::Clock | CardBehavior::Pomodoro => {
             matches!(refresh, RefreshPolicy::DeviceLocal)
         }
-        ProviderKind::Calendar
-        | ProviderKind::Weather
-        | ProviderKind::JsonFeed
-        | ProviderKind::Rss
-        | ProviderKind::Plugin => matches!(
+        CardBehavior::Picture => matches!(
             refresh,
             RefreshPolicy::Manual | RefreshPolicy::Interval { .. }
         ),
@@ -2278,17 +1478,17 @@ fn validate_composition(
         issues.push(ValidationIssue::new(
             format!("{path}.refresh"),
             ValidationCode::InvalidComposition,
-            "refresh policy is incompatible with this provider",
+            "refresh policy is incompatible with this card kind",
         ));
     }
     if let RefreshPolicy::Interval { minutes } = refresh
-        && !(MIN_CALENDAR_REFRESH_MINUTES..=MAX_CALENDAR_REFRESH_MINUTES).contains(&minutes)
+        && !(MIN_CARD_REFRESH_MINUTES..=MAX_CARD_REFRESH_MINUTES).contains(&minutes)
     {
         issues.push(ValidationIssue::new(
             format!("{path}.refresh.minutes"),
             ValidationCode::OutOfRange,
             format!(
-                "refresh interval must be {MIN_CALENDAR_REFRESH_MINUTES}..={MAX_CALENDAR_REFRESH_MINUTES} minutes"
+                "refresh interval must be {MIN_CARD_REFRESH_MINUTES}..={MAX_CARD_REFRESH_MINUTES} minutes"
             ),
         ));
     }
@@ -2322,14 +1522,24 @@ impl WidgetTapAction {
 }
 
 fn validate_http_url(path: &str, url: &str, issues: &mut Vec<ValidationIssue>) {
-    validate_text(path, url, MAX_PROVIDER_URL_LEN, true, issues);
-    if !url.is_empty() && providers::http::validate_http_url(url).is_err() {
+    validate_text(path, url, MAX_ACTION_URL_LEN, true, issues);
+    if !url.is_empty() && !is_valid_http_url(url) {
         issues.push(ValidationIssue::new(
             path,
             ValidationCode::InvalidSource,
             "URL must be HTTP(S), include a host, and contain no credentials",
         ));
     }
+}
+
+fn is_valid_http_url(raw: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(raw) else {
+        return false;
+    };
+    matches!(parsed.scheme(), "http" | "https")
+        && parsed.host_str().is_some()
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
 }
 
 fn validate_range(
@@ -2363,23 +1573,6 @@ fn validate_card_behaviour(path: &str, card: &CardSettings, issues: &mut Vec<Val
             }
             validate_alert_hold(path, hold, issues);
         }
-        CardAlert::BeforeEvent { lead_minutes, hold } => {
-            if !matches!(card, CardSettings::Calendar { .. }) {
-                issues.push(ValidationIssue::new(
-                    format!("{path}.alert"),
-                    ValidationCode::OutOfRange,
-                    "before-event alerts are only valid on calendar cards",
-                ));
-            }
-            validate_range(
-                &format!("{path}.alert.lead_minutes"),
-                u32::from(lead_minutes),
-                u32::from(MIN_ALERT_LEAD_MINUTES),
-                u32::from(MAX_ALERT_LEAD_MINUTES),
-                issues,
-            );
-            validate_alert_hold(path, hold, issues);
-        }
     }
 }
 
@@ -2397,7 +1590,7 @@ fn validate_alert_hold(path: &str, hold: AlertHold, issues: &mut Vec<ValidationI
 
 impl AssetSettings {
     fn validate(&self, path: &str, issues: &mut Vec<ValidationIssue>) {
-        validate_identifier(&format!("{path}.id"), &self.id, MAX_WIDGET_ID_LEN, issues);
+        validate_identifier(&format!("{path}.id"), &self.id, MAX_CARD_ID_LEN, issues);
         let AssetSource::File(source) = &self.source;
         validate_text(
             &format!("{path}.source"),
@@ -2452,23 +1645,27 @@ impl AssetSettings {
     }
 }
 
-fn text_field(key: &str, value: &str) -> Field {
-    Field {
+fn text_field(key: &str, value: &str) -> CardField {
+    CardField {
         key: key.into(),
-        value: FieldValue::Text(value.into()),
+        value: CardFieldValue::Text {
+            value: value.into(),
+        },
     }
 }
 
-fn int_field(key: &str, value: u32) -> Field {
-    Field {
+fn int_field(key: &str, value: u32) -> CardField {
+    CardField {
         key: key.into(),
-        value: FieldValue::Integer(i64::from(value)),
+        value: CardFieldValue::Integer {
+            value: i64::from(value),
+        },
     }
 }
 
-fn bool_field(key: &str, value: bool) -> Field {
-    Field {
+fn bool_field(key: &str, value: bool) -> CardField {
+    CardField {
         key: key.into(),
-        value: FieldValue::Boolean(value),
+        value: CardFieldValue::Boolean { value },
     }
 }

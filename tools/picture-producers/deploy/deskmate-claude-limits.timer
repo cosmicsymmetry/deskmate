@@ -1,0 +1,12 @@
+[Unit]
+Description=Push the Claude usage panel to Deskmate every 10 minutes
+
+[Timer]
+# Matches the feed's own cadence. Pushing faster would only re-send an identical
+# picture, which the server accepts as a liveness signal but moves no bytes for.
+OnBootSec=2min
+OnUnitActiveSec=10min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

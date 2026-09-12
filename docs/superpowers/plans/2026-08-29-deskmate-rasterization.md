@@ -1,6 +1,15 @@
 # Stage 4 — Rasterization fallback and SVG plugins
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
+
+> **STATUS (recorded 2026-09-09): SOFTWARE-COMPLETE 2026-09-01 and CONFIRMED ON HARDWARE
+> 2026-09-06.** Its 15 open boxes are Task 7's hardware gates, and board-notes records
+> that they PASSED — the `v2.0.0-raster1` OTA installed first-try and survived the
+> rollback window, capabilities read 1003, and Task 6 Step 5's on-target
+> `framebuffer_diff` returned **96 total / 10 excluded / 86 identical / 0 differing**
+> historically; after manifest removal the next-run software prediction is **78/8/70**
+> (predicted 96/8/88; corrected by three test-harness-only fixes). Only the
+> BUSY/OTA-owner variant, which needs a pending OTA in flight, is still owed.
 > (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps
 > use checkbox (`- [ ]`) syntax for tracking.
 
@@ -914,7 +923,8 @@ server/device timestamps and status values. Do not start Phase B if Phase A fail
 - [x] **Step 11: Run the exact payload delivery row on hardware.** DONE on the board
       2026-09-06 (recorded in `docs/hardware/board-notes.md` under "B11 / Task 6 Step 5").
       `framebuffer_diff` = **96 total / 10 excluded / 86 identical / 0 differing / 0
-      errored**, exit 0. The predicted 96/8/88 was corrected to 96/10/86 by three
+      errored**, exit 0 (historical; after manifest removal the next-run prediction is
+      **78/8/70**). The predicted 96/8/88 was corrected to 96/10/86 by three
       test-harness fidelity fixes the first hardware run surfaced (a wire-invalid
       `now_unix_seconds: 0` on the v2-timer rows; `plugin-aqi--empty`'s `field.title` `--`
       placeholder being unreachable on a device that registers its card's template fields,

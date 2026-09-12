@@ -1,14 +1,16 @@
 //! Headless renderer for Deskmate's LVGL surfaces.
 //!
-//! This crate links the shipping scene interpreter and hardware-independent
-//! firmware core, plus the retired C templates from its clearly isolated
-//! `reference-oracle/`. Rust can therefore produce exact device pixels and
-//! keep comparing scenes against the live historical oracle. See `build.rs`
-//! for the source list and `csrc/sim_shim.c` for the C-side glue.
+//! This crate links the shipping scene interpreter and the hardware-independent
+//! firmware core, so Rust can produce exact device pixels: the goldens, the
+//! settings-window preview and the on-board framebuffer diff all render through
+//! the same C the device runs. See `build.rs` for the source list and
+//! `csrc/sim_shim.c` for the C-side glue.
+//!
+//! It used to compile the retired C templates too, as an oracle for a parity
+//! gate. That went on 2026-09-11 along with the second renderer it existed to
+//! check.
 
-use std::ffi::CString;
 use std::fmt;
-use std::os::raw::c_char;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -20,54 +22,13 @@ pub mod cases;
 /// See its module doc for why the vendored TTF is patched before being subset.
 pub mod assets;
 
-/// Task 8: rendering a declarative scene through the firmware's own decoder
-/// and `ui/scene_view.c` interpreter, the device-side half of the plugin
-/// display list. See its module doc for why it goes through the wire format
+/// Rendering a declarative scene through the firmware's own decoder and
+/// `ui/scene_view.c` interpreter. See its module doc for why it goes through the wire format
 /// rather than filling a `scene_t` over FFI.
 pub mod scene;
 
 pub const LOGICAL_WIDTH: u32 = 448;
 pub const LOGICAL_HEIGHT: u32 = 368;
-
-/// A firmware template kind. Values mirror `protocol_template_kind_t` in
-/// `firmware/main/core/protocol_message.h`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SimTemplate {
-    DigitalClock,
-    ProgressRing,
-    RowList,
-    AnalogClock,
-    BigNumberLabel,
-    IconBadgeText,
-}
-
-impl SimTemplate {
-    /// The corresponding `protocol_template_kind_t` value used by the C ABI.
-    fn wire_kind(self) -> i32 {
-        match self {
-            Self::DigitalClock => 1,
-            Self::ProgressRing => 2,
-            Self::RowList => 3,
-            Self::AnalogClock => 4,
-            Self::BigNumberLabel => 5,
-            Self::IconBadgeText => 6,
-        }
-    }
-}
-
-/// A field value pinned for one render. Kind mirrors `protocol_field_type_t`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SimFieldValue {
-    Text(String),
-    Integer(i64),
-    Boolean(bool),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SimField {
-    pub name: String,
-    pub value: SimFieldValue,
-}
 
 /// The device mounting orientation. `LandscapeFlipped` is the 270° mount
 /// (180° rotation of the logical canvas); see the "flipped orientation"
@@ -76,15 +37,6 @@ pub struct SimField {
 pub enum SimOrientation {
     Landscape,
     LandscapeFlipped,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RenderRequest {
-    pub template: SimTemplate,
-    pub fields: Vec<SimField>,
-    pub utc_offset_minutes: i16,
-    pub now_unix_seconds: i64,
-    pub orientation: SimOrientation,
 }
 
 /// Errors from simulator setup or rendering.
@@ -151,55 +103,11 @@ impl fmt::Display for SimError {
 
 impl std::error::Error for SimError {}
 
-/// A field passed across the FFI boundary. Kept alive only for the duration
-/// of one `sim_render` call; `name`/`text` point into the `CString`s held by
-/// the caller in `Simulator::render`.
-#[repr(C)]
-struct RawField {
-    name: *const c_char,
-    kind: i32,
-    text: *const c_char,
-    integer: i64,
-    boolean: bool,
-}
-
 // SAFETY: this block declares the C shim's signatures exactly as defined in
 // `csrc/sim_shim.h` / `csrc/sim_shim.c`, compiled and linked in by `build.rs`.
 unsafe extern "C" {
     fn sim_init() -> bool;
 
-    fn sim_render(
-        template_kind: i32,
-        fields: *const RawField,
-        field_count: usize,
-        utc_offset_minutes: i16,
-        now_unix_seconds: i64,
-        orientation_flipped: bool,
-        out_pixels: *mut u16,
-    ) -> bool;
-}
-
-/// Builds a `CString` from `s`, truncating at the first interior NUL byte
-/// instead of failing the whole string. `CString::new` rejects any interior
-/// NUL, and the call sites used to fall back to `.unwrap_or_default()` on
-/// that error — silently rendering an *empty* field for a string that has a
-/// NUL anywhere in it. On device, the field text lands in a fixed C buffer
-/// via `strncpy` (see `sim_shim.c`'s `build_fields`), which just stops
-/// copying at the NUL and renders everything before it; truncating here
-/// instead of blanking matches that behavior so the preview shows the same
-/// prefix the firmware would.
-pub(crate) fn truncated_cstring(s: &str) -> CString {
-    match CString::new(s) {
-        Ok(cstring) => cstring,
-        Err(err) => {
-            let nul_position = err.nul_position();
-            // The bytes up to `nul_position` are exactly the prefix before
-            // the first NUL that made `CString::new` fail, so they contain
-            // no NUL themselves and this cannot fail.
-            CString::new(&s.as_bytes()[..nul_position])
-                .expect("prefix before first NUL cannot itself contain a NUL")
-        }
-    }
 }
 
 static SIMULATOR_CLAIMED: AtomicBool = AtomicBool::new(false);
@@ -261,47 +169,10 @@ impl Simulator {
             _not_sync: std::marker::PhantomData,
         })
     }
-
-    /// Renders one template with the given fields at a pinned instant.
-    /// Returns 448*368 RGB565 pixels in logical landscape orientation.
-    pub fn render(&mut self, request: &RenderRequest) -> Result<Vec<u16>, SimError> {
-        // Keep CStrings alive across the call: `RawField` below only holds
-        // pointers into them.
-        let (_names, _texts, raw) = scene::prepare_template_fields(request);
-
-        let mut pixels = vec![0_u16; (LOGICAL_WIDTH * LOGICAL_HEIGHT) as usize];
-        // SAFETY: `raw` and the `CString`s backing its pointers are alive for
-        // the duration of this call; `pixels` has exactly
-        // `LOGICAL_WIDTH * LOGICAL_HEIGHT` elements, matching what
-        // `sim_render` writes (SIM_WIDTH * SIM_HEIGHT in the shim).
-        let ok = unsafe {
-            sim_render(
-                request.template.wire_kind(),
-                raw.as_ptr(),
-                raw.len(),
-                request.utc_offset_minutes,
-                request.now_unix_seconds,
-                matches!(request.orientation, SimOrientation::LandscapeFlipped),
-                pixels.as_mut_ptr(),
-            )
-        };
-        if ok {
-            Ok(pixels)
-        } else {
-            Err(SimError::RenderFailed)
-        }
-    }
-
-    /// Renders like [`Simulator::render`] and encodes the result as an 8-bit
-    /// RGB PNG.
-    pub fn render_png(&mut self, request: &RenderRequest) -> Result<Vec<u8>, SimError> {
-        let pixels = self.render(request)?;
-        pixels_to_png(&pixels)
-    }
 }
 
 /// Encodes 448*368 RGB565 pixels (logical landscape, as returned by
-/// [`Simulator::render`]) as an 8-bit RGB PNG.
+/// [`Simulator::render_scene`]) as an 8-bit RGB PNG.
 ///
 /// This is public so hardware/parity diagnostics can write failure frames
 /// with the same bit-identical encoder as the simulator's golden suites.
@@ -345,84 +216,43 @@ impl Drop for Simulator {
 mod tests {
     use super::*;
 
+    fn face_case(name: &str) -> crate::scene::SceneRenderRequest {
+        crate::cases::face_scene_cases()
+            .into_iter()
+            .find(|(case_name, _)| case_name == name)
+            .unwrap_or_else(|| panic!("no face case named {name}"))
+            .1
+    }
+
     #[test]
     fn digital_clock_renders_deterministically_and_not_blank() {
         let mut sim = Simulator::new().expect("simulator");
-        let request = RenderRequest {
-            template: SimTemplate::DigitalClock,
-            fields: vec![
-                SimField {
-                    name: "title".into(),
-                    value: SimFieldValue::Text("Desk".into()),
-                },
-                SimField {
-                    name: "show_seconds".into(),
-                    value: SimFieldValue::Boolean(true),
-                },
-            ],
-            utc_offset_minutes: 240,
-            now_unix_seconds: 1_755_000_000, // 2025-08-12 12:00:00 UTC -> 16:00 local
-            orientation: SimOrientation::Landscape,
-        };
-        let first = sim.render(&request).expect("render");
+        let request = face_case("digital-clock--typical--landscape");
+        let first = sim.render_scene(&request).expect("render");
         assert_eq!(first.len(), (LOGICAL_WIDTH * LOGICAL_HEIGHT) as usize);
         // Not blank: some pixel differs from the background.
         let background = first[0];
         assert!(first.iter().any(|pixel| *pixel != background));
         // Deterministic: same request, same pixels.
-        let second = sim.render(&request).expect("render again");
+        let second = sim.render_scene(&request).expect("render again");
         assert_eq!(first, second);
     }
 
+    /// `copy_frame_out` builds the flipped frame by reversing the finished
+    /// buffer index-by-index, which is why a flipped golden would pin nothing
+    /// a landscape one does not. Everything downstream -- the preview's
+    /// upright-at-both-mountings rule, `framebuffer_diff`'s orientation rows --
+    /// rests on that being a pure 180 degree rotation, so it is pinned here.
     #[test]
     fn flipped_orientation_is_a_180_rotation_of_landscape() {
         let mut sim = Simulator::new().expect("simulator");
-        let mut request = RenderRequest {
-            template: SimTemplate::BigNumberLabel,
-            fields: vec![
-                SimField {
-                    name: "title".into(),
-                    value: SimFieldValue::Text("Steps".into()),
-                },
-                SimField {
-                    name: "value".into(),
-                    value: SimFieldValue::Text("8123".into()),
-                },
-                SimField {
-                    name: "label".into(),
-                    value: SimFieldValue::Text("today".into()),
-                },
-            ],
-            utc_offset_minutes: 0,
-            now_unix_seconds: 1_755_000_000,
-            orientation: SimOrientation::Landscape,
-        };
-        let plain = sim.render(&request).expect("render");
-        request.orientation = SimOrientation::LandscapeFlipped;
-        let flipped = sim.render(&request).expect("render flipped");
+        let plain = sim
+            .render_scene(&face_case("analog-clock--typical--landscape"))
+            .expect("render");
+        let flipped = sim
+            .render_scene(&face_case("analog-clock--typical--flipped"))
+            .expect("render flipped");
         let reversed: Vec<u16> = plain.iter().rev().copied().collect();
         assert_eq!(flipped, reversed);
-    }
-
-    #[test]
-    fn truncated_cstring_truncates_at_first_interior_nul() {
-        let with_interior_nul = "Café\0Zürich";
-        let result = truncated_cstring(with_interior_nul);
-        assert_eq!(result.to_str().expect("valid utf-8"), "Café");
-
-        // A string with no interior NUL is passed through unchanged.
-        let clean = "Zürich";
-        assert_eq!(
-            truncated_cstring(clean).to_str().expect("valid utf-8"),
-            clean
-        );
-
-        // A NUL as the very first byte truncates to empty, not a panic.
-        assert_eq!(
-            truncated_cstring("\0trailing")
-                .to_str()
-                .expect("valid utf-8"),
-            ""
-        );
     }
 }

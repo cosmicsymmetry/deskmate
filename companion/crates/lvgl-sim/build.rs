@@ -4,33 +4,6 @@ fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let firmware = manifest.join("../../../firmware");
     let lvgl = firmware.join("managed_components/lvgl__lvgl");
-    let template_oracle_root = manifest.join("reference-oracle");
-    let template_oracle = template_oracle_root.join("ui");
-
-    // The oracle is useful only while it is live reference code and harmful
-    // if it quietly returns to the device image. Keep that boundary enforced
-    // by the same build that consumes it: a parity run must fail if ESP-IDF's
-    // source manifest ever names the retired view or template directory.
-    let firmware_cmake = std::fs::read_to_string(firmware.join("main/CMakeLists.txt"))
-        .expect("read firmware source manifest");
-    for forbidden in ["ui/template_view.c", "ui/templates/"] {
-        assert!(
-            !firmware_cmake.contains(forbidden),
-            "reference-only C template oracle is shipping again: {forbidden}"
-        );
-    }
-    for forbidden in [
-        firmware.join("main/ui/template_view.c"),
-        firmware.join("main/ui/template_view.h"),
-        firmware.join("main/ui/templates"),
-    ] {
-        assert!(
-            !forbidden.exists(),
-            "reference-only C template oracle was recreated in the shipping include tree: {}",
-            forbidden.display()
-        );
-    }
-
     let mut sources: Vec<PathBuf> = glob::glob(lvgl.join("src/**/*.c").to_str().unwrap())
         .unwrap()
         .filter_map(Result::ok)
@@ -38,7 +11,6 @@ fn main() {
     for core in [
         "timefmt.c",
         "clock_source.c",
-        "template_fields.c",
         // Task 12: the runtime asset store, compiled unmodified so the
         // simulator's digest -> bytes lookup uses the identical format and
         // logic the device's link/asset_flash.c backs with real flash
@@ -58,19 +30,6 @@ fn main() {
     ] {
         sources.push(firmware.join("main/core").join(core));
     }
-    for template in [
-        "digital_clock.c",
-        "analog_clock.c",
-        "progress_ring.c",
-        "row_list.c",
-        "big_number_label.c",
-        "icon_badge_text.c",
-        "template_style.c",
-        "weather_icon.c",
-    ] {
-        sources.push(template_oracle.join("templates").join(template));
-    }
-    sources.push(template_oracle.join("template_view.c"));
     // Task 12: free of ESP-IDF includes by design (see its own header
     // comment) specifically so it can compile into this host binary.
     sources.push(firmware.join("main/ui/font_registry.c"));
@@ -102,12 +61,7 @@ fn main() {
     build
         .files(&sources)
         .include(&lvgl) // lvgl.h
-        // Shipping core/ui headers precede the oracle include roots. The
-        // filesystem assertions above make that safe: a recreated shipping
-        // template header cannot shadow the frozen oracle silently.
         .include(firmware.join("main"))
-        .include(&template_oracle_root) // ui/templates/weather_icon.h
-        .include(&template_oracle) // reference-only template oracle headers
         .include(&firmware) // lv_conf.h
         .include(&cbor)
         .define("LV_CONF_INCLUDE_SIMPLE", None)
@@ -121,6 +75,5 @@ fn main() {
         firmware.join("lv_conf.h").display()
     );
     println!("cargo:rerun-if-changed={}", firmware.join("main").display());
-    println!("cargo:rerun-if-changed={}", template_oracle.display());
     println!("cargo:rerun-if-changed={}", manifest.join("csrc").display());
 }

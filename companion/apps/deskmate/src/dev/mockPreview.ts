@@ -13,7 +13,7 @@
  *  - every other template keeps its title chip
  *  - the canvas is one clean 448x368 with no status strip
  */
-import type { CardDataSnapshot, CardSettings } from "../lib/types";
+import type { CardSettings } from "../lib/types";
 
 export const PANEL_WIDTH = 448;
 export const PANEL_HEIGHT = 368;
@@ -22,13 +22,6 @@ const INK = "#FFFFFF";
 const DIM = "#8A8A8E";
 const GROUND = "#000000";
 const EMIT = "#FFB340";
-
-function fieldValue(data: CardDataSnapshot | undefined, key: string): string | null {
-  const field = data?.fields.find((candidate) => candidate.key === key);
-  if (!field) return null;
-  const { value } = field;
-  return value.kind === "text" ? value.value : String(value.value);
-}
 
 function chip(ctx: CanvasRenderingContext2D, text: string) {
   ctx.font = "600 19px ui-sans-serif, system-ui, sans-serif";
@@ -111,43 +104,25 @@ function progressRing(
   ctx.fillText(label.toUpperCase(), cx, 322);
 }
 
-function rowList(ctx: CanvasRenderingContext2D, title: string, rows: string[]) {
-  chip(ctx, title);
+function pictureFrame(ctx: CanvasRenderingContext2D, title: string) {
+  ctx.fillStyle = "#16162A";
+  ctx.fillRect(0, 0, PANEL_WIDTH, PANEL_HEIGHT);
+  ctx.fillStyle = "#8D8DFF";
+  ctx.fillRect(24, 86, 400, 74);
+  ctx.fillStyle = "#5B5BC8";
+  ctx.fillRect(24, 218, 288, 74);
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
-  const visible = rows.length > 0 ? rows : ["--"];
-  visible.slice(0, 4).forEach((row, index) => {
-    const y = 118 + index * 62;
-    ctx.fillStyle = index === 0 ? INK : DIM;
-    ctx.font = `${index === 0 ? "500" : "400"} 27px ui-sans-serif, system-ui, sans-serif`;
-    const text = row.length > 30 ? `${row.slice(0, 29)}…` : row;
-    ctx.fillText(text, 44, y);
-    if (index < Math.min(visible.length, 4) - 1) {
-      ctx.strokeStyle = "#1C1C1E";
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(44, y + 31);
-      ctx.lineTo(PANEL_WIDTH - 44, y + 31);
-      ctx.stroke();
-    }
-  });
-}
-
-function heroCaption(ctx: CanvasRenderingContext2D, title: string, hero: string, caption: string) {
-  chip(ctx, title);
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
   ctx.fillStyle = INK;
-  ctx.font = "300 124px ui-rounded, ui-sans-serif, system-ui, sans-serif";
-  ctx.fillText(hero, PANEL_WIDTH / 2, 196);
-  ctx.fillStyle = DIM;
-  ctx.font = "500 26px ui-sans-serif, system-ui, sans-serif";
-  ctx.fillText(caption, PANEL_WIDTH / 2, 288);
+  ctx.font = "600 25px ui-sans-serif, system-ui, sans-serif";
+  ctx.fillText(title || "Pushed picture", 38, 48);
+  ctx.font = "500 34px ui-rounded, ui-sans-serif, system-ui, sans-serif";
+  ctx.fillText("72%", 42, 123);
+  ctx.fillText("48%", 42, 255);
 }
 
 export function renderMockFrame(
   card: CardSettings,
-  data: CardDataSnapshot | undefined,
   timezone: string,
   pomodoroRemaining: number | null,
 ): string {
@@ -171,42 +146,8 @@ export function renderMockFrame(
         card.duration_seconds,
       );
       break;
-    case "weather":
-      heroCaption(
-        ctx,
-        card.title || "Weather",
-        fieldValue(data, "hero") ?? "--",
-        fieldValue(data, "caption") ?? "No data yet",
-      );
-      break;
-    case "json-feed":
-      heroCaption(
-        ctx,
-        card.title || "JSON feed",
-        fieldValue(data, "hero") ?? "--",
-        fieldValue(data, "caption") ?? "No data yet",
-      );
-      break;
-    case "calendar":
-    case "rss": {
-      const rows = (data?.fields ?? []).flatMap((field) => {
-        const match = /^row(\d+)_title$/.exec(field.key);
-        if (!match || field.value.kind !== "text" || field.value.value.trim() === "") {
-          return [];
-        }
-        const time = fieldValue(data, `row${match[1]}_time`);
-        return [time ? `${time}  ${field.value.value}` : field.value.value];
-      });
-      rowList(ctx, card.title || (card.kind === "rss" ? "Headlines" : "Calendar"), rows);
-      break;
-    }
-    case "plugin":
-      heroCaption(
-        ctx,
-        card.title || card.plugin_id,
-        fieldValue(data, "hero") ?? "--",
-        "Rendered on the server",
-      );
+    case "picture":
+      pictureFrame(ctx, card.title);
       break;
   }
 

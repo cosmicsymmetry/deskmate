@@ -7,7 +7,6 @@ pub struct AppSnapshot {
     pub config: AppConfig,
     pub runtime: RuntimeState,
     pub device: DeviceSnapshot,
-    pub providers: Vec<ProviderSnapshot>,
     pub pomodoros: Vec<PomodoroSnapshot>,
     pub card_data: Vec<CardDataSnapshot>,
     /// Cards whose last data push was refused, or whose complete scene could not be
@@ -41,9 +40,6 @@ pub enum CardErrorKind {
 pub struct RuntimeDiagnostics {
     pub commands_processed: u64,
     pub command_queue_full: u64,
-    pub provider_jobs_started: u64,
-    pub provider_queue_full: u64,
-    pub provider_results_discarded: u64,
     pub subscriber_snapshots_overwritten: u64,
     /// `InterruptDismissed` events the host received but could not apply,
     /// because the arbiter no longer tracks the token they carry (or they
@@ -105,7 +101,7 @@ pub struct DeviceSnapshot {
     pub last_network_error: Option<String>,
     #[serde(default)]
     pub ota_state: Option<DeviceOtaState>,
-    pub active_screen_id: Option<String>,
+    pub active_card_id: Option<String>,
     pub counters: DeviceCounters,
 }
 
@@ -145,44 +141,32 @@ impl DeviceSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DeviceCapability {
-    CoreWidgets,
-    ConfigRotation,
-    DashboardLayouts,
-    ExtendedTemplates,
-    HostTapActions,
     AssetTransfer,
     FirmwareUpdate,
     Networking,
     SceneRender,
     VolatileAssets,
+    DurableAssetEncoding,
 }
 
 impl DeviceCapability {
-    const ALL: [Self; 10] = [
-        Self::CoreWidgets,
-        Self::ConfigRotation,
-        Self::DashboardLayouts,
-        Self::ExtendedTemplates,
-        Self::HostTapActions,
+    const ALL: [Self; 6] = [
         Self::AssetTransfer,
         Self::FirmwareUpdate,
         Self::Networking,
         Self::SceneRender,
         Self::VolatileAssets,
+        Self::DurableAssetEncoding,
     ];
 
     pub const fn bit(self) -> u64 {
         match self {
-            Self::CoreWidgets => protocol::CAPABILITY_CORE_WIDGETS,
-            Self::ConfigRotation => protocol::CAPABILITY_CONFIG_ROTATION,
-            Self::DashboardLayouts => protocol::CAPABILITY_DASHBOARD_LAYOUTS,
-            Self::ExtendedTemplates => protocol::CAPABILITY_EXTENDED_TEMPLATES,
-            Self::HostTapActions => protocol::CAPABILITY_HOST_TAP_ACTIONS,
             Self::AssetTransfer => protocol::CAPABILITY_ASSET_TRANSFER,
             Self::FirmwareUpdate => protocol::CAPABILITY_FIRMWARE_UPDATE,
             Self::Networking => protocol::CAPABILITY_NETWORKING,
             Self::SceneRender => protocol::CAPABILITY_SCENE_RENDER,
             Self::VolatileAssets => protocol::CAPABILITY_VOLATILE_ASSETS,
+            Self::DurableAssetEncoding => protocol::CAPABILITY_DURABLE_ASSET_ENCODING,
         }
     }
 
@@ -191,16 +175,12 @@ impl DeviceCapability {
     /// user nothing about what to change or which firmware to install.
     pub const fn label(self) -> &'static str {
         match self {
-            Self::CoreWidgets => "core widgets",
-            Self::ConfigRotation => "display rotation",
-            Self::DashboardLayouts => "dashboard layouts",
-            Self::ExtendedTemplates => "extended display templates",
-            Self::HostTapActions => "host tap actions",
             Self::AssetTransfer => "icon and font asset transfer",
             Self::FirmwareUpdate => "firmware update",
             Self::Networking => "networking",
             Self::SceneRender => "declarative scene rendering",
             Self::VolatileAssets => "volatile raster assets",
+            Self::DurableAssetEncoding => "durable raster asset encoding",
         }
     }
 
@@ -354,26 +334,8 @@ pub struct DeviceCounters {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProviderSnapshot {
-    pub widget_id: String,
-    pub state: ProviderState,
-    pub last_success_unix_ms: Option<i64>,
-    pub age_seconds: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
-pub enum ProviderState {
-    Idle,
-    Refreshing,
-    Fresh,
-    Stale { message: String },
-    Error { message: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PomodoroSnapshot {
-    pub widget_id: String,
+    pub card_id: String,
     pub state: PomodoroState,
     pub duration_seconds: u32,
     pub remaining_seconds: u32,
@@ -388,7 +350,10 @@ pub enum PomodoroState {
     Completed,
 }
 
-/// Mirrors `protocol::FieldValue` for the settings webview. The wire type
+/// One live value a card's scene builder reads. Protocol v2 removed the wire's
+/// generic field bag, so this is now purely a HOST-side type: it is what the
+/// runtime keeps per card, what the settings webview renders, and what
+/// `build_card_scene` reads. The wire
 /// deliberately does not derive `Serialize` (it must stay free of
 /// presentation concerns), so this DTO carries the same last-good values
 /// across the IPC boundary instead.
@@ -413,26 +378,10 @@ pub struct CardDataSnapshot {
 }
 
 impl CardDataSnapshot {
-    pub(crate) fn from_protocol(card_id: &str, fields: &[protocol::Field]) -> Self {
+    pub(crate) fn new(card_id: &str, fields: &[CardField]) -> Self {
         Self {
             card_id: card_id.to_owned(),
-            fields: fields
-                .iter()
-                .map(|field| CardField {
-                    key: field.key.clone(),
-                    value: match &field.value {
-                        protocol::FieldValue::Text(value) => CardFieldValue::Text {
-                            value: value.clone(),
-                        },
-                        protocol::FieldValue::Integer(value) => {
-                            CardFieldValue::Integer { value: *value }
-                        }
-                        protocol::FieldValue::Boolean(value) => {
-                            CardFieldValue::Boolean { value: *value }
-                        }
-                    },
-                })
-                .collect(),
+            fields: fields.to_vec(),
         }
     }
 }

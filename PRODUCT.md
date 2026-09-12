@@ -34,41 +34,36 @@ channel, and the panel itself is the real output.
 ## Product Purpose
 
 Deskmate is a small emissive AMOLED panel (368×448 physical, driven as a 448×368
-landscape UI) that clips to a monitor and shows one card at a time — clock, focus
-timer, calendar, weather, a JSON feed, RSS headlines. This desktop app is the
+landscape UI) that clips to a monitor and shows one card at a time — a clock, a focus
+timer, or a server-produced picture. This desktop app is the
 **authoring and ownership surface** for that hardware: it is where a person builds
 the loop of cards the panel cycles through, decides what advances when,
-watches provider health, provisions the device onto WiFi and a server, and hands
+reviews card failures, provisions the device onto WiFi and a server, and hands
 ownership between the Mac and that server.
 
 Success is that the display shows the right thing without the person thinking about
 it, and that when something is wrong they can see which card, why, and what to do —
 without connecting a console.
 
+## Picture cards
+
+A picture card is for a non-interactive face produced outside this repository and sent
+to Deskmate as a PNG. Anybody who can produce the image can add the card with one line
+of `curl`; it requires no manifest, SDK, or repository access.
+
 ## Positioning
 
 Three facts a neighbouring "smart display companion" could not truthfully copy:
 
-1. **The preview is not a mock.** For the six built-in kinds, `render_card_preview` sends
+1. **The preview is not a mock.** For the two on-device kinds, `render_card_preview` sends
    host-built scenes through the firmware/LVGL renderer and returns exact-pixel PNG
    frames; the retired C templates survive only in `lvgl-sim` as the reference oracle,
    not as templates shipped on the device. A framebuffer diff harness proves the
    simulator and firmware agree pixel for pixel. What the app shows is what the panel
    will show.
 
-   **For a plugin card the claim is narrower, and it is stated rather than glossed
-   (2026-09-07).** The Mac holds no plugin registry and no rasterizer, so a plugin
-   card's preview is rendered on the server by `resvg` and returned as a PNG built from
-   the same cached snapshot the panel's face is built from. For an SVG-template plugin
-   that is exact by construction — the raster *is* what the panel shows. For a
-   display-list plugin it can differ exactly where stage 4's rasterization work already
-   found and pinned it (`docs/superpowers/plans/2026-08-29-deskmate-rasterization.md`'s
-   Task 6 evidence row `digital-clock--date-overflow`): LVGL ellipsizes an overflowing
-   line where the raster shows it whole. It is a render of the real card from the real
-   data, never a drawing of a card that does not exist. Rendering the server's compiled
-   scene in the Mac's own
-   simulator, byte-exact, remains available later as an additive extension of the same
-   route.
+   A picture is already the producer's complete 448×368 frame, so the stage states that
+   the pushed source owns it instead of fabricating a second rendering path.
 2. **Ownership is a single implementation with two tiers.** In `local` tier the Mac
    owns the device over USB; in `networked` tier a single-tenant server owns it
    through the same `RuntimeDevice` seam and the app becomes a configurator. Where
@@ -81,60 +76,50 @@ Three facts a neighbouring "smart display companion" could not truthfully copy:
 ## Operating Context
 
 - macOS. The app is tray-resident: closing the window does not stop the background
-  Rust runtime, which keeps owning the device, running providers, and holding timers.
+  Rust runtime, which keeps owning the device and holding timers.
 - The physical display is normally within arm's reach of the Mac, and in `local`
   tier is physically cabled to it over USB.
 - Provisioning is **a cable operation by design** — WiFi and server credentials
   can only be written over USB, never over the network tunnel.
-- Two failure regimes are routine, not exceptional: the display is disconnected or
-  in standalone mode (settings queue and sync later), and a provider is stale or
-  erroring (last good data keeps showing).
+- A disconnected or standalone display is routine rather than exceptional: settings
+  queue and sync later.
 - The user edits a **draft**; nothing reaches the device until Save. Validation runs
   on the draft, debounced 180ms, in the Rust backend over IPC.
 
 ## Capabilities and Constraints
 
-**Objects.** The app edits six built-in card kinds (max 8): `clock`,
-`pomodoro`, `calendar`, `weather`, `json-feed`, and `rss`. Schema v6 also carries
-server-side `plugin` cards, and since 2026-09-07 a plugin card is a peer of a built-in
-one in `networked` tier: added from the same menu with the same gesture, named by its
-manifest's `display_name`, showing a live headline on its tile, carrying the same
-freshness and error states, previewing on the stage, and edited in an editor whose
-Plugin field owns `cards[i].plugin_id`. The server still renders it; the Mac reads the
-server's catalog, per-card state and preview over the admin bearer. In `local` tier
-there is no server to render it, so the card is flagged `needs the server` and the stage
-says so — and the hostless runtime no longer schedules a refresh it cannot perform, which
-is what used to show as a permanent `stale`.
+**Objects.** The app edits three card kinds (max 8): on-device `clock` and `pomodoro`,
+plus server-side `picture`. Picture content is a durable frame pushed by an external
+producer; it is frozen between pushes. Clock and Pomodoro are the only faces that keep
+ticking on the device while the host is absent.
 The window has **one loop** (since 2026-09-06): the document's active playlist. Schema
-v6 still carries `playlists[]` (max 8, max 8 entries each, one active); the app exposes
+v9 carries `playlists[]` (max 8, max 8 entries each, one active); the app exposes
 exactly one, never creates another, and round-trips any extra playlist an older file
 holds untouched. A new card joins the loop as it is added; a card outside the loop is
 shown in the same grid, flagged, with one action to join. Each card in the loop carries
 an optional dwell that inherits the loop default. Advance is `manual` or
-`timed`. Alerts exist on `pomodoro` (on timer finish) and `calendar` (before event)
-only, each with a hold that is host-side bookkeeping and never clears the panel.
+`timed`. Alerts exist on `pomodoro` (on timer finish), with a hold that is host-side
+bookkeeping and never clears the panel.
 
 **Surfaces in the current app.** A `TopBar` wordmark and Settings button;
 `SettingsSheet` as the sole disclosure of state, for device ownership, pairing,
 link/WiFi/IP/update state, timezone, mounting orientation, and start-at-login; first-run
 and error notices; the loop grid (complication tiles in loop order, reordered in place,
-with the add-card slot and its menu of built-in kinds and, in networked tier, the
-server's plugins with their descriptions); the per-card editor, which also edits the
-card's dwell and, for a plugin card, chooses its plugin; `DevicePreview`;
+with the add-card slot and its menu of on-device kinds plus Picture); the per-card
+editor, which also edits the card's dwell and picture source; `DevicePreview`;
 `LoopRing` (arc ∝ dwell, with a playhead, and the pacing control in its head);
-card-local stale/provider recovery; and save controls in both the work column and
+card-local failures; and save controls in both the work column and
 settings sheet.
 
 **Hard constraints that outlive any visual direction.**
-- Config schema is **v6** and frozen (`docs/config/v6.md`); wire protocol is **v1**.
+- Config schema is **v9** (`docs/config/v9.md`); wire protocol is **v1**.
   A redesign of this app must not require a schema or wire change.
 - Canvas is a single clean 448×368 landscape. Orientation is `landscape` or
   `landscape-flipped` only — no portrait, and orientation is owned by this settings
   app, never by a device gesture.
 - Clock faces carry no title chip and no eyebrow on the device. User-visible card
-  identity is card-kind-first: `cardLabel(card, catalog)` returns the template name for a
-  built-in card and the plugin's `display_name` for a plugin card — never the word
-  "Plugin", and never a bare machine id without a word saying why; the owner's `title` is
+  identity is card-kind-first: `cardLabel(card)` returns the card kind's display name;
+  the owner's `title` is
   a quiet second line that distinguishes cards of the same kind.
 - Tauri CSP blocks every external host. All fonts, images, and scripts must be local.
 - Secrets (WiFi passphrase, device token, admin token) are **write-only**: accepted
@@ -159,8 +144,8 @@ exclaims, and never blames the user.
 
 ## Evidence on Hand
 
-- Real, working exact-pixel device previews via IPC (`render_card_preview`) for the six
-  built-in kinds, and server-rendered PNG previews for plugin cards.
+- Real, working exact-pixel device previews via IPC (`render_card_preview`) for Clock and
+  Pomodoro, with Picture explicitly owned by its pushed source.
 - A full typed IPC contract (`src/lib/types.ts`, cross-checked against Rust
   serialization in CI) — enough to build a faithful mock backend.
 - Existing tests: `tests/components.test.tsx`, `useAppState.test.ts`,
@@ -174,7 +159,7 @@ exclaims, and never blames the user.
 
 1. **The panel is the product; this window is the instrument.** The app's job is to
    make the physical display right, then get out of the way.
-2. **Show state, not reassurance.** Connection, ownership, provider freshness, and
+2. **Show state, not reassurance.** Connection, ownership, card failures, and
    save destination are consequential facts. Name them precisely, including when
    they are bad.
 3. **Every problem is attached to the thing that causes it.** An issue belongs next

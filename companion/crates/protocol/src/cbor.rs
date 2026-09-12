@@ -103,14 +103,6 @@ impl<'a> Decoder<'a> {
         Self { bytes, pos: 0 }
     }
 
-    pub fn position(&self) -> usize {
-        self.pos
-    }
-
-    pub fn slice(&self, start: usize, end: usize) -> &'a [u8] {
-        &self.bytes[start..end]
-    }
-
     fn byte(&mut self) -> Result<u8, CborError> {
         let value = *self.bytes.get(self.pos).ok_or(CborError::Eof)?;
         self.pos += 1;
@@ -228,10 +220,6 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    pub fn peek_major(&self) -> Result<u8, CborError> {
-        Ok(*self.bytes.get(self.pos).ok_or(CborError::Eof)? >> 5)
-    }
-
     pub fn skip(&mut self) -> Result<(), CborError> {
         self.skip_at_depth(0)
     }
@@ -282,10 +270,6 @@ impl<'a> Decoder<'a> {
             Err(CborError::TrailingData)
         }
     }
-}
-
-pub fn deterministic_key_before(previous: &[u8], current: &[u8]) -> bool {
-    previous.len() < current.len() || (previous.len() == current.len() && previous < current)
 }
 
 #[cfg(test)]

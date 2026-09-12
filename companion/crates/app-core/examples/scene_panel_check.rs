@@ -42,9 +42,8 @@ use device::{DeviceClient, DeviceError, Transport, connect};
 use lvgl_sim::scene::{SceneAsset, SceneRenderRequest, SceneTimer};
 use lvgl_sim::{LOGICAL_HEIGHT, LOGICAL_WIDTH, SimOrientation, Simulator, cases};
 use protocol::{
-    ApplyConfig, AssetKind, ErrorCode, Field, FieldValue, InterruptPolicy, Message, PushData,
-    PushScene, ScreenConfig, SizeClass, TYPE_APPLY_CONFIG, TYPE_PUSH_SCENE, TapAction,
-    TemplateKind, Tier, TimeSync, WidgetConfig,
+    ApplyConfig, AssetKind, CardConfig, ErrorCode, Message, PushScene, PushTimer,
+    TYPE_APPLY_CONFIG, TYPE_PUSH_SCENE, TYPE_PUSH_TIMER, TapAction, Tier, TimeSync,
 };
 
 // The capture module cannot import the simulator, so CI compiles this example to pin their dimensions together.
@@ -54,7 +53,6 @@ const _: () = assert!(
 );
 
 const CARD_ID: &str = "scene-check";
-const SCREEN_ID: &str = "scene-check-screen";
 const SETTLE: Duration = Duration::from_millis(300);
 
 struct Instant {
@@ -157,8 +155,10 @@ const INSTANTS: &[Instant] = &[
 struct CheckCase {
     name: String,
     request: SceneRenderRequest,
-    template: TemplateKind,
-    fields: Vec<Field>,
+    /// The timer the device's own `timer.*` bindings must resolve against.
+    /// Protocol v2 states it directly; v1 sent a field bag a C template
+    /// re-derived it from.
+    timer: Option<SceneTimer>,
     exclusion: Option<String>,
 }
 
@@ -207,11 +207,9 @@ fn digital_clock_cases() -> Vec<CheckCase> {
                         utc_offset_minutes: instant.utc_offset_minutes,
                         now_unix_seconds: instant.now_unix_seconds(),
                         timer: None,
-                        fields: Vec::new(),
                         orientation,
                     },
-                    template: TemplateKind::DigitalClock,
-                    fields: Vec::new(),
+                    timer: None,
                     exclusion: None,
                 });
             }
@@ -239,49 +237,20 @@ fn asset_exclusion(assets: &[SceneAsset]) -> Option<String> {
     }
 }
 
-fn timer_fields(timer: SceneTimer) -> Vec<Field> {
-    // The asset-free arc case reads timer.pct but not timer.remaining. A
-    // stopped 100-second ProgressRing snapshot represents every integer
-    // remaining percentage exactly and cannot move during push-to-capture
-    // latency, so the device producer and simulator receive the same value.
-    let duration = i64::from(timer.total_ms / 1_000);
-    let remaining = i64::from(timer.remaining_ms / 1_000);
-    vec![
-        Field {
-            key: "duration_seconds".into(),
-            value: FieldValue::Integer(duration),
-        },
-        Field {
-            key: "remaining_seconds".into(),
-            value: FieldValue::Integer(remaining),
-        },
-        Field {
-            key: "running".into(),
-            value: FieldValue::Boolean(timer.running),
-        },
-    ]
-}
-
 fn scene_node_cases() -> Vec<CheckCase> {
     cases::scene_cases()
         .into_iter()
         .map(|(name, request)| {
-            let exclusion = asset_exclusion(&request.assets).or_else(|| {
-                (!request.fields.is_empty()).then(|| {
-                    "field.status cannot be supplied to hardware: PushData retains only fields \
-                     registered by a built-in template, and no template registers status"
-                        .to_string()
-                })
-            });
-            let (template, fields) = match request.timer {
-                Some(timer) => (TemplateKind::ProgressRing, timer_fields(timer)),
-                None => (TemplateKind::DigitalClock, Vec::new()),
-            };
+            // Protocol v1 also excluded the two `field.*` rows here, because
+            // no template registry accepted the field name they bound. v2 has
+            // no field namespace at all, so those rows bind `date` and
+            // `timer.status` and run on hardware like any other.
+            let exclusion = asset_exclusion(&request.assets);
+            let timer = request.timer;
             CheckCase {
                 name,
                 request,
-                template,
-                fields,
+                timer,
                 exclusion,
             }
         })
@@ -350,16 +319,9 @@ fn apply_config(
     let config = ApplyConfig {
         revision,
         rotation: rotation_degrees(case.request.orientation),
-        widgets: vec![WidgetConfig {
-            widget_id: CARD_ID.into(),
-            template: case.template,
-            size_class: SizeClass::Full,
+        cards: vec![CardConfig {
+            card_id: CARD_ID.into(),
             tap_action: TapAction::None,
-            interrupt_policy: InterruptPolicy::Disabled,
-        }],
-        screens: vec![ScreenConfig {
-            screen_id: SCREEN_ID.into(),
-            widget_id: CARD_ID.into(),
         }],
     };
     match client
@@ -377,22 +339,21 @@ fn apply_config(
     }
 }
 
-fn push_fields(
+fn push_timer(
     client: &mut DeviceClient<impl Transport>,
     revision: u32,
-    fields: &[Field],
+    timer: SceneTimer,
 ) -> Result<(), CaseError> {
-    if fields.is_empty() {
-        return Ok(());
-    }
     let ack = client
-        .push_data(PushData {
-            widget_id: CARD_ID.into(),
+        .push_timer(PushTimer {
+            card_id: CARD_ID.into(),
             revision,
-            fields: fields.to_vec(),
+            total_ms: timer.total_ms,
+            remaining_ms: timer.remaining_ms,
+            running: timer.running,
         })
-        .map_err(|error| device_error("push data", error))?;
-    if ack.revision == Some(revision) {
+        .map_err(|error| device_error("push timer", error))?;
+    if ack.acknowledged_type == TYPE_PUSH_TIMER && ack.revision == Some(revision) {
         Ok(())
     } else {
         Err(CaseError::Other(format!(
@@ -582,13 +543,13 @@ fn run_case<T: Transport>(
     let setup = (|| {
         let config_revision = revisions.next_config()?;
         apply_config(&mut client, config_revision, case)?;
-        if !case.fields.is_empty() {
+        if let Some(timer) = case.timer {
             let data_revision = revisions.next_data()?;
-            push_fields(&mut client, data_revision, &case.fields)?;
+            push_timer(&mut client, data_revision, timer)?;
         }
 
-        // ApplyConfig/PushData are queued but PushScene is synchronous. Drain
-        // the former first so a late template command cannot delete the scene.
+        // ApplyConfig/PushTimer are queued but PushScene is synchronous. Drain
+        // the former first so a late model command cannot delete the scene.
         thread::sleep(SETTLE);
 
         let scene_revision = revisions.next_scene()?;
@@ -789,22 +750,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn panel_timer_fields_preserve_remaining_percentage_semantics() {
-        let fields = timer_fields(SceneTimer {
-            total_ms: 100_000,
-            remaining_ms: 60_000,
-            running: false,
-        });
-        assert!(matches!(
-            fields.get(1),
-            Some(Field {
-                key,
-                value: FieldValue::Integer(60),
-            }) if key == "remaining_seconds"
-        ));
-    }
-
-    #[test]
     fn case_table_has_the_parity_matrix_and_only_explicit_scene_exclusions() {
         let checks = all_cases();
         assert_eq!(
@@ -827,14 +772,6 @@ mod tests {
             excluded,
             [
                 (
-                    "scene-text--landscape",
-                    "field.status cannot be supplied to hardware: PushData retains only fields registered by a built-in template, and no template registers status",
-                ),
-                (
-                    "scene-text--flipped",
-                    "field.status cannot be supplied to hardware: PushData retains only fields registered by a built-in template, and no template registers status",
-                ),
-                (
                     "scene-image--landscape",
                     "the scene requires a registered RGB565 image asset; asset transfer is out of scope",
                 ),
@@ -850,17 +787,9 @@ mod tests {
                     "scene-glyph--flipped",
                     "the scene requires a registered runtime font asset; asset transfer is out of scope",
                 ),
-                (
-                    "scene-label--landscape",
-                    "field.status cannot be supplied to hardware: PushData retains only fields registered by a built-in template, and no template registers status",
-                ),
-                (
-                    "scene-label--flipped",
-                    "field.status cannot be supplied to hardware: PushData retains only fields registered by a built-in template, and no template registers status",
-                ),
             ]
         );
         assert_eq!(checks.len(), 46);
-        assert_eq!(checks.len() - excluded.len(), 38);
+        assert_eq!(checks.len() - excluded.len(), 42);
     }
 }

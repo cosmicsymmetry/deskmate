@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define PROTOCOL_VERSION 1U
+#define PROTOCOL_VERSION 2U
 #define PROTOCOL_MAX_DECODED_FRAME 2048U
 #define PROTOCOL_HEADER_SIZE 10U
 #define PROTOCOL_CHECKSUM_SIZE 4U

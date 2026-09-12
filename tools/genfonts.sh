@@ -3,8 +3,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 FONT_DIR=firmware/main/ui/fonts
-BODY=tools/fonts/Inter-Regular.ttf
-HERO_SRC=tools/fonts/Inter-SemiBold.ttf
+# The checked-in Inter sources were coupled to the retired server rasterizer. Keep
+# this firmware-generation tool usable without restoring that directory: callers
+# provide equivalent OFL-licensed faces whose digit cmap already selects tabular forms.
+BODY=${DESKMATE_BODY_FONT:?Set DESKMATE_BODY_FONT to a tabular-digit text TTF}
+HERO=${DESKMATE_HERO_FONT:?Set DESKMATE_HERO_FONT to a tabular-digit display TTF}
 # Text tiers: ASCII 0x20-0x7E, the Latin-1 Supplement block 0xA0-0xFF (spec
 # §5.2, amended 2026-08-13 — accented Latin row titles like "Café" and
 # "Zürich" arrive from real calendar feeds and were rendering as fallback
@@ -15,35 +18,9 @@ TEXT_RANGE='0x20-0x7E,0xA0-0xFF,0x2014,0x2018-0x2019,0x201C-0x201D'
 HERO_RANGE='0x25,0x2D,0x30-0x3A,0xB0'
 mkdir -p "$FONT_DIR"
 
-# Inter's digits are proportional by default; the tabular ("tnum") forms are
-# a GSUB feature lv_font_conv does not apply (it reads glyphs by raw cmap
-# lookup, not through a text shaper). Bake the tabular glyphs into the digit
-# cmap entries of a throwaway copy before conversion; see
-# tools/fonts/patch_tabular_figures.py for why. Both hero sources and the
-# BODY tier (deskmate_font_28, used for row-list times among other text) get
-# this treatment so colons line up wherever digits appear; the 18px CAPTION
-# tier never sets multi-digit numerals in a column and is left proportional.
-# Patching only remaps digit cmap entries, so the BODY tier's full
-# TEXT_RANGE (Latin-1, not just digits) is unaffected.
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "FAIL: python3 not found on PATH; required by tools/fonts/patch_tabular_figures.py" >&2
-  exit 1
-fi
-if ! python3 -c "import fontTools" >/dev/null 2>&1; then
-  cat >&2 <<'EOF'
-FAIL: python3 cannot import fontTools; required by tools/fonts/patch_tabular_figures.py.
-Install it with:
-  pip3 install fonttools
-On macOS with a Homebrew/system Python you may need:
-  pip3 install --break-system-packages fonttools
-EOF
-  exit 1
-fi
-
-HERO="/tmp/Inter-SemiBold-tnum.ttf"
-python3 tools/fonts/patch_tabular_figures.py "$HERO_SRC" "$HERO"
-BODY_TNUM="/tmp/Inter-Regular-tnum.ttf"
-python3 tools/fonts/patch_tabular_figures.py "$BODY" "$BODY_TNUM"
+# `lv_font_conv` does not apply OpenType GSUB features, so ordinary proportional
+# faces silently lose tabular alignment. Requiring prepatched inputs keeps that
+# constraint explicit now that the repository no longer owns a font-patching tool.
 gen() { # size, ttf, range, name
   # --lv-include lvgl.h: the vendored LVGL component exposes lvgl.h directly
   # on the include path (firmware/managed_components/lvgl__lvgl/lvgl.h), not
@@ -57,7 +34,7 @@ gen() { # size, ttf, range, name
     --range "$3" --no-compress -o "/tmp/$4.bin"
 }
 gen 18 "$BODY" "$TEXT_RANGE" deskmate_font_18
-gen 28 "$BODY_TNUM" "$TEXT_RANGE" deskmate_font_28
+gen 28 "$BODY" "$TEXT_RANGE" deskmate_font_28
 gen 56 "$HERO" "$HERO_RANGE" deskmate_font_56
 gen 96 "$HERO" "$HERO_RANGE" deskmate_font_96
 TOTAL=$(cat /tmp/deskmate_font_{18,28,56,96}.bin | wc -c | tr -d ' ')

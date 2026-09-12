@@ -8,9 +8,7 @@ rust-version.workspace = true
 [dependencies]
 app-core = { path = "../app-core" }
 device = { path = "../device" }
-plugin = { path = "../plugin" }
 protocol = { path = "../protocol" }
-providers = { path = "../providers" }
 atomic-write-file = "0.3.0"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
@@ -24,20 +22,21 @@ sha2 = "0.10"
 # HMAC-SHA256 for signing the short-lived operator session cookie (spec §1.2, §6),
 # keyed by DESKMATE_ADMIN_TOKEN. Pairs with the existing sha2 0.10; pinned exactly.
 hmac = "=0.12.1"
-# The homelab render host permits exactly one in-process SVG engine: `resvg`.
-# Defaults stay off so raster-image loading, system-font discovery, and mmap font
-# access cannot grow ambient filesystem/network authority; only SVG text shaping is on.
-resvg = { version = "=0.45.1", default-features = false, features = ["text"] }
-# A separate, bounded XML policy pass rejects hostile structure before `usvg`
-# allocates its normalized render tree.
-roxmltree = "=0.20.0"
+# Header-first PNG decoding for the image-ingest route. `Pixmap::decode_png` would
+# need no new line here but decodes in one shot; `png::Decoder::read_header_info`
+# reads the IHDR alone, which is what lets a decompression bomb be rejected before
+# anything is allocated. Same version already in the lockfile via tiny-skia.
+png = "0.17"
+tiny-skia = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# Shared by production egress and HTTP-facing tests; outbound plugin data
-# fetches need TLS, hence the rustls feature.
+# The OAuth token call is the server's only outbound request, and it is a POST
+# form over TLS -- hence `rustls` and `form`. `egress.rs` is the sole caller and
+# permits exactly one host; see the revision spec §1 and §8. The plugin-feed
+# fetches this was originally shared with are gone.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "form"] }
 url = "2"
 # Backs `FirmwareCatalog::in_memory()`, which is normal library API (used by
@@ -51,6 +50,7 @@ zeroize = { version = "=1.9.0", features = ["derive"] }
 protocol = { path = "../protocol", features = ["test-support"] }
 tokio-tungstenite = "0.24"
 http = "1"
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 [lints]
 workspace = true

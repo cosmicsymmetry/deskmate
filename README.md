@@ -9,20 +9,19 @@ and the repository’s durable implementation contract is [CLAUDE.md](CLAUDE.md)
 The live milestone status is in the
 [roadmap](docs/superpowers/plans/2026-08-03-deskmate-roadmap.md). V1 is closed pending
 declaration/tag authorization; V2’s network-owned device path is implemented, with two
-observations still owed. Scene-native rendering, declarative plugins, and the server-side
-`resvg` fallback are delivered in software. The remaining work and hardware gates live
-in these active plans:
+observations still owed. Scene-native rendering is delivered in software. Manifest-based
+plugins and the server-side SVG raster fallback have been retired; server-side cards are
+now pictures pushed by external producers. The remaining work and hardware gates live in
+these active plans:
 
 - [V2 networked device](docs/superpowers/plans/2026-08-18-deskmate-v2-networked-device.md)
-- [Plugin manifest, including the remaining asset-GC observation](docs/superpowers/plans/2026-08-28-deskmate-plugin-manifest.md)
-- [Rasterization fallback](docs/superpowers/plans/2026-08-29-deskmate-rasterization.md)
-- [Stage 5 plugin-upload risk review](docs/superpowers/plans/2026-09-01-deskmate-plugin-upload-risk-review.md)
+- [Picture cards](docs/superpowers/plans/2026-09-10-deskmate-picture-cards.md)
 
 The current application config is frozen at
-[schema v6](docs/config/v6.md), while the additive wire contract remains
-[protocol v1](docs/protocol/v1.md). The device renders host-built scenes; curated
-plugins and rasterization run server-side. Hardware observations and unresolved board
-gates are recorded in [board notes](docs/hardware/board-notes.md).
+[schema v9](docs/config/v9.md), while the additive wire contract remains
+[protocol v1](docs/protocol/v1.md). Clock and pomodoro render as host-built scenes;
+picture frames use durable device assets. Hardware observations and unresolved board gates
+are recorded in [board notes](docs/hardware/board-notes.md).
 
 ## Companion app
 
@@ -60,14 +59,16 @@ idf.py -C firmware build
 idf.py -C firmware -p /dev/cu.usbmodem* flash monitor
 ```
 
-## Legacy CLI inspection
+## CLI inspection
 
-`deskmate-cli` retains the M1 `status`, `time-sync`, and `push-data` commands and the M2
-config/demo commands as a manual inspection path. The M2 commands are legacy tooling for
-template-era firmware: scene-native firmware cannot draw a card from them. See the
+`deskmate-cli` is a manual inspection path over the cable: `status`, `time-sync`,
+`push-data`, `provision` and `factory-reset`. See the
 [M1 protocol/CLI plan](docs/superpowers/plans/2026-08-04-deskmate-m1-protocol-link-cli.md)
-and [M2 walkthrough](docs/superpowers/plans/2026-08-04-deskmate-m2-template-first-widgets.md)
-for the commands and their historical acceptance flow.
+for what each one sends.
+
+The M2 config/demo commands were removed on 2026-09-11. They pushed `ApplyConfig`
+and `PushData` with templates, and since stage 3a the device draws only host-pushed
+scenes, so none of them could put a face on the panel.
 
 ## Verification
 

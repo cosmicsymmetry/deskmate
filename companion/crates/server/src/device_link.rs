@@ -10,8 +10,7 @@ use tokio::sync::OwnedSemaphorePermit;
 use app_core::{ConfigOrigin, LoadOutcome, RuntimeHandle, RuntimeOptions};
 
 use crate::auth::AuthenticatedDevice;
-use crate::plugin_host::ServerPluginHost;
-use crate::plugin_refresher::ServerProviderRefresher;
+use crate::image_sources::ServerImageSourceHost;
 use crate::registry::DeviceId;
 use crate::runtime_device::WebSocketRuntimeDevice;
 use crate::{LinkLease, ServerState};
@@ -77,16 +76,13 @@ async fn run(
 
         let (device, connector) = WebSocketRuntimeDevice::channel(device_id.clone());
         let peer = connector.attach();
-        let plugins = std::sync::Arc::clone(state.plugins());
+        let image_sources = std::sync::Arc::clone(state.image_sources());
         let runtime = tokio::task::spawn_blocking(move || {
-            RuntimeHandle::start_with_plugin_host(
+            RuntimeHandle::start_with_image_source_host(
                 config,
                 Box::new(device),
-                Box::new(ServerProviderRefresher::new(std::sync::Arc::clone(
-                    &plugins,
-                ))),
                 RuntimeOptions::default(),
-                Some(Box::new(ServerPluginHost::new(plugins))),
+                Some(Box::new(ServerImageSourceHost::new(image_sources))),
             )
         })
         .await;

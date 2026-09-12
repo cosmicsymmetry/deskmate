@@ -3,8 +3,8 @@ use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
 use protocol::{
-    Ack, Deframer, ErrorResponse, FrameError, HeartbeatAck, Message, MessageError, PushData,
-    RequestIdAllocator, StatusResponse, TYPE_PUSH_DATA, TYPE_TIME_SYNC, TimeSync, decode_message,
+    Ack, Deframer, ErrorResponse, FrameError, HeartbeatAck, Message, MessageError, PushTimer,
+    RequestIdAllocator, StatusResponse, TYPE_PUSH_TIMER, TYPE_TIME_SYNC, TimeSync, decode_message,
     encode_message, expected_response_type,
 };
 
@@ -195,10 +195,10 @@ impl<T: Transport> DeviceClient<T> {
         }
     }
 
-    pub fn push_data(&mut self, push: PushData) -> Result<Ack, DeviceError> {
-        match self.request(&Message::PushData(push))? {
+    pub fn push_timer(&mut self, push: PushTimer) -> Result<Ack, DeviceError> {
+        match self.request(&Message::PushTimer(push))? {
             Message::Ack(ack)
-                if ack.acknowledged_type == TYPE_PUSH_DATA && ack.revision.is_some() =>
+                if ack.acknowledged_type == TYPE_PUSH_TIMER && ack.revision.is_some() =>
             {
                 Ok(ack)
             }
@@ -472,14 +472,17 @@ mod tests {
     fn version_mismatch_is_distinct() {
         let valid = encode_message(1, &Message::StatusResponse(status())).unwrap();
         let mut frame = protocol::decode_wire_frame(&valid).unwrap();
-        frame.version = 2;
+        frame.version = protocol::PROTOCOL_VERSION + 1;
         let response = encode_frame(&frame).unwrap();
         let fake = FakeTransport {
             reads: VecDeque::from([Ok(response)]),
             ..FakeTransport::default()
         };
         let mut client = DeviceClient::new(fake);
-        assert_eq!(client.status(), Err(DeviceError::VersionMismatch(2)));
+        assert_eq!(
+            client.status(),
+            Err(DeviceError::VersionMismatch(protocol::PROTOCOL_VERSION + 1))
+        );
     }
 
     #[test]

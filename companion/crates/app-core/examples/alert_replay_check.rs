@@ -13,7 +13,7 @@
 use std::time::{Duration, Instant};
 
 use app_core::{
-    AlertHold, AppConfig, CardAlert, CardSettings, ConnectionState, DisplayTemplate, PlaylistEntry,
+    AlertHold, AppConfig, CardAlert, CardSettings, ConnectionState, DisplayTemplate,
     PomodoroAction, PomodoroState, RefreshPolicy, RuntimeHandle, WidgetTapAction,
 };
 
@@ -44,9 +44,6 @@ fn main() {
                 value: HOLD_SECONDS,
             },
         },
-    });
-    config.playlists[0].entries.push(PlaylistEntry {
-        card_id: "focus".into(),
         dwell_seconds: None,
     });
     config.validate().expect("harness config must validate");
@@ -119,7 +116,7 @@ fn main() {
 
         match phase {
             Phase::AwaitConnect if online => {
-                handle.activate_screen("focus").expect("activate focus");
+                handle.activate_card("focus").expect("activate focus");
                 phase = Phase::AwaitUnplug;
                 println!();
                 println!(">>> Connected; the pomodoro card is on the panel (idle ring).");
@@ -158,7 +155,7 @@ fn main() {
             _ => {}
         }
 
-        if let Some(pomodoro) = snapshot.pomodoros.iter().find(|p| p.widget_id == "focus") {
+        if let Some(pomodoro) = snapshot.pomodoros.iter().find(|p| p.card_id == "focus") {
             let line = format!("{:?} {}s", pomodoro.state, pomodoro.remaining_seconds);
             if line != last_line {
                 if pomodoro.state == PomodoroState::Completed && completed_at.is_none() {

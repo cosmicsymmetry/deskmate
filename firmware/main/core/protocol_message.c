@@ -60,10 +60,10 @@ protocol_request_gate_t protocol_message_request_gate(
     switch (type) {
     case PROTOCOL_TYPE_STATUS_REQUEST:
     case PROTOCOL_TYPE_TIME_SYNC:
-    case PROTOCOL_TYPE_PUSH_DATA:
+    case PROTOCOL_TYPE_PUSH_TIMER:
     case PROTOCOL_TYPE_HEARTBEAT:
     case PROTOCOL_TYPE_APPLY_CONFIG:
-    case PROTOCOL_TYPE_ACTIVATE_SCREEN:
+    case PROTOCOL_TYPE_ACTIVATE_CARD:
     case PROTOCOL_TYPE_TRIGGER_INTERRUPT:
     case PROTOCOL_TYPE_NETWORK_CONFIG:
     case PROTOCOL_TYPE_FACTORY_RESET:
@@ -334,59 +334,9 @@ static protocol_message_result_t decode_time_sync(
     return PROTOCOL_MESSAGE_OK;
 }
 
-static protocol_message_result_t decode_fields(CborValue *value,
-                                                protocol_push_data_t *push)
-{
-    if (!cbor_value_is_map(value)) {
-        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-    }
-    size_t count = 0U;
-    CborError error = cbor_value_get_map_length(value, &count);
-    if (error != CborNoError) {
-        return cbor_result(error);
-    }
-    if (count > PROTOCOL_MAX_FIELD_COUNT) {
-        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-    }
-    CborValue fields;
-    error = cbor_value_enter_container(value, &fields);
-    if (error != CborNoError) {
-        return cbor_result(error);
-    }
-    for (size_t i = 0; i < count; ++i) {
-        protocol_field_t *field = &push->fields[i];
-        protocol_message_result_t result = read_text(
-            &fields, field->key, sizeof(field->key), 1U,
-            PROTOCOL_MAX_FIELD_KEY_LENGTH);
-        if (result != PROTOCOL_MESSAGE_OK) {
-            return result;
-        }
-        if (cbor_value_is_integer(&fields)) {
-            field->type = PROTOCOL_FIELD_INTEGER;
-            result = read_signed(&fields, &field->value.integer);
-        } else if (cbor_value_is_text_string(&fields)) {
-            field->type = PROTOCOL_FIELD_TEXT;
-            result = read_text(&fields, field->value.text,
-                               sizeof(field->value.text), 0U,
-                               PROTOCOL_MAX_FIELD_TEXT_LENGTH);
-        } else if (cbor_value_is_boolean(&fields)) {
-            field->type = PROTOCOL_FIELD_BOOLEAN;
-            result = read_boolean(&fields, &field->value.boolean);
-        } else {
-            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-        }
-        if (result != PROTOCOL_MESSAGE_OK) {
-            return result;
-        }
-    }
-    push->field_count = count;
-    error = cbor_value_leave_container(value, &fields);
-    return cbor_result(error);
-}
-
-static protocol_message_result_t decode_push_data(
+static protocol_message_result_t decode_push_timer(
     const protocol_frame_t *frame,
-    protocol_push_data_t *push)
+    protocol_push_timer_t *push)
 {
     CborParser parser;
     CborValue contents;
@@ -407,9 +357,9 @@ static protocol_message_result_t decode_push_data(
             return result;
         }
         if (key == 0U) {
-            result = read_text(&contents, push->widget_id,
-                               sizeof(push->widget_id), 1U,
-                               PROTOCOL_MAX_WIDGET_ID_LENGTH);
+            result = read_text(&contents, push->card_id,
+                               sizeof(push->card_id), 1U,
+                               PROTOCOL_MAX_CARD_ID_LENGTH);
             present |= REQUIRED_BIT(0);
         } else if (key == 1U) {
             uint64_t revision = 0U;
@@ -420,9 +370,24 @@ static protocol_message_result_t decode_push_data(
             }
             push->revision = (uint32_t)revision;
             present |= REQUIRED_BIT(1);
-        } else if (key == 2U) {
-            result = decode_fields(&contents, push);
-            present |= REQUIRED_BIT(2);
+        } else if (key == 2U || key == 3U) {
+            uint64_t milliseconds = 0U;
+            result = read_unsigned(&contents, &milliseconds);
+            if (result == PROTOCOL_MESSAGE_OK && milliseconds > UINT32_MAX) {
+                result = PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                if (key == 2U) {
+                    push->total_ms = (uint32_t)milliseconds;
+                    present |= REQUIRED_BIT(2);
+                } else {
+                    push->remaining_ms = (uint32_t)milliseconds;
+                    present |= REQUIRED_BIT(3);
+                }
+            }
+        } else if (key == 4U) {
+            result = read_boolean(&contents, &push->running);
+            present |= REQUIRED_BIT(4);
         } else {
             result = skip_value(&contents);
         }
@@ -430,9 +395,17 @@ static protocol_message_result_t decode_push_data(
             return result;
         }
     }
-    uint32_t required = REQUIRED_BIT(0) | REQUIRED_BIT(1) | REQUIRED_BIT(2);
-    return (present & required) == required ? PROTOCOL_MESSAGE_OK
-                                            : PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
+    uint32_t required = REQUIRED_BIT(0) | REQUIRED_BIT(1) | REQUIRED_BIT(2) |
+                        REQUIRED_BIT(3) | REQUIRED_BIT(4);
+    if ((present & required) != required) {
+        return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
+    }
+    /* A timer past its own total is not a state the host can mean, and it
+     * would drive a `timer.permille` binding out of range. */
+    if (push->remaining_ms > push->total_ms) {
+        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+    }
+    return PROTOCOL_MESSAGE_OK;
 }
 
 static protocol_message_result_t validate_network_config(
@@ -550,12 +523,6 @@ static protocol_message_result_t validate_apply_config(
         return PROTOCOL_MESSAGE_ERR_CONFIG_TOO_LARGE;
     case APPLY_CONFIG_DUPLICATE_ID:
         return PROTOCOL_MESSAGE_ERR_DUPLICATE_KEY;
-    case APPLY_CONFIG_UNKNOWN_WIDGET:
-        return PROTOCOL_MESSAGE_ERR_UNKNOWN_WIDGET;
-    case APPLY_CONFIG_UNSUPPORTED_TEMPLATE:
-        return PROTOCOL_MESSAGE_ERR_UNSUPPORTED_TEMPLATE;
-    case APPLY_CONFIG_UNSUPPORTED_SIZE_CLASS:
-        return PROTOCOL_MESSAGE_ERR_UNSUPPORTED_SIZE_CLASS;
     case APPLY_CONFIG_INVALID_ARGUMENT:
     case APPLY_CONFIG_INVALID_VALUE:
     default:
@@ -666,10 +633,11 @@ static protocol_message_result_t decode_asset_begin(
     if (!begin->has_decoded_length) {
         return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
     }
-    if (!begin->volatile_tier) {
-        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-    }
-    if (begin->kind == ASSET_KIND_IMAGE &&
+    /* The tier is no longer part of this rule: bit 10 means the durable tier
+     * decodes too. A VOLATILE image is still pinned to the full canvas, because
+     * it lands in a fixed-size PSRAM slot; a durable image is an ordinary
+     * stored asset of any bounded size. */
+    if (begin->volatile_tier && begin->kind == ASSET_KIND_IMAGE &&
         begin->decoded_length != PROTOCOL_VOLATILE_IMAGE_DECODED_LENGTH) {
         return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
     }
@@ -916,8 +884,8 @@ static protocol_message_result_t decode_asset_release(
     return PROTOCOL_MESSAGE_OK;
 }
 
-static protocol_message_result_t decode_widget(CborValue *value,
-                                                protocol_widget_config_t *widget)
+static protocol_message_result_t decode_card(CborValue *value,
+                                             protocol_card_config_t *card)
 {
     if (!cbor_value_is_map(value)) {
         return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
@@ -943,40 +911,19 @@ static protocol_message_result_t decode_widget(CborValue *value,
             return result;
         }
         if (key == 0U) {
-            result = read_text(&fields, widget->widget_id,
-                               sizeof(widget->widget_id), 1U,
-                               PROTOCOL_MAX_WIDGET_ID_LENGTH);
-        } else if (key >= 1U && key <= 4U) {
+            result = read_text(&fields, card->card_id,
+                               sizeof(card->card_id), 1U,
+                               PROTOCOL_MAX_CARD_ID_LENGTH);
+            present |= REQUIRED_BIT(0);
+        } else if (key == 1U) {
             uint64_t raw = 0U;
             result = read_unsigned(&fields, &raw);
-            if (result == PROTOCOL_MESSAGE_OK && raw > UINT8_MAX) {
-                result = PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-            }
-            if (result == PROTOCOL_MESSAGE_OK && key == 1U) {
-                if (!protocol_template_kind_valid((protocol_template_kind_t)raw)) {
-                    result = PROTOCOL_MESSAGE_ERR_UNSUPPORTED_TEMPLATE;
-                } else {
-                    widget->template_kind = (protocol_template_kind_t)raw;
-                }
-            } else if (result == PROTOCOL_MESSAGE_OK && key == 2U) {
-                if (raw < PROTOCOL_SIZE_FULL || raw > PROTOCOL_SIZE_TILE ||
-                    raw == PROTOCOL_SIZE_TILE) {
-                    result = PROTOCOL_MESSAGE_ERR_UNSUPPORTED_SIZE_CLASS;
-                } else {
-                    widget->size_class = (protocol_size_class_t)raw;
-                }
-            } else if (result == PROTOCOL_MESSAGE_OK && key == 3U) {
+            if (result == PROTOCOL_MESSAGE_OK) {
                 if (raw > PROTOCOL_TAP_RESET) {
                     result = PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
                 } else {
-                    widget->tap_action = (protocol_tap_action_t)raw;
-                }
-            } else if (result == PROTOCOL_MESSAGE_OK && key == 4U) {
-                if (raw > PROTOCOL_INTERRUPT_ENABLED) {
-                    result = PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-                } else {
-                    widget->interrupt_policy =
-                        (protocol_interrupt_policy_t)raw;
+                    card->tap_action = (protocol_tap_action_t)raw;
+                    present |= REQUIRED_BIT(1);
                 }
             }
         } else {
@@ -985,18 +932,18 @@ static protocol_message_result_t decode_widget(CborValue *value,
         if (result != PROTOCOL_MESSAGE_OK) {
             return result;
         }
-        if (key <= 4U) {
-            present |= REQUIRED_BIT((uint32_t)key);
-        }
     }
-    if ((present & UINT32_C(0x1f)) != UINT32_C(0x1f)) {
-        return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
+    error = cbor_value_leave_container(value, &fields);
+    if (error != CborNoError) {
+        return cbor_result(error);
     }
-    return cbor_result(cbor_value_leave_container(value, &fields));
+    uint32_t required = REQUIRED_BIT(0) | REQUIRED_BIT(1);
+    return (present & required) == required ? PROTOCOL_MESSAGE_OK
+                                            : PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
 }
 
-static protocol_message_result_t decode_widgets(CborValue *value,
-                                                 protocol_apply_config_t *config)
+static protocol_message_result_t decode_cards(CborValue *value,
+                                              protocol_apply_config_t *config)
 {
     if (!cbor_value_is_array(value)) {
         return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
@@ -1006,7 +953,7 @@ static protocol_message_result_t decode_widgets(CborValue *value,
     if (error != CborNoError) {
         return cbor_result(error);
     }
-    if (count > PROTOCOL_MAX_CONFIG_WIDGETS) {
+    if (count > PROTOCOL_MAX_CONFIG_CARDS) {
         return PROTOCOL_MESSAGE_ERR_CONFIG_TOO_LARGE;
     }
     CborValue items;
@@ -1015,93 +962,17 @@ static protocol_message_result_t decode_widgets(CborValue *value,
         return cbor_result(error);
     }
     for (size_t i = 0U; i < count; ++i) {
-        protocol_message_result_t result =
-            decode_widget(&items, &config->widgets[i]);
+        protocol_message_result_t result = decode_card(&items, &config->cards[i]);
         if (result != PROTOCOL_MESSAGE_OK) {
             return result;
         }
     }
-    config->widget_count = count;
-    return cbor_result(cbor_value_leave_container(value, &items));
-}
-
-static protocol_message_result_t decode_screen(CborValue *value,
-                                                protocol_screen_config_t *screen)
-{
-    if (!cbor_value_is_map(value)) {
-        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-    }
-    size_t count = 0U;
-    CborError error = cbor_value_get_map_length(value, &count);
+    error = cbor_value_leave_container(value, &items);
     if (error != CborNoError) {
         return cbor_result(error);
     }
-    CborValue fields;
-    error = cbor_value_enter_container(value, &fields);
-    if (error != CborNoError) {
-        return cbor_result(error);
-    }
-    uint32_t present = 0U;
-    uint64_t previous = 0U;
-    bool has_previous = false;
-    for (size_t i = 0U; i < count; ++i) {
-        uint64_t key = 0U;
-        protocol_message_result_t result =
-            read_key(&fields, &key, &previous, &has_previous);
-        if (result != PROTOCOL_MESSAGE_OK) {
-            return result;
-        }
-        if (key == 0U) {
-            result = read_text(&fields, screen->screen_id,
-                               sizeof(screen->screen_id), 1U,
-                               PROTOCOL_MAX_SCREEN_ID_LENGTH);
-            present |= REQUIRED_BIT(0);
-        } else if (key == 1U) {
-            result = read_text(&fields, screen->widget_id,
-                               sizeof(screen->widget_id), 1U,
-                               PROTOCOL_MAX_WIDGET_ID_LENGTH);
-            present |= REQUIRED_BIT(1);
-        } else {
-            result = skip_value(&fields);
-        }
-        if (result != PROTOCOL_MESSAGE_OK) {
-            return result;
-        }
-    }
-    if ((present & UINT32_C(0x03)) != UINT32_C(0x03)) {
-        return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
-    }
-    return cbor_result(cbor_value_leave_container(value, &fields));
-}
-
-static protocol_message_result_t decode_screens(CborValue *value,
-                                                 protocol_apply_config_t *config)
-{
-    if (!cbor_value_is_array(value)) {
-        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-    }
-    size_t count = 0U;
-    CborError error = cbor_value_get_array_length(value, &count);
-    if (error != CborNoError) {
-        return cbor_result(error);
-    }
-    if (count > PROTOCOL_MAX_CONFIG_SCREENS) {
-        return PROTOCOL_MESSAGE_ERR_CONFIG_TOO_LARGE;
-    }
-    CborValue items;
-    error = cbor_value_enter_container(value, &items);
-    if (error != CborNoError) {
-        return cbor_result(error);
-    }
-    for (size_t i = 0U; i < count; ++i) {
-        protocol_message_result_t result =
-            decode_screen(&items, &config->screens[i]);
-        if (result != PROTOCOL_MESSAGE_OK) {
-            return result;
-        }
-    }
-    config->screen_count = count;
-    return cbor_result(cbor_value_leave_container(value, &items));
+    config->card_count = count;
+    return PROTOCOL_MESSAGE_OK;
 }
 
 static protocol_message_result_t decode_apply_config(
@@ -1136,11 +1007,8 @@ static protocol_message_result_t decode_apply_config(
             config->revision = (uint32_t)revision;
             present |= REQUIRED_BIT(0);
         } else if (key == 1U) {
-            result = decode_widgets(&contents, config);
+            result = decode_cards(&contents, config);
             present |= REQUIRED_BIT(1);
-        } else if (key == 2U) {
-            result = decode_screens(&contents, config);
-            present |= REQUIRED_BIT(2);
         } else if (key == 3U) {
             uint64_t rotation = 0U;
             result = read_unsigned(&contents, &rotation);
@@ -1156,15 +1024,15 @@ static protocol_message_result_t decode_apply_config(
             return result;
         }
     }
-    if ((present & UINT32_C(0x07)) != UINT32_C(0x07)) {
+    if ((present & UINT32_C(0x03)) != UINT32_C(0x03)) {
         return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
     }
     return validate_apply_config(config);
 }
 
-static protocol_message_result_t decode_activate_screen(
+static protocol_message_result_t decode_activate_card(
     const protocol_frame_t *frame,
-    protocol_activate_screen_t *activate)
+    protocol_activate_card_t *activate)
 {
     CborParser parser;
     CborValue contents;
@@ -1184,9 +1052,9 @@ static protocol_message_result_t decode_activate_screen(
             return result;
         }
         if (key == 0U) {
-            result = read_text(&contents, activate->screen_id,
-                               sizeof(activate->screen_id), 1U,
-                               PROTOCOL_MAX_SCREEN_ID_LENGTH);
+            result = read_text(&contents, activate->card_id,
+                               sizeof(activate->card_id), 1U,
+                               PROTOCOL_MAX_CARD_ID_LENGTH);
             present = true;
         } else {
             result = skip_value(&contents);
@@ -1220,9 +1088,9 @@ static protocol_message_result_t decode_trigger_interrupt(
             return result;
         }
         if (key == 0U) {
-            result = read_text(&contents, interrupt->widget_id,
-                               sizeof(interrupt->widget_id), 1U,
-                               PROTOCOL_MAX_WIDGET_ID_LENGTH);
+            result = read_text(&contents, interrupt->card_id,
+                               sizeof(interrupt->card_id), 1U,
+                               PROTOCOL_MAX_CARD_ID_LENGTH);
             present |= REQUIRED_BIT(0);
         } else if (key == 1U) {
             uint64_t token = 0U;
@@ -1255,9 +1123,7 @@ static protocol_message_result_t validate_device_event(
 {
     size_t length = 0U;
     if (event->sequence == 0U ||
-        !bounded_length(event->widget_id, sizeof(event->widget_id), &length) ||
-        length == 0U ||
-        !bounded_length(event->screen_id, sizeof(event->screen_id), &length) ||
+        !bounded_length(event->card_id, sizeof(event->card_id), &length) ||
         length == 0U) {
         return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
     }
@@ -1326,15 +1192,10 @@ static protocol_message_result_t decode_device_event(
             }
             present |= REQUIRED_BIT((uint32_t)key);
         } else if (key == 2U) {
-            result = read_text(&contents, event->widget_id,
-                               sizeof(event->widget_id), 1U,
-                               PROTOCOL_MAX_WIDGET_ID_LENGTH);
+            result = read_text(&contents, event->card_id,
+                               sizeof(event->card_id), 1U,
+                               PROTOCOL_MAX_CARD_ID_LENGTH);
             present |= REQUIRED_BIT(2);
-        } else if (key == 3U) {
-            result = read_text(&contents, event->screen_id,
-                               sizeof(event->screen_id), 1U,
-                               PROTOCOL_MAX_SCREEN_ID_LENGTH);
-            present |= REQUIRED_BIT(3);
         } else {
             result = skip_value(&contents);
         }
@@ -1342,7 +1203,9 @@ static protocol_message_result_t decode_device_event(
             return result;
         }
     }
-    if ((present & UINT32_C(0x1f)) != UINT32_C(0x1f)) {
+    /* Keys 0, 1, 2 and 4 are required; key 3 was retired with v1's second
+     * identifier and key 5 is the optional interrupt token. */
+    if ((present & UINT32_C(0x17)) != UINT32_C(0x17)) {
         return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
     }
     return validate_device_event(event);
@@ -1353,9 +1216,9 @@ static protocol_message_result_t validate_ack_payload(
 {
     bool acknowledged_type_valid =
         ack->acknowledged_type == PROTOCOL_TYPE_TIME_SYNC ||
-        ack->acknowledged_type == PROTOCOL_TYPE_PUSH_DATA ||
+        ack->acknowledged_type == PROTOCOL_TYPE_PUSH_TIMER ||
         ack->acknowledged_type == PROTOCOL_TYPE_APPLY_CONFIG ||
-        ack->acknowledged_type == PROTOCOL_TYPE_ACTIVATE_SCREEN ||
+        ack->acknowledged_type == PROTOCOL_TYPE_ACTIVATE_CARD ||
         ack->acknowledged_type == PROTOCOL_TYPE_TRIGGER_INTERRUPT ||
         ack->acknowledged_type == PROTOCOL_TYPE_NETWORK_CONFIG ||
         ack->acknowledged_type == PROTOCOL_TYPE_FACTORY_RESET ||
@@ -1365,7 +1228,7 @@ static protocol_message_result_t validate_ack_payload(
         ack->acknowledged_type == PROTOCOL_TYPE_ASSET_RELEASE ||
         ack->acknowledged_type == PROTOCOL_TYPE_PUSH_SCENE;
     bool revision_required =
-        ack->acknowledged_type == PROTOCOL_TYPE_PUSH_DATA ||
+        ack->acknowledged_type == PROTOCOL_TYPE_PUSH_TIMER ||
         ack->acknowledged_type == PROTOCOL_TYPE_APPLY_CONFIG ||
         ack->acknowledged_type == PROTOCOL_TYPE_PUSH_SCENE;
     bool already_present_required =
@@ -1787,7 +1650,8 @@ static protocol_message_result_t decode_status(
         status->max_protocol_version = status->protocol_version;
     }
     if ((present & REQUIRED_BIT(23)) == 0U) {
-        status->capabilities = PROTOCOL_LEGACY_CAPABILITIES;
+        /* A v2 peer always states its capabilities. */
+        status->capabilities = 0U;
     }
     if (status->protocol_version != PROTOCOL_VERSION ||
         status->max_protocol_version < status->protocol_version ||
@@ -1827,16 +1691,16 @@ protocol_message_result_t protocol_message_decode(
         return decode_time_sync(frame, &message->value.time_sync);
     case PROTOCOL_TYPE_ACK:
         return decode_ack(frame, &message->value.ack);
-    case PROTOCOL_TYPE_PUSH_DATA:
-        return decode_push_data(frame, &message->value.push_data);
+    case PROTOCOL_TYPE_PUSH_TIMER:
+        return decode_push_timer(frame, &message->value.push_timer);
     case PROTOCOL_TYPE_HEARTBEAT_ACK:
         return decode_heartbeat_ack(frame, &message->value.heartbeat_ack);
     case PROTOCOL_TYPE_ERROR:
         return decode_error(frame, &message->value.error);
     case PROTOCOL_TYPE_APPLY_CONFIG:
         return decode_apply_config(frame, &message->value.apply_config);
-    case PROTOCOL_TYPE_ACTIVATE_SCREEN:
-        return decode_activate_screen(frame, &message->value.activate_screen);
+    case PROTOCOL_TYPE_ACTIVATE_CARD:
+        return decode_activate_card(frame, &message->value.activate_card);
     case PROTOCOL_TYPE_TRIGGER_INTERRUPT:
         return decode_trigger_interrupt(frame,
                                         &message->value.trigger_interrupt);
@@ -1928,50 +1792,28 @@ static protocol_message_result_t validate_message(
         return PROTOCOL_MESSAGE_OK;
     case PROTOCOL_TYPE_ACK:
         return validate_ack_payload(&message->value.ack);
-    case PROTOCOL_TYPE_PUSH_DATA: {
-        const protocol_push_data_t *push = &message->value.push_data;
-        if (!bounded_length(push->widget_id, sizeof(push->widget_id),
-                            &length) ||
+    case PROTOCOL_TYPE_PUSH_TIMER: {
+        const protocol_push_timer_t *push = &message->value.push_timer;
+        if (!bounded_length(push->card_id, sizeof(push->card_id), &length) ||
             length == 0U || push->revision == 0U ||
-            push->field_count > PROTOCOL_MAX_FIELD_COUNT) {
+            push->remaining_ms > push->total_ms) {
             return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-        }
-        for (size_t i = 0; i < push->field_count; ++i) {
-            const protocol_field_t *field = &push->fields[i];
-            if (!bounded_length(field->key, sizeof(field->key), &length) ||
-                length == 0U) {
-                return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-            }
-            for (size_t j = 0; j < i; ++j) {
-                if (strcmp(field->key, push->fields[j].key) == 0) {
-                    return PROTOCOL_MESSAGE_ERR_DUPLICATE_KEY;
-                }
-            }
-            if (field->type == PROTOCOL_FIELD_TEXT) {
-                if (!bounded_length(field->value.text,
-                                    sizeof(field->value.text), &length)) {
-                    return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-                }
-            } else if (field->type != PROTOCOL_FIELD_INTEGER &&
-                       field->type != PROTOCOL_FIELD_BOOLEAN) {
-                return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-            }
         }
         return PROTOCOL_MESSAGE_OK;
     }
     case PROTOCOL_TYPE_APPLY_CONFIG:
         return validate_apply_config(&message->value.apply_config);
-    case PROTOCOL_TYPE_ACTIVATE_SCREEN:
-        if (!bounded_length(message->value.activate_screen.screen_id,
-                            sizeof(message->value.activate_screen.screen_id),
+    case PROTOCOL_TYPE_ACTIVATE_CARD:
+        if (!bounded_length(message->value.activate_card.card_id,
+                            sizeof(message->value.activate_card.card_id),
                             &length) ||
             length == 0U) {
             return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
         }
         return PROTOCOL_MESSAGE_OK;
     case PROTOCOL_TYPE_TRIGGER_INTERRUPT:
-        if (!bounded_length(message->value.trigger_interrupt.widget_id,
-                            sizeof(message->value.trigger_interrupt.widget_id),
+        if (!bounded_length(message->value.trigger_interrupt.card_id,
+                            sizeof(message->value.trigger_interrupt.card_id),
                             &length) ||
             length == 0U || message->value.trigger_interrupt.token == 0U ||
             !bounded_length(message->value.trigger_interrupt.reason,
@@ -2015,13 +1857,19 @@ static protocol_message_result_t validate_message(
                        ? PROTOCOL_MESSAGE_ERR_INVALID_VALUE
                        : PROTOCOL_MESSAGE_OK;
         }
-        if (!begin->volatile_tier || !begin->has_decoded_length ||
-            begin->decoded_length == 0U ||
+        /* Encoding was volatile-only until bit 10; the durable tier decodes
+         * now, so the tier is no longer part of this rule. */
+        if (!begin->has_decoded_length || begin->decoded_length == 0U ||
             begin->decoded_length > (uint32_t)ASSET_MAX_BYTES ||
-            (begin->kind == ASSET_KIND_IMAGE &&
-             begin->decoded_length !=
-                 PROTOCOL_VOLATILE_IMAGE_DECODED_LENGTH) ||
             begin->total_length >= begin->decoded_length) {
+            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+        }
+        /* A VOLATILE image is a full-canvas frame by construction: it lands in
+         * a fixed-size PSRAM slot, so its decoded length is pinned. A durable
+         * image is an ordinary stored asset of any bounded size, and pinning it
+         * would reject every plugin image that is not a whole screen. */
+        if (begin->volatile_tier && begin->kind == ASSET_KIND_IMAGE &&
+            begin->decoded_length != PROTOCOL_VOLATILE_IMAGE_DECODED_LENGTH) {
             return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
         }
         return PROTOCOL_MESSAGE_OK;
@@ -2116,73 +1964,13 @@ static protocol_message_result_t encode_pair_uint(CborEncoder *map,
     return result == PROTOCOL_MESSAGE_OK ? encode_uint(map, value) : result;
 }
 
-static size_t encoded_text_length(const char *text)
-{
-    size_t length = strlen(text);
-    return length + (length <= 23U ? 1U : 2U);
-}
-
-static bool field_before(const protocol_field_t *left,
-                         const protocol_field_t *right)
-{
-    size_t left_encoded = encoded_text_length(left->key);
-    size_t right_encoded = encoded_text_length(right->key);
-    if (left_encoded != right_encoded) {
-        return left_encoded < right_encoded;
-    }
-    return strcmp(left->key, right->key) < 0;
-}
-
-static protocol_message_result_t encode_push_fields(
-    CborEncoder *parent,
-    const protocol_push_data_t *push)
-{
-    CborEncoder fields;
-    protocol_message_result_t result =
-        begin_map(parent, &fields, push->field_count);
-    if (result != PROTOCOL_MESSAGE_OK) {
-        return result;
-    }
-    size_t order[PROTOCOL_MAX_FIELD_COUNT];
-    for (size_t i = 0; i < push->field_count; ++i) {
-        order[i] = i;
-    }
-    for (size_t i = 1; i < push->field_count; ++i) {
-        size_t current = order[i];
-        size_t j = i;
-        while (j > 0U && field_before(&push->fields[current],
-                                     &push->fields[order[j - 1U]])) {
-            order[j] = order[j - 1U];
-            --j;
-        }
-        order[j] = current;
-    }
-    for (size_t i = 0; i < push->field_count; ++i) {
-        const protocol_field_t *field = &push->fields[order[i]];
-        result = encode_text(&fields, field->key);
-        if (result == PROTOCOL_MESSAGE_OK) {
-            if (field->type == PROTOCOL_FIELD_TEXT) {
-                result = encode_text(&fields, field->value.text);
-            } else if (field->type == PROTOCOL_FIELD_INTEGER) {
-                result = encode_int(&fields, field->value.integer);
-            } else {
-                result = encode_bool(&fields, field->value.boolean);
-            }
-        }
-        if (result != PROTOCOL_MESSAGE_OK) {
-            return result;
-        }
-    }
-    return end_map(parent, &fields);
-}
-
 static protocol_message_result_t encode_apply_config_payload(
     CborEncoder *root,
     const protocol_apply_config_t *config)
 {
     CborEncoder map;
-    CborEncoder widgets;
-    protocol_message_result_t result = begin_map(root, &map, 4U);
+    CborEncoder cards;
+    protocol_message_result_t result = begin_map(root, &map, 3U);
     if (result == PROTOCOL_MESSAGE_OK) {
         result = encode_pair_uint(&map, 0U, config->revision);
     }
@@ -2190,39 +1978,19 @@ static protocol_message_result_t encode_apply_config_payload(
         result = encode_uint(&map, 1U);
     }
     if (result == PROTOCOL_MESSAGE_OK) {
-        result = begin_array(&map, &widgets, config->widget_count);
+        result = begin_array(&map, &cards, config->card_count);
     }
     for (size_t i = 0U;
-         result == PROTOCOL_MESSAGE_OK && i < config->widget_count; ++i) {
-        const protocol_widget_config_t *widget = &config->widgets[i];
+         result == PROTOCOL_MESSAGE_OK && i < config->card_count; ++i) {
+        const protocol_card_config_t *card = &config->cards[i];
         CborEncoder item;
-        result = begin_map(&widgets, &item, 5U);
+        result = begin_map(&cards, &item, 2U);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&item, 0U);
-        if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&item, widget->widget_id);
-        if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&item, 1U, widget->template_kind);
-        if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&item, 2U, widget->size_class);
-        if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&item, 3U, widget->tap_action);
-        if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&item, 4U, widget->interrupt_policy);
-        if (result == PROTOCOL_MESSAGE_OK) result = end_map(&widgets, &item);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&item, card->card_id);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&item, 1U, card->tap_action);
+        if (result == PROTOCOL_MESSAGE_OK) result = end_map(&cards, &item);
     }
-    if (result == PROTOCOL_MESSAGE_OK) result = end_map(&map, &widgets);
-    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
-    CborEncoder screens;
-    if (result == PROTOCOL_MESSAGE_OK) {
-        result = begin_array(&map, &screens, config->screen_count);
-    }
-    for (size_t i = 0U;
-         result == PROTOCOL_MESSAGE_OK && i < config->screen_count; ++i) {
-        const protocol_screen_config_t *screen = &config->screens[i];
-        CborEncoder item;
-        result = begin_map(&screens, &item, 2U);
-        if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&item, 0U);
-        if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&item, screen->screen_id);
-        if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&item, 1U);
-        if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&item, screen->widget_id);
-        if (result == PROTOCOL_MESSAGE_OK) result = end_map(&screens, &item);
-    }
-    if (result == PROTOCOL_MESSAGE_OK) result = end_map(&map, &screens);
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(&map, &cards);
     if (result == PROTOCOL_MESSAGE_OK) {
         result = encode_pair_uint(&map, 3U, config->rotation);
     }
@@ -3048,13 +2816,15 @@ static protocol_message_result_t encode_payload(
         if (result == PROTOCOL_MESSAGE_OK) result = end_map(&root, &map);
         break;
     }
-    case PROTOCOL_TYPE_PUSH_DATA:
-        result = begin_map(&root, &map, 3U);
+    case PROTOCOL_TYPE_PUSH_TIMER:
+        result = begin_map(&root, &map, 5U);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
-        if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, message->value.push_data.widget_id);
-        if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 1U, message->value.push_data.revision);
-        if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
-        if (result == PROTOCOL_MESSAGE_OK) result = encode_push_fields(&map, &message->value.push_data);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, message->value.push_timer.card_id);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 1U, message->value.push_timer.revision);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 2U, message->value.push_timer.total_ms);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 3U, message->value.push_timer.remaining_ms);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 4U);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_bool(&map, message->value.push_timer.running);
         if (result == PROTOCOL_MESSAGE_OK) result = end_map(&root, &map);
         break;
     case PROTOCOL_TYPE_HEARTBEAT_ACK:
@@ -3066,16 +2836,16 @@ static protocol_message_result_t encode_payload(
         result = encode_apply_config_payload(&root,
                                              &message->value.apply_config);
         break;
-    case PROTOCOL_TYPE_ACTIVATE_SCREEN:
+    case PROTOCOL_TYPE_ACTIVATE_CARD:
         result = begin_map(&root, &map, 1U);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
-        if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, message->value.activate_screen.screen_id);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, message->value.activate_card.card_id);
         if (result == PROTOCOL_MESSAGE_OK) result = end_map(&root, &map);
         break;
     case PROTOCOL_TYPE_TRIGGER_INTERRUPT:
         result = begin_map(&root, &map, 3U);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
-        if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, message->value.trigger_interrupt.widget_id);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, message->value.trigger_interrupt.card_id);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 1U, message->value.trigger_interrupt.token);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, message->value.trigger_interrupt.reason);
@@ -3084,14 +2854,12 @@ static protocol_message_result_t encode_payload(
     case PROTOCOL_TYPE_DEVICE_EVENT:
         result = begin_map(&root, &map,
                            message->value.device_event.has_interrupt_token
-                               ? 6U
-                               : 5U);
+                               ? 5U
+                               : 4U);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 0U, message->value.device_event.sequence);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 1U, message->value.device_event.kind);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
-        if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, message->value.device_event.widget_id);
-        if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 3U);
-        if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, message->value.device_event.screen_id);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, message->value.device_event.card_id);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 4U, message->value.device_event.action);
         if (result == PROTOCOL_MESSAGE_OK && message->value.device_event.has_interrupt_token) {
             result = encode_pair_uint(&map, 5U, message->value.device_event.interrupt_token);

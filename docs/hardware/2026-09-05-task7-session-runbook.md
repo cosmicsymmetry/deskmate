@@ -141,7 +141,8 @@ while OTA owns the panel (see Phase A note) — defer/rebuild observed.
 **B11 (framebuffer_diff — LAST, it costs the device identity).** Over the cable:
 flash `firmware/build-diag/deskmate.bin`, take the board to local tier, run
 `companion/crates/device/examples/framebuffer_diff` fresh. Expected split
-**96 total / 8 excluded / 88 identical** is a software prediction — record the actual
+**78 total / 8 excluded / 70 identical** is the post-manifest-removal software
+prediction (superseding this runbook's original 96/8/88) — record the actual
 numbers, and the raster row's byte comparison with its honest claim (payload delivery,
 not source-render correctness). Then restore: full `idf.py flash` of the release build
 (rollback tests need a full flash), return to networked tier, **mint a fresh identity**

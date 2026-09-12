@@ -8,10 +8,8 @@
 #include "core/clock_source.h"
 #include "core/scene_binding.h"
 #include "core/scene_model.h"
-#include "core/template_fields.h"
 #include "ui/font_registry.h"
 #include "ui/scene_view.h"
-#include "ui/template_view.h"
 
 #define SIM_WIDTH 448
 #define SIM_HEIGHT 368
@@ -98,70 +96,6 @@ bool sim_init(void)
                            LV_DISPLAY_RENDER_MODE_FULL);
     lv_display_set_flush_cb(s_display, sim_flush_cb);
     lv_display_set_color_format(s_display, LV_COLOR_FORMAT_RGB565);
-    return true;
-}
-
-static bool build_fields(int template_kind, const sim_field_t *fields,
-                         size_t field_count, template_field_state_t *state)
-{
-    if (!template_fields_init((protocol_template_kind_t)template_kind, state)) {
-        return false;
-    }
-    /* Overwrite defaults directly: the registry validated shape lives in
-     * template_fields_resolve, but the sim pins values without a PushData
-     * round-trip. TEXT fields stay bounded because template_field_value_t
-     * text is a fixed buffer (see the strncpy below), but INTEGER fields
-     * have no such backstop here — keeping each face's displayed value
-     * inside its documented range is that face's own display-layer
-     * responsibility (see progress_ring.c's patch-entry clamp for an
-     * example), not something this shim or the registry enforces. */
-    size_t registry_count = 0;
-    const template_field_descriptor_t *registry = template_fields_registry(
-        (protocol_template_kind_t)template_kind, &registry_count);
-    for (size_t input = 0; input < field_count; ++input) {
-        for (size_t slot = 0; slot < registry_count; ++slot) {
-            if (strcmp(registry[slot].name, fields[input].name) != 0) {
-                continue;
-            }
-            template_field_value_t *value = &state->values[slot];
-            if (fields[input].type == 0) {
-                strncpy(value->value.text, fields[input].text,
-                        PROTOCOL_MAX_FIELD_TEXT_LENGTH);
-                value->value.text[PROTOCOL_MAX_FIELD_TEXT_LENGTH] = '\0';
-            } else if (fields[input].type == 1) {
-                value->value.integer = fields[input].integer;
-            } else {
-                value->value.boolean = fields[input].boolean;
-            }
-            break;
-        }
-    }
-    return true;
-}
-
-bool sim_render(int template_kind, const sim_field_t *fields,
-                size_t field_count, int16_t utc_offset_minutes,
-                int64_t now_unix_seconds, bool orientation_flipped,
-                uint16_t *out_pixels)
-{
-    if (!sim_init() || out_pixels == NULL) {
-        return false;
-    }
-    clock_source_set_override(now_unix_seconds);
-    template_field_state_t state;
-    if (!build_fields(template_kind, fields, field_count, &state)) {
-        clock_source_clear_override();
-        return false;
-    }
-    template_view_set_utc_offset_minutes(utc_offset_minutes);
-    if (!template_view_show((protocol_template_kind_t)template_kind,
-                            PROTOCOL_SIZE_FULL, &state)) {
-        clock_source_clear_override();
-        return false;
-    }
-    advance_fake_tick_phase();
-    copy_frame_out(orientation_flipped, out_pixels);
-    clock_source_clear_override();
     return true;
 }
 
@@ -370,30 +304,6 @@ static bool ensure_font_registry(void)
  * one caller at a time. */
 static scene_t s_scene;
 
-typedef struct {
-    const sim_scene_field_t *fields;
-    size_t count;
-} sim_scene_field_table_t;
-
-/* scene_binding.h's scene_field_fn. Returning NULL for an unknown name is
- * not an error: scene_binding_evaluate() renders the "--" placeholder for
- * it, which is exactly what the device does for a provider that has not
- * reported yet, and a golden that pins that state is worth having. */
-static const char *sim_scene_field_lookup(void *ctx, const char *name)
-{
-    const sim_scene_field_table_t *table = (const sim_scene_field_table_t *)ctx;
-    if (table == NULL || name == NULL) {
-        return NULL;
-    }
-    for (size_t i = 0; i < table->count; ++i) {
-        if (table->fields[i].name != NULL &&
-            strcmp(table->fields[i].name, name) == 0) {
-            return table->fields[i].value;
-        }
-    }
-    return NULL;
-}
-
 /* Maps scene_decode()'s scene_model_result_t onto the SIM_SCENE_ERR_DECODE_*
  * subrange, in the same order the two enums are declared in -- see
  * sim_scene_result_t's own comment in sim_shim.h for why this is not folded
@@ -440,8 +350,7 @@ sim_scene_result_t sim_render_scene(const uint8_t *payload, size_t payload_lengt
                                     int16_t utc_offset_minutes, int64_t now_unix_seconds,
                                     bool timer_active, uint32_t timer_total_ms,
                                     uint32_t timer_remaining_ms, bool timer_running,
-                                    const sim_scene_field_t *fields,
-                                    size_t field_count, bool orientation_flipped,
+                                    bool orientation_flipped,
                                     uint16_t *out_pixels)
 {
     if (payload == NULL || payload_length == 0U || out_pixels == NULL) {
@@ -471,123 +380,19 @@ sim_scene_result_t sim_render_scene(const uint8_t *payload, size_t payload_lengt
         return map_decode_result(decode_result);
     }
 
-    sim_scene_field_table_t table = {
-        .fields = fields,
-        .count = (fields == NULL) ? 0U : field_count,
-    };
     scene_binding_context_t context = {
         .unix_seconds = now_unix_seconds,
         .utc_offset_minutes = utc_offset_minutes,
-        .field = sim_scene_field_lookup,
-        .field_ctx = &table,
     };
     fill_scene_timer_context(&context, timer_active, timer_total_ms,
                              timer_remaining_ms, timer_running);
-    /* Every binding is evaluated inside this call, so `context` and the
-     * table it points at only have to outlive it. */
+    /* Every binding is evaluated inside this call, so `context` only has to
+     * outlive it. */
     if (!scene_view_show(&s_scene, &context)) {
         return SIM_SCENE_ERR_SHOW;
     }
 
     advance_fake_tick_phase();
     copy_frame_out(orientation_flipped, out_pixels);
-    return SIM_SCENE_OK;
-}
-
-sim_scene_result_t sim_render_scene_temporal_pair(
-    const uint8_t *payload, size_t payload_length,
-    int template_kind, const sim_field_t *template_fields,
-    size_t template_field_count, int16_t utc_offset_minutes,
-    int64_t now_unix_seconds, bool timer_active, uint32_t timer_total_ms,
-    uint32_t timer_remaining_ms, bool timer_running, uint32_t elapsed_ms,
-    bool toggle_running, bool authoritative_reconcile,
-    const sim_scene_field_t *scene_fields,
-    size_t scene_field_count, bool orientation_flipped,
-    uint16_t *out_template_pixels, uint16_t *out_initial_scene_pixels,
-    uint16_t *out_scene_pixels)
-{
-    if (payload == NULL || payload_length == 0U ||
-        out_template_pixels == NULL || out_initial_scene_pixels == NULL ||
-        out_scene_pixels == NULL ||
-        (authoritative_reconcile && !toggle_running)) {
-        return SIM_SCENE_ERR_ARGUMENT;
-    }
-    if (!sim_init() || !ensure_asset_store() || !ensure_font_registry()) {
-        return SIM_SCENE_ERR_SETUP;
-    }
-    scene_view_set_asset_resolver(sim_asset_resolver, sim_asset_release);
-    scene_model_result_t decode_result =
-        scene_decode(payload, payload_length, &s_scene);
-    if (decode_result != SCENE_MODEL_OK) {
-        return map_decode_result(decode_result);
-    }
-
-    template_field_state_t template_state;
-    if (!build_fields(template_kind, template_fields, template_field_count,
-                      &template_state)) {
-        return SIM_SCENE_ERR_SHOW;
-    }
-    clock_source_set_override(now_unix_seconds);
-    template_view_set_utc_offset_minutes(utc_offset_minutes);
-    if (!template_view_show((protocol_template_kind_t)template_kind,
-                            PROTOCOL_SIZE_FULL, &template_state)) {
-        clock_source_clear_override();
-        return SIM_SCENE_ERR_SHOW;
-    }
-    lv_refr_now(s_display);
-    s_fake_tick += elapsed_ms;
-    clock_source_set_override(now_unix_seconds + (int64_t)(elapsed_ms / 1000U));
-    if (toggle_running) {
-        /* Advance the running face to this instant before applying the local
-         * pause. A real LVGL timer does this throughout the interval; without
-         * the explicit tick a single fake-tick jump would leave the arc at
-         * its initial sweep even though local_action captures the new time. */
-        template_view_set_utc_offset_minutes(utc_offset_minutes);
-        template_view_apply_local_action(PROTOCOL_EVENT_ACTION_START_PAUSE);
-    } else {
-        /* This setter synchronously calls the template tick callback. */
-        template_view_set_utc_offset_minutes(utc_offset_minutes);
-    }
-    if (authoritative_reconcile &&
-        !template_view_patch((protocol_template_kind_t)template_kind,
-                             &template_state, UINT16_MAX)) {
-        clock_source_clear_override();
-        return SIM_SCENE_ERR_SHOW;
-    }
-    lv_refr_now(s_display);
-    copy_frame_out(orientation_flipped, out_template_pixels);
-    clock_source_clear_override();
-
-    sim_scene_field_table_t table = {
-        .fields = scene_fields,
-        .count = scene_fields == NULL ? 0U : scene_field_count,
-    };
-    scene_binding_context_t context = {
-        .unix_seconds = now_unix_seconds,
-        .utc_offset_minutes = utc_offset_minutes,
-        .field = sim_scene_field_lookup,
-        .field_ctx = &table,
-    };
-    fill_scene_timer_context(&context, timer_active, timer_total_ms,
-                             timer_remaining_ms, timer_running);
-    if (!scene_view_show(&s_scene, &context)) {
-        return SIM_SCENE_ERR_SHOW;
-    }
-    lv_refr_now(s_display);
-    copy_frame_out(orientation_flipped, out_initial_scene_pixels);
-
-    s_fake_tick += elapsed_ms;
-    context.unix_seconds =
-        now_unix_seconds + (int64_t)(elapsed_ms / 1000U);
-    if (toggle_running) {
-        scene_view_apply_local_action(PROTOCOL_EVENT_ACTION_START_PAUSE);
-    } else {
-        scene_view_tick_bindings(&context);
-    }
-    if (authoritative_reconcile) {
-        scene_view_refresh_bindings(&context);
-    }
-    lv_refr_now(s_display);
-    copy_frame_out(orientation_flipped, out_scene_pixels);
     return SIM_SCENE_OK;
 }

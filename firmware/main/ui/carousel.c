@@ -60,8 +60,7 @@ static void emit_event(navigation_gesture_t gesture)
         event.action = PROTOCOL_EVENT_ACTION_DISMISS_INTERRUPT;
         event.has_interrupt_token = true;
         event.interrupt_token = s_carousel.binding.interrupt_token;
-        strcpy(event.widget_id, s_carousel.binding.widget_id);
-        strcpy(event.screen_id, s_carousel.binding.screen_id);
+        strcpy(event.card_id, s_carousel.binding.card_id);
         (void)device_event_queue_push(s_carousel.event_queue, &event);
         return;
     }
@@ -72,29 +71,26 @@ static void emit_event(navigation_gesture_t gesture)
             return;
         }
         event.kind = PROTOCOL_EVENT_TAP;
-        strcpy(event.widget_id, s_carousel.binding.widget_id);
-        strcpy(event.screen_id, s_carousel.binding.screen_id);
-        /* Optimistic feedback is intentionally reconciled by the next full
-         * authoritative PushData snapshot, including when this enqueue drops. */
+        strcpy(event.card_id, s_carousel.binding.card_id);
+        /* Optimistic feedback is intentionally reconciled by the next
+         * authoritative PushTimer, including when this enqueue drops. */
         scene_view_apply_local_action(event.action);
     } else if (gesture == NAVIGATION_GESTURE_PREVIOUS) {
-        if (strcmp(s_carousel.binding.previous_screen_id,
-                   s_carousel.binding.screen_id) == 0) {
+        if (strcmp(s_carousel.binding.previous_card_id,
+                   s_carousel.binding.card_id) == 0) {
             return;
         }
         event.kind = PROTOCOL_EVENT_NAVIGATION;
         event.action = PROTOCOL_EVENT_ACTION_NAVIGATE_PREVIOUS;
-        strcpy(event.widget_id, s_carousel.binding.previous_widget_id);
-        strcpy(event.screen_id, s_carousel.binding.previous_screen_id);
+        strcpy(event.card_id, s_carousel.binding.previous_card_id);
     } else if (gesture == NAVIGATION_GESTURE_NEXT) {
-        if (strcmp(s_carousel.binding.next_screen_id,
-                   s_carousel.binding.screen_id) == 0) {
+        if (strcmp(s_carousel.binding.next_card_id,
+                   s_carousel.binding.card_id) == 0) {
             return;
         }
         event.kind = PROTOCOL_EVENT_NAVIGATION;
         event.action = PROTOCOL_EVENT_ACTION_NAVIGATE_NEXT;
-        strcpy(event.widget_id, s_carousel.binding.next_widget_id);
-        strcpy(event.screen_id, s_carousel.binding.next_screen_id);
+        strcpy(event.card_id, s_carousel.binding.next_card_id);
     } else {
         return;
     }

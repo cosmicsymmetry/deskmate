@@ -1,17 +1,17 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { CardEditor } from "./components/CardEditor";
-import { CardList, type PluginKindOption } from "./components/CardList";
+import { CardList } from "./components/CardList";
+import { DevicePreview } from "./components/DevicePreview";
 import { Icon } from "./components/Icon";
 import { LoopRing } from "./components/LoopRing";
-import { DevicePreview } from "./components/DevicePreview";
 import { NetworkPanel, ownershipLabel } from "./components/NetworkPanel";
-import { type SaveState, SaveBar, type ValidationState } from "./components/SaveBar";
+import { SaveBar, type SaveState, type ValidationState } from "./components/SaveBar";
 import { SettingsSheet } from "./components/SettingsSheet";
 import { TopBar } from "./components/TopBar";
 import {
+  type AddCardRequest,
   addCard,
-  activePlaylist,
   cardLabel,
   copyConfig,
   firstRunSteps,
@@ -21,15 +21,13 @@ import {
   removeCard,
   unclaimedIssues,
   updateWidget,
-  type AddCardRequest,
 } from "./lib/configDraft";
 import {
-  chooseIcsFile,
   controlPomodoro,
   getAutostartStatus,
-  refreshProvider,
-  setAutostartEnabled,
+  mintImageSource,
   resumePushing,
+  setAutostartEnabled,
   toIpcError,
   validateConfigDraft,
 } from "./lib/tauri";
@@ -40,6 +38,7 @@ import type {
   DisplayOrientation,
   DraftValidation,
   IpcError,
+  MintedImageSource,
   PomodoroAction,
 } from "./lib/types";
 import { useAppState } from "./lib/useAppState";
@@ -73,10 +72,6 @@ export function App() {
     dataGeneration,
     networkSettings,
     ownershipTier,
-    pluginCatalog,
-    catalogError,
-    refreshCatalog,
-    serverCardState,
     saveConfig,
     saveServerAccess,
     pairDevice,
@@ -85,6 +80,8 @@ export function App() {
     chooseLocalMode,
   } = useAppState();
   const [draft, setDraft] = useState<AppConfig | null>(null);
+  const draftRef = useRef<AppConfig | null>(draft);
+  draftRef.current = draft;
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [validation, setValidation] = useState<ValidationState>({
@@ -94,10 +91,13 @@ export function App() {
   const [saveState, setSaveState] = useState<SaveState>({ kind: "idle" });
   const [commandError, setCommandError] = useState<IpcError | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [refreshingProviderId, setRefreshingProviderId] = useState<string | null>(null);
   const [autostartEnabled, setAutostartValue] = useState(false);
   const [autostartMismatch, setAutostartMismatch] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [mintedPicture, setMintedPicture] = useState<{
+    cardId: string;
+    access: MintedImageSource;
+  } | null>(null);
 
   useEffect(() => {
     if (!snapshot || dirty) {
@@ -187,21 +187,9 @@ export function App() {
 
   const selectedWidget = draft.cards.find((card) => card.id === selectedCardId) ?? null;
   const pomodoro =
-    snapshot.pomodoros.find((candidate) => candidate.widget_id === selectedCardId) ?? null;
+    snapshot.pomodoros.find((candidate) => candidate.card_id === selectedCardId) ?? null;
   const issues = validation.result.issues;
   const cardIssues = selectedCardId ? issuesForCard(issues, draft, selectedCardId) : [];
-  const active = activePlaylist(draft);
-  const activeIndex = draft.playlists.findIndex(
-    (playlist) => playlist.id === draft.active_playlist_id,
-  );
-  const selectedEntryIndex =
-    selectedCardId && active
-      ? active.entries.findIndex((entry) => entry.card_id === selectedCardId)
-      : -1;
-  const selectedEntryIssues =
-    activeIndex >= 0 && selectedEntryIndex >= 0
-      ? issuesForPath(issues, `playlists[${activeIndex}].entries[${selectedEntryIndex}]`)
-      : [];
   const selectedCardError =
     snapshot.card_errors.find((error) => error.card_id === selectedCardId) ?? null;
   const cardErrorCount = snapshot.card_errors.length;
@@ -230,8 +218,6 @@ export function App() {
   const leftoverIssues = unclaimedIssues(issues, draft);
   const networkedTier = ownershipTier === "networked";
   const localTier = ownershipTier === "local";
-  const selectedProvider =
-    snapshot.providers.find((candidate) => candidate.widget_id === selectedCardId) ?? null;
   const protocolMismatch =
     snapshot.device.protocol_version !== null && snapshot.device.protocol_version !== 1;
   const paused = snapshot.config.preferences.paused || snapshot.runtime.kind === "paused";
@@ -244,38 +230,66 @@ export function App() {
     snapshot.device.last_network_error !== null;
 
   const replaceDraft = (next: AppConfig) => {
+    draftRef.current = next;
     setDraft(next);
     setDirty(true);
     setSaveState({ kind: "idle" });
   };
-  const handleAdd = (request: AddCardRequest) => {
-    const result = addCard(draft, request);
+  const handleAdd = (request: AddCardRequest): string | null => {
+    // Source minting is asynchronous. Read the latest draft here so settings edited
+    // while the server responds are not replaced by the render that began the mint.
+    const currentDraft = draftRef.current;
+    if (!currentDraft) {
+      return null;
+    }
+    const result = addCard(currentDraft, request);
     if (!result.cardId) {
-      return;
+      return null;
     }
     replaceDraft(result.config);
     setSelectedCardId(result.cardId);
+    return result.cardId;
+  };
+  const handleSelectCard = (cardId: string) => {
+    setMintedPicture((current) => (current?.cardId === cardId ? current : null));
+    setSelectedCardId(cardId);
+  };
+  const handleAddPicture = () => {
+    const sourceNumber = draft.image_sources.length + 1;
+    const sourceName = sourceNumber === 1 ? "Picture" : `Picture ${sourceNumber}`;
+    setBusyAction("picture-source");
+    setCommandError(null);
+    void mintImageSource(sourceName)
+      .then((access) => {
+        const cardId = handleAdd({
+          kind: "picture",
+          sourceId: access.source_id,
+          sourceName,
+        });
+        if (cardId) {
+          setMintedPicture({ cardId, access });
+        }
+      })
+      .catch((nextError) => setCommandError(toIpcError(nextError)))
+      .finally(() => setBusyAction(null));
   };
 
-  // The add menu's server group, built from the catalog and nothing else. It is
-  // empty in local tier and before the first read, which is why the group only
-  // renders when it has rows.
-  const pluginKinds: PluginKindOption[] = (pluginCatalog?.plugins ?? []).map((entry) => ({
-    id: entry.id,
-    version: entry.version,
-    displayName: entry.display_name,
-    description: entry.description,
-    onAdd: () =>
-      handleAdd({ kind: "plugin", pluginId: entry.id, refreshMinutes: entry.refresh_minutes }),
-  }));
   const handleWidgetChange = (widget: CardSettings) => {
     if (!selectedCardId) {
       return;
+    }
+    if (
+      mintedPicture?.cardId === widget.id &&
+      widget.kind === "picture" &&
+      mintedPicture.access.source_id !== widget.source_id
+    ) {
+      setMintedPicture(null);
     }
     replaceDraft(updateWidget(draft, selectedCardId, widget));
   };
   const handleRemoveCard = (cardId: string) => {
     const next = removeCard(draft, cardId);
+    setMintedPicture((current) => (current?.cardId === cardId ? null : current));
     replaceDraft(next);
     setSelectedCardId((current) => (current === cardId ? firstSelectableCard(next) : current));
   };
@@ -284,24 +298,6 @@ export function App() {
       return;
     }
     handleRemoveCard(selectedCardId);
-  };
-  const handleChooseCalendarFile = () => {
-    if (selectedWidget?.kind !== "calendar") {
-      return;
-    }
-    setBusyAction("calendar-file");
-    setCommandError(null);
-    void chooseIcsFile()
-      .then((path) => {
-        if (path) {
-          handleWidgetChange({
-            ...selectedWidget,
-            source: { kind: "file", value: path },
-          });
-        }
-      })
-      .catch((nextError) => setCommandError(toIpcError(nextError)))
-      .finally(() => setBusyAction(null));
   };
   const runAction = async (name: string, operation: () => Promise<void>) => {
     setBusyAction(name);
@@ -355,14 +351,6 @@ export function App() {
     }
     void runAction("timer", () => controlPomodoro(selectedCardId, action satisfies PomodoroAction));
   };
-  const handleProviderRefresh = (widgetId: string) => {
-    setRefreshingProviderId(widgetId);
-    setCommandError(null);
-    void refreshProvider(widgetId)
-      .then(() => refresh())
-      .catch((nextError) => setCommandError(toIpcError(nextError)))
-      .finally(() => setRefreshingProviderId(null));
-  };
   const handleAutostart = (enabled: boolean) => {
     setBusyAction("autostart");
     setCommandError(null);
@@ -399,9 +387,8 @@ export function App() {
           <LoopRing
             config={draft}
             issues={issues}
-            catalog={pluginCatalog}
             selectedCardId={selectedCardId}
-            onSelect={setSelectedCardId}
+            onSelect={handleSelectCard}
             onChange={replaceDraft}
           />
         </aside>
@@ -475,21 +462,6 @@ export function App() {
             </aside>
           )}
 
-          {/* One notice for either server read failing. The last projection and the
-              last catalog are kept — a plugin card keeps its name and its value
-              rather than blanking because a poll missed. */}
-          {catalogError && (
-            <aside className="notice notice--warn" role="status">
-              <div>
-                <strong>{catalogError}</strong>
-                <p>Plugin names and previews are the last ones this window received.</p>
-                <button className="button button--quiet" type="button" onClick={refreshCatalog}>
-                  Try again
-                </button>
-              </div>
-            </aside>
-          )}
-
           {/* Card-scoped failures stay actionable without inventing a cause: data
               refusals name the display, while scene failures remain neutral because
               scene construction can fail before the display sees anything. */}
@@ -501,7 +473,7 @@ export function App() {
                   const card = draft.cards.find((candidate) => candidate.id === cardError.card_id);
                   return (
                     <p key={cardError.card_id}>
-                      <strong>{card ? cardLabel(card, pluginCatalog) : cardError.card_id}</strong> —{" "}
+                      <strong>{card ? cardLabel(card) : cardError.card_id}</strong> —{" "}
                       {cardError.message}
                     </p>
                   );
@@ -567,16 +539,12 @@ export function App() {
           <CardList
             config={draft}
             issues={issues}
-            cardData={snapshot.card_data}
             pomodoros={snapshot.pomodoros}
-            providers={snapshot.providers}
-            pluginKinds={pluginKinds}
-            catalog={pluginCatalog}
-            serverCardState={serverCardState}
             ownershipTier={ownershipTier}
             selectedCardId={selectedCardId}
-            onSelect={setSelectedCardId}
+            onSelect={handleSelectCard}
             onAdd={handleAdd}
+            onAddPicture={handleAddPicture}
             onChange={replaceDraft}
             onRemove={handleRemoveCard}
           />
@@ -585,21 +553,14 @@ export function App() {
             card={selectedWidget}
             config={draft}
             issues={cardIssues}
-            entryIssues={selectedEntryIssues}
             cardError={selectedCardError}
             pomodoro={pomodoro}
-            provider={selectedProvider}
             timerBusy={busyAction === "timer"}
-            filePickerBusy={busyAction === "calendar-file"}
-            providerRefreshing={refreshingProviderId === selectedCardId}
-            catalog={pluginCatalog}
-            ownershipTier={ownershipTier}
+            pictureAccess={mintedPicture?.cardId === selectedCardId ? mintedPicture.access : null}
             onChange={handleWidgetChange}
             onConfigChange={replaceDraft}
             onRemove={handleRemove}
             onTimerAction={handleTimerAction}
-            onChooseCalendarFile={handleChooseCalendarFile}
-            onRefreshProvider={() => selectedCardId && handleProviderRefresh(selectedCardId)}
           />
         </main>
       </div>

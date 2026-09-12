@@ -2,6 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **STATUS (recorded 2026-09-09): V2 is EXITED and tagged `v2`. Its 16 remaining open
+> boxes are HARDWARE observations, and most were formally waived at exit** by owner
+> direction on 2026-09-06. The authoritative list of what V2 still owes is the
+> "Still owed" line in CLAUDE.md's V2 section — currently just Task 9's tap latency —
+> not the boxes below.
+
 **Goal:** Let a Deskmate device be owned over WiFi by a server instead of by a cable, so
 the panel keeps updating with the Mac app quit — plus a firmware update mechanism with
 rollback for both tiers.

@@ -127,8 +127,7 @@ async fn hostile_device_frames_are_bounded_and_concatenated_frames_decode() {
         Message::DeviceEvent(DeviceEvent {
             sequence,
             kind: EventKind::Tap,
-            widget_id: "clock".to_string(),
-            screen_id: "clock".to_string(),
+            card_id: "clock".to_string(),
             action: EventAction::StartPause,
             interrupt_token: None,
         })
@@ -161,4 +160,71 @@ async fn hostile_device_frames_are_bounded_and_concatenated_frames_decode() {
         );
         tokio::task::yield_now().await;
     }
+}
+
+/// A producer's push must not wait on device delivery.
+///
+/// The durable outcome of `POST /v1/images/{token}` is "the frame is stored",
+/// and it is stored before the runtime is told anything. Delivery happens over a
+/// link the producer has no relationship with and cannot act on, so awaiting it
+/// made a successful push answer 504 once the reconcile grew `AssetRelease`'s
+/// twenty-second budget -- somebody holding a curl command saw an error for work
+/// that had succeeded, and would reasonably retry it.
+///
+/// This lives here rather than beside the other image-route tests because it
+/// needs a device that is CONNECTED and silent. With no device attached the
+/// notification returns instantly either way, so the same test over there passed
+/// against the awaiting version too, and proved nothing.
+/// A 448x368 all-black PNG: the smallest thing the ingest route accepts.
+fn exact_png() -> Vec<u8> {
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, 448, 368);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("header");
+        writer
+            .write_image_data(&vec![0u8; 448 * 368 * 3])
+            .expect("data");
+    }
+    out
+}
+
+#[tokio::test]
+async fn an_image_push_does_not_wait_for_a_silent_device() {
+    let (host, identity, admin_token) = spawn().await;
+    let mut sequence = ConnectionSequence::default();
+    // Connected, bootstrapped, and from here on it answers nothing.
+    let _socket = sequence.connect(&host, &identity).await;
+
+    let client = reqwest::Client::new();
+    let minted: serde_json::Value = client
+        .post(format!("http://{host}/v1/images"))
+        .bearer_auth(&admin_token)
+        .header("Content-Type", "application/json")
+        .body(r#"{"name":"Panel"}"#)
+        .send()
+        .await
+        .expect("mint")
+        .text()
+        .await
+        .map(|body| serde_json::from_str(&body).expect("mint body"))
+        .expect("mint body text");
+    let token = minted["token"].as_str().expect("token").to_string();
+
+    let started = std::time::Instant::now();
+    let response = client
+        .post(format!("http://{host}/v1/images/{token}"))
+        .header("Content-Type", "image/png")
+        .body(exact_png())
+        .send()
+        .await
+        .expect("push");
+    let elapsed = started.elapsed();
+
+    assert_eq!(response.status(), 200);
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the push waited on a silent device: {elapsed:?}"
+    );
 }

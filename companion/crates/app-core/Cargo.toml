@@ -12,18 +12,16 @@ chrono-tz = "0.10"
 device = { path = "../device" }
 engine = { path = "../engine" }
 protocol = { path = "../protocol" }
-providers = { path = "../providers" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+url = "2"
 
 [dev-dependencies]
-# Task 9 (stage 2a): the parity gate in `tests/scene_parity.rs` renders the
-# shipped `DigitalClock` C template and `scene_build`'s scene through the same
-# LVGL simulator and compares the framebuffers byte for byte. A dev-dependency
-# rather than the reverse direction because `lvgl-sim` cannot depend on this
-# crate: `app-core -> device -> lvgl-sim` already, so the gate has to live on
-# this side of that edge.
+# `examples/scene_panel_check.rs` drives the simulator's case tables against a
+# real board. A dev-dependency rather than the reverse direction because
+# `lvgl-sim` cannot depend on this crate: `app-core -> device -> lvgl-sim`
+# already, so anything needing both has to live on this side of that edge.
 lvgl-sim = { path = "../lvgl-sim" }
 tempfile = "3"
 

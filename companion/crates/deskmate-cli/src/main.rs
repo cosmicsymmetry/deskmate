@@ -5,25 +5,24 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use device::{DeviceError, connect, connect_session};
 use protocol::{
-    Field, FieldValue, MAX_DEVICE_ID_LEN, MAX_DEVICE_TOKEN_LEN, MAX_FIELD_COUNT, MAX_FIELD_KEY_LEN,
-    MAX_FIELD_TEXT_LEN, MAX_PSK_LEN, MAX_SERVER_URL_LEN, MAX_SSID_LEN, MAX_WIDGET_ID_LEN,
-    NetworkConfig, OtaState, PushData, StatusResponse, Tier, TimeSync, WifiState,
+    MAX_CARD_ID_LEN, MAX_DEVICE_ID_LEN, MAX_DEVICE_TOKEN_LEN, MAX_PSK_LEN, MAX_SERVER_URL_LEN,
+    MAX_SSID_LEN, NetworkConfig, OtaState, PushTimer, StatusResponse, Tier, TimeSync, WifiState,
 };
-
-mod m2;
 
 const USAGE: &str = "\
 Usage:
   deskmate-cli status [--port PATH] [--json]
   deskmate-cli time-sync [--offset-minutes N] [--port PATH] [--json]
-  deskmate-cli push-data --widget ID --revision N [--field KEY=VALUE]... [--port PATH] [--json]
+  deskmate-cli push-timer --card ID --revision N --total-ms N --remaining-ms N [--running] \\
+      [--port PATH] [--json]
   deskmate-cli provision [--ssid SSID] [--psk PSK] [--server-url URL] \\
       [--device-id ID] [--token TOKEN] [--offset-minutes N] [--tier local|networked] \\
       [--port PATH] [--json]
   deskmate-cli factory-reset [--port PATH] [--json]
 
-Field values infer booleans and integers; use s:, i:, or b: to force a type.
-Examples: --field summary=s:Clear --field temp=i:23 --field ok=b:true
+push-timer sets the timer a card's `timer.*` scene bindings resolve against.
+It is the only per-card state protocol v2's device models; everything else a
+face shows is a scene the host builds and pushes.
 
 provision persists over the cable and takes effect on the device's next boot,
 not live.";
@@ -31,8 +30,6 @@ not live.";
 #[derive(Debug)]
 pub(crate) enum AppError {
     Usage(String),
-    Config(String),
-    Provider(String),
     Device(DeviceError),
     Host(String),
 }
@@ -40,10 +37,7 @@ pub(crate) enum AppError {
 impl fmt::Display for AppError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Usage(error)
-            | Self::Config(error)
-            | Self::Provider(error)
-            | Self::Host(error) => f.write_str(error),
+            Self::Usage(error) | Self::Host(error) => f.write_str(error),
             Self::Device(error) => error.fmt(f),
         }
     }
@@ -61,10 +55,12 @@ enum CliCommand {
     TimeSync {
         offset_minutes: Option<i16>,
     },
-    PushData {
-        widget_id: String,
+    PushTimer {
+        card_id: String,
         revision: u32,
-        fields: Vec<Field>,
+        total_ms: u32,
+        remaining_ms: u32,
+        running: bool,
     },
     Provision {
         config: NetworkConfig,
@@ -82,9 +78,11 @@ struct Options {
 #[derive(Debug, Default)]
 struct CommandOptions {
     offset_minutes: Option<i16>,
-    widget_id: Option<String>,
+    card_id: Option<String>,
     revision: Option<u32>,
-    fields: Vec<Field>,
+    total_ms: Option<u32>,
+    remaining_ms: Option<u32>,
+    running: bool,
     ssid: Option<String>,
     psk: Option<String>,
     server_url: Option<String>,
@@ -94,6 +92,14 @@ struct CommandOptions {
 }
 
 impl CommandOptions {
+    fn has_timer_options(&self) -> bool {
+        self.card_id.is_some()
+            || self.revision.is_some()
+            || self.total_ms.is_some()
+            || self.remaining_ms.is_some()
+            || self.running
+    }
+
     fn has_provisioning_options(&self) -> bool {
         self.ssid.is_some()
             || self.psk.is_some()
@@ -113,52 +119,6 @@ fn next_value(
         .ok_or_else(|| AppError::Usage(format!("{option} requires a value")))
 }
 
-fn parse_field(raw: &str) -> Result<Field, AppError> {
-    let (key, raw_value) = raw
-        .split_once('=')
-        .ok_or_else(|| AppError::Usage("--field must be KEY=VALUE".into()))?;
-    if key.is_empty() || key.len() > MAX_FIELD_KEY_LEN {
-        return Err(AppError::Usage(format!(
-            "field key must be 1..={MAX_FIELD_KEY_LEN} UTF-8 bytes"
-        )));
-    }
-    let value = if let Some(text) = raw_value.strip_prefix("s:") {
-        if text.len() > MAX_FIELD_TEXT_LEN {
-            return Err(AppError::Usage(format!(
-                "field text must be at most {MAX_FIELD_TEXT_LEN} UTF-8 bytes"
-            )));
-        }
-        FieldValue::Text(text.to_owned())
-    } else if let Some(integer) = raw_value.strip_prefix("i:") {
-        FieldValue::Integer(
-            integer
-                .parse()
-                .map_err(|_| AppError::Usage(format!("invalid integer field: {raw}")))?,
-        )
-    } else if let Some(boolean) = raw_value.strip_prefix("b:") {
-        FieldValue::Boolean(
-            boolean
-                .parse()
-                .map_err(|_| AppError::Usage(format!("invalid boolean field: {raw}")))?,
-        )
-    } else if let Ok(boolean) = raw_value.parse::<bool>() {
-        FieldValue::Boolean(boolean)
-    } else if let Ok(integer) = raw_value.parse::<i64>() {
-        FieldValue::Integer(integer)
-    } else {
-        if raw_value.len() > MAX_FIELD_TEXT_LEN {
-            return Err(AppError::Usage(format!(
-                "field text must be at most {MAX_FIELD_TEXT_LEN} UTF-8 bytes"
-            )));
-        }
-        FieldValue::Text(raw_value.to_owned())
-    };
-    Ok(Field {
-        key: key.to_owned(),
-        value,
-    })
-}
-
 fn parse_tier(value: &str) -> Result<Tier, AppError> {
     match value {
         "local" => Ok(Tier::Local),
@@ -173,25 +133,19 @@ fn build_command(command_name: &str, options: CommandOptions) -> Result<CliComma
     Ok(match command_name {
         "status" => {
             if options.offset_minutes.is_some()
-                || options.widget_id.is_some()
-                || options.revision.is_some()
-                || !options.fields.is_empty()
+                || options.has_timer_options()
                 || options.has_provisioning_options()
             {
                 return Err(AppError::Usage(
-                    "status does not accept time-sync, push-data or provision options".into(),
+                    "status does not accept time-sync, push-timer or provision options".into(),
                 ));
             }
             CliCommand::Status
         }
         "time-sync" => {
-            if options.widget_id.is_some()
-                || options.revision.is_some()
-                || !options.fields.is_empty()
-                || options.has_provisioning_options()
-            {
+            if options.has_timer_options() || options.has_provisioning_options() {
                 return Err(AppError::Usage(
-                    "time-sync does not accept push-data or provision options".into(),
+                    "time-sync does not accept push-timer or provision options".into(),
                 ));
             }
             if options
@@ -206,13 +160,11 @@ fn build_command(command_name: &str, options: CommandOptions) -> Result<CliComma
                 offset_minutes: options.offset_minutes,
             }
         }
-        "push-data" => build_push_data(options)?,
+        "push-timer" => build_push_timer(options)?,
         "provision" => build_provision(options)?,
         "factory-reset" => {
             if options.offset_minutes.is_some()
-                || options.widget_id.is_some()
-                || options.revision.is_some()
-                || !options.fields.is_empty()
+                || options.has_timer_options()
                 || options.has_provisioning_options()
             {
                 return Err(AppError::Usage(
@@ -225,44 +177,41 @@ fn build_command(command_name: &str, options: CommandOptions) -> Result<CliComma
     })
 }
 
-fn build_push_data(options: CommandOptions) -> Result<CliCommand, AppError> {
+fn build_push_timer(options: CommandOptions) -> Result<CliCommand, AppError> {
     if options.offset_minutes.is_some() || options.has_provisioning_options() {
         return Err(AppError::Usage(
-            "push-data does not accept --offset-minutes or provision options".into(),
+            "push-timer does not accept --offset-minutes or provision options".into(),
         ));
     }
-    let widget_id = options
-        .widget_id
-        .ok_or_else(|| AppError::Usage("push-data requires --widget".into()))?;
-    if widget_id.is_empty() || widget_id.len() > MAX_WIDGET_ID_LEN {
+    let card_id = options
+        .card_id
+        .ok_or_else(|| AppError::Usage("push-timer requires --card".into()))?;
+    if card_id.is_empty() || card_id.len() > MAX_CARD_ID_LEN {
         return Err(AppError::Usage(format!(
-            "widget ID must be 1..={MAX_WIDGET_ID_LEN} UTF-8 bytes"
+            "card ID must be 1..={MAX_CARD_ID_LEN} UTF-8 bytes"
         )));
     }
     let revision = options
         .revision
         .filter(|value| *value != 0)
-        .ok_or_else(|| AppError::Usage("push-data requires nonzero --revision".into()))?;
-    if options.fields.len() > MAX_FIELD_COUNT {
-        return Err(AppError::Usage(format!(
-            "push-data accepts at most {MAX_FIELD_COUNT} fields"
-        )));
+        .ok_or_else(|| AppError::Usage("push-timer requires nonzero --revision".into()))?;
+    let total_ms = options
+        .total_ms
+        .ok_or_else(|| AppError::Usage("push-timer requires --total-ms".into()))?;
+    let remaining_ms = options
+        .remaining_ms
+        .ok_or_else(|| AppError::Usage("push-timer requires --remaining-ms".into()))?;
+    if remaining_ms > total_ms {
+        return Err(AppError::Usage(
+            "--remaining-ms must not exceed --total-ms".into(),
+        ));
     }
-    for (index, field) in options.fields.iter().enumerate() {
-        if options.fields[..index]
-            .iter()
-            .any(|previous| previous.key == field.key)
-        {
-            return Err(AppError::Usage(format!(
-                "duplicate field key: {}",
-                field.key
-            )));
-        }
-    }
-    Ok(CliCommand::PushData {
-        widget_id,
+    Ok(CliCommand::PushTimer {
+        card_id,
         revision,
-        fields: options.fields,
+        total_ms,
+        remaining_ms,
+        running: options.running,
     })
 }
 
@@ -281,9 +230,9 @@ fn checked_provision_text(
 }
 
 fn build_provision(options: CommandOptions) -> Result<CliCommand, AppError> {
-    if options.widget_id.is_some() || options.revision.is_some() || !options.fields.is_empty() {
+    if options.has_timer_options() {
         return Err(AppError::Usage(
-            "provision does not accept push-data options".into(),
+            "provision does not accept push-timer options".into(),
         ));
     }
     if options
@@ -336,8 +285,8 @@ fn parse_options() -> Result<Options, AppError> {
                     AppError::Usage("--offset-minutes must be a signed integer".into())
                 })?);
             }
-            "--widget" => {
-                command_options.widget_id = Some(next_value(&mut arguments, "--widget")?);
+            "--card" => {
+                command_options.card_id = Some(next_value(&mut arguments, "--card")?);
             }
             "--revision" => {
                 let value = next_value(&mut arguments, "--revision")?;
@@ -347,10 +296,23 @@ fn parse_options() -> Result<Options, AppError> {
                         .map_err(|_| AppError::Usage("--revision must be a nonzero u32".into()))?,
                 );
             }
-            "--field" => {
-                let value = next_value(&mut arguments, "--field")?;
-                command_options.fields.push(parse_field(&value)?);
+            "--total-ms" => {
+                let value = next_value(&mut arguments, "--total-ms")?;
+                command_options.total_ms = Some(
+                    value
+                        .parse()
+                        .map_err(|_| AppError::Usage("--total-ms must be a u32".into()))?,
+                );
             }
+            "--remaining-ms" => {
+                let value = next_value(&mut arguments, "--remaining-ms")?;
+                command_options.remaining_ms = Some(
+                    value
+                        .parse()
+                        .map_err(|_| AppError::Usage("--remaining-ms must be a u32".into()))?,
+                );
+            }
+            "--running" => command_options.running = true,
             "--ssid" => command_options.ssid = Some(next_value(&mut arguments, "--ssid")?),
             "--psk" => command_options.psk = Some(next_value(&mut arguments, "--psk")?),
             "--server-url" => {
@@ -527,9 +489,6 @@ fn print_status(status: &StatusResponse, port_name: &str, json: bool) {
 }
 
 fn run() -> Result<(), AppError> {
-    if m2::run_if_requested()? {
-        return Ok(());
-    }
     let options = parse_options()?;
     let port = options.port.as_deref();
     let json = options.json;
@@ -557,25 +516,29 @@ fn run() -> Result<(), AppError> {
                 println!("time synchronized: unix={seconds}, UTC offset={offset_minutes} minutes");
             }
         }
-        CliCommand::PushData {
-            widget_id,
+        CliCommand::PushTimer {
+            card_id,
             revision,
-            fields,
+            total_ms,
+            remaining_ms,
+            running,
         } => {
             let mut connected = connect(port)?;
-            let ack = connected.client.push_data(PushData {
-                widget_id: widget_id.clone(),
+            let ack = connected.client.push_timer(PushTimer {
+                card_id: card_id.clone(),
                 revision,
-                fields,
+                total_ms,
+                remaining_ms,
+                running,
             })?;
             let accepted_revision = ack.revision.ok_or(DeviceError::UnexpectedMessage)?;
             if json {
                 println!(
-                    "{{\"ok\":true,\"widget_id\":{},\"revision\":{accepted_revision}}}",
-                    json_string(&widget_id)
+                    "{{\"ok\":true,\"card_id\":{},\"revision\":{accepted_revision}}}",
+                    json_string(&card_id)
                 );
             } else {
-                println!("pushed {widget_id} revision {accepted_revision}");
+                println!("pushed {card_id} timer revision {accepted_revision}");
             }
         }
         CliCommand::Provision { config } => {
@@ -645,8 +608,6 @@ fn ota_state_name(state: OtaState) -> &'static str {
 fn exit_code(error: &AppError) -> i32 {
     match error {
         AppError::Usage(_) => 2,
-        AppError::Config(_) => 3,
-        AppError::Provider(_) => 4,
         AppError::Device(DeviceError::NoDevice) => 10,
         AppError::Device(DeviceError::Timeout) => 11,
         AppError::Device(DeviceError::VersionMismatch(_)) => 12,
@@ -661,7 +622,7 @@ fn main() {
         env::args().nth(1).as_deref(),
         Some("help" | "--help" | "-h")
     ) {
-        println!("{USAGE}\n\n{}", m2::M2_USAGE);
+        println!("{USAGE}");
         return;
     }
     let json = env::args().any(|argument| argument == "--json");
@@ -672,7 +633,7 @@ fn main() {
             if !error.to_string().is_empty() {
                 eprintln!("error: {error}\n");
             }
-            eprintln!("{USAGE}\n\n{}", m2::M2_USAGE);
+            eprintln!("{USAGE}");
         } else {
             eprintln!("error: {error}");
         }
@@ -738,9 +699,9 @@ mod tests {
     }
 
     #[test]
-    fn provision_rejects_push_data_options() {
+    fn provision_rejects_push_timer_options() {
         let options = CommandOptions {
-            widget_id: Some("clock".into()),
+            card_id: Some("clock".into()),
             offset_minutes: Some(0),
             ..CommandOptions::default()
         };

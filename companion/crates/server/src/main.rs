@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use server::firmware::FirmwareCatalog;
-use server::plugin_registry::{PluginLoadFailure, PluginRegistry};
 use server::{ServerState, app};
 
 // Loopback, not `0.0.0.0`: per `deploy/README.md` §4, a Cloudflare Tunnel is
@@ -23,7 +22,6 @@ const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:8443";
 // reason.
 const DEFAULT_FIRMWARE_DIR: &str = "/var/lib/deskmate/firmware";
 const DEFAULT_CONFIG_DIR: &str = "/var/lib/deskmate/configs";
-const DEFAULT_PLUGINS_DIR: &str = "/var/lib/deskmate/plugins";
 
 const ENV_GOOGLE_CLIENT_ID: &str = "DESKMATE_GOOGLE_CLIENT_ID";
 const ENV_GOOGLE_CLIENT_SECRET: &str = "DESKMATE_GOOGLE_CLIENT_SECRET";
@@ -265,15 +263,6 @@ async fn main() {
          unspecified under launchd/systemd",
         config_dir.display()
     );
-    let plugins_dir = std::env::var("DESKMATE_PLUGINS_DIR")
-        .map_or_else(|_| PathBuf::from(DEFAULT_PLUGINS_DIR), PathBuf::from);
-    assert!(
-        plugins_dir.is_absolute(),
-        "DESKMATE_PLUGINS_DIR must be an absolute path (got {}); a relative \
-         path resolves against the process's working directory, which is \
-         unspecified under launchd/systemd",
-        plugins_dir.display()
-    );
     let firmware_version = required_firmware_version(std::env::var("DESKMATE_FIRMWARE_VERSION"));
     let admin_token = std::env::var("DESKMATE_ADMIN_TOKEN")
         .expect("DESKMATE_ADMIN_TOKEN must be set -- see deploy/README.md");
@@ -281,14 +270,13 @@ async fn main() {
     let session_signer = google_oauth
         .as_ref()
         .map(|_| server::oauth::session::SessionSigner::from_admin_token(&admin_token));
-    let (plugins, plugin_load_failures) = load_plugins(&plugins_dir);
 
-    let state = ServerState::new_with_plugins(
+    // `config_dir` is cloned because the integration store below opens against
+    // it after the state has taken ownership.
+    let state = ServerState::new(
         admin_token,
         FirmwareCatalog::new(firmware_dir, firmware_version),
         config_dir.clone(),
-        Arc::new(plugins),
-        plugin_load_failures,
     );
 
     if let Some(oauth) = google_oauth {
@@ -337,62 +325,6 @@ fn required_firmware_version(value: Result<String, std::env::VarError>) -> Strin
         "DESKMATE_FIRMWARE_VERSION must be set to the published image's exact \
          firmware/version.txt value -- see deploy/README.md",
     )
-}
-
-fn load_plugins(directory: &std::path::Path) -> (PluginRegistry, Vec<PluginLoadFailure>) {
-    let exists = directory.try_exists().unwrap_or_else(|error| {
-        tracing::error!(
-            path = %directory.display(),
-            %error,
-            "plugins directory could not be inspected"
-        );
-        panic!(
-            "plugins directory {} could not be inspected: {error}",
-            directory.display()
-        );
-    });
-    if !exists {
-        tracing::warn!(
-            path = %directory.display(),
-            "plugins directory does not exist; starting with an empty plugin registry"
-        );
-        return (PluginRegistry::empty(), Vec::new());
-    }
-
-    let (registry, failures) = PluginRegistry::load(directory).unwrap_or_else(|error| {
-        tracing::error!(
-            path = %directory.display(),
-            error = ?error,
-            "plugin registry failed to load"
-        );
-        panic!(
-            "plugin registry failed to load from {}: {error}",
-            directory.display()
-        );
-    });
-    for failure in &failures {
-        tracing::warn!(
-            plugin_id = %failure.id,
-            error = ?failure.error,
-            message = %failure.error,
-            "plugin failed to load"
-        );
-    }
-    if registry.is_empty() {
-        tracing::warn!(
-            path = %directory.display(),
-            failure_count = failures.len(),
-            "no plugins loaded; plugin cards will be refused until the registry is populated"
-        );
-    } else {
-        tracing::info!(
-            path = %directory.display(),
-            plugin_count = registry.len(),
-            failure_count = failures.len(),
-            "plugin registry loaded"
-        );
-    }
-    (registry, failures)
 }
 
 /// Resolves once `SIGINT` (Ctrl-C) or, on Unix, `SIGTERM` is received, so

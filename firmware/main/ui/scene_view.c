@@ -1373,8 +1373,6 @@ void scene_view_tick_bindings(const scene_binding_context_t *context)
      * optimistic action four times a second. */
     s_state->binding.unix_seconds = context->unix_seconds;
     s_state->binding.utc_offset_minutes = context->utc_offset_minutes;
-    s_state->binding.field = context->field;
-    s_state->binding.field_ctx = context->field_ctx;
     s_state->binding.timer_active = context->timer_active;
     scene_timer_snapshot_t current = scene_timer_snapshot_at(
         s_state->timer, lv_tick_get());

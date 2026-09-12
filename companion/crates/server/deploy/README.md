@@ -40,11 +40,6 @@ sudo $EDITOR /etc/deskmate/server.env   # set token and published firmware versi
 downgrade. The supplied systemd unit and launchd job already source this environment
 file, so no second unit-local value should be added.
 
-`DESKMATE_PLUGINS_DIR` is optional and defaults to `/var/lib/deskmate/plugins`
-(`main.rs`'s `DEFAULT_PLUGINS_DIR`, line 26); it must be absolute. That directory holds
-**content**, not code: one subdirectory per plugin id, each with a `manifest.toml`
-and its declared assets. It is deployed separately from the binary -- see §6.
-
 **`DESKMATE_ADMIN_TOKEN` is the whole V2 auth story for the Mac-facing
 surface** -- the explicit stand-in for V3's accounts (spec §5.2). Generate it
 with `openssl rand -hex 32` and paste it straight into the file; never type it
@@ -69,7 +64,7 @@ device's firmware check, which is useful while diagnosing updates.
 
 Provisioned identities survive normal process and host restarts. The registry
 lives at `$DESKMATE_CONFIG_DIR/device-identities.json`, alongside the per-device
-config files (currently [schema v6](../../../../docs/config/v6.md); legacy v4/v5 files
+config files (currently [schema v9](../../../../docs/config/v9.md); legacy v4-v8 files
 are migrated on load). It is a versioned JSON document containing each
 `dev-NNNN` id and the lowercase SHA-256 digest of that device's bearer token.
 Its historical schema-v1 field `next_sequence` stores the **last issued**
@@ -231,23 +226,18 @@ LAN address (`192.168.8.20`), which is unreachable from any other network, so us
 Tailscale address explicitly.
 
 **Export from `git archive HEAD`, never from the working tree.** A dirty tree deploys code
-nobody can reproduce. The export needs `tools/fonts/` as well as `companion/`, because the
-server does `include_bytes!("../../../../tools/fonts/...")` for the pinned rasterizer faces
-(`rasterizer.rs:23-24`, `plugin_host.rs:329`) -- a `companion/`-only export stopped
-building at stage 4.
+nobody can reproduce.
 
 ```sh
 # On the Mac, from the repository root:
 rm -rf /tmp/deskmate-deploy && mkdir -p /tmp/deskmate-deploy
-git archive HEAD companion tools/fonts | tar -x -C /tmp/deskmate-deploy
+git archive HEAD companion | tar -x -C /tmp/deskmate-deploy
 
 # Sources only. `target/` on the VM is root-owned and left by the previous deploy:
 # keeping it turns a cold build into roughly 40 seconds, so the exclude below is what
 # protects it from --delete. Never drop it.
 rsync -a --delete --exclude 'target/' \
   /tmp/deskmate-deploy/companion/ rodion@100.93.166.123:~/deskmate-build/companion/
-rsync -a --delete \
-  /tmp/deskmate-deploy/tools/fonts/ rodion@100.93.166.123:~/deskmate-build/tools/fonts/
 ```
 
 Build and install on the VM. The container image must match
@@ -260,51 +250,38 @@ ssh rodion@100.93.166.123
 cd ~/deskmate-build
 sudo -n docker run --rm -v "$PWD":/work -w /work/companion rust:1.98-bookworm \
   cargo build --release -p server
-sudo -n cp -a /usr/local/bin/deskmate-server "/usr/local/bin/deskmate-server.bak-$(date +%Y%m%d)"
+sudo -n cp -a /usr/local/bin/deskmate-server "/usr/local/bin/deskmate-server.bak-$(date -u +%Y%m%dT%H%M%SZ)"
 sudo -n install -m 0755 companion/target/release/server /usr/local/bin/deskmate-server
 ```
 
-**Deploy plugin content after the binary, never before.** Every manifest table is
-`deny_unknown_fields`, so a manifest using keys the running binary does not know fails to
-load and the plugin drops out of the registry into `load_failures` -- its cards go dark.
-Sync into the directory `DESKMATE_PLUGINS_DIR` names, **without** `--delete`: the live
-directory may hold ids that are not in the repository (session fixtures such as
-`svg-live-clock`), and deleting them is not part of a redeploy.
+The backup name carries a **UTC timestamp, not just a date**, because more than one
+redeploy a day is now normal and `cp -a` overwrites silently: a date-only name meant the
+second deploy of a day destroyed the first one's rollback target while reporting success.
+It also stamps UTC deliberately — the VM runs UTC while the Mac driving the deploy may not,
+so a local date can name a backup for the wrong day. Note the two same-day names already on
+the box (`.bak-20260910`, `.bak-20260910-rle`) are the scar from that.
 
-```sh
-# From the Mac, from the same export:
-rsync -a /tmp/deskmate-deploy/companion/plugins/ rodion@100.93.166.123:~/deskmate-plugins/
-ssh rodion@100.93.166.123 'sudo -n rsync -a ~/deskmate-plugins/ /var/lib/deskmate/plugins/'
-```
-
-Restart and read the registry line:
+Restart and read the service log:
 
 ```sh
 ssh rodion@100.93.166.123
 sudo -n systemctl restart deskmate-server
-sudo -n journalctl -u deskmate-server -n 5 --no-pager   # plugin registry loaded ... failure_count=0
+sudo -n journalctl -u deskmate-server -n 5 --no-pager
 ```
 
-A non-zero `failure_count` means a manifest the running binary cannot parse; an empty
-registry logs `no plugins loaded; plugin cards will be refused ...` instead. Read the
-failures through `GET /v1/plugins`'s `load_failures` before touching anything else.
-
-**Verify the admin surface without ever printing the token.** Read it into a shell
-variable and use it only in the header; never `echo` it, never pass it on a command line
-in a shell whose history is kept.
-
-```sh
-ssh rodion@100.93.166.123 'bash -s' <<'REMOTE'
-set -eu
-TOKEN=$(sudo -n grep "^DESKMATE_ADMIN_TOKEN=" /etc/deskmate/server.env | cut -d= -f2-)
-BIND=$(sudo -n grep "^DESKMATE_SERVER_BIND=" /etc/deskmate/server.env | cut -d= -f2-)
-curl -s -H "Authorization: Bearer $TOKEN" "http://$BIND/v1/plugins" | python3 -m json.tool
-unset TOKEN
-REMOTE
-```
-
-**Redeploy whenever the config schema or the manifest contract moves.** The server
+**Redeploy whenever the config schema moves.** The server
 compiles its own `CURRENT_SCHEMA_VERSION` in, so a schema bump on the app side does
 nothing to a live deployment until the binary is replaced; the symptom is a typed
 "schema version N is not supported; expected M" on the first save, which reads like a
 config problem rather than a deploy problem.
+
+### Picture-card rollout
+
+The order is load-bearing:
+
+1. **Redeploy the server binary first.** It compiles its own
+   `CURRENT_SCHEMA_VERSION`, so until the binary moves every v9 save is refused with the
+   typed `schema version 9 is not supported; expected 8` error.
+2. Mint the image source and capture its plaintext token. It is shown once.
+3. Point the producer at the picture webhook and send its PNG.
+4. Save the v9 config that names the source.

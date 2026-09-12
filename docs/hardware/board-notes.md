@@ -4626,6 +4626,10 @@ rebuilt too and **reproduces the shipping image byte-identically** (sha
 includable case is byte-identical, both orientations, no tolerance. The log is at
 `docs/hardware/media/2026-09-06-task7/framebuffer_diff-2026-09-06.log`.
 
+Post-manifest-removal update (2026-09-11): that remains the historical observation. The
+current inventory's unobserved software prediction is **78 total / 8 excluded / 70
+identical**; the next hardware session must run the matrix fresh.
+
 **The predicted split was 96/8/88; the first hardware run corrected it to 96/10/86 by
 surfacing three test-harness fidelity issues — none a firmware or renderer defect:**
 
@@ -4668,7 +4672,8 @@ surfacing three test-harness fidelity issues — none a firmware or renderer def
 
 The three fixes are test-only (`cases.rs`, `examples/framebuffer_diff.rs`) — no firmware,
 protocol, or config change — so no OTA re-verification is owed. The harness unit test now
-pins the 96/10/86 split with the per-reason exclusion breakdown.
+pins the historical 96/10/86 split with the per-reason exclusion breakdown; the current
+post-removal test pins the unobserved 78/8/70 inventory instead.
 
 **Restore.** Re-provisioned networked (`dev-0005`, WiFi `Slate7Legacy`, offset 240,
 plaintext token from `pass`), then full-flashed the verified release image (sha
@@ -4738,3 +4743,226 @@ attempts) — likely internal-RAM churn on repeated TLS setup; worth a follow-up
 distinct from the normal outage path; (2) the device briefly displayed an apparently
 wrong wall-clock time during the outage (standalone clock ~6 h off real local) — the VM
 clock is NTP-synced and correct now, so glance at the TimeSync/offset path later.
+
+## Cable pull with the Mac app running — PASSED 2026-09-09
+
+Verification for `f976f42` ("bound every wait on the device session worker"), the fix
+for the defect where a device that disappeared from under an open serial fd wedged the
+whole companion app and made saving to the server impossible. Host-side change only —
+no firmware was rebuilt or flashed, so no OTA re-verification is owed. Board `dev-0005`
+on `v2.0.0-raster1`, networked tier, server `deskmate.rodi.one`.
+
+**Method.** Attach the board over USB with the app running; save a config change to the
+server; pull the cable; then re-check the app. The runtime worker was sampled with
+`sample <pid>` throughout, because the failure signature is a stack, not a log line: the
+broken build parks 100% of samples at one `run_runtime` offset inside
+`SerialRuntimeDevice::status -> DeviceSession::request -> recv`, while a healthy worker
+shows several distinct offsets as it cycles.
+
+| Check | Observed | Result |
+| --- | --- | --- |
+| App connects over USB in networked tier | tray "Device: Connected" | PASS |
+| Save to server, cable attached | `dev-0005.json` 09:56:04Z, `show_seconds: true` | PASS |
+| Cable pulled 13:57:04 local | node `/dev/cu.usbmodem1101` gone | — |
+| Worker at t+3/6/9 s after the pull | 4 distinct `run_runtime` offsets, **0** frames in `status` | PASS |
+| Runtime notices the disconnection | tray "Device: Standalone" | PASS |
+| Save to server, cable pulled | `dev-0005.json` 09:58:15Z, `show_seconds: false`, UI "Saved to the server" | PASS |
+| Quit with the cable pulled | **0.1 s** | PASS |
+| Config left as found | byte-identical to the pre-test copy | PASS |
+
+**Why the last two rows matter.** Before the fix the same quit hung for over 30 s and
+only completed when macOS finished tearing the device node down, because `Drop` joined a
+thread blocked in an uninterruptible read. And "Device: Standalone" is the visible proof
+that a stalled session reports `Transport(Disconnected)` rather than `Timeout`:
+app-core's `is_disconnect` does not count `Timeout`, so the wrong classification would
+have left the runtime holding a dead session and silently never reconnecting.
+
+**Not covered here.** Re-attaching the cable and confirming the app picks the device up
+again on a fresh session was not exercised; `SerialRuntimeDevice::connect` discards a
+stalled session and opens a new one, and that path has unit coverage but no board
+observation yet.
+
+## Picture cards on the panel — 2026-09-10
+
+First picture card drawn on `dev-0005`. Observed, not inferred: the loop rotated
+`clock -> plugin -> picture` at 50 s dwell across two full cycles with
+`card_errors: 0`, the picture holding its dwell each time.
+
+Getting there took five defects, each hidden behind the last, plus one stale
+binary. Recorded because four of them are the kind that recur.
+
+1. **A durable asset could not be compressed, in BOTH halves.** A 448x368 frame is
+   329,740 bytes, and at `MAX_ASSET_CHUNK_BYTES` (1920) that is 172 sequential
+   chunk round trips. It died at offset 161,280 -- exactly chunk 84. The host
+   hard-coded `ASSET_ENCODING_RAW` on the durable path and the firmware's durable
+   `AssetBegin` ignored `encoding` outright; only the volatile tier ever
+   compressed. Picture cards chose durable for lifetime reasons (two PSRAM slots
+   cannot serve a loop) and nobody noticed durable also forfeited the compression
+   stage 4 added for exactly this cost.
+2. **The failure named the wrong card.** `record_plugin_asset_sync_refusals`
+   iterated plugin cards only, so a picture card's own transfer failure was
+   recorded against `plugin-2` -- a card that was fine -- and the picture card
+   reported nothing. That is why this presented as silence rather than a fault,
+   and it is what cost the session.
+3. **`AssetRelease` was budgeted like a message.** Its handler runs the mark-dead
+   scan and compacts the flash blob region, and a 330 KB frame makes that move far
+   more than the curated fonts ever did. It timed out at 2 s while the device
+   reported `dropped_responses`, `malformed_frames` and `crc_errors` all ZERO --
+   the reply was late, not lost. The many-round-trip chunk phase, which does no
+   bulk flash work, succeeded in the same pass; that is what ruled out a flaky
+   link.
+4. **The volatile-only rule was written in THREE places** -- `protocol`'s
+   `validate_asset_begin`, and the firmware's decode AND validate paths -- so
+   fixing one shipped `v2.0.0-durable1`, an image that ADVERTISED capability bit
+   10 while still refusing the transfers the bit promises. Same failure as bit 7
+   sitting defined-but-dark. The firmware test that looked like it pinned the rule
+   was decoding a fixture that omitted `AssetBegin` key 3, so the durable case
+   never reached the tier check at all.
+5. **The durable decode fed the passthrough header to the decoder.** The host
+   copies the 12-byte LVGL header verbatim and encodes only the pixel body; the
+   volatile path mirrors that by initialising the decoder at `bytes + 12`. The new
+   durable path did neither, and said so: `asset chunk decode failed`.
+
+**And the companion app is a third deployment boundary.** `/Applications/Deskmate.app`
+was a build from the previous day, so it compiled `CURRENT_SCHEMA_VERSION = 6`,
+could not read the v7 config the redeployed server held, and rendered no cards at
+all. That reads as a broken window rather than a stale binary. `docs/config/v7.md`
+now lists all three boundaries in order.
+
+**OTA and memory.** Three OTA downloads (`durable1`, `2`, `3`) each installed and
+rebooted in ~30 seconds, on a device that only re-checks firmware at boot.
+Internal RAM stayed BYTE-FLAT across every build -- DIRAM 203,867, `.bss` 87,104,
+`.data` 23,128, IRAM 16,384/16,384 with 0 remaining -- verified before and after
+on the same tree rather than against a remembered number. That is because the
+protocol context is `heap_caps_calloc`'d from PSRAM, so the decoder state it
+gained costs no static RAM. Flat memory has now predicted a clean download five
+times; it is still not a law, and the check stays.
+
+**`PROTOCOL_CURRENT_CAPABILITIES` is now 2027** (bit 10, `DurableAssetEncoding`,
+`+1024`). Bit 9 could not carry the promise: a deployed bit-9 build writes durable
+wire bytes to flash verbatim, so compressing without a new bit would have stored
+compressed bytes as pixels on every device in the fleet.
+
+## Protocol v2 — OWED, not yet observed (branch `refactor/wave-c-protocol-v2`)
+
+**Nothing in this section has been run on hardware.** It is the stub the Wave C plan asks
+for: what a session must observe before protocol v2 is trusted, written down while the
+reasons are fresh.
+
+`refactor/wave-c-protocol-v2` was **merged to `main` on 2026-09-12** by owner direction,
+ahead of this session. **It is not deployed, and the server must not be redeployed until
+the board is flashed** -- the live binary must keep running its pre-v2 build until then,
+because a v2 server cannot talk to the v1 firmware on `dev-0005` at all.
+
+### Why an on-board check is mandatory here
+
+Firmware statics moved. Measured before and after on the same tree:
+
+| | Before (2026-09-05 cleanup) | After protocol v2 | Delta |
+|---|---:|---:|---:|
+| `.bss` | 87,104 | 87,000 | **−104** |
+| `.data` | 23,128 | 23,128 | 0 |
+| DIRAM total | 203,891 | 203,763 | −128 |
+| IRAM | 16,384 / 16,384, 0 remaining | 16,384 / 16,384, 0 remaining | 0 |
+
+**−104 bytes of `.bss` is within one byte of the ~105 bytes that broke OTA downloads in
+`3f2aa03` with every test green.** That failure was a memory-layout shift, not a capacity
+problem, and a shrink moves layout exactly as a growth does. Treat this as the same class
+of hazard, and do not read "it got smaller" as reassurance.
+
+Where the 104 bytes went: `protocol_device_event_t` lost its second 33-byte id array and
+`carousel_binding_t` lost three of its six, so `device_event_queue_t` fell from 616 to 552
+bytes (the host test prints the figure) and `protocol_task`'s binding shrank with it. The
+per-template field registry (`core/template_fields.c`) and `widget_model`'s field state
+went entirely.
+
+### The rollout order is NOT the usual one, and getting it wrong bricks the link
+
+Protocol v2 is **not additive**. A v2 server and a v1 device do not half-work: the frame
+envelope's version byte makes every frame `VersionMismatch` in both directions. So the
+device must be flashed **first**, over the cable, and the server redeployed second.
+Between the two the device is unreachable from the live server — that window is expected,
+not a fault.
+
+1. `idf.py -C firmware flash` the v2 image over USB. **The version string is
+   `v2.1.0-proto2`**, bumped from `v2.0.0-durable3` on 2026-09-12 precisely so this image
+   is not published under a string an earlier, different image already used — the OTA
+   refusal keys on the string, not on image content, so a reused one can never be
+   corrected. `FirmwareCatalog::check` is string equality and offers its version in either
+   direction, so the catalog will revert the board within a minute unless step 2 moves
+   `DESKMATE_FIRMWARE_VERSION` to `v2.1.0-proto2` as well.
+2. Redeploy the server (the merge already happened, 2026-09-12), with
+   `DESKMATE_FIRMWARE_VERSION=v2.1.0-proto2` and the matching image in the firmware
+   directory. A server built before this change speaks v1 and cannot talk to the flashed
+   device at all -- which is also why the live binary must stay on its pre-v2 build until
+   step 1 is done.
+3. Verify the link comes back, then run the checks below.
+
+### What the session must observe
+
+- [ ] **The OTA download.** The check this whole section exists for. Publish a second v2
+      image and watch it download, install and survive the rollback window.
+- [ ] **Capabilities read 2016**, by name, with no unknown bits. Bits 0-4 are retired;
+      a device still advertising them is running pre-v2 firmware.
+- [ ] **A card face draws** at 270° and 90° — the scene path is unchanged, so this is a
+      regression check, not new coverage.
+- [ ] **A pomodoro counts down between pushes.** `PushTimer` replaced the field bag; the
+      `timer.*` bindings must still tick locally with no host traffic.
+- [ ] **A tap reports one card id.** `DeviceEvent` lost its second identifier; confirm a
+      tap and a swipe both reach the host and act on the right card.
+- [ ] **`framebuffer_diff` on target.** The last observed split was `96 total / 10
+      excluded / 86 identical` (2026-09-06). That matrix is gone: Wave A retired the three
+      orphan faces with the template oracle (−34 rows) and schema v9 removed the curated
+      plugins (−18). The software inventory is now **44 rows**, pinned by
+      `gate_b_inventory_is_the_real_counted_split_not_an_assumed_one`. Protocol v2 then
+      closed the four `field.*` exclusions — there is no field namespace to fall outside
+      of — leaving **one** exclusion, the `progress-ring--running-mid-countdown` pair,
+      which is a push-to-capture timing race no wire change can fix. So the expected split
+      is **`44 total / 2 excluded / 42 identical / 0 differing`**. That is a software
+      prediction; run it fresh rather than trusting it.
+
+Software gates that are green on this branch, and what they do not cover: the full
+companion workspace set, `make -C firmware/host_tests clean test` and `sanitize`, and
+`idf.py -C firmware build`. None of them can see an OTA layout failure. That is the whole
+lesson of `3f2aa03`.
+
+### The server half is DEPLOYED as of 2026-09-11 21:36 UTC — the board is now the missing half
+
+Deployed by owner direction (*"deploy as well"*), ahead of the flash, which inverts the
+order the section above prescribes. The consequence is the documented one and it is now
+the live state: **`deskmate.rodi.one` speaks protocol v2 and `dev-0005` is still flashed
+with v1, so the two cannot talk at all.**
+
+What was deployed, from `31e9042` via `git archive HEAD` (never the working tree):
+
+| | |
+|---|---|
+| binary | built in `rust:1.98-bookworm` on docker-vm, 17.4 s against the retained `target/` |
+| rollback target | `/usr/local/bin/deskmate-server.bak-20260911T213610Z` |
+| env backup | `/etc/deskmate/server.env.bak-20260911T213610Z` |
+| `DESKMATE_FIRMWARE_VERSION` | `v2.0.0-durable3` → **`v2.1.0-proto2`** |
+| published image | `/var/lib/deskmate/firmware/v2.1.0-proto2.bin`, sha256 `34484a79e8a9e8ae…`, byte-identical to the local build |
+| verified | `GET /v1/firmware/v2.1.0-proto2.bin` → 200, 1,593,984 bytes through the tunnel; `/v1/device/link` → 401 unauthenticated |
+
+**Observed, not inferred:** `dev-0005` was connected and reporting
+`current=v2.0.0-durable3` at 21:26:04, the restart closed its link at 21:36:18, and it has
+not reconnected since. Whether that is the protocol mismatch, a widening backoff, or the
+board simply being powered off **cannot be told apart from the server side** — the log
+records no link attempt at all, and a board at rest looks identical. Do not write this up
+as a confirmed mismatch observation; confirm it at the board.
+
+**Rollback, if the panel is needed before the flash session** — both halves, together:
+
+```sh
+ssh rodion@100.93.166.123
+sudo -n cp -a /usr/local/bin/deskmate-server.bak-20260911T213610Z /usr/local/bin/deskmate-server
+sudo -n cp -a /etc/deskmate/server.env.bak-20260911T213610Z /etc/deskmate/server.env
+sudo -n systemctl restart deskmate-server
+```
+
+The env file must go back too: a pre-v2 binary with `DESKMATE_FIRMWARE_VERSION=v2.1.0-proto2`
+would offer a v1 device an image it cannot run.
+
+**What the flash session still owes is unchanged** — every checkbox above, with the OTA
+download the one that matters. Step 2 of the rollout order is already done; the session is
+now step 1 and steps 3-5.

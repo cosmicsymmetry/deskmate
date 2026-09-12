@@ -1,14 +1,18 @@
-//! SSRF egress guard for outbound plugin data fetches (spec `docs/plugin
-//! manifest` §5: "Deny RFC1918, loopback, link-local, and
-//! `169.254.169.254`; resolve-then-pin against DNS rebinding; cap size,
-//! time, and redirects.").
+//! SSRF egress guard for the server's one outbound call: the OAuth token
+//! endpoint.
 //!
-//! The render host is the owner's homelab, alongside unrelated services
-//! behind the same private network. A plugin data source is an
-//! owner-supplied URL that this process fetches on the plugin's behalf; an
-//! SSRF here would let a malicious or compromised plugin reach those
-//! neighbours (or the cloud metadata endpoint, if this ever runs on a
-//! cloud VM). This module is the only place that is allowed to decide
+//! This module was written for plugin data fetches -- owner-supplied URLs the
+//! server fetched on a plugin's behalf -- and schema v9 removed those. What
+//! survives is the credential path, and it is now bounded twice over: a
+//! positive allowlist of exactly one host ([`IDENTITY_HOST`]), and, behind it,
+//! the original address-level deny of RFC1918, loopback, link-local and
+//! `169.254.169.254` with resolve-then-pin against DNS rebinding.
+//!
+//! Both layers earn their place. The allowlist states the policy -- the server
+//! is a credential custodian and fetches no card content (revision spec §1) --
+//! while the address checks stop a DNS answer for that one permitted host from
+//! pointing the pinned connection at a homelab neighbour or, on a cloud VM, at
+//! the metadata endpoint. This module is the only place allowed to decide
 //! "yes, fetch that" and the only place that performs the fetch.
 //!
 //! # Why hostname validation alone is not enough
@@ -16,7 +20,7 @@
 //! Checking a URL's hostname and then handing the URL to an HTTP client is
 //! not sufficient: the client performs its own DNS lookup at connect time,
 //! and the answer can differ from whatever the guard saw a moment earlier
-//! (DNS rebinding). [`fetch`] instead resolves each host exactly once,
+//! (DNS rebinding). [`fetch_post_form`] instead resolves the host exactly once,
 //! validates every address that resolution returned, and then pins the
 //! HTTP client to that *specific validated address* via
 //! `reqwest::ClientBuilder::resolve`, which overrides reqwest's own
@@ -100,11 +104,7 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// individually could otherwise still run unboundedly long.
 pub const TOTAL_FETCH_BUDGET: Duration = Duration::from_secs(20);
 
-/// Maximum number of redirect hops followed before giving up. `0` means the
-/// first response must not be a redirect.
-pub const MAX_REDIRECTS: u8 = 5;
-
-/// Maximum response body size accepted from a plugin data source.
+/// Maximum response body size accepted from the token endpoint.
 pub const MAX_RESPONSE_BODY_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Why a fetch was refused. Every variant is meant to be safe to log and to
@@ -126,22 +126,20 @@ pub enum EgressError {
     /// DNS resolution for `host` failed or timed out.
     #[error("dns resolution failed for {host}: {detail}")]
     ResolutionFailed { host: String, detail: String },
-    /// Too many redirect hops.
-    #[error("too many redirects (limit {})", MAX_REDIRECTS)]
-    TooManyRedirects,
     /// The response body exceeded [`MAX_RESPONSE_BODY_BYTES`].
     #[error("response exceeded {limit}-byte cap")]
     ResponseTooLarge { limit: u64 },
     /// The fetch did not complete inside [`TOTAL_FETCH_BUDGET`].
     #[error("fetch exceeded {:?} time budget", TOTAL_FETCH_BUDGET)]
     Timeout,
-    /// A redirect response had a missing or unusable `Location` header.
-    #[error("bad redirect: {0}")]
-    BadRedirect(String),
     /// The underlying HTTP client reported an error (connect failure,
     /// protocol error, etc.).
     #[error("request failed: {0}")]
     Request(String),
+    /// The host is not [`IDENTITY_HOST`]. The server is a credential custodian,
+    /// not a content fetcher; see [`IDENTITY_HOST`].
+    #[error("host {host} is not the permitted identity host")]
+    HostNotPermitted { host: String },
 }
 
 /// Why an address is not globally-routable unicast, and therefore denied.
@@ -567,31 +565,6 @@ async fn resolve_and_pin(url: &Url) -> Result<(String, SocketAddr), EgressError>
     Ok((host, SocketAddr::new(ip, port)))
 }
 
-/// Counts redirect hops and fails the moment more than `max` have been
-/// followed. Used by [`fetch_inner`] instead of an inline loop counter so
-/// the cap is directly unit-testable, the same way [`BodyLimiter`] makes
-/// the size cap directly testable.
-struct RedirectBudget {
-    max: u8,
-    followed: u8,
-}
-
-impl RedirectBudget {
-    fn new(max: u8) -> Self {
-        Self { max, followed: 0 }
-    }
-
-    /// Call once per redirect hop actually followed. Errs on the hop that
-    /// would take the count past `max`.
-    fn consume(&mut self) -> Result<(), EgressError> {
-        if self.followed >= self.max {
-            return Err(EgressError::TooManyRedirects);
-        }
-        self.followed += 1;
-        Ok(())
-    }
-}
-
 /// A byte counter that fails the moment it would exceed `limit`, used to
 /// cap a response body while it is still streaming in rather than after
 /// the fact.
@@ -615,14 +588,14 @@ impl BodyLimiter {
     }
 }
 
-/// What one hop of [`fetch_inner`] needs from DNS resolution: given the
+/// What [`post_form_inner`] needs from DNS resolution: given the
 /// current URL, produce the `(host, SocketAddr)` to pin the connection to.
 ///
 /// Production always uses [`RealResolver`] (real DNS via [`resolve_and_pin`],
 /// hence real validation of every resolved address). Tests inject
 /// [`FixedAddrResolver`], which points the *connection* at a loopback
 /// wiremock while leaving `egress_guard` -- which still runs, unmodified, on
-/// every hop inside `fetch_inner` -- to validate the URL exactly as
+/// the POST path -- to validate the URL exactly as
 /// production does. This is what makes the redirect chain, the body cap and
 /// the total time budget testable end-to-end against a real HTTP server:
 /// the seam is DNS resolution, never the deny-list, so a loopback address is
@@ -645,51 +618,13 @@ impl HopResolver for RealResolver {
 /// 7b): [`fetch`] previously returned only `Vec<u8>`, discarding status
 /// entirely, which made a 503 and a 200 indistinguishable to every caller
 /// -- exactly what let a transient server error masquerade as either a
-/// permanent parse failure or, worse, a successful response. Redirect
-/// statuses never reach here: `fetch_inner`'s loop follows them internally
-/// (up to [`MAX_REDIRECTS`]) and only returns once a non-redirect response
-/// is reached.
+/// permanent parse failure or, worse, a successful response. A redirect
+/// status now arrives here as itself: the POST client disables redirect
+/// following, and the token endpoint has no reason to issue one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchResponse {
     pub status: u16,
     pub body: Vec<u8>,
-}
-
-/// Fetches `url` under the egress guard: scheme/deny-list checks, DNS
-/// resolve-then-pin, a capped redirect chain (every hop re-validated and
-/// re-pinned from scratch), a capped response body, and an overall wall-clock
-/// budget. This is the only function in this module that touches the
-/// network.
-pub async fn fetch(url: &str) -> Result<FetchResponse, EgressError> {
-    fetch_with_resolver(url, &RealResolver).await
-}
-
-/// The whole of [`fetch`]'s behaviour -- including the total-budget
-/// wrapping -- parameterized over the DNS step *and* the budget itself, so
-/// tests exercise the exact same composition production uses rather than a
-/// parallel reimplementation of it. Production always calls this through
-/// [`fetch_with_resolver`], which fixes `total_budget` at
-/// [`TOTAL_FETCH_BUDGET`]; tests pass a millisecond-scale budget instead so
-/// the over-budget case is proven with a real (not virtual/paused) clock in
-/// milliseconds rather than tens of real seconds. [`REQUEST_TIMEOUT`] is
-/// unaffected either way -- it stays the real per-hop constant, comfortably
-/// larger than any test delay used against it.
-async fn fetch_with_budget(
-    url: &str,
-    resolver: &impl HopResolver,
-    total_budget: Duration,
-) -> Result<FetchResponse, EgressError> {
-    match tokio::time::timeout(total_budget, fetch_inner(url, resolver)).await {
-        Ok(result) => result,
-        Err(_elapsed) => Err(EgressError::Timeout),
-    }
-}
-
-async fn fetch_with_resolver(
-    url: &str,
-    resolver: &impl HopResolver,
-) -> Result<FetchResponse, EgressError> {
-    fetch_with_budget(url, resolver, TOTAL_FETCH_BUDGET).await
 }
 
 /// `reqwest::Error`'s `Display` is usually just the outermost frame (e.g.
@@ -736,10 +671,38 @@ fn build_pinned_client(
 /// token endpoint answering a POST with a redirect is not a flow to follow, so a
 /// 3xx is returned to the caller as-is (and treated as an error there) rather
 /// than re-issued as a POST or silently downgraded to GET.
+/// The server's only permitted outbound host.
+///
+/// `accounts.google.com` is deliberately absent: consent is a `302` the
+/// *browser* follows, not a request the server issues. `www.googleapis.com` is
+/// absent because the Calendar API is the *producer's* egress. Widening this
+/// constant means the server has started fetching something, which the
+/// revision spec §1 forbids -- three tests fail if it does.
+pub const IDENTITY_HOST: &str = "oauth2.googleapis.com";
+
+/// The production entry point, and therefore where the allowlist lives.
+///
+/// The check sits here rather than in [`post_form_inner`] because
+/// `post_form_inner` is shared with [`post_form_with_resolver`], which the
+/// resolver-injected tests drive against a loopback listener under a fake
+/// hostname. That path is private to this module and unreachable from
+/// production: [`crate::oauth::transport::EgressTransport`] is the only caller
+/// that reaches the network, and it comes through here.
+///
+/// [`egress_guard`] runs first so that a bad scheme or a literal denied
+/// address keeps reporting its own specific error rather than being masked by
+/// the host check.
 pub async fn fetch_post_form(
     url: &str,
     form: &[(&str, &str)],
 ) -> Result<FetchResponse, EgressError> {
+    let parsed = egress_guard(url)?;
+    let host = parsed.host_str().unwrap_or_default();
+    if host != IDENTITY_HOST {
+        return Err(EgressError::HostNotPermitted {
+            host: host.to_owned(),
+        });
+    }
     post_form_with_resolver(url, &RealResolver, form).await
 }
 
@@ -771,47 +734,6 @@ async fn post_form_inner(
     let status = response.status().as_u16();
     let body = read_capped_body(response).await?;
     Ok(FetchResponse { status, body })
-}
-
-async fn fetch_inner(url: &str, resolver: &impl HopResolver) -> Result<FetchResponse, EgressError> {
-    let mut current = egress_guard(url)?;
-    let mut redirects = RedirectBudget::new(MAX_REDIRECTS);
-
-    loop {
-        let (host, pinned_addr) = resolver.resolve(&current).await?;
-
-        let client = build_pinned_client(&host, pinned_addr)?;
-
-        let response = client
-            .get(current.clone())
-            .send()
-            .await
-            .map_err(|error| EgressError::Request(describe_reqwest_error(&error)))?;
-
-        if response.status().is_redirection() {
-            redirects.consume()?;
-            let location = response
-                .headers()
-                .get(reqwest::header::LOCATION)
-                .ok_or_else(|| EgressError::BadRedirect("missing Location header".to_string()))?
-                .to_str()
-                .map_err(|_| {
-                    EgressError::BadRedirect("Location header is not valid UTF-8".to_string())
-                })?;
-            let next = current
-                .join(location)
-                .map_err(|error| EgressError::BadRedirect(error.to_string()))?;
-            // Re-run the full guard (scheme + literal-IP deny check) on the
-            // redirect target: a permitted host can redirect to
-            // 169.254.169.254, and this is what catches that.
-            current = egress_guard(next.as_str())?;
-            continue;
-        }
-
-        let status = response.status().as_u16();
-        let body = read_capped_body(response).await?;
-        return Ok(FetchResponse { status, body });
-    }
 }
 
 async fn read_capped_body(mut response: reqwest::Response) -> Result<Vec<u8>, EgressError> {
@@ -1004,6 +926,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_calendar_api_host_is_not_reachable_from_the_server() {
+        // www.googleapis.com is the PRODUCER's egress, never the server's. If
+        // this ever stops failing, the server has become a content fetcher
+        // again, which the revision spec §1 forbids outright.
+        let error = super::fetch_post_form(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            &[],
+        )
+        .await
+        .expect_err("the Calendar API must not be reachable from the server");
+        assert!(matches!(error, EgressError::HostNotPermitted { .. }));
+    }
+
+    #[tokio::test]
+    async fn the_consent_host_is_not_reachable_from_the_server() {
+        // accounts.google.com is a 302 the BROWSER follows, not a fetch the
+        // server makes, so it has no business on the allowlist.
+        let error = super::fetch_post_form("https://accounts.google.com/o/oauth2/v2/auth", &[])
+            .await
+            .expect_err("the consent host must not be reachable from the server");
+        assert!(matches!(error, EgressError::HostNotPermitted { .. }));
+    }
+
+    #[tokio::test]
+    async fn an_arbitrary_host_is_not_reachable_from_the_server() {
+        let error = super::fetch_post_form("https://example.invalid/token", &[])
+            .await
+            .expect_err("only the identity host is permitted");
+        assert!(matches!(error, EgressError::HostNotPermitted { .. }));
+    }
+
+    #[tokio::test]
+    async fn the_identity_host_passes_the_allowlist() {
+        // Asserts only that the ALLOWLIST admits it. Resolution and transport
+        // may fail offline; anything other than HostNotPermitted means the host
+        // cleared the check, which is what is under test.
+        let outcome = super::fetch_post_form("https://oauth2.googleapis.com/token", &[]).await;
+        assert!(!matches!(
+            outcome,
+            Err(EgressError::HostNotPermitted { .. })
+        ));
+    }
+
+    #[tokio::test]
     async fn post_form_rejects_a_non_http_scheme() {
         let error = super::fetch_post_form("ftp://example.com/token", &[])
             .await
@@ -1104,53 +1070,20 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn redirect_budget_allows_exactly_max_redirects_hops() {
-        let mut budget = RedirectBudget::new(MAX_REDIRECTS);
-        for hop in 0..MAX_REDIRECTS {
-            assert!(budget.consume().is_ok(), "hop {hop} should be permitted");
-        }
-    }
-
-    #[test]
-    fn redirect_budget_rejects_one_hop_past_max_redirects() {
-        let mut budget = RedirectBudget::new(MAX_REDIRECTS);
-        for _ in 0..MAX_REDIRECTS {
-            budget.consume().expect("hops up to the cap are permitted");
-        }
-        assert!(matches!(
-            budget.consume(),
-            Err(EgressError::TooManyRedirects)
-        ));
-    }
-
-    // --- The redirect-target-is-re-validated-in-URL-space check that never
-    // needed a network. Kept: it pins that `Url::join` resolves a relative
-    // Location the way `fetch_inner` needs it to. ---
-
-    #[test]
-    fn a_relative_redirect_target_resolves_against_its_base() {
-        let base = Url::parse("https://example.com/a/start").unwrap();
-        let next = base.join("../b/next").unwrap();
-        assert_eq!(next.as_str(), "https://example.com/b/next");
-        assert!(egress_guard(next.as_str()).is_ok());
-    }
-
-    // --- Fix round 1, item 3: fetch_inner had zero coverage, and the two
-    // tests below reimplemented its logic instead of driving it. A denied
-    // redirect target and an over-budget total time can now be proven
-    // through the actual redirect loop / timeout wrapper against a real
-    // loopback server, via `FixedAddrResolver` -- which swaps out only the
-    // DNS step. `egress_guard` still runs, unmodified, on every hop inside
-    // `fetch_inner`. ---
-
-    /// Always resolves to a caller-supplied loopback address, whatever host
-    /// the URL names. Used only so `fetch_inner`'s redirect chain, body cap
-    /// and timeout wrapper can be driven against a real local HTTP server:
-    /// a loopback address could never pass `egress_guard`/`resolve_and_pin`
-    /// for real, so this is the one deliberate seam, not a weakening of the
-    /// deny list itself (which still runs on every hop's URL exactly as in
-    /// production).
+    /// The credential-bearing POST path had no test that reached
+    /// `build_pinned_client`: both existing POST tests fail inside
+    /// `egress_guard` first, and `post_form_with_resolver` -- the seam that
+    /// exists so this path can be driven at all -- had no caller.
+    ///
+    /// This drives it end to end against a real loopback server. Replacing
+    /// `build_pinned_client(&host, pinned_addr)?` in `post_form_inner` with a
+    /// plain `reqwest::Client::new()` fails here, because nothing would then
+    /// map `token.invalid` onto the listener. That single substitution would
+    /// also drop `.no_proxy()` and the redirect policy from the one request
+    /// that carries the client secret and the refresh token.
+    /// Test-only resolver that swaps out DNS alone: the URL keeps its fake
+    /// hostname (so `Host:` and TLS naming stay honest) while the connection
+    /// is pointed at a loopback listener.
     struct FixedAddrResolver(SocketAddr);
 
     impl HopResolver for FixedAddrResolver {
@@ -1164,105 +1097,6 @@ mod tests {
         }
     }
 
-    /// Spawns a loopback server whose `/hop1` -> `/hop2` -> `/hop3` chain
-    /// each sleeps `hop_delay` before redirecting to the next, and `/hop3`
-    /// finally responds 200. Each hop's sleep is kept under
-    /// [`REQUEST_TIMEOUT`] individually so no single hop times out; the
-    /// point is their *sum*, which a caller picks to land on either side of
-    /// [`TOTAL_FETCH_BUDGET`].
-    async fn spawn_delayed_redirect_chain(hop_delay: Duration) -> SocketAddr {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind a loopback listener");
-        let addr = listener.local_addr().expect("listener has a local addr");
-        let router = axum::Router::new()
-            .route(
-                "/hop1",
-                axum::routing::get(move || async move {
-                    tokio::time::sleep(hop_delay).await;
-                    axum::response::Redirect::to("/hop2")
-                }),
-            )
-            .route(
-                "/hop2",
-                axum::routing::get(move || async move {
-                    tokio::time::sleep(hop_delay).await;
-                    axum::response::Redirect::to("/hop3")
-                }),
-            )
-            .route(
-                "/hop3",
-                axum::routing::get(move || async move {
-                    tokio::time::sleep(hop_delay).await;
-                    "done"
-                }),
-            );
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, router).await;
-        });
-        addr
-    }
-
-    #[tokio::test]
-    async fn fetch_times_out_when_cumulative_hop_delay_exceeds_the_total_budget() {
-        // Real (not paused/virtual) time throughout: mixing tokio's paused
-        // clock with genuine TCP I/O across two concurrently-running tasks
-        // (this test's client, the spawned axum server) turned out to be
-        // exactly as unreliable as its reputation -- an earlier version of
-        // this test used `#[tokio::test(start_paused = true)]` with 9-second
-        // hop delays and failed non-deterministically with the client's own
-        // per-hop request timeout firing before the paused clock had
-        // advanced the server's sleep, even though the sleep's deadline was
-        // provably sooner. Real, small (millisecond) delays sidestep the
-        // whole class of problem and are just as deterministic.
-        //
-        // `fetch_with_budget` (not `fetch_with_resolver`) lets this pass a
-        // millisecond-scale total budget rather than waiting out the real
-        // TOTAL_FETCH_BUDGET (20s); REQUEST_TIMEOUT stays the real 10s
-        // constant, unaffected, and is not at risk of firing here.
-        let hop_delay = Duration::from_millis(60);
-        let total_budget = Duration::from_millis(100);
-        assert!(hop_delay < REQUEST_TIMEOUT);
-        assert!(hop_delay * 3 > total_budget);
-        let addr = spawn_delayed_redirect_chain(hop_delay).await;
-        let url = format!("http://slow-chain.invalid:{}/hop1", addr.port());
-
-        let outcome = fetch_with_budget(&url, &FixedAddrResolver(addr), total_budget).await;
-
-        assert!(
-            matches!(outcome, Err(EgressError::Timeout)),
-            "expected Timeout, got {outcome:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn fetch_succeeds_through_a_redirect_chain_that_stays_under_the_total_budget() {
-        // 3 hops * 5ms is trivially under the real TOTAL_FETCH_BUDGET
-        // (20s), so this drives the exact production composition
-        // (`fetch_with_resolver`, hence `fetch`'s real constant) rather
-        // than a shrunk test-only budget, with no risk of running slow.
-        let hop_delay = Duration::from_millis(5);
-        let addr = spawn_delayed_redirect_chain(hop_delay).await;
-        let url = format!("http://fast-chain.invalid:{}/hop1", addr.port());
-
-        let outcome = fetch_with_resolver(&url, &FixedAddrResolver(addr)).await;
-
-        let response = outcome.expect("fetch should succeed");
-        assert_eq!(response.status, 200);
-        assert_eq!(response.body, b"done".to_vec());
-    }
-
-    /// The credential-bearing POST path had no test that reached
-    /// `build_pinned_client`: both existing POST tests fail inside
-    /// `egress_guard` first, and `post_form_with_resolver` -- the seam that
-    /// exists so this path can be driven at all -- had no caller.
-    ///
-    /// This drives it end to end against a real loopback server. Replacing
-    /// `build_pinned_client(&host, pinned_addr)?` in `post_form_inner` with a
-    /// plain `reqwest::Client::new()` fails here, because nothing would then
-    /// map `token.invalid` onto the listener. That single substitution would
-    /// also drop `.no_proxy()` and the redirect policy from the one request
-    /// that carries the client secret and the refresh token.
     #[tokio::test]
     async fn post_form_resolves_then_pins_and_sends_the_form() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1295,9 +1129,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_returns_the_response_status_for_a_non_2xx_response() {
+    async fn post_form_returns_the_response_status_for_a_non_2xx_response() {
         // Fix round 2, item 1: the status capture at the end of
-        // `fetch_inner` (`let status = response.status().as_u16();`) had
+        // `post_form_inner` (`let status = response.status().as_u16();`) had
         // no test at THIS level -- `plugin_provider.rs` uses deterministic
         // fake response sequences to prove status-before-parse and last-good
         // behavior. This drives the real guarded path (`fetch_with_resolver`,
@@ -1311,7 +1145,7 @@ mod tests {
         let addr = listener.local_addr().expect("listener has a local addr");
         let router = axum::Router::new().route(
             "/unavailable",
-            axum::routing::get(|| async {
+            axum::routing::post(|| async {
                 (
                     axum::http::StatusCode::SERVICE_UNAVAILABLE,
                     "service unavailable",
@@ -1323,7 +1157,7 @@ mod tests {
         });
         let url = format!("http://unavailable.invalid:{}/unavailable", addr.port());
 
-        let outcome = fetch_with_resolver(&url, &FixedAddrResolver(addr)).await;
+        let outcome = post_form_with_resolver(&url, &FixedAddrResolver(addr), &[]).await;
 
         let response = outcome.expect("a non-2xx response must still be a successful fetch");
         assert_eq!(response.status, 503);
@@ -1331,75 +1165,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_inner_denies_a_redirect_target_that_resolves_to_a_denied_address() {
-        // Distinct from the URL-space-only check above: this drives the
-        // REAL fetch_inner loop end to end -- resolver.resolve, the HTTP
-        // GET, RedirectBudget::consume, Location extraction, Url::join,
-        // and finally egress_guard running again on the joined URL -- via a
-        // server that actually issues the redirect, rather than
-        // hand-constructing the joined URL and calling egress_guard on it
-        // directly. A `fetch_inner` that dropped the re-validation call
-        // would return `Ok` here instead.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind a loopback listener");
-        let addr = listener.local_addr().expect("listener has a local addr");
-        let router = axum::Router::new().route(
-            "/start",
-            axum::routing::get(|| async {
-                axum::response::Redirect::to("http://169.254.169.254/secret")
-            }),
-        );
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, router).await;
-        });
-        let url = format!("http://redirect-test.invalid:{}/start", addr.port());
-
-        let outcome = fetch_inner(&url, &FixedAddrResolver(addr)).await;
-
-        assert!(
-            matches!(
-                outcome,
-                Err(EgressError::Denied {
-                    reason: DenyReason::CloudMetadata,
-                    ..
-                })
-            ),
-            "expected the metadata redirect target to be denied, got {outcome:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn fetch_inner_denies_a_redirect_chain_that_exceeds_max_redirects() {
-        // Fix round 2, item 1: a mutation that turned `redirects.consume()?`
-        // into `let _ = redirects.consume();` passed every prior test,
-        // because the longest redirect chain any test drove was 3 hops --
-        // well under MAX_REDIRECTS (5). A handler that redirects to itself
-        // forever is what actually exercises the cap: `fetch_inner` must
-        // give up after MAX_REDIRECTS hops, not loop indefinitely.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind a loopback listener");
-        let addr = listener.local_addr().expect("listener has a local addr");
-        let router = axum::Router::new().route(
-            "/loop",
-            axum::routing::get(|| async { axum::response::Redirect::to("/loop") }),
-        );
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, router).await;
-        });
-        let url = format!("http://self-redirect.invalid:{}/loop", addr.port());
-
-        let outcome = fetch_inner(&url, &FixedAddrResolver(addr)).await;
-
-        assert!(
-            matches!(outcome, Err(EgressError::TooManyRedirects)),
-            "expected TooManyRedirects, got {outcome:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn fetch_inner_enforces_the_response_body_cap_over_a_real_connection() {
+    async fn post_form_enforces_the_response_body_cap_over_a_real_connection() {
         // Exercises specifically the `content_length()` precheck in
         // `read_capped_body`: axum sets a real, honest Content-Length for a
         // fully-materialized `Vec<u8>` body, and that header alone is
@@ -1412,14 +1178,14 @@ mod tests {
         let addr = listener.local_addr().expect("listener has a local addr");
         let router = axum::Router::new().route(
             "/oversized",
-            axum::routing::get(move || async move { oversized }),
+            axum::routing::post(move || async move { oversized }),
         );
         tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
         });
         let url = format!("http://oversized.invalid:{}/oversized", addr.port());
 
-        let outcome = fetch_inner(&url, &FixedAddrResolver(addr)).await;
+        let outcome = post_form_inner(&url, &FixedAddrResolver(addr), &[]).await;
 
         assert!(
             matches!(
@@ -1433,7 +1199,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_inner_enforces_the_body_cap_against_a_server_that_never_declares_a_length() {
+    async fn post_form_enforces_the_body_cap_against_a_server_that_never_declares_a_length() {
         // Fix round 2, item 2: the case above alone left the streaming
         // `limiter.push` check unproven -- a mutation deleting it, alone,
         // still passed, because the `content_length()` precheck caught
@@ -1451,7 +1217,7 @@ mod tests {
         let addr = listener.local_addr().expect("listener has a local addr");
         let router = axum::Router::new().route(
             "/chunked-oversized",
-            axum::routing::get(move || async move {
+            axum::routing::post(move || async move {
                 let chunks: Vec<Result<Vec<u8>, std::io::Error>> =
                     vec![Ok(vec![0u8; cap]), Ok(vec![0u8; 1])];
                 axum::body::Body::from_stream(futures_util::stream::iter(chunks))
@@ -1465,7 +1231,7 @@ mod tests {
             addr.port()
         );
 
-        let outcome = fetch_inner(&url, &FixedAddrResolver(addr)).await;
+        let outcome = post_form_inner(&url, &FixedAddrResolver(addr), &[]).await;
 
         assert!(
             matches!(
@@ -1482,7 +1248,7 @@ mod tests {
     // reqwest's `.resolve()` override both connects to the pinned address
     // AND preserves the original hostname in the outgoing `Host` header.
     // This talks to `reqwest::Client` directly -- no `egress_guard`, no
-    // `fetch_inner`, nothing from this module's own deny logic -- so it
+    // `post_form_inner`, nothing from this module's own deny logic -- so it
     // pins reqwest's behaviour in isolation from everything this module
     // built on top of it. ---
 

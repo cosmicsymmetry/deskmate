@@ -223,6 +223,23 @@ impl Registry {
     /// Whether `device_id` belongs to a loaded or newly minted identity.
     /// Admin paths use this check before deriving a per-device config path,
     /// so an arbitrary URL segment never reaches the filesystem.
+    /// Every minted device id, sorted. Ids only -- a digest never leaves this
+    /// type, and the management surface reports presence, never credentials.
+    #[must_use]
+    pub fn device_ids(&self) -> Vec<String> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut ids: Vec<String> = state
+            .tokens
+            .iter()
+            .map(|record| record.device_id.clone())
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
     pub fn contains_device(&self, device_id: &str) -> bool {
         self.state
             .lock()
@@ -584,6 +601,23 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn device_ids_lists_every_minted_identity_and_no_digest() {
+        let registry = Registry::new();
+        let first = registry.mint().expect("mint");
+        let second = registry.mint().expect("mint");
+
+        let ids = registry.device_ids();
+
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&first.device_id));
+        assert!(ids.contains(&second.device_id));
+        // The listing exists for a dashboard, so assert what it must NOT carry.
+        let joined = ids.join(" ");
+        assert!(!joined.contains(&first.token));
+        assert!(!joined.contains(&second.token));
+    }
     use super::*;
 
     #[test]

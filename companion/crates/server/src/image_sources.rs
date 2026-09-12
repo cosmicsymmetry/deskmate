@@ -86,6 +86,19 @@ struct ImageSourceState {
     sources: Vec<SourceRecord>,
 }
 
+/// What the management surface shows about one image source. Carries no bytes
+/// and no credential -- only what a person needs to tell "the producer is
+/// broken" from "the integration needs reconnecting" (revision spec §7).
+// Consumed by `manage::view` in the next commit; the allow goes with it.
+#[allow(dead_code)]
+pub(crate) struct SourceSummary {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) has_frame: bool,
+    pub(crate) stale: bool,
+    pub(crate) last_push: Option<DateTime<Utc>>,
+}
+
 #[derive(Clone)]
 struct SourceRecord {
     id: String,
@@ -307,6 +320,27 @@ impl ImageSourceStore {
             bytes: Arc::clone(&frame.bytes),
             stale: is_stale(&source.recent_push_times, now),
         })
+    }
+
+    /// Liveness metadata for the management surface.
+    ///
+    /// Deliberately separate from [`ImageSourceStore::all_frames`], which
+    /// clones an `Arc` per frame for the push path: a dashboard that listed
+    /// sources through it would hold every canonical frame alive to render a
+    /// table of names.
+    #[allow(dead_code)]
+    pub(crate) fn summaries(&self, now: DateTime<Utc>) -> Vec<SourceSummary> {
+        self.lock()
+            .sources
+            .iter()
+            .map(|source| SourceSummary {
+                id: source.id.clone(),
+                name: source.name.clone(),
+                has_frame: source.frame.is_some(),
+                stale: is_stale(&source.recent_push_times, now),
+                last_push: source.recent_push_times.last().copied(),
+            })
+            .collect()
     }
 
     pub(crate) fn all_frames(&self, now: DateTime<Utc>) -> Vec<(String, SourceFrame)> {
@@ -579,6 +613,25 @@ fn valid_source_id(id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn summaries_report_liveness_without_carrying_frame_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ImageSourceStore::new(dir.path().to_path_buf()).expect("store");
+        let minted = store.mint("kitchen", 8).expect("mint");
+
+        let summaries = store.summaries(Utc::now());
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, minted.id);
+        assert_eq!(summaries[0].name, "kitchen");
+        assert!(!summaries[0].has_frame, "nothing has been pushed yet");
+        assert_eq!(summaries[0].last_push, None);
+        assert!(
+            !summaries[0].stale,
+            "a source with no push history has no deadline to be past"
+        );
+    }
     use std::fs;
 
     use app_core::config::MAX_IMAGE_SOURCES;

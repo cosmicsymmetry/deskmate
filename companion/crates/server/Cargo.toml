@@ -48,6 +48,11 @@ zeroize = { version = "=1.9.0", features = ["derive"] }
 
 [dev-dependencies]
 protocol = { path = "../protocol", features = ["test-support"] }
+# Lets `tests/producer_credentials.rs` assert POSITIVELY that what lands on
+# disk is SHA-256(token). Asserting only that the plaintext is absent is too
+# weak: a "digest" that copied the token's bytes verbatim would still be
+# hex-encoded on the way out, so the substring check never fires.
+sha2 = "0.10"
 tokio-tungstenite = "0.24"
 http = "1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }

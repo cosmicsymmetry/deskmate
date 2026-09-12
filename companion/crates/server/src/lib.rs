@@ -24,6 +24,7 @@ pub mod image_sources;
 mod image_staleness;
 mod images;
 pub mod oauth;
+pub mod producer_credentials;
 pub mod registry;
 pub mod runtime_device;
 pub mod secrets;

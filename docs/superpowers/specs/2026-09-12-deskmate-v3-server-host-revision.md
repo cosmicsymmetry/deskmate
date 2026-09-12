@@ -271,9 +271,9 @@ consumes.** It is a server-side feature end to end.
 |---|---|---|
 | 1 | Secrets-at-rest foundation (`IntegrationStore`) | **Delivered**, `994a422`..`e472113`, reviewed APPROVE |
 | 2 | OAuth integration framework (Google first) | **Delivered**, `ca319af`..`ee69120`, reviewed APPROVE-WITH-FIXES, all fixes applied |
-| 3 | ~~Google Calendar provider + `CalendarSource::Google`~~ → **Token vending + producer credential** | **Withdrawn and replaced.** Scope is now §5: one route, one credential type, revocation coupling, and the egress-boundary test |
+| 3 | ~~Google Calendar provider + `CalendarSource::Google`~~ → **Token vending + producer credential** | **DELIVERED 2026-09-13**, `986dbc6`..`af470a3`. The original was withdrawn; scope became §5: the vend route, the producer credential, revocation coupling, and the egress-boundary test |
 | 3b | Reference Google Calendar producer | `tools/picture-producers/`, following `claude_limits_png.py`; the exit gate's proof. Its own sub-project, after the management surface, because it needs a real Google grant to develop against |
-| 4 | Management web surface | Unchanged in intent, extended: image-source liveness and staleness join integration health (§7) |
+| 4 | Management web surface | **DELIVERED 2026-09-13**, `5749461`..`64ed968`. `/v1/manage` with its login and three actions, showing device links, integration health and image-source liveness together (§7) |
 | 5 | Multi-tenant foundation | Still deferred; §11 |
 
 Sub-project 3 is now **much smaller than it was** — it was the deepest-specced piece in the

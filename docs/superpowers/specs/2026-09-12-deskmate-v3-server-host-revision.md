@@ -170,8 +170,18 @@ recreate the SSRF surface the deleted egress guard existed to bound, without the
 
 ## 6. The reference producer (Google Calendar)
 
-Lives **outside this repository**, like the existing `claude-limits` producer in the TRMNL
-repo. V3 ships it as the proof that the seam works, not as a repo component.
+Lives in **`tools/picture-producers/`**, which is where this repository already keeps
+them. The precedent is `claude_limits_png.py`: a standalone Python script that reads
+whatever data it likes, draws the finished 448x368 face with PIL, and POSTs the bytes —
+shipped with a `deploy/` systemd service, timer and wrapper script installed to
+`/opt/deskmate-producers/`. Its own docstring states the contract this design depends on:
+"There is no manifest, no expression language and no scene -- which is the whole point of
+the card kind."
+
+A producer is not linked into the server and shares no code with it; it is a separate
+process with its own credentials and its own egress. Keeping it in-tree is a packaging
+decision, not an architectural one, and it does not weaken §1 — the *server* still fetches
+nothing. The Google Calendar producer follows `claude_limits_png.py`'s shape.
 
 What it does, on its own schedule: vend a token; call
 `GET https://www.googleapis.com/calendar/v3/calendars/primary/events` with
@@ -262,7 +272,7 @@ consumes.** It is a server-side feature end to end.
 | 1 | Secrets-at-rest foundation (`IntegrationStore`) | **Delivered**, `994a422`..`e472113`, reviewed APPROVE |
 | 2 | OAuth integration framework (Google first) | **Delivered**, `ca319af`..`ee69120`, reviewed APPROVE-WITH-FIXES, all fixes applied |
 | 3 | ~~Google Calendar provider + `CalendarSource::Google`~~ → **Token vending + producer credential** | **Withdrawn and replaced.** Scope is now §5: one route, one credential type, revocation coupling, and the egress-boundary test |
-| 3b | Reference Google Calendar producer | Outside this repo; the exit gate's proof, not a repo deliverable |
+| 3b | Reference Google Calendar producer | `tools/picture-producers/`, following `claude_limits_png.py`; the exit gate's proof. Its own sub-project, after the management surface, because it needs a real Google grant to develop against |
 | 4 | Management web surface | Unchanged in intent, extended: image-source liveness and staleness join integration health (§7) |
 | 5 | Multi-tenant foundation | Still deferred; §11 |
 

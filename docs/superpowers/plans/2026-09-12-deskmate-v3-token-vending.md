@@ -100,6 +100,24 @@ Resolve by keeping the `pub` form in both files. `companion/crates/server/tests/
 
 Delete every `plugin*` module declaration and `use` from the branch side. Those modules are gone from the working tree after this merge; a leftover `mod plugin_host;` is a compile error that tells you which one you missed.
 
+> **EXECUTED 2026-09-13.** The merge produced exactly the six conflicts §14 predicted
+> and nothing else. Resolutions actually taken, including three the measurement did not
+> foresee:
+> - `secure_file.rs`: `main`'s side wholesale. It did more than promote visibility — it
+>   split the writer into `write_and_replace` (text, appends a newline) and
+>   `write_and_replace_binary` (exact bytes, for the 329,740-byte canonical frame). The
+>   branch's `secrets.rs` already trims with `trim_ascii_end()`, so `secrets.enc` is
+>   unaffected. The only branch-side line not in `main`'s version is the unconditional
+>   newline write, which `write_atomic`'s flag replaced.
+> - `lib.rs`: **`main` deleted the `pub mod egress;` declaration and git auto-merged that
+>   deletion**, because the branch never touched that line — only the file. Keeping
+>   `egress.rs` in Step 2 is not enough; the declaration must be restored by hand or the
+>   module is silently dropped from the crate.
+> - `main.rs`: `main` also removed `use std::sync::Arc;`, which existed only for
+>   `Arc::new(plugins)`. The OAuth wiring below needs it. Restored.
+> - `Cargo.toml`: kept `hmac` (session cookie), `png`/`tiny-skia` (image ingest),
+>   `reqwest` + `url` (egress); dropped `resvg`/`roxmltree` with the plugins.
+
 - [ ] **Step 5: Resolve `main.rs` and `Cargo.toml`**
 
 Keep `main`'s startup wiring (image sources, ingest) and add the branch's integration wiring (`open_integration_store`, `set_integrations`). In `Cargo.toml`, keep `main`'s dependency set and re-add what the branch needs and `main` dropped: `reqwest` with its `form` feature (`egress.rs` uses it), `chacha20poly1305`, `zeroize`, `base64`. Drop anything only the plugin path used (`resvg` and friends) — if it turns out something still needs one, the build says so by name.
@@ -145,7 +163,9 @@ git log --oneline -1
 
 **Interfaces:**
 - Consumes: `egress::fetch_post_form` as it exists after Task 1.
-- Produces: `pub const IDENTITY_HOST: &str = "oauth2.googleapis.com";` and an `EgressError::HostNotPermitted { host: String }` variant. `fetch_post_form(url: &str, form: Vec<(String, String)>) -> Result<FetchResponse, EgressError>` keeps its signature and gains the host check.
+- Produces: `pub const IDENTITY_HOST: &str = "oauth2.googleapis.com";` and an `EgressError::HostNotPermitted { host: String }` variant.
+- **Verified signature (do not guess):** `pub async fn fetch_post_form(url: &str, form: &[(&str, &str)]) -> Result<FetchResponse, EgressError>`. It keeps that signature and gains the host check.
+- **The check goes in `fetch_post_form`, not `post_form_inner`.** Production reaches the network only through `EgressTransport::post_form` → `fetch_post_form`, so the public entry point is the real boundary. `post_form_inner` is shared with `post_form_with_resolver`, which the existing sub-project 2 test `post_form_resolves_then_pins_and_sends_the_form` drives against `http://token.invalid:PORT/token` — putting the check deeper would break that test for no security gain, since the resolver-injected path is private to the module and unreachable from production.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -158,7 +178,7 @@ Add to `egress.rs`'s existing `mod tests`. These assert the §1 invariant: the s
         // If this ever passes, the server has become a content fetcher again.
         let error = fetch_post_form(
             "https://www.googleapis.com/calendar/v3/calendars/primary/events",
-            vec![],
+            &[],
         )
         .await
         .expect_err("the Calendar API must not be reachable from the server");
@@ -169,7 +189,7 @@ Add to `egress.rs`'s existing `mod tests`. These assert the §1 invariant: the s
     async fn the_consent_host_is_not_reachable_from_the_server() {
         // accounts.google.com is a 302 the BROWSER follows, not a fetch the
         // server makes, so it has no business on the allowlist.
-        let error = fetch_post_form("https://accounts.google.com/o/oauth2/v2/auth", vec![])
+        let error = fetch_post_form("https://accounts.google.com/o/oauth2/v2/auth", &[])
             .await
             .expect_err("the consent host must not be reachable from the server");
         assert!(matches!(error, EgressError::HostNotPermitted { .. }));
@@ -177,7 +197,7 @@ Add to `egress.rs`'s existing `mod tests`. These assert the §1 invariant: the s
 
     #[tokio::test]
     async fn an_arbitrary_host_is_not_reachable_from_the_server() {
-        let error = fetch_post_form("https://example.invalid/token", vec![])
+        let error = fetch_post_form("https://example.invalid/token", &[])
             .await
             .expect_err("only the identity host is permitted");
         assert!(matches!(error, EgressError::HostNotPermitted { .. }));
@@ -188,7 +208,7 @@ Add to `egress.rs`'s existing `mod tests`. These assert the §1 invariant: the s
         // Asserts only that the ALLOWLIST admits it. Resolution and transport
         // may fail in a sandbox; anything but HostNotPermitted means the host
         // cleared this check, which is what is under test.
-        let outcome = fetch_post_form("https://oauth2.googleapis.com/token", vec![]).await;
+        let outcome = fetch_post_form("https://oauth2.googleapis.com/token", &[]).await;
         assert!(!matches!(outcome, Err(EgressError::HostNotPermitted { .. })));
     }
 ```
@@ -877,6 +897,6 @@ that local state goes because the operator asked to disconnect."
 ## What this plan deliberately does not do
 
 - **No management surface.** Sub-project 4 gets its own plan, written at this one's exit so its findings feed forward — the repo's standing practice. Until then the mint route is the operator's interface, via `curl` with the admin token.
-- **No reference producer.** It lives outside this repository, like `claude-limits`. This plan ends when the seam works and is tested; the producer is the exit gate's proof, not a repo deliverable (spec §10).
+- **No reference producer.** It belongs in `tools/picture-producers/` beside `claude_limits_png.py`, and it needs a real Google grant to develop against, so it is its own sub-project after the management surface. This plan ends when the seam works and is tested.
 - **No `AdminAuthenticated` unification.** It is duplicated between `admin.rs` and `images.rs` and the management surface will be its third consumer; the spec assigns that cleanup to sub-project 4, where a third copy would otherwise appear.
 - **No hardware.** V3 touches no firmware. The end-to-end gate (spec §13.2) needs the panel, and therefore waits on the protocol-v2 flash — but nothing in this plan does.

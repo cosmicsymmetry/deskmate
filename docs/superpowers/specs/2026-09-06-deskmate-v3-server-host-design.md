@@ -1,5 +1,14 @@
 # Deskmate V3 — Self-Sufficient Server Host — Design
 
+> **SUPERSEDED 2026-09-12 by
+> `docs/superpowers/specs/2026-09-12-deskmate-v3-server-host-revision.md`.**
+> This document is kept as the record of what sub-projects 1 and 2 were built and
+> reviewed against — their plans' STATUS headers cite its section numbers — and NOT as
+> a current contract. Its §2–§5 describe a provider layer that schema v8/v9 deleted, and
+> it states protocol v1, schema v6/v7, and a `calendar` card, none of which exist on
+> `main`. Read the revision for what V3 now delivers; read this only for the history of
+> the OAuth and secrets decisions, which the revision carries forward unchanged.
+
 **Date:** 2026-09-06
 **Status:** Draft for Rodion. Nothing here is implemented. Approach (Option A —
 single-owner, self-sufficient homelab server) is decided; the design choices below need

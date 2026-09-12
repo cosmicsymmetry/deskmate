@@ -89,8 +89,6 @@ struct ImageSourceState {
 /// What the management surface shows about one image source. Carries no bytes
 /// and no credential -- only what a person needs to tell "the producer is
 /// broken" from "the integration needs reconnecting" (revision spec §7).
-// Consumed by `manage::view` in the next commit; the allow goes with it.
-#[allow(dead_code)]
 pub(crate) struct SourceSummary {
     pub(crate) id: String,
     pub(crate) name: String,
@@ -328,7 +326,6 @@ impl ImageSourceStore {
     /// clones an `Arc` per frame for the push path: a dashboard that listed
     /// sources through it would hold every canonical frame alive to render a
     /// table of names.
-    #[allow(dead_code)]
     pub(crate) fn summaries(&self, now: DateTime<Utc>) -> Vec<SourceSummary> {
         self.lock()
             .sources

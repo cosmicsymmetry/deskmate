@@ -292,6 +292,13 @@ impl TokenManager {
         }
     }
 
+    /// The integrations that have stored credentials. Ids only -- spec §6:
+    /// presence, never token values.
+    #[must_use]
+    pub fn integration_ids(&self) -> Vec<String> {
+        self.store.integration_ids()
+    }
+
     pub fn health(&self, integration_id: &str) -> Option<IntegrationHealth> {
         self.health
             .lock()

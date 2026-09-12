@@ -23,6 +23,7 @@ mod image_ingest;
 pub mod image_sources;
 mod image_staleness;
 mod images;
+mod manage;
 pub mod oauth;
 pub mod producer_credentials;
 pub mod registry;
@@ -176,6 +177,19 @@ impl ServerState {
         &self,
     ) -> &Arc<producer_credentials::ProducerCredentialStore> {
         &self.inner.producer_credentials
+    }
+
+    /// Every minted device id, for the management surface's device table.
+    pub(crate) fn registry_device_ids(&self) -> Vec<String> {
+        self.inner.registry.device_ids()
+    }
+
+    /// Whether a device currently holds a live link. A board at rest is the
+    /// resting state here, not a fault, so this is reported as "not connected"
+    /// rather than as an error.
+    pub(crate) fn device_is_linked(&self, device_id: &str) -> bool {
+        self.device_link(device_id)
+            .is_some_and(|link| link.is_live())
     }
 
     /// Compares `presented` against the admin token in constant time. This
@@ -390,6 +404,7 @@ pub fn app(state: ServerState) -> Router {
         .route("/v1/firmware/{filename}", get(firmware::download))
         .merge(admin::routes())
         .merge(images::routes())
+        .merge(manage::routes())
         .merge(oauth::routes::routes())
         .layer(middleware)
         .with_state(state)

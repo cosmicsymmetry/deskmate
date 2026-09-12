@@ -136,6 +136,15 @@ impl ProducerCredentialStore {
             .map(|credential| credential.integration_id.clone())
     }
 
+    /// Whether a credential exists for `integration_id`. Presence only; the
+    /// value is not recoverable from this type at all.
+    #[must_use]
+    pub fn has_credential(&self, integration_id: &str) -> bool {
+        self.lock()
+            .iter()
+            .any(|credential| credential.integration_id == integration_id)
+    }
+
     /// Removes `integration_id`'s credential. Reports whether one existed.
     ///
     /// # Errors

@@ -23,7 +23,7 @@ use crate::auth::bearer_token;
 use crate::registry::constant_time_eq;
 
 const PENDING_TTL: Duration = Duration::seconds(600);
-const SESSION_TTL: Duration = Duration::hours(12);
+pub(crate) const SESSION_TTL: Duration = Duration::hours(12);
 const DEFAULT_INTEGRATION_ID: &str = "google-primary";
 /// Longest `integration_id` accepted from a caller. The id is a map key in three
 /// long-lived maps (`pending`, the token cache, and health), and only `revoke`
@@ -147,7 +147,7 @@ impl IntegrationRuntime {
     }
 }
 
-enum RouteError {
+pub(crate) enum RouteError {
     Unauthorized,
     BadRequest(String),
     /// A state the caller cannot retry out of -- today, a revoked or expired
@@ -242,13 +242,7 @@ async fn mint_producer(
     _operator: OperatorAuthenticated,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<MintedCredentialResponse>), RouteError> {
-    validate_integration_id(&id)?;
-    // The credential store holds a sync Mutex across disk I/O, so this must not
-    // run on the async executor.
-    let minted = tokio::task::spawn_blocking(move || state.producer_credentials().mint(&id))
-        .await
-        .map_err(|_| RouteError::Store("producer credential worker failed".to_string()))?
-        .map_err(|error| RouteError::Store(error.to_string()))?;
+    let minted = mint_producer_action(&state, &id).await?;
     Ok((
         StatusCode::CREATED,
         Json(MintedCredentialResponse {
@@ -256,6 +250,22 @@ async fn mint_producer(
             token: minted.token,
         }),
     ))
+}
+
+/// Shared by the JSON route above and the management surface's form action.
+pub(crate) async fn mint_producer_action(
+    state: &ServerState,
+    id: &str,
+) -> Result<crate::producer_credentials::MintedProducerCredential, RouteError> {
+    validate_integration_id(id)?;
+    // The credential store holds a sync Mutex across disk I/O, so this must not
+    // run on the async executor.
+    let state = state.clone();
+    let id = id.to_owned();
+    tokio::task::spawn_blocking(move || state.producer_credentials().mint(&id))
+        .await
+        .map_err(|_| RouteError::Store("producer credential worker failed".to_string()))?
+        .map_err(|error| RouteError::Store(error.to_string()))
 }
 
 /// Revokes an integration's producer credential without touching the grant.
@@ -433,6 +443,18 @@ async fn revoke_integration(
     _operator: OperatorAuthenticated,
     Path(id): Path<String>,
 ) -> Result<StatusCode, RouteError> {
+    revoke_integration_action(&state, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The revoke behaviour itself, shared by the JSON route above and the
+/// management surface's form action, so the browser path cannot drift from the
+/// API path -- in particular so the credential coupling below is not
+/// reimplemented, and half-implemented, twice.
+pub(crate) async fn revoke_integration_action(
+    state: &ServerState,
+    id: &str,
+) -> Result<(), RouteError> {
     let runtime = state.integrations().ok_or(RouteError::NotConfigured)?;
     // The producer credential goes FIRST, and unconditionally. It is scoped to
     // this integration and nothing else, so a credential that outlived the
@@ -443,7 +465,7 @@ async fn revoke_integration(
     // matching `TokenManager::revoke`'s own rule that local state goes because
     // the operator asked to disconnect.
     let credential_state = state.clone();
-    let credential_id = id.clone();
+    let credential_id = id.to_owned();
     tokio::task::spawn_blocking(move || {
         credential_state
             .producer_credentials()
@@ -454,10 +476,10 @@ async fn revoke_integration(
     .map_err(|error| RouteError::Store(error.to_string()))?;
     runtime
         .token_manager()
-        .revoke(&id)
+        .revoke(id)
         .await
         .map_err(token_error_to_route)?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(())
 }
 
 #[cfg(test)]

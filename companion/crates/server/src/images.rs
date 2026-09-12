@@ -15,6 +15,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::ServerState;
+use crate::auth::AdminAuthenticated;
 use crate::auth::bearer_token;
 use crate::image_ingest::{ImageIngestError, canonical_frame_from_png};
 use crate::image_sources::{AcceptOutcome, ImageSourceError};
@@ -28,26 +29,6 @@ pub(crate) fn routes() -> Router<ServerState> {
             .layer(DefaultBodyLimit::max(MAX_IMAGE_BODY_BYTES))
             .delete(revoke_source),
     )
-}
-
-/// The existing admin extractor is private to `admin.rs`; keep the same
-/// extractor position and the same constant-time verification contract here.
-struct AdminAuthenticated;
-
-impl FromRequestParts<ServerState> for AdminAuthenticated {
-    type Rejection = ImageRouteError;
-
-    #[allow(clippy::unused_async_trait_impl)]
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &ServerState,
-    ) -> Result<Self, Self::Rejection> {
-        let presented = bearer_token(parts).ok_or(ImageRouteError::AdminUnauthorized)?;
-        state
-            .verify_admin_token(presented)
-            .then_some(Self)
-            .ok_or(ImageRouteError::AdminUnauthorized)
-    }
 }
 
 /// Copies only a well-formed bearer credential from the request parts. The
@@ -293,7 +274,6 @@ fn map_accept_error(error: &ImageSourceError) -> ImageRouteError {
 
 #[derive(Debug)]
 enum ImageRouteError {
-    AdminUnauthorized,
     ProducerUnauthorized,
     NotFound,
     InvalidJson { status: StatusCode, message: String },
@@ -325,7 +305,6 @@ enum ErrorBody<'a> {
 impl IntoResponse for ImageRouteError {
     fn into_response(self) -> Response {
         match self {
-            Self::AdminUnauthorized => StatusCode::UNAUTHORIZED.into_response(),
             Self::ProducerUnauthorized => (
                 StatusCode::UNAUTHORIZED,
                 Json(ErrorBody::Unauthorized {

@@ -127,6 +127,41 @@ pub(crate) fn bearer_token(parts: &Parts) -> Option<&str> {
     scheme.eq_ignore_ascii_case(SCHEME).then_some(token)
 }
 
+/// The one admin extractor. `admin.rs` and `images.rs` each grew their own
+/// copy because the first was private to its module; the management surface
+/// would have been the third, so they now share this.
+///
+/// Rejection is a bare 401 with no body -- which is what both copies already
+/// produced -- so an unauthenticated caller learns nothing about whether the
+/// route, the device, or the token was the problem.
+pub(crate) struct AdminAuthenticated;
+
+pub(crate) struct AdminUnauthorized;
+
+impl IntoResponse for AdminUnauthorized {
+    fn into_response(self) -> Response {
+        StatusCode::UNAUTHORIZED.into_response()
+    }
+}
+
+impl FromRequestParts<ServerState> for AdminAuthenticated {
+    type Rejection = AdminUnauthorized;
+
+    // axum's `FromRequestParts` declares `async fn`, so the signature is fixed
+    // by the trait even though this body never awaits.
+    #[allow(clippy::unused_async_trait_impl)]
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &ServerState,
+    ) -> Result<Self, Self::Rejection> {
+        let presented = bearer_token(parts).ok_or(AdminUnauthorized)?;
+        state
+            .verify_admin_token(presented)
+            .then_some(Self)
+            .ok_or(AdminUnauthorized)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use axum::http::HeaderValue;

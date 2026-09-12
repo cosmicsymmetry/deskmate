@@ -89,6 +89,7 @@ pub struct ServerState {
 struct StateInner {
     registry: Registry,
     image_sources: Arc<image_sources::ImageSourceStore>,
+    producer_credentials: Arc<producer_credentials::ProducerCredentialStore>,
     admin_token: String,
     firmware: FirmwareCatalog,
     configs: store::DeviceConfigStores,
@@ -123,10 +124,14 @@ impl ServerState {
     ) -> Self {
         let image_sources = image_sources::ImageSourceStore::new(config_directory.clone())
             .expect("failed to load the image-source store");
+        let producer_credentials =
+            producer_credentials::ProducerCredentialStore::open(config_directory.clone())
+                .expect("failed to load the producer credential store");
         Self {
             inner: Arc::new(StateInner {
                 registry,
                 image_sources: Arc::new(image_sources),
+                producer_credentials: Arc::new(producer_credentials),
                 admin_token,
                 firmware,
                 configs: store::DeviceConfigStores::new(config_directory),
@@ -165,6 +170,12 @@ impl ServerState {
 
     pub(crate) fn image_sources(&self) -> &Arc<image_sources::ImageSourceStore> {
         &self.inner.image_sources
+    }
+
+    pub(crate) fn producer_credentials(
+        &self,
+    ) -> &Arc<producer_credentials::ProducerCredentialStore> {
+        &self.inner.producer_credentials
     }
 
     /// Compares `presented` against the admin token in constant time. This

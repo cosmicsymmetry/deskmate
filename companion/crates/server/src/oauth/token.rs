@@ -183,9 +183,33 @@ impl TokenManager {
         Ok(())
     }
 
+    /// The live access token alone. The wrapper the existing callers use.
+    ///
+    /// # Errors
+    /// See [`TokenManager::access_token_with_expiry`].
     pub async fn access_token(&self, integration_id: &str) -> Result<String, TokenError> {
-        if let Some(token) = self.cached_valid(integration_id) {
-            return Ok(token);
+        self.access_token_with_expiry(integration_id)
+            .await
+            .map(|(token, _)| token)
+    }
+
+    /// The live access token and the expiry the provider gave it.
+    ///
+    /// The vend route (revision spec §5) needs both: what it hands a producer
+    /// is the provider's own credential with the provider's own expiry, not
+    /// anything this server mints, so the producer can cache until that instant
+    /// and the provider can revoke it out from under both of us.
+    ///
+    /// # Errors
+    /// [`TokenError::NotFound`] when no credentials are stored,
+    /// [`TokenError::NeedsReconnect`] when the grant was revoked or expired,
+    /// and the transport/provider variants otherwise.
+    pub async fn access_token_with_expiry(
+        &self,
+        integration_id: &str,
+    ) -> Result<(String, DateTime<Utc>), TokenError> {
+        if let Some(pair) = self.cached_valid(integration_id) {
+            return Ok(pair);
         }
         // Serialize refreshes per integration. Without this every caller that
         // missed the cache posts its own `grant_type=refresh_token`: they all
@@ -197,8 +221,8 @@ impl TokenManager {
         let _turn = gate.lock().await;
         // Re-check under the gate: whoever held it before us has already
         // refreshed and cached, and their token is the one to return.
-        if let Some(token) = self.cached_valid(integration_id) {
-            return Ok(token);
+        if let Some(pair) = self.cached_valid(integration_id) {
+            return Ok(pair);
         }
         let secret = self
             .store_get(integration_id.to_string())
@@ -233,7 +257,12 @@ impl TokenManager {
             tokens.expires_in,
         );
         self.set_health(integration_id, IntegrationHealth::Connected);
-        Ok(tokens.access_token)
+        // Read the expiry back out of the cache rather than recomputing it, so
+        // there is exactly one place that decides when this token dies.
+        let expires_at = self
+            .cached_valid(integration_id)
+            .map_or_else(|| (self.now)(), |(_, expires_at)| expires_at);
+        Ok((tokens.access_token, expires_at))
     }
 
     pub async fn revoke(&self, integration_id: &str) -> Result<(), TokenError> {
@@ -335,7 +364,7 @@ impl TokenManager {
         )
     }
 
-    fn cached_valid(&self, integration_id: &str) -> Option<String> {
+    fn cached_valid(&self, integration_id: &str) -> Option<(String, DateTime<Utc>)> {
         let now = (self.now)();
         let cache = self
             .cache
@@ -343,7 +372,7 @@ impl TokenManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = cache.get(integration_id)?;
         if now + Duration::seconds(REFRESH_SKEW_SECONDS) < entry.expires_at {
-            Some(entry.access_token.clone())
+            Some((entry.access_token.clone(), entry.expires_at))
         } else {
             None
         }

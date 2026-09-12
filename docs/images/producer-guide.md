@@ -40,6 +40,44 @@ Both carriers use one verification function. A path token can appear in access l
 use the bearer carrier when the producer should keep the token out of its URL. The token
 is write-only, scoped to one source, and can be revoked independently.
 
+## Obtain a third-party access token (integrations only)
+
+A producer that renders someone's calendar or mailbox needs a credential for
+that service. Deskmate holds the OAuth grant; you ask it for an access token and
+call the API yourself. The server never calls that API, which is why the panel
+can show your calendar without the server being allowed to fetch anything.
+
+```sh
+curl -X POST -H 'Authorization: Bearer PRODUCER_CREDENTIAL' \
+  https://deskmate.rodi.one/v1/integrations/google/token
+```
+
+```json
+{ "access_token": "ya29....", "expires_at": "2026-09-13T15:04:05+00:00" }
+```
+
+The token is **the provider's own**, with the provider's own expiry -- typically
+one hour. Cache it until `expires_at` and ask again then; do not ask per
+request. Because it is the provider's credential rather than something Deskmate
+mints, revoking Deskmate's access at the provider stops it working immediately.
+
+The producer credential is **not** your image-source token. They are minted and
+revoked separately, on purpose: if an integration is disconnected, your picture
+pushes keep working and the card simply goes stale, instead of failing in a way
+nobody can interpret.
+
+| Status | Meaning | Producer action |
+| --- | --- | --- |
+| 401 | The producer credential is invalid, revoked, or belongs to a different integration. | Ask the operator to mint a new one. |
+| 400 | No such integration. | Check the integration id in the URL. |
+| 409 | The owner's authorization was revoked or expired. | **Stop polling** and surface it: retrying cannot fix this, only the operator reconnecting can. |
+| 502 | The provider's token endpoint failed. | Retry with backoff, and keep pushing your last good frame meanwhile. |
+| 503 | This server has no integrations configured. | Nothing to do from the producer side. |
+
+The request takes no body and no query parameters. Anything you send is ignored:
+the integration record on the server is the only source of which host and which
+scopes the credential covers.
+
 ## Errors
 
 Each error response is one line and is intended for the producer.

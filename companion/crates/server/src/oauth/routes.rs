@@ -5,14 +5,15 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use axum::Json;
 use axum::Router;
-use axum::extract::{Path, Query, State};
+use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use chrono::{DateTime, Duration, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use super::session::{OperatorAuthenticated, SessionSigner, set_cookie_header};
@@ -149,8 +150,12 @@ impl IntegrationRuntime {
 enum RouteError {
     Unauthorized,
     BadRequest(String),
+    /// A state the caller cannot retry out of -- today, a revoked or expired
+    /// grant. Distinct from `BadRequest` because the request was fine.
+    Conflict(String),
     Upstream(String),
     NotConfigured,
+    Store(String),
 }
 
 impl IntoResponse for RouteError {
@@ -158,6 +163,8 @@ impl IntoResponse for RouteError {
         match self {
             Self::Unauthorized => StatusCode::UNAUTHORIZED.into_response(),
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message).into_response(),
+            Self::Conflict(message) => (StatusCode::CONFLICT, message).into_response(),
+            Self::Store(message) => (StatusCode::INTERNAL_SERVER_ERROR, message).into_response(),
             Self::Upstream(message) => (StatusCode::BAD_GATEWAY, message).into_response(),
             Self::NotConfigured => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -178,12 +185,131 @@ fn token_error_to_route(error: TokenError) -> RouteError {
     }
 }
 
+/// Like [`token_error_to_route`], but a revoked grant is a 409 rather than a
+/// 400: the producer's request was well-formed, and no amount of retrying will
+/// fix a grant the owner revoked. The producer guide tells producers to stop
+/// polling on this status and surface it to the operator.
+fn vend_error_to_route(error: &TokenError) -> RouteError {
+    match error {
+        TokenError::NeedsReconnect => RouteError::Conflict(
+            "authorization was revoked or expired; reconnect the integration".to_string(),
+        ),
+        TokenError::NotFound => RouteError::BadRequest("no such integration".to_string()),
+        // Deliberately drops the provider's detail: a token-endpoint error body
+        // can quote the request back, and this response goes to a producer.
+        _ => RouteError::Upstream("the identity provider's token endpoint failed".to_string()),
+    }
+}
+
+/// A producer credential, resolved to the integration it may vend for.
+///
+/// Separate from [`OperatorAuthenticated`] on purpose: an admin token must not
+/// work here, or it would end up living in a producer's environment.
+struct ProducerAuthenticated(String);
+
+impl FromRequestParts<ServerState> for ProducerAuthenticated {
+    type Rejection = RouteError;
+
+    #[allow(clippy::unused_async_trait_impl)]
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &ServerState,
+    ) -> Result<Self, Self::Rejection> {
+        let presented = bearer_token(parts).ok_or(RouteError::Unauthorized)?;
+        let integration_id = state
+            .producer_credentials()
+            .authenticate(presented)
+            .ok_or(RouteError::Unauthorized)?;
+        Ok(Self(integration_id))
+    }
+}
+
+#[derive(Serialize)]
+struct MintedCredentialResponse {
+    integration_id: String,
+    token: String,
+}
+
+#[derive(Serialize)]
+struct VendedToken {
+    access_token: String,
+    expires_at: String,
+}
+
+/// Mints (or rotates) the producer credential for one integration.
+async fn mint_producer(
+    State(state): State<ServerState>,
+    _operator: OperatorAuthenticated,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<MintedCredentialResponse>), RouteError> {
+    validate_integration_id(&id)?;
+    // The credential store holds a sync Mutex across disk I/O, so this must not
+    // run on the async executor.
+    let minted = tokio::task::spawn_blocking(move || state.producer_credentials().mint(&id))
+        .await
+        .map_err(|_| RouteError::Store("producer credential worker failed".to_string()))?
+        .map_err(|error| RouteError::Store(error.to_string()))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(MintedCredentialResponse {
+            integration_id: minted.integration_id,
+            token: minted.token,
+        }),
+    ))
+}
+
+/// Revokes an integration's producer credential without touching the grant.
+async fn revoke_producer(
+    State(state): State<ServerState>,
+    _operator: OperatorAuthenticated,
+    Path(id): Path<String>,
+) -> Result<StatusCode, RouteError> {
+    validate_integration_id(&id)?;
+    tokio::task::spawn_blocking(move || state.producer_credentials().revoke(&id))
+        .await
+        .map_err(|_| RouteError::Store("producer credential worker failed".to_string()))?
+        .map_err(|error| RouteError::Store(error.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Hands a producer the provider's own access token.
+///
+/// Takes no body and no query on purpose (spec §5): the integration record is
+/// the only source of host and scope, so there is nothing a caller can supply
+/// that would redirect the credential-bearing call.
+async fn vend_token(
+    State(state): State<ServerState>,
+    ProducerAuthenticated(authenticated_id): ProducerAuthenticated,
+    Path(id): Path<String>,
+) -> Result<Json<VendedToken>, RouteError> {
+    // Uniform 401 rather than 403: a distinguishable rejection would let a
+    // caller enumerate which integration ids exist.
+    if !constant_time_eq(authenticated_id.as_bytes(), id.as_bytes()) {
+        return Err(RouteError::Unauthorized);
+    }
+    let runtime = state.integrations().ok_or(RouteError::NotConfigured)?;
+    let (access_token, expires_at) = runtime
+        .token_manager()
+        .access_token_with_expiry(&authenticated_id)
+        .await
+        .map_err(|error| vend_error_to_route(&error))?;
+    Ok(Json(VendedToken {
+        access_token,
+        expires_at: expires_at.to_rfc3339(),
+    }))
+}
+
 pub(crate) fn routes() -> Router<ServerState> {
     Router::new()
         .route("/v1/session/login", post(login))
         .route("/v1/integrations/google", post(start_google))
         .route("/v1/integrations/google/callback", get(google_callback))
         .route("/v1/integrations/{id}/revoke", post(revoke_integration))
+        .route(
+            "/v1/integrations/{id}/producer",
+            post(mint_producer).delete(revoke_producer),
+        )
+        .route("/v1/integrations/{id}/token", post(vend_token))
 }
 
 /// Exchanges the admin bearer token for a short-lived session cookie.

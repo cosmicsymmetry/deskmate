@@ -346,11 +346,31 @@ but the fleet is down until that flash happens, so the end-to-end gate cannot ru
 Its last merge from `main` was `0c2f377` (2026-09-08), before schema v8, v9, v10 and
 protocol v2.
 
-1. **Merge `main` into the branch before writing any sub-project 3 code.** Sub-projects 1
-   and 2 are server-crate-only and touch none of the removed seams, so the merge is
-   expected to be mechanical — but that expectation must be *verified by the full workspace
-   gate*, not assumed. Budget a cold run (~35 min; `cargo` needs
-   `export PATH="$HOME/.cargo/bin:$PATH"`, and piping cargo into `tail` hides failures).
+1. **Merge `main` into the branch before writing any sub-project 3 code.** The collision
+   was measured against the true merge base (`faac9ab`) on 2026-09-12, not estimated:
+
+   | Kind | Files | Resolution |
+   |---|---|---|
+   | modify/delete | `server/src/egress.rs` | **The one real decision — see below.** |
+   | both changed | `server/src/lib.rs`, `server/src/main.rs` | Router composition and startup wiring; `main` removed the plugin router and providers, the branch adds the OAuth router |
+   | both changed | `server/Cargo.toml`, `Cargo.lock` | Reconcile dep sets; regenerate the lock |
+   | both changed | `app-core/src/lib.rs`, `app-core/src/secure_file.rs` | **Both sides made the *identical* `pub(crate)` → `pub` promotion** — the branch for `IntegrationStore`, `main` for the image-source store. `server/tests/secure_file_reexport.rs` is byte-identical on both sides |
+   | carried in clean | all of `server/src/oauth/`, `secrets.rs`, `tests/oauth_routes.rs`, both sub-project plans | New on the branch, untouched by `main` |
+
+   So sub-projects 1 and 2 survive the merge substantially intact. **The claim that this
+   is "mechanical" still must be verified by the full workspace gate rather than assumed**
+   — budget a cold run (~35 min; `cargo` needs `export PATH="$HOME/.cargo/bin:$PATH"`, and
+   piping cargo into `tail` reports `tail`'s status in zsh, hiding a failure as a pass).
+
+   **`egress.rs` is the decision, and this revision already made it.** The module exists on
+   the branch — sub-project 2's first commit (`ca319af`) added `fetch_post_form` to it for
+   the token call — and `main` deleted it along with the plugin feeds it was originally
+   written for. It is **kept, reduced**: the resolve-then-pin, redirects-disabled, capped-body
+   machinery is exactly what §8's one-host allowlist needs, and deleting it would mean
+   rewriting that guarantee from scratch for the token endpoint. What goes is the plugin-feed
+   GET path and the range-based allowlist §8 withdraws; what stays is the POST-form path and
+   the pinning. §8's wording — "the deleted guard" — describes its state on `main`, not a
+   thing to be recreated: on the merged branch it is a surviving module with its scope cut.
 2. **Re-run sub-project 1 and 2's own tests** after the merge. Their green reports predate
    78 commits of breaking change.
 3. Only then start sub-project 3 as scoped in §5.

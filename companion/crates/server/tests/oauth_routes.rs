@@ -471,3 +471,59 @@ async fn a_producer_supplied_target_is_ignored_entirely() {
         "the producer's suggested target must never be reached"
     );
 }
+
+#[tokio::test]
+async fn revoking_an_integration_also_revokes_its_producer_credential() {
+    // Otherwise a producer keeps a credential against a dead integration and
+    // the failure surfaces as a 401 loop, which reads like a broken producer
+    // rather than the disconnection the operator actually performed.
+    let transport = FakeTransport::with(vec![(200, r"{}")]);
+    let state = state_with_stored_grant(transport);
+    let credential = mint_producer_credential(&state, "google").await;
+
+    let revoked = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/integrations/google/revoke")
+                .header(header::AUTHORIZATION, "Bearer in-memory-admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
+
+    let (status, _) = vend(&state, "google", Some(&credential)).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "the producer credential must not outlive the integration"
+    );
+}
+
+#[tokio::test]
+async fn revoking_an_integration_drops_the_credential_even_when_the_remote_revoke_fails() {
+    // TokenManager::revoke already removes local state regardless of what the
+    // provider says, because the operator asked to disconnect. Leaving a live
+    // producer credential behind would contradict that.
+    let transport = FakeTransport::with(vec![]); // every post_form errors
+    let state = state_with_stored_grant(transport);
+    let credential = mint_producer_credential(&state, "google").await;
+
+    let revoked = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/integrations/google/revoke")
+                .header(header::AUTHORIZATION, "Bearer in-memory-admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
+
+    let (status, _) = vend(&state, "google", Some(&credential)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}

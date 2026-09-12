@@ -434,6 +434,24 @@ async fn revoke_integration(
     Path(id): Path<String>,
 ) -> Result<StatusCode, RouteError> {
     let runtime = state.integrations().ok_or(RouteError::NotConfigured)?;
+    // The producer credential goes FIRST, and unconditionally. It is scoped to
+    // this integration and nothing else, so a credential that outlived the
+    // grant could only fail -- and it would fail as a 401 loop, which reads
+    // like a broken producer rather than the disconnection the operator just
+    // performed. Ordering it first also means a grant revoke that errors (an
+    // unknown id, a provider outage) still leaves no live credential behind,
+    // matching `TokenManager::revoke`'s own rule that local state goes because
+    // the operator asked to disconnect.
+    let credential_state = state.clone();
+    let credential_id = id.clone();
+    tokio::task::spawn_blocking(move || {
+        credential_state
+            .producer_credentials()
+            .revoke(&credential_id)
+    })
+    .await
+    .map_err(|_| RouteError::Store("producer credential worker failed".to_string()))?
+    .map_err(|error| RouteError::Store(error.to_string()))?;
     runtime
         .token_manager()
         .revoke(&id)

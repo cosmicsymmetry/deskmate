@@ -225,11 +225,10 @@ fn save(root: &Path, credentials: &[Credential]) -> Result<(), ProducerCredentia
             })
             .collect(),
     };
-    let bytes = serde_json::to_vec_pretty(&persisted).map_err(|error| {
-        ProducerCredentialError::Io {
+    let bytes =
+        serde_json::to_vec_pretty(&persisted).map_err(|error| ProducerCredentialError::Io {
             message: format!("serializing producer credentials: {error}"),
-        }
-    })?;
+        })?;
     secure_file::write_and_replace(&root.join(STORE_FILE), &bytes).map_err(|error| {
         ProducerCredentialError::Io {
             message: format!("writing producer credentials: {error:?}"),

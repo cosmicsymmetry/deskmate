@@ -1,5 +1,24 @@
 # V3 Sub-Project 3 — Token Vending and the Egress Boundary Implementation Plan
 
+> **STATUS: EXECUTED 2026-09-13, Tasks 1-5 complete.** Boxes below are ticked as
+> they were verified, not in advance. Commits: `986dbc6` (merge), `5012663`
+> (egress), `2bbb346` (credentials), `e98859a` (vend), plus the coupling commit.
+> Five deviations from the plan as written, each forced by what the code turned
+> out to be:
+>
+> | Planned | Actual |
+> |---|---|
+> | `fetch_post_form(url, Vec<(String, String)>)` | `&[(&str, &str)]`, and the host check belongs on `fetch_post_form` rather than `post_form_inner`, which is shared with the resolver-injected test driving `http://token.invalid` |
+> | Delete the GET path | Also deleted `MAX_REDIRECTS`, `TooManyRedirects` and `BadRedirect`, which the POST client's disabled redirects made unreachable; **retargeted** the two body-cap tests and the status-capture test onto the POST path rather than deleting them, because `read_capped_body` is still live there |
+> | Disk test asserts the plaintext is absent | Too weak, and a mutation probe proved it: a `token_digest` copying the token's bytes verbatim passed it, since the bytes are hex-encoded on the way out and the substring never appears. Rewritten to assert the stored value **is** SHA-256(token), which fails that mutation |
+> | Test harness with `.bearer()` helpers | `tests/oauth_routes.rs` drives `tower::ServiceExt::oneshot` directly; helpers written to match |
+> | `NeedsReconnect` → 409 via `map_vend_error` | A separate `vend_error_to_route`, leaving sub-project 2's `token_error_to_route` (and its 400) untouched on the consent/revoke routes |
+>
+> One gap recorded rather than closed: `read_capped_body`'s `content_length`
+> precheck is not independently covered — deleting it fails nothing, because the
+> streaming limiter catches the same case. That was equally true before this
+> work; it is an optimization, not a second guard.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let an external producer obtain a live Google access token from the server, so the producer — not the server — calls the third-party API, renders a 448x368 face, and pushes it through the image-source path that already ships.
@@ -53,7 +72,7 @@ The branch is 18 commits ahead of `main` and 78 behind. Nothing else in this pla
 - Consumes: nothing.
 - Produces: a branch on which `oauth/`, `secrets.rs` and `egress.rs` coexist with `image_sources.rs`, `image_ingest.rs` and `images.rs`.
 
-- [ ] **Step 1: Start the merge and capture the conflict list**
+- [x] **Step 1: Start the merge and capture the conflict list**
 
 ```bash
 cd /Users/rodion/dev/deskmate/.worktrees/v3-server-host
@@ -63,7 +82,7 @@ git status --short | grep -E '^(UU|AA|DU|UD|AU|UA)'
 
 Expected: conflicts on the six files named above and nothing else. **If a file outside that list conflicts, stop and report** — the spec's §14 measurement was wrong and the plan needs amending before you continue.
 
-- [ ] **Step 2: Resolve `egress.rs` — keep it**
+- [x] **Step 2: Resolve `egress.rs` — keep it**
 
 `main` deleted this file with the plugin feeds it was written for. The branch modified it: sub-project 2's `ca319af` added `fetch_post_form` for the token call. Keep the branch's version wholesale; Task 2 cuts it down.
 
@@ -72,7 +91,7 @@ git checkout --ours companion/crates/server/src/egress.rs
 git add companion/crates/server/src/egress.rs
 ```
 
-- [ ] **Step 3: Resolve `app-core` — verify the two sides are identical, then take either**
+- [x] **Step 3: Resolve `app-core` — verify the two sides are identical, then take either**
 
 Both sides independently promoted `secure_file`'s `BoundedReadError` and `FileIoError` from `pub(crate)` to `pub` — the branch for `IntegrationStore`, `main` for the image-source store.
 
@@ -82,7 +101,7 @@ git diff --diff-filter=U --stat -- companion/crates/app-core/
 
 Resolve by keeping the `pub` form in both files. `companion/crates/server/tests/secure_file_reexport.rs` is byte-identical on both sides; keep one copy.
 
-- [ ] **Step 4: Resolve `lib.rs` — both routers, minus the plugins**
+- [x] **Step 4: Resolve `lib.rs` — both routers, minus the plugins**
 
 `main` removed the plugin router and its `StateInner` fields (`plugins`, `plugin_load_failures`); the branch added `integrations: OnceLock<Arc<oauth::IntegrationRuntime>>`. The merged result keeps `main`'s field set plus the branch's `integrations` field, and the merged router is:
 
@@ -118,11 +137,11 @@ Delete every `plugin*` module declaration and `use` from the branch side. Those 
 > - `Cargo.toml`: kept `hmac` (session cookie), `png`/`tiny-skia` (image ingest),
 >   `reqwest` + `url` (egress); dropped `resvg`/`roxmltree` with the plugins.
 
-- [ ] **Step 5: Resolve `main.rs` and `Cargo.toml`**
+- [x] **Step 5: Resolve `main.rs` and `Cargo.toml`**
 
 Keep `main`'s startup wiring (image sources, ingest) and add the branch's integration wiring (`open_integration_store`, `set_integrations`). In `Cargo.toml`, keep `main`'s dependency set and re-add what the branch needs and `main` dropped: `reqwest` with its `form` feature (`egress.rs` uses it), `chacha20poly1305`, `zeroize`, `base64`. Drop anything only the plugin path used (`resvg` and friends) — if it turns out something still needs one, the build says so by name.
 
-- [ ] **Step 6: Regenerate the lock file and complete the merge**
+- [x] **Step 6: Regenerate the lock file and complete the merge**
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -132,7 +151,7 @@ git checkout --theirs Cargo.lock && cargo check --workspace > /tmp/v3-merge-chec
 
 Expected: `exit=0`. Read `/tmp/v3-merge-check.log` on any failure; do not pipe this to `tail`.
 
-- [ ] **Step 7: Run the full workspace gate**
+- [x] **Step 7: Run the full workspace gate**
 
 This is the step that decides whether "mechanical" was true. Budget ~35 minutes cold.
 
@@ -147,7 +166,7 @@ cargo test --workspace --doc > /tmp/v3-doc.log 2>&1; echo "doc=$?"
 
 Expected: all four report `0`. Both test invocations are required — `--all-targets` adds integration targets but removes doctests, so neither alone covers the workspace.
 
-- [ ] **Step 8: Commit the merge**
+- [x] **Step 8: Commit the merge**
 
 ```bash
 git commit --no-edit
@@ -167,7 +186,7 @@ git log --oneline -1
 - **Verified signature (do not guess):** `pub async fn fetch_post_form(url: &str, form: &[(&str, &str)]) -> Result<FetchResponse, EgressError>`. It keeps that signature and gains the host check.
 - **The check goes in `fetch_post_form`, not `post_form_inner`.** Production reaches the network only through `EgressTransport::post_form` → `fetch_post_form`, so the public entry point is the real boundary. `post_form_inner` is shared with `post_form_with_resolver`, which the existing sub-project 2 test `post_form_resolves_then_pins_and_sends_the_form` drives against `http://token.invalid:PORT/token` — putting the check deeper would break that test for no security gain, since the resolver-injected path is private to the module and unreachable from production.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `egress.rs`'s existing `mod tests`. These assert the §1 invariant: the server may reach the identity host and nothing else. Every case must be refused **before any I/O**, like the metadata-IP tests already there.
 
@@ -213,7 +232,7 @@ Add to `egress.rs`'s existing `mod tests`. These assert the §1 invariant: the s
     }
 ```
 
-- [ ] **Step 2: Run them and watch them fail**
+- [x] **Step 2: Run them and watch them fail**
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -223,7 +242,7 @@ cargo test -p server --lib egress:: > /tmp/t2.log 2>&1; echo "exit=$?"
 
 Expected: FAIL — `EgressError` has no `HostNotPermitted` variant, so this does not compile.
 
-- [ ] **Step 3: Add the allowlist**
+- [x] **Step 3: Add the allowlist**
 
 In `egress.rs`, add the constant and the variant, then enforce it at the top of `fetch_post_form` — after `egress_guard` parses the URL and before any resolution:
 
@@ -252,7 +271,7 @@ Add to `EgressError`:
     HostNotPermitted { host: String },
 ```
 
-- [ ] **Step 4: Run the tests and watch them pass**
+- [x] **Step 4: Run the tests and watch them pass**
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -262,17 +281,17 @@ cargo test -p server --lib egress:: > /tmp/t2.log 2>&1; echo "exit=$?"
 
 Expected: `exit=0`.
 
-- [ ] **Step 5: Delete the plugin-feed GET path**
+- [x] **Step 5: Delete the plugin-feed GET path**
 
 `fetch`, `fetch_with_budget`, `fetch_with_resolver` and `fetch_inner` served plugin feeds, which no longer exist. Remove them and any test that only covers them. Keep `FetchResponse` — `fetch_post_form` returns it — and keep `egress_guard`, `deny_reason_for_ip`, `is_globally_routable`, `resolve_and_pin`, `build_pinned_client`, `read_capped_body`.
 
 Compile after deleting. If `cargo check` reports an unused function you kept, delete that too; if it reports a missing one you deleted, restore it. **Do not delete `deny_reason_for_ip` or the CIDR tables** even though the allowlist now makes them a second line of defence — they are what stops a DNS answer pointing the pinned connection at a private address.
 
-- [ ] **Step 6: Verify the guard still guards, by mutation**
+- [x] **Step 6: Verify the guard still guards, by mutation**
 
 Delete the `if host != IDENTITY_HOST` block and re-run Step 4's command. Expected: three of the four new tests FAIL. Restore the block. A boundary test that passes against a deleted boundary is not a boundary test.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add companion/crates/server/src/egress.rs
@@ -307,7 +326,7 @@ Mutation-probed: deleting the host check fails three of the four tests."
   - `pub fn revoke(&self, integration_id: &str) -> Result<bool, ProducerCredentialError>`
   - `pub struct MintedProducerCredential { pub integration_id: String, pub token: String }`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `companion/crates/server/tests/producer_credentials.rs`:
 
@@ -388,7 +407,7 @@ fn a_credential_survives_a_restart() {
 }
 ```
 
-- [ ] **Step 2: Run them and watch them fail**
+- [x] **Step 2: Run them and watch them fail**
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -398,7 +417,7 @@ cargo test -p server --test producer_credentials > /tmp/t3.log 2>&1; echo "exit=
 
 Expected: FAIL — the module does not exist.
 
-- [ ] **Step 3: Write the store**
+- [x] **Step 3: Write the store**
 
 Create `companion/crates/server/src/producer_credentials.rs`. Persist `{ schema_version, credentials: [{ integration_id, token_sha256 }] }` through `app_core::secure_file` so the file lands atomically at `0600`, exactly as `image_sources.rs` does.
 
@@ -470,7 +489,7 @@ Recover a poisoned lock with `unwrap_or_else(std::sync::PoisonError::into_inner)
 
 Add `pub mod producer_credentials;` to `lib.rs`.
 
-- [ ] **Step 4: Run the tests and watch them pass**
+- [x] **Step 4: Run the tests and watch them pass**
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -480,11 +499,11 @@ cargo test -p server --test producer_credentials > /tmp/t3.log 2>&1; echo "exit=
 
 Expected: `exit=0`, six tests passing.
 
-- [ ] **Step 5: Probe the two tests that matter**
+- [x] **Step 5: Probe the two tests that matter**
 
 Change `constant_time_eq` to `==` and re-run: every test still passes, which is expected and is exactly why that line needs the comment explaining it rather than a test. Restore it. Then change `mint` to persist `token` instead of its digest and re-run: `the_plaintext_credential_never_reaches_the_disk` must FAIL. Restore. A test suite that cannot see a plaintext credential hit the disk is not protecting the thing this store exists for.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add companion/crates/server/src/producer_credentials.rs companion/crates/server/src/lib.rs companion/crates/server/tests/producer_credentials.rs
@@ -519,7 +538,7 @@ the plaintext instead of the digest fails the disk test."
   - `DELETE /v1/integrations/{id}/producer` (admin) → `204`
   - `POST /v1/integrations/{id}/token` (producer bearer) → `200 { "access_token": "...", "expires_at": "RFC3339" }`
 
-- [ ] **Step 1: Thread the expiry through `TokenManager`**
+- [x] **Step 1: Thread the expiry through `TokenManager`**
 
 `CachedToken` already holds `expires_at: DateTime<Utc>`; only the accessor drops it. Change the private `cached_valid` to return `Option<(String, DateTime<Utc>)>` — `(token.access_token.clone(), token.expires_at)` — then add:
 
@@ -553,7 +572,7 @@ the plaintext instead of the digest fails the disk test."
 
 **Keep the per-integration refresh gate exactly where it is.** It is the fix the 2026-09-09 review forced, and N producers polling is precisely the shape it exists for. If you find yourself moving or removing the `let _turn = gate.lock().await;` line, you are reintroducing the refresh stampede.
 
-- [ ] **Step 2: Write the failing route tests**
+- [x] **Step 2: Write the failing route tests**
 
 Append to `companion/crates/server/tests/oauth_routes.rs`, following the harness that file already sets up for sub-project 2.
 
@@ -647,7 +666,7 @@ async fn a_revoked_grant_vends_needs_reconnect_not_a_generic_error() {
 
 Add the two harness helpers the tests use — `mint_producer_credential`, and `harness_with_invalid_grant` queueing the fake transport with an `invalid_grant` response — beside the existing sub-project 2 helpers.
 
-- [ ] **Step 3: Run them and watch them fail**
+- [x] **Step 3: Run them and watch them fail**
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -657,7 +676,7 @@ cargo test -p server --test oauth_routes > /tmp/t4.log 2>&1; echo "exit=$?"
 
 Expected: FAIL — the routes do not exist.
 
-- [ ] **Step 4: Add the routes**
+- [x] **Step 4: Add the routes**
 
 In `oauth/routes.rs`, add a `ProducerAuthenticated(String)` extractor that reads the bearer token, calls `ProducerCredentialStore::authenticate`, and yields the integration id — rejecting with `401` when absent, unknown, **or not equal to the path's `{id}`**. Then:
 
@@ -692,7 +711,7 @@ The mint and revoke routes go through `spawn_blocking`, because the store writes
 
 Wire `ProducerCredentialStore` into `StateInner` with an accessor beside the existing ones, and open it in `main.rs` next to the integration store.
 
-- [ ] **Step 5: Run the tests and watch them pass**
+- [x] **Step 5: Run the tests and watch them pass**
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -702,7 +721,7 @@ cargo test -p server --test oauth_routes > /tmp/t4.log 2>&1; echo "exit=$?"
 
 Expected: `exit=0`, with sub-project 2's existing tests still green.
 
-- [ ] **Step 6: Prove the route takes no producer-supplied target**
+- [x] **Step 6: Prove the route takes no producer-supplied target**
 
 Spec §5 names this as the trap the route must not reintroduce: a vend route that
 accepted a URL, host, or scope from its caller would recreate the SSRF surface the
@@ -736,7 +755,7 @@ Run it, watch it pass without new code (the handler already takes no body), then
 add a `Json<VendRequest>` parameter that reads `token_uri` and routes on it, and confirm
 the assertion on `transport_hosts_called` fails. Remove the parameter again.
 
-- [ ] **Step 7: Verify the `spawn_blocking` discipline by inspection**
+- [x] **Step 7: Verify the `spawn_blocking` discipline by inspection**
 
 Spec §13.1 requires it and no test can see it — a direct call compiles and passes, it
 just stalls the executor under load. `IntegrationStore` and `ProducerCredentialStore`
@@ -750,7 +769,7 @@ Every hit must sit inside a `tokio::task::spawn_blocking(...)` closure. The 2026
 review verified this rule by inspection too; it found zero violations, and that is the
 standard to hold.
 
-- [ ] **Step 8: Document the route for producers**
+- [x] **Step 8: Document the route for producers**
 
 Add a section to `docs/images/producer-guide.md`, after "Authentication", written for the producer the way the rest of that file is:
 
@@ -786,7 +805,7 @@ disconnected.
 
 Note in `deploy/deskmate-server.env.example` that producer credentials live in `producer-credentials.json` under the config root and need no new environment variable.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add companion/crates/server/src/oauth/ companion/crates/server/src/lib.rs companion/crates/server/src/main.rs companion/crates/server/tests/oauth_routes.rs docs/images/producer-guide.md companion/crates/server/deploy/deskmate-server.env.example
@@ -815,7 +834,7 @@ fixes a revoked grant."
 - Consumes: everything above.
 - Produces: no new signatures. Revoking an integration also revokes its producer credential.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[tokio::test]
@@ -842,7 +861,7 @@ async fn revoking_an_integration_also_revokes_its_producer_credential() {
 }
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -852,11 +871,11 @@ cargo test -p server --test oauth_routes revoking_an_integration > /tmp/t5.log 2
 
 Expected: FAIL — the credential still authenticates after the integration is gone.
 
-- [ ] **Step 3: Couple the two revocations**
+- [x] **Step 3: Couple the two revocations**
 
 In the existing revoke handler, after `TokenManager::revoke` succeeds, revoke the producer credential for the same integration through `spawn_blocking`. Revoke the credential **even if the remote revoke failed** — `TokenManager::revoke` already removes local state regardless, because the operator asked to disconnect, and leaving a live producer credential behind would contradict that.
 
-- [ ] **Step 4: Run it and watch it pass**
+- [x] **Step 4: Run it and watch it pass**
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -866,7 +885,7 @@ cargo test -p server --test oauth_routes > /tmp/t5.log 2>&1; echo "exit=$?"
 
 Expected: `exit=0`.
 
-- [ ] **Step 5: Run the full workspace gate**
+- [x] **Step 5: Run the full workspace gate**
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -880,7 +899,7 @@ cd ../apps/deskmate && bun test && bun run check
 
 Expected: every gate `0`. **The controller runs these**, not a sandboxed subagent — `server/tests/` does real loopback binds.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add companion/crates/server/src/oauth/routes.rs companion/crates/server/tests/oauth_routes.rs

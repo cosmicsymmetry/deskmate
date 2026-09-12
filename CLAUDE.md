@@ -81,18 +81,18 @@ default. This section states only what is true now.
 - **The legacy subtraction** (spec
   `docs/superpowers/specs/2026-09-11-deskmate-legacy-subtraction-design.md`): all three
   waves are complete and merged, Wave C on explicit owner direction 2026-09-12.
-- **THE LIVE SERVER SPEAKS PROTOCOL v2 AND `dev-0005` IS STILL FLASHED WITH v1, SO THE
-  FLEET IS DOWN UNTIL THE BOARD IS FLASHED.** Deployed 2026-09-11 21:36 UTC by owner
-  direction, ahead of the flash. This is not a fault to debug: protocol v2 is not
-  additive, so a v2 server and a v1 device answer every frame with `VersionMismatch`.
-  The board needs `v2.1.0-proto2` flashed over USB (`idf.py -C firmware flash`), which is
-  also the version the catalog now publishes. Rollback is both halves together -- binary
-  **and** env file -- and the exact commands are in the "The server half is DEPLOYED"
-  block at the end of `docs/hardware/board-notes.md`, which is also where the rest of what
-  the flash session owes lives. Firmware
-  `.bss` moved **-104 bytes** (87,104 -> 87,000; `.data` and IRAM byte-flat), which is
-  within one byte of the shift that broke OTA downloads in `3f2aa03`, so the on-board OTA
-  check is mandatory rather than a formality.
+- **The fleet is UP. `dev-0005` is flashed with `v2.1.0-proto2` and linking.** Observed
+  2026-09-12 20:11 UTC from the server side, immediately after a redeploy: the board
+  re-linked 2 s after the restart, `firmware check` reports `current=v2.1.0-proto2`, the
+  published pin matches, and no frame answered `VersionMismatch`. This supersedes the
+  "fleet is down" block that stood here from 2026-09-11, and the pre-flash prose at the
+  end of `docs/hardware/board-notes.md` ("not reconnected since", "what the flash session
+  still owes") is stale in the same way -- see the 2026-09-12 entry appended there.
+  **What this proves is the link, and only the link**: protocol v2 negotiates, the board
+  runs the published image, and the two halves agree. It is *server-side* evidence. It
+  says nothing about the OTA download, the capability word read by name, a face at either
+  mounting, or the framebuffer matrix -- all of which remain owed below and are now, for
+  the first time since the flash, actually runnable.
 
 ### Traps that still bite
 
@@ -223,9 +223,16 @@ These are decisions, not defaults. Changing one needs the owner, not a judgement
 - V2 Task 9's tap latency.
 - The BUSY/OTA-owner refusal variant (needs a pending OTA in flight).
 - Stage 3b's asset-GC teardown, only partially observable on dev-0005's card set.
-- The whole of protocol v2: the OTA download (mandatory, see above), capabilities
-  reading 2016 by name, a face at both mountings, a pomodoro counting down between
-  pushes, and a tap reporting one card id.
+- The whole of protocol v2 **except the link itself**: the OTA download (mandatory --
+  `.bss` moved -104 bytes, within one byte of the shift that broke OTA in `3f2aa03`),
+  capabilities reading 2016 by name, a face at both mountings, a pomodoro counting down
+  between pushes, and a tap reporting one card id. The link is established and observed,
+  so these are runnable rather than blocked.
+- A **server-rendered face on the panel**. These frames reach the device over the picture
+  card's asset path, which is proven for a producer's PNG but has never carried a frame
+  the server drew. Owed: one weather, one RSS and one token face on `dev-0005` at both
+  mountings, plus the measured RLE565 transfer size per frame -- the flat-fill argument in
+  `docs/images/server-rendered-cards.md` is reasoned, not measured.
 - The framebuffer matrix has not been run since Wave A moved it to 44 rows and Wave C
   closed the four `field.*` exclusions, leaving **44 rows / 2 excluded / 42 comparable**
   (the one exclusion is the `progress-ring--running-mid-countdown` push-to-capture timing

@@ -4966,3 +4966,67 @@ would offer a v1 device an image it cannot run.
 **What the flash session still owes is unchanged** — every checkbox above, with the OTA
 download the one that matters. Step 2 of the rollout order is already done; the session is
 now step 1 and steps 3-5.
+
+---
+
+## 2026-09-12 — the board is flashed and linking (server-side observation)
+
+**Everything above this line about the flash session being owed, and about `dev-0005` not
+having reconnected, is superseded.** The board is on protocol v2 and talking to the live
+server.
+
+Observed at 20:11 UTC while redeploying the server for the server-rendered card faces —
+not as a hardware session, which is why the scope of what this proves is narrow:
+
+| | |
+| --- | --- |
+| board firmware reported | `firmware check device_id=dev-0005 current=v2.1.0-proto2` |
+| published pin | `DESKMATE_FIRMWARE_VERSION=v2.1.0-proto2` — matches, so nothing is offered in either direction |
+| link | `device link established device_id=dev-0005`, 2.1 s after `systemctl restart` |
+| version mismatch | none in the log, before or after the restart |
+| server binary at the time | 18,415,416 bytes, built from `5d14cd4` |
+
+### What this proves, and what it does not
+
+It proves **the link**: the protocol v2 handshake completes, the board runs the published
+image, and the host and device halves agree. A v1 board against this server would answer
+every frame `VersionMismatch`, and none appears.
+
+It proves nothing else, and this is the distinction the repo's rule about hardware claims
+exists for — **this is server-side evidence, observed from a log, not from the board.**
+Still owed, and now runnable for the first time since the flash:
+
+- [ ] **The OTA download.** Mandatory, not a formality: `.bss` moved −104 bytes
+      (87,104 → 87,000), within one byte of the shift that broke OTA downloads in
+      `3f2aa03`. A board that links fine can still fail to pull an image.
+- [ ] Capabilities reading **2016** by name at the board.
+- [ ] A face at both mountings (90° and 270°).
+- [ ] A pomodoro counting down between pushes.
+- [ ] A tap reporting one card id.
+- [ ] The framebuffer matrix — 44 rows / 2 excluded / 42 comparable. Last observed
+      96/10/86 on 2026-09-06, which predates v9, Wave A and Wave C.
+
+### Newly owed, from the same deploy
+
+- [ ] **A server-rendered face on the panel.** The weather/RSS/token faces ride the
+      picture card's durable-asset path, which is proven for a producer's PNG but has
+      never carried a frame the server drew itself. Owed: one of each on `dev-0005` at
+      both mountings, **plus the measured RLE565 transfer size per frame** — the
+      flat-fill/no-gradient reasoning in `docs/images/server-rendered-cards.md` predicts
+      ~10 KB against ~330 KB raw, and that number has never been measured for these
+      faces.
+
+### Rollback for the current binary
+
+The pre-flash rollback block above is now wrong in one respect: the env file does **not**
+need to go back, because the pin already matches the flashed image and did not move in
+this deploy. The binary alone:
+
+```sh
+ssh rodion@100.93.166.123
+sudo -n cp -a /usr/local/bin/deskmate-server.bak-20260912T201058Z /usr/local/bin/deskmate-server
+sudo -n systemctl restart deskmate-server
+```
+
+That backup is the 2026-09-11 protocol-v2 binary (8,934,672 bytes), which speaks the same
+wire to the same board — so this rollback is binary-only and does not disturb the fleet.

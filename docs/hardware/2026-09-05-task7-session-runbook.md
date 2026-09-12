@@ -14,10 +14,15 @@ kept separate. Never record an observation that was not made.
   `agenda, aqi, claude-limits, svg-aqi, svg-live-clock`. `dev-0005` intact,
   disconnected. The published pin is **unchanged at `v2.0.0-live2`**, so a connecting
   board is offered nothing.
-- **Deploy fact learned during prep**: the stage-4 server does
+- **Deploy fact learned during prep**: the stage-4 server did
   `include_bytes!("../../../../tools/fonts/…")`, so a `companion/`-only source export
-  no longer builds. `~/deskmate-build/` on the VM now carries `tools/fonts/` beside
-  `companion/`; keep rsyncing both.
+  did not build, and `~/deskmate-build/` on the VM was given `tools/fonts/` beside
+  `companion/`.
+  **Superseded 2026-09-12.** The escaping include path was the actual defect, and it
+  came back with the server-rendered card faces. The fonts now live at
+  `companion/crates/server/assets/fonts/`, inside the crate that includes them, so the
+  `companion/`-only export is self-contained again and there is no second directory to
+  rsync. `tools/fonts/` no longer exists.
 - **Stage-4 image**: `v2.0.0-raster1.bin` is already in `/var/lib/deskmate/firmware/`
   but **not published** (the catalog serves only the env-pinned version).
   sha256 `29f15a6f7ee1f6f5717deaa09a21a3bdb75bd19c6ddeae5dd2b51ade1afc3b15`.

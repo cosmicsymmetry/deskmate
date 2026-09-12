@@ -39,8 +39,17 @@ use crate::image_ingest::{CanonicalFrame, encode_rgb565};
 
 /// The two faces the panel's own baked tiers are subset from, so a rastered
 /// face and a scene-native one are the same typeface.
-const INTER_REGULAR: &[u8] = include_bytes!("../../../../tools/fonts/Inter-Regular.ttf");
-const INTER_SEMIBOLD: &[u8] = include_bytes!("../../../../tools/fonts/Inter-SemiBold.ttf");
+///
+/// They live inside this crate rather than in `tools/`, and that is a deploy
+/// constraint rather than tidiness: `deploy/README.md`'s recipe exports
+/// `git archive HEAD companion`, so an `include_bytes!` path that climbs out of
+/// `companion/` does not exist on the build VM and the release build fails to
+/// compile. The retired rasterizer included them from `tools/fonts/` and the
+/// answer at the time was to rsync a second directory -- an undocumented step
+/// in a documented recipe. Keeping build inputs inside the crate that includes
+/// them means any export works.
+const INTER_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
+const INTER_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Inter-SemiBold.ttf");
 pub(crate) const FONT_FAMILY: &str = "Inter";
 
 /// A face that could not be rasterized. Every variant is a bug in this

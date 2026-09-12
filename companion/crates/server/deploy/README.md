@@ -262,6 +262,19 @@ Tailscale address explicitly.
 **Export from `git archive HEAD`, never from the working tree.** A dirty tree deploys code
 nobody can reproduce.
 
+**The export is `companion/` only, so nothing the server compiles may live outside it.**
+An `include_bytes!` path that climbs out of `companion/` builds fine on the Mac and then
+fails to compile on the VM, where that path does not exist. This has happened twice, both
+times for the bundled Inter faces; they now live at
+`companion/crates/server/assets/fonts/`. To check before deploying, build the export in
+isolation:
+
+```sh
+rm -rf /tmp/deskmate-exportcheck && mkdir -p /tmp/deskmate-exportcheck
+git archive HEAD companion | tar -x -C /tmp/deskmate-exportcheck
+(cd /tmp/deskmate-exportcheck/companion && cargo build --release -p server)
+```
+
 ```sh
 # On the Mac, from the repository root:
 rm -rf /tmp/deskmate-deploy && mkdir -p /tmp/deskmate-deploy

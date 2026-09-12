@@ -1,0 +1,18 @@
+[package]
+name = "providers"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono-tz = "0.10"
+protocol = { path = "../protocol" }
+quick-xml = "0.41"
+serde_json = "1"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+url = "2"
+
+[lints]
+workspace = true

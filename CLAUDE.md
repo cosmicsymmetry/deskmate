@@ -48,10 +48,22 @@ default. This section states only what is true now.
   the store can still read vN, so the set shrinks as migrations retire; v4 is the oldest
   readable version and a pre-v4 document is a typed `UnsupportedVersion` refusal.
 - **Three card kinds: clock, pomodoro, picture.** Clock and pomodoro tick on the device
-  between host pushes. A picture card's face is a PNG an external producer pushes to the
-  server, and it is frozen between pushes. The device-rendered data cards (calendar,
-  weather, json-feed, rss) went in v8 and manifest-based plugins in v9; the server makes
-  no outbound HTTP at all.
+  between host pushes. A picture card's face is a raster frame, frozen between pushes,
+  from one of two producers: an external one POSTing a PNG, or **the server itself**. The
+  device-rendered data cards (calendar, weather, json-feed, rss) went in v8 and
+  manifest-based plugins in v9, and neither is coming back as a card kind.
+- **The server renders weather, RSS and token faces, and therefore makes outbound HTTP
+  again** (`docs/images/server-rendered-cards.md`). It did not between `e137294` and
+  `feat/server-side-cards`. These are **not new card kinds**: each is an image source the
+  server pushes to itself, named by an ordinary picture card, configured in
+  `data-cards.json` under `DESKMATE_CONFIG_DIR` (or `DESKMATE_DATA_CARDS`). Schema stays
+  v10 and the wire is untouched. Every outbound request goes through
+  `crates/server/src/egress.rs` -- the same SSRF guard the plugin system used, restored
+  whole -- and `EgressHttpClient` is the only HTTP client the provider layer is given.
+  **A face is rastered, not composed as a scene**, because `SCENE_MAX_NODES` is 24, a
+  `SceneLine` holds 8 points, and only the Caption and Body baked tiers contain letters;
+  the frame then rides the picture card's existing asset path, so there is still exactly
+  one *scene* renderer.
 - **Every card face is a host-pushed scene**, and there is exactly **one renderer**. The
   hand-written C templates stopped shipping at stage 3a and their reference oracle was
   deleted on 2026-09-11. The settings-window preview builds the same scene
@@ -143,6 +155,15 @@ Each of these cost this project real time at least once.
   the image valid, or `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` rolls it back.
 - **The board is normally powered off.** A disconnected `dev-0005` or an idle-timeout
   close is the resting state, not a fault.
+- **`face_render::text_width` does NOT account for `letter-spacing`.** Every eyebrow on a
+  server-rendered face is tracked out 1.4px, so a 27-character run draws ~38px wider than
+  it measures and silently overhangs the canvas -- a fixed panel has no scrollbar and no
+  clipping artifact to show you. Use `svg::tracked_width`/`svg::fit_tracked` for any
+  tracked run. Every fixture place name was short, so only a live response caught it.
+- **`reqwest` sends no `User-Agent` unless one is set**, and a Cloudflare-fronted API
+  answers that with 403 before it reads the path -- which is why a CoinGecko fetch failed
+  while `curl` to the same URL worked. `egress::USER_AGENT` covers the server;
+  `tools/picture-producers/claude_limits_png.py` carries the same note for urllib.
 
 ### Product rules the owner has set
 

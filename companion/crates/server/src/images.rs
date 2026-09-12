@@ -218,7 +218,7 @@ fn authenticate_producer(
 /// runtime command waits for its worker reply. Every device gets the update:
 /// image sources are reusable across devices and the runtime itself decides
 /// whether the visible card subscribes to this source.
-fn live_runtimes(state: &ServerState) -> Vec<Arc<app_core::RuntimeHandle>> {
+pub(crate) fn live_runtimes(state: &ServerState) -> Vec<Arc<app_core::RuntimeHandle>> {
     state
         .inner
         .device_links
@@ -230,7 +230,7 @@ fn live_runtimes(state: &ServerState) -> Vec<Arc<app_core::RuntimeHandle>> {
         .collect()
 }
 
-fn notify_runtimes(
+pub(crate) fn notify_runtimes(
     runtimes: Vec<Arc<app_core::RuntimeHandle>>,
     source_id: &str,
     digest: [u8; protocol::ASSET_DIGEST_LEN],

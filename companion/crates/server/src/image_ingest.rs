@@ -126,7 +126,11 @@ pub(crate) fn canonical_frame_from_png(bytes: &[u8]) -> Result<CanonicalFrame, I
     })
 }
 
-fn encode_rgb565(width: u32, height: u32, pixmap: &tiny_skia::Pixmap) -> Vec<u8> {
+/// Shared with [`crate::face_render`], which rasterizes a server-authored
+/// face into the very same canonical blob. One encoder means a face drawn
+/// here and a PNG pushed by an external producer are byte-identical assets
+/// for the same picture, so they share a digest.
+pub(crate) fn encode_rgb565(width: u32, height: u32, pixmap: &tiny_skia::Pixmap) -> Vec<u8> {
     let pixel_count = usize::try_from(width * height).expect("fixed canvas fits usize");
     let mut bytes = Vec::with_capacity(LVGL_IMAGE_HEADER_BYTES + pixel_count * 2);
     let stride = width * 2;

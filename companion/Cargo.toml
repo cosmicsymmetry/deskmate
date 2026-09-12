@@ -8,6 +8,7 @@ members = [
     "crates/engine",
     "crates/lvgl-sim",
     "crates/protocol",
+    "crates/providers",
     "crates/server",
 ]
 

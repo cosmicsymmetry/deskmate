@@ -1,5 +1,22 @@
 # V3 Sub-Project 4 — Management Surface Implementation Plan
 
+> **STATUS: EXECUTED 2026-09-13, all five tasks complete.** Boxes are ticked as
+> verified. Commits: `5749461` (one `AdminAuthenticated`), `78987b3` (the two
+> listings), `64ed968` (the surface itself). Full gate green: fmt, clippy, 643
+> workspace tests, doctests, 112 frontend tests, `tsc --noEmit`.
+>
+> Four deviations, each forced by what execution turned up:
+>
+> | Planned | Actual |
+> |---|---|
+> | Tasks 3, 4 and 5 as three commits | **One commit.** A view layer with no consumer is dead code that fails `-D warnings`, so "the dashboard renders" is the smallest unit that can be green on its own. Task 2 hit the same wall and needed a temporary `#[allow(dead_code)]`, removed in the next commit. |
+> | Actions call the stores directly | **Extracted `revoke_integration_action` and `mint_producer_action` into `oauth::routes`**, called by both the JSON route and the form action. Calling the stores directly would have reimplemented — and risked half-implementing — sub-project 3's revocation coupling. A test mints through the dashboard and vends through the API to prove one store. |
+> | (not planned) | **`render_error`,** added on review. `connect_integration`'s failure path rendered the *sign-in form* for a "too many pending consents" error, which tells the operator to re-authenticate and hides the cause. |
+> | (not planned) | Four accessors the model needs: `ServerState::registry_device_ids` / `device_is_linked`, `TokenManager::integration_ids`, `ProducerCredentialStore::has_credential` — all presence-only, no credential leaves any of them. |
+>
+> `clippy::format_push_string` rejects `push_str(&format!(…))`; the render
+> functions use `write!` into the buffer instead.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A single server-rendered page at `/v1/manage` that makes the Mac app unnecessary for owning a networked device: device connection status, integration health, image-source liveness, and the four actions an operator needs.
@@ -43,15 +60,15 @@ Two copies exist; the dashboard would be the third. Both reject with a bare 401,
 **Interfaces:**
 - Produces: `pub(crate) struct AdminAuthenticated;` in `auth.rs`, with `Rejection = AdminUnauthorized`, whose `IntoResponse` is a bare `401`.
 
-- [ ] **Step 1: Move the extractor into `auth.rs`**
+- [x] **Step 1: Move the extractor into `auth.rs`**
 
 Define `AdminAuthenticated` and a `pub(crate) struct AdminUnauthorized;` whose `IntoResponse` is `StatusCode::UNAUTHORIZED.into_response()` — bare, no body, matching both current behaviours.
 
-- [ ] **Step 2: Delete both local copies**
+- [x] **Step 2: Delete both local copies**
 
 Remove `admin.rs`'s `struct AdminAuthenticated` + impl and `images.rs`'s, importing `crate::auth::AdminAuthenticated` in each. Keep `ImageRouteError::AdminUnauthorized` only if something still constructs it; if nothing does, delete the variant.
 
-- [ ] **Step 3: Verify no behaviour moved**
+- [x] **Step 3: Verify no behaviour moved**
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -61,7 +78,7 @@ cargo test -p server --all-targets > /tmp/s4-t1.log 2>&1; echo "exit=$?"
 
 Expected: `exit=0`, with the existing admin and image-route 401 tests unchanged and still passing. **If any assertion needed editing, stop** — the refactor was supposed to preserve behaviour exactly.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ---
 
@@ -74,7 +91,7 @@ Expected: `exit=0`, with the existing admin and image-route 401 tests unchanged 
 - `ImageSourceStore::summaries(&self, now: DateTime<Utc>) -> Vec<SourceSummary>` where
   `pub(crate) struct SourceSummary { pub id: String, pub name: String, pub has_frame: bool, pub stale: bool, pub last_push: Option<DateTime<Utc>> }`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
     #[test]
@@ -104,15 +121,15 @@ Expected: `exit=0`, with the existing admin and image-route 401 tests unchanged 
     }
 ```
 
-- [ ] **Step 2: Run them and watch them fail**
+- [x] **Step 2: Run them and watch them fail**
 
 Expected: FAIL — neither method exists.
 
-- [ ] **Step 3: Implement both**
+- [x] **Step 3: Implement both**
 
 `device_ids` reads the registry's token table and maps to device ids, sorted, recovering a poisoned lock as the rest of that file does. `summaries` reads each `SourceRecord` and reports `is_stale(&record.recent_push_times, now)` plus `record.recent_push_times.last().copied()`. **Neither may clone frame bytes** — `all_frames` exists for the push path and is the wrong tool here.
 
-- [ ] **Step 4: Run them and watch them pass, then commit**
+- [x] **Step 4: Run them and watch them pass, then commit**
 
 ---
 
@@ -129,7 +146,7 @@ Rendering is where an injection bug would live, and it needs no server to test.
 - `pub(crate) fn render_login(error: Option<&str>) -> String`
 - `pub(crate) fn render_minted_credential(integration_id: &str, token: &str) -> String`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
     #[test]
@@ -195,21 +212,21 @@ Rendering is where an injection bug would live, and it needs no server to test.
     }
 ```
 
-- [ ] **Step 2: Run them and watch them fail**
+- [x] **Step 2: Run them and watch them fail**
 
-- [ ] **Step 3: Implement the view**
+- [x] **Step 3: Implement the view**
 
 `escape_html` replaces `&` first, then `<`, `>`, `"`, `'`. Order matters: escaping `&` after the others would double-escape their entities. Every interpolation in every render function goes through it, with no exceptions for values that "cannot" contain markup.
 
 Keep the markup plain: one `<style>` block, semantic tables, no external assets — the CSP-free page still must not depend on a font host or CDN, matching how the app already refuses them.
 
-- [ ] **Step 4: Run them, watch them pass**
+- [x] **Step 4: Run them, watch them pass**
 
-- [ ] **Step 5: Probe the escaping**
+- [x] **Step 5: Probe the escaping**
 
 Make `escape_html` return its input unchanged and re-run: `a_hostile_image_source_name_cannot_inject_markup` and the escaping test must both FAIL. Restore.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ---
 
@@ -225,7 +242,7 @@ Make `escape_html` return its input unchanged and re-run: `a_hostile_image_sourc
 - `GET /v1/manage/login` → 200 HTML form (always reachable)
 - `POST /v1/manage/login` → form-encoded `token`; on success sets the session cookie and 303s to `/v1/manage`; on failure re-renders the form with an error and 401
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[tokio::test]
@@ -281,13 +298,13 @@ async fn the_dashboard_never_renders_a_stored_credential() {
 }
 ```
 
-- [ ] **Step 2: Run, watch them fail (404s)**
+- [x] **Step 2: Run, watch them fail (404s)**
 
-- [ ] **Step 3: Implement the handlers**
+- [x] **Step 3: Implement the handlers**
 
 `GET /v1/manage` builds a `DashboardModel` from `Registry::device_ids()` + `ServerState::device_link()` for liveness, the integration store's ids + `TokenManager::health`, and `ImageSourceStore::summaries()`. `POST /v1/manage/login` verifies with `verify_admin_token` and mints through the same `SessionSigner` and TTL the JSON login route uses — one cookie format, not two.
 
-- [ ] **Step 4: Run, watch them pass, then commit**
+- [x] **Step 4: Run, watch them pass, then commit**
 
 ---
 
@@ -300,7 +317,7 @@ async fn the_dashboard_never_renders_a_stored_credential() {
 - `POST /v1/manage/integrations/{id}/revoke` → 303 back to `/v1/manage`
 - `POST /v1/manage/integrations/{id}/producer` → 200 HTML showing the credential once
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[tokio::test]
@@ -340,13 +357,13 @@ async fn revoking_from_the_dashboard_redirects_back_to_it() {
 }
 ```
 
-- [ ] **Step 2: Run, watch them fail**
+- [x] **Step 2: Run, watch them fail**
 
-- [ ] **Step 3: Implement, reusing the stores through `spawn_blocking`**
+- [x] **Step 3: Implement, reusing the stores through `spawn_blocking`**
 
 Each action calls exactly what the JSON route calls — the same `IntegrationRuntime`, the same `ProducerCredentialStore` — so there is one implementation of each behaviour and the browser path cannot drift from the API path. The mint action renders; the other two redirect.
 
-- [ ] **Step 4: Verify the `spawn_blocking` discipline by inspection**
+- [x] **Step 4: Verify the `spawn_blocking` discipline by inspection**
 
 ```bash
 grep -n "producer_credentials()\." companion/crates/server/src/manage/mod.rs
@@ -354,7 +371,7 @@ grep -n "producer_credentials()\." companion/crates/server/src/manage/mod.rs
 
 Every hit must sit inside a `spawn_blocking` closure.
 
-- [ ] **Step 5: Full gate**
+- [x] **Step 5: Full gate**
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -366,7 +383,7 @@ cargo test --workspace --doc > /tmp/s4-doc.log 2>&1; echo "doc=$?"
 cd apps/deskmate && bun install && bun test && bun run check
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ---
 

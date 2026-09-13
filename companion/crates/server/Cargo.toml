@@ -19,6 +19,9 @@ tower = { version = "0.5", features = ["limit", "load-shed", "timeout", "util"] 
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 rand = "0.9"
 sha2 = "0.10"
+# HMAC-SHA256 for signing the short-lived operator session cookie (spec §1.2, §6),
+# keyed by DESKMATE_ADMIN_TOKEN. Pairs with the existing sha2 0.10; pinned exactly.
+hmac = "=0.12.1"
 # Header-first PNG decoding for the image-ingest route. `Pixmap::decode_png` would
 # need no new line here but decodes in one shot; `png::Decoder::read_header_info`
 # reads the IHDR alone, which is what lets a decompression bomb be rejected before
@@ -30,13 +33,26 @@ serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# The OAuth token call is the server's only outbound request, and it is a POST
+# form over TLS -- hence `rustls` and `form`. `egress.rs` is the sole caller and
+# permits exactly one host; see the revision spec §1 and §8. The plugin-feed
+# fetches this was originally shared with are gone.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "form"] }
+url = "2"
 # Backs `FirmwareCatalog::in_memory()`, which is normal library API (used by
 # every integration test binary, not just this crate's own #[cfg(test)]
 # code) -- it must be a real dependency, not a dev-dependency.
 tempfile = "3"
+chacha20poly1305 = "=0.10.1"
+zeroize = { version = "=1.9.0", features = ["derive"] }
 
 [dev-dependencies]
 protocol = { path = "../protocol", features = ["test-support"] }
+# Lets `tests/producer_credentials.rs` assert POSITIVELY that what lands on
+# disk is SHA-256(token). Asserting only that the plaintext is absent is too
+# weak: a "digest" that copied the token's bytes verbatim would still be
+# hex-encoded on the way out, so the substring check never fires.
+sha2 = "0.10"
 tokio-tungstenite = "0.24"
 http = "1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }

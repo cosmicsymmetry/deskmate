@@ -8,9 +8,8 @@ use app_core::{
 use axum::Json;
 use axum::Router;
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::StatusCode;
-use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use chrono::NaiveDateTime;
@@ -18,7 +17,7 @@ use protocol::{Message, PushScene, validate_message};
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::ServerState;
-use crate::auth::bearer_token;
+use crate::auth::AdminAuthenticated;
 
 pub(crate) fn routes() -> Router<ServerState> {
     Router::new()
@@ -29,28 +28,6 @@ pub(crate) fn routes() -> Router<ServerState> {
             put(put_config).layer(DefaultBodyLimit::max(MAX_CONFIG_FILE_BYTES)),
         )
         .route("/v1/devices/{id}/scene", post(post_scene))
-}
-
-struct AdminAuthenticated;
-
-impl FromRequestParts<ServerState> for AdminAuthenticated {
-    type Rejection = AdminError;
-
-    // axum's FromRequestParts declares `async fn`, so the signature is fixed by
-    // the trait even though this body never awaits. Rewriting it to return
-    // `std::future::ready` to satisfy the lint would obscure the extractor for
-    // no behavioural gain.
-    #[allow(clippy::unused_async_trait_impl)]
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &ServerState,
-    ) -> Result<Self, Self::Rejection> {
-        let presented = bearer_token(parts).ok_or(AdminError::Unauthorized)?;
-        state
-            .verify_admin_token(presented)
-            .then_some(Self)
-            .ok_or(AdminError::Unauthorized)
-    }
 }
 
 async fn create_device(
@@ -479,7 +456,6 @@ enum SaveConfigError {
 
 #[derive(Debug)]
 enum AdminError {
-    Unauthorized,
     NotFound,
     InvalidJson { status: StatusCode, message: String },
     InvalidScene { message: String },
@@ -542,7 +518,6 @@ enum ErrorBody<'a> {
 impl IntoResponse for AdminError {
     fn into_response(self) -> Response {
         match self {
-            Self::Unauthorized => StatusCode::UNAUTHORIZED.into_response(),
             Self::NotFound => StatusCode::NOT_FOUND.into_response(),
             Self::InvalidJson { status, message } => {
                 (status, Json(ErrorBody::InvalidJson { message: &message })).into_response()

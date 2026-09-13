@@ -17,19 +17,25 @@ mod admin;
 pub use app_core::asset_sync;
 mod auth;
 mod device_link;
+pub mod egress;
 pub mod firmware;
 mod image_ingest;
 pub mod image_sources;
 mod image_staleness;
 mod images;
+mod manage;
+pub mod oauth;
+pub mod producer_credentials;
 pub mod registry;
 pub mod runtime_device;
+pub mod secrets;
 mod store;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -84,9 +90,14 @@ pub struct ServerState {
 struct StateInner {
     registry: Registry,
     image_sources: Arc<image_sources::ImageSourceStore>,
+    producer_credentials: Arc<producer_credentials::ProducerCredentialStore>,
     admin_token: String,
     firmware: FirmwareCatalog,
     configs: store::DeviceConfigStores,
+    /// The OAuth integration runtime, attached at startup by `set_integrations`
+    /// when integrations are configured. `OnceLock` so existing constructors are
+    /// untouched and a deployment without integrations simply never sets it.
+    integrations: OnceLock<Arc<oauth::IntegrationRuntime>>,
     /// Keeps the dedicated config root alive for [`ServerState::in_memory`].
     /// Production paths are operator-owned and leave this as `None`.
     _config_temp_dir: Option<tempfile::TempDir>,
@@ -114,13 +125,18 @@ impl ServerState {
     ) -> Self {
         let image_sources = image_sources::ImageSourceStore::new(config_directory.clone())
             .expect("failed to load the image-source store");
+        let producer_credentials =
+            producer_credentials::ProducerCredentialStore::open(config_directory.clone())
+                .expect("failed to load the producer credential store");
         Self {
             inner: Arc::new(StateInner {
                 registry,
                 image_sources: Arc::new(image_sources),
+                producer_credentials: Arc::new(producer_credentials),
                 admin_token,
                 firmware,
                 configs: store::DeviceConfigStores::new(config_directory),
+                integrations: OnceLock::new(),
                 _config_temp_dir: config_temp_dir,
                 device_links: Mutex::new(HashMap::new()),
                 link_slots: Arc::new(tokio::sync::Semaphore::new(
@@ -157,6 +173,25 @@ impl ServerState {
         &self.inner.image_sources
     }
 
+    pub(crate) fn producer_credentials(
+        &self,
+    ) -> &Arc<producer_credentials::ProducerCredentialStore> {
+        &self.inner.producer_credentials
+    }
+
+    /// Every minted device id, for the management surface's device table.
+    pub(crate) fn registry_device_ids(&self) -> Vec<String> {
+        self.inner.registry.device_ids()
+    }
+
+    /// Whether a device currently holds a live link. A board at rest is the
+    /// resting state here, not a fault, so this is reported as "not connected"
+    /// rather than as an error.
+    pub(crate) fn device_is_linked(&self, device_id: &str) -> bool {
+        self.device_link(device_id)
+            .is_some_and(|link| link.is_live())
+    }
+
     /// Compares `presented` against the admin token in constant time. This
     /// is the *only* sanctioned way to check the admin token, preserving the
     /// constant-time-comparison guarantee for the one secret that protects
@@ -181,6 +216,18 @@ impl ServerState {
 
     pub(crate) fn configs(&self) -> &store::DeviceConfigStores {
         &self.inner.configs
+    }
+
+    /// The OAuth integration runtime, if one was attached at startup.
+    #[must_use]
+    pub fn integrations(&self) -> Option<Arc<oauth::IntegrationRuntime>> {
+        self.inner.integrations.get().map(Arc::clone)
+    }
+
+    /// Attaches the OAuth integration runtime once, at startup. Subsequent calls
+    /// are ignored (the first attachment wins).
+    pub fn set_integrations(&self, runtime: Arc<oauth::IntegrationRuntime>) {
+        let _ = self.inner.integrations.set(runtime);
     }
 
     /// Atomically reserves the one live ownership slot for `device_id`.
@@ -357,6 +404,8 @@ pub fn app(state: ServerState) -> Router {
         .route("/v1/firmware/{filename}", get(firmware::download))
         .merge(admin::routes())
         .merge(images::routes())
+        .merge(manage::routes())
+        .merge(oauth::routes::routes())
         .layer(middleware)
         .with_state(state)
 }

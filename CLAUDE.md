@@ -64,7 +64,11 @@ default. This section states only what is true now.
   `rust:1.98-bookworm` container over an rsync'd `git archive HEAD` export -- never the
   working tree. Device URL `wss://deskmate.rodi.one/v1/device/link`.
 - **Milestones**: V1 and V2 are exited and tagged (`v1` at `7abd496`, `v2` at `fdf85ba`).
-  V3 (server host) is in progress on `feat/v3-server-host`. Tags require explicit owner
+  V3 (server host) is in progress; **sub-projects 1-4 are merged to `main`** (`fb15060`,
+  2026-09-13) and V3 is **schema- and wire-neutral** -- it adds no config field, no wire
+  message and no firmware change, so merging it does not move the flash. What V3 still
+  owes is the reference Google Calendar producer in `tools/picture-producers/` and the
+  end-to-end gate, which needs the panel. Tags require explicit owner
   authorization; `m0`/`m1`/`v1`/`v2` exist and later milestones do not.
 - **The legacy subtraction** (spec
   `docs/superpowers/specs/2026-09-11-deskmate-legacy-subtraction-design.md`): all three

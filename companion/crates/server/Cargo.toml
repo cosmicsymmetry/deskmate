@@ -9,6 +9,7 @@ rust-version.workspace = true
 app-core = { path = "../app-core" }
 device = { path = "../device" }
 protocol = { path = "../protocol" }
+providers = { path = "../providers" }
 atomic-write-file = "0.3.0"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
@@ -28,15 +29,26 @@ hmac = "=0.12.1"
 # anything is allocated. Same version already in the lockfile via tiny-skia.
 png = "0.17"
 tiny-skia = "0.11"
+# The server authors its own SVG for the data-card faces and rasterizes it into
+# the same RGB565 frame a picture producer would have pushed.
+#
+# `system-fonts` is deliberately OFF. The face renderer loads the two bundled
+# Inter faces into its own `fontdb` and nothing else, so a face rasterizes to
+# identical bytes on the owner's Mac, in CI, and on docker-vm. With system
+# fonts enabled, a golden-image test would pass or fail according to what
+# happened to be installed on the machine running it.
+# Pinned exactly: this is a rasterizer parsing owner-supplied data into a
+# render tree, and a patch bump is a change to that parser.
+resvg = { version = "=0.45.1", default-features = false, features = ["text"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# The OAuth token call is the server's only outbound request, and it is a POST
-# form over TLS -- hence `rustls` and `form`. `egress.rs` is the sole caller and
-# permits exactly one host; see the revision spec §1 and §8. The plugin-feed
-# fetches this was originally shared with are gone.
+# Shared by production egress and the HTTP-facing tests. `rustls` covers both
+# the OAuth token call and the outbound data fetches behind the server-rendered
+# cards; `form` is the OAuth token POST, whose one-host allowlist lives in
+# `egress::fetch_post_form` (revision spec 1 and 8).
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "form"] }
 url = "2"
 # Backs `FirmwareCatalog::in_memory()`, which is normal library API (used by
@@ -55,7 +67,6 @@ protocol = { path = "../protocol", features = ["test-support"] }
 sha2 = "0.10"
 tokio-tungstenite = "0.24"
 http = "1"
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 [lints]
 workspace = true

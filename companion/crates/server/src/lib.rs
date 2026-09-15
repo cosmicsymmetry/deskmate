@@ -16,8 +16,20 @@
 mod admin;
 pub use app_core::asset_sync;
 mod auth;
+// Server-rendered data cards: the server pushing frames to its own image
+// sources, so a weather/RSS/token face reaches the device through the same
+// picture-card path an external producer's PNG does.
+pub mod data_cards;
 mod device_link;
+// The SSRF egress guard, and the one HTTP client the provider layer is
+// allowed to use.
 pub mod egress;
+mod egress_client;
+// The server-authored data-card faces: the SVG authoring (`faces`) and the
+// rasterizer that turns one into the frame a picture producer would have
+// pushed (`face_render`).
+mod face_render;
+mod faces;
 pub mod firmware;
 mod image_ingest;
 pub mod image_sources;

@@ -116,6 +116,40 @@ state subdirectory on the first successful identity or config write. For
 launchd, point `DESKMATE_CONFIG_DIR` at an absolute directory writable by the
 account running the agent/daemon.
 
+### Server-rendered data cards (optional)
+
+If this deployment draws its own weather, RSS or token faces, it also needs a spec
+file. `data-cards.json.example` in this directory is a starting point;
+`docs/images/server-rendered-cards.md` is the reference.
+
+```sh
+# One image source per card. Keep the id; the token is only needed by an
+# external producer, and the server pushes to its own store directly.
+curl -sX POST https://deskmate.rodi.one/v1/images \
+  -H "Authorization: Bearer $DESKMATE_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "Weather"}'
+
+sudo install -m 0644 data-cards.json.example \
+  /var/lib/deskmate/configs/data-cards.json
+sudo $EDITOR /var/lib/deskmate/configs/data-cards.json
+```
+
+Then add one `picture` card per source in the companion window, naming the same
+`source_id`, and restart the server.
+
+Two consequences worth stating before you enable this:
+
+- **The server makes outbound HTTP again.** Only to Open-Meteo, CoinGecko and whatever
+  feed URLs the specs name, and every request goes through the SSRF guard in
+  `crates/server/src/egress.rs` -- scheme checks, the RFC1918/loopback/link-local/
+  metadata deny list, resolve-then-pin against DNS rebinding, per-hop re-validation
+  across redirects, a body cap and a wall-clock budget. But the surface is non-zero
+  again, where between `e137294` and `feat/server-side-cards` it was zero.
+- **A malformed spec file fails the start.** Deliberately: a server that came up with
+  cards silently missing presents as "the panel stopped updating" with nothing in the
+  log. Unknown fields are refused too, so a typo does not quietly take a default.
+
 ## 3a. Run under systemd (Linux)
 
 ```sh
@@ -227,6 +261,19 @@ Tailscale address explicitly.
 
 **Export from `git archive HEAD`, never from the working tree.** A dirty tree deploys code
 nobody can reproduce.
+
+**The export is `companion/` only, so nothing the server compiles may live outside it.**
+An `include_bytes!` path that climbs out of `companion/` builds fine on the Mac and then
+fails to compile on the VM, where that path does not exist. This has happened twice, both
+times for the bundled Inter faces; they now live at
+`companion/crates/server/assets/fonts/`. To check before deploying, build the export in
+isolation:
+
+```sh
+rm -rf /tmp/deskmate-exportcheck && mkdir -p /tmp/deskmate-exportcheck
+git archive HEAD companion | tar -x -C /tmp/deskmate-exportcheck
+(cd /tmp/deskmate-exportcheck/companion && cargo build --release -p server)
+```
 
 ```sh
 # On the Mac, from the repository root:

@@ -5091,3 +5091,61 @@ The cause is a seam, not a bug in the page: the session signer lives on
 `DESKMATE_GOOGLE_CLIENT_ID` is set. Setting the Google client config fixes it with no
 code change. Fixing it properly means moving `SessionSigner` onto `ServerState` so the
 operator session does not depend on an integration existing.
+
+---
+
+## Server-rendered card faces deployed — 2026-09-15 22:32 UTC
+
+`feat/server-side-cards` merged to `main` as `a1e5a5f` and deployed. **This changes
+nothing the device sees**: schema stays v10, the wire is untouched, firmware is untouched,
+and no capability moves. `DESKMATE_FIRMWARE_VERSION` stays `v2.1.0-proto2` and the env
+file was not edited, so **rollback is binary-only**.
+
+| | |
+|---|---|
+| commit | `a1e5a5f` via `git archive HEAD` (never the working tree) |
+| binary | built in `rust:1.98-bookworm` on docker-vm, **26.42 s** against the retained `target/` |
+| size | 19,088,472 bytes |
+| sha256 | `1672065a3ebda88efa2ff6c6ef6f3d923fd6e547c8e7b383793b2c2daf01945f` |
+| rollback binary | `/usr/local/bin/deskmate-server.bak-20260915T223212Z` (sha256 `2b50d217…`, the V3 build from `fc3e82a`) |
+| rollback env | none needed — the env file did not move |
+
+Two image sources were minted and a spec file written to
+`/var/lib/deskmate/configs/data-cards.json` (0600, `deskmate-server`), so this deploy is
+**not** behaviour-neutral the way the branch's own record anticipated:
+
+| source_id | face | refresh |
+|---|---|---|
+| `image-a9773eb40f03457f37a9b6d8` | `weather`, Dubai, metric | 900 s |
+| `image-8e361aaf9eb90ddd8d4b685e` | `rss`, Hacker News | 900 s |
+
+Both refreshers spawned on start and pushed a frame within 1.3 s of the restart, with
+zero `error`/`warn`/`panic` lines in the journal since:
+
+```
+INFO server::data_cards: server-rendered card refreshing source_id=image-a9773eb40f03457f37a9b6d8 kind="weather" refresh_seconds=900
+INFO server::data_cards: server-rendered card refreshing source_id=image-8e361aaf9eb90ddd8d4b685e kind="rss"     refresh_seconds=900
+```
+
+Frames landed at **329,740 bytes** each — `448 x 368 x 2` plus the 12-byte LVGL header,
+byte-identical in size to the working `Claude limits` card, which is the evidence the
+rasterizer produced a full frame rather than a partial one.
+
+`dev-0005`'s stored config was migrated v7 -> v10 and gained two picture cards naming
+those sources (backup: `dev-0005.json.bak-20260915T223846Z`). Note that
+`POST /v1/images` alone is NOT enough: `config.rs:413` requires a picture card's
+`source_id` to also appear in that document's own `image_sources`, so the source must be
+minted **and** listed.
+
+### Still owed — nothing here was seen on the panel
+
+**The board was powered off for all of this.** Every observation above is server-side.
+What the branch's own record already owed remains owed, and this deploy adds nothing to
+the evidence:
+
+- A server-rendered face **on the panel**, at either mounting.
+- **The measured RLE565 transfer size.** `docs/images/server-rendered-cards.md` predicts
+  ~10 KB against the ~330 KB raw frame on the flat-fill argument. The stored frame is the
+  raw 329,740 bytes; the compression happens on the wire and has never been measured.
+- The OTA download against the -104-byte `.bss` shift, which is unrelated to this deploy
+  but is still the check that matters most.

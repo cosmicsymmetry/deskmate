@@ -4966,3 +4966,61 @@ would offer a v1 device an image it cannot run.
 **What the flash session still owes is unchanged** — every checkbox above, with the OTA
 download the one that matters. Step 2 of the rollout order is already done; the session is
 now step 1 and steps 3-5.
+
+## V3 deployed to `deskmate.rodi.one` — 2026-09-15 14:46 UTC
+
+V3 sub-projects 1-4 (`fc3e82a`, merge `fb15060`). **This changes nothing the device
+sees**: V3 adds no config field, no wire message and no firmware byte, so the pending
+flash is unaffected in either direction. `DESKMATE_FIRMWARE_VERSION` stays
+`v2.1.0-proto2` and the env file was not edited.
+
+| | |
+|---|---|
+| commit | `fc3e82a` via `git archive HEAD` (never the working tree) |
+| binary | built in `rust:1.98-bookworm` on docker-vm, **41.4 s** against the retained `target/` |
+| sha256 | `2b50d217699feee5d6e48676f68c7823c5360bfc5650d13e42ecf501db662851` |
+| rollback binary | `/usr/local/bin/deskmate-server.bak-20260915T144613Z` (sha256 `f5ff2b70…`) |
+| rollback env | `/etc/deskmate/server.env.bak-20260915T144613Z` (identical to the running one) |
+
+Verified through the tunnel after restart:
+
+| Route | Before | After |
+|---|---|---|
+| `GET /v1/manage` | 404 | **401** (exists, gated) |
+| `GET /v1/manage/login` | 404 | **200**, renders |
+| `POST /v1/integrations/{id}/token` | 404 | **401** |
+| `GET /v1/device/link` | 401 | 401 |
+| `POST /v1/images` | 401 | 401 |
+| `GET /v1/firmware/v2.1.0-proto2.bin` | 200, 1,593,984 B | 200, 1,593,984 B |
+
+The dashboard renders real state: `dev-0001`..`dev-0005`, all **Not connected**, no
+integrations, no picture sources. A board at rest is the resting state, not a fault.
+
+### The rollback block in the section above was two deploys stale — corrected here
+
+That block names `deskmate-server.bak-20260911T213610Z` as the rollback target. It is not
+the binary that was running. **An undeployed-by-this-record deploy happened
+2026-09-12T20:10:58Z**, leaving `deskmate-server.bak-20260912T201058Z`, and the binary
+actually running until today was `f5ff2b70…`, which matches neither. Its provenance is
+not recorded anywhere and could not be reconstructed from the VM — the build tree is a
+`git archive` export with no commit marker. **Whoever deploys next: read the live
+`sha256sum` rather than trusting a rollback block, and write the commit down.**
+
+Also observed in the journal: `device link established device_id=dev-0005` at
+2026-09-12T20:11:03Z, followed by `device link idle timeout, closing` 54 s later. That is
+consistent with a v1 device opening the WebSocket and then failing every frame on
+`VersionMismatch` — the link is established before any protocol frame is exchanged — so
+it is **not** evidence the board is flashed. Confirm at the board.
+
+### One thing that does not work on this deployment
+
+**Browser form login returns 503 while no Google OAuth client is configured**, so
+`/v1/manage` is reachable today only by sending `Authorization: Bearer <admin token>`
+(curl works; a browser cannot sign in). Observed live: correct token -> 503, wrong token
+-> 401, so the token check runs first and nothing leaks.
+
+The cause is a seam, not a bug in the page: the session signer lives on
+`IntegrationRuntime` (sub-project 2), and `main.rs` only constructs that when
+`DESKMATE_GOOGLE_CLIENT_ID` is set. Setting the Google client config fixes it with no
+code change. Fixing it properly means moving `SessionSigner` onto `ServerState` so the
+operator session does not depend on an integration existing.

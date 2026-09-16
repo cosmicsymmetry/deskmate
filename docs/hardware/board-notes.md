@@ -5149,3 +5149,64 @@ the evidence:
   raw 329,740 bytes; the compression happens on the wire and has never been measured.
 - The OTA download against the -104-byte `.bss` shift, which is unrelated to this deploy
   but is still the check that matters most.
+
+---
+
+## Schema v11 deployed — first-class weather/RSS/token cards, 2026-09-16 12:03 UTC
+
+`e2b103c`. The owner rejected the interim shape: three tiles reading
+`PICTURE / PNG` above a dropdown that re-points a card at another source. Weather,
+RSS and token are now card kinds with their own settings, and `data-cards.json` is
+gone. **Schema bump, so the order was server binary -> `Deskmate.app` -> save.**
+No wire change, no firmware change, no capability moves;
+`DESKMATE_FIRMWARE_VERSION` stays `v2.1.0-proto2` and the env file was not edited,
+so **rollback is binary-only**.
+
+| | |
+|---|---|
+| commit | `e2b103c` via `git archive HEAD` |
+| binary | `rust:1.98-bookworm` on docker-vm, **25.45 s** against the retained `target/` |
+| size | 19,211,032 bytes |
+| sha256 | `fa7486d7a35c1ae85a588269c5b5f172f050d41ac2b805fdd717b5b9715e4727` |
+| rollback binary | `/usr/local/bin/deskmate-server.bak-20260916T120328Z` (`1672065a…`, the v10 build from `a1e5a5f`) |
+| retired | `data-cards.json` -> `data-cards.json.retired-20260916T120328Z` (inert: `load_specs` is deleted) |
+| Mac app | rebuilt and installed from the same commit, 16,959,568 bytes |
+
+### The observation that matters: a config PUT re-derives the refreshers
+
+The server restarted at **12:03:28** and spawned NO refreshers, which is correct --
+`dev-0005` still held v10 picture cards and the spec file was retired. The
+`PUT /v1/devices/dev-0005/config` at **12:05:15** spawned both, two minutes after
+the restart:
+
+```
+INFO server::data_cards: server-rendered card refreshing source_id=card-weather     kind="weather" refresh_seconds=900
+INFO server::data_cards: server-rendered card refreshing source_id=card-hacker-news kind="rss"     refresh_seconds=900
+```
+
+That gap is the evidence that an edit in the companion takes effect without a
+process restart, and that `replace_data_card_refreshers` aborts the previous set.
+The derived sources `card-weather` and `card-hacker-news` were created
+server-owned and tokenless, and each pushed a **329,740-byte** frame within a
+second. Zero `error`/`warn`/`panic` lines since. Frame files are named
+`card-<sha256>.bin`: source ids are hashed into filenames so one containing path
+characters cannot escape the frame directory.
+
+The v10 -> v11 migration ran on the real stored document (`origin=MigratedV10`),
+not a fixture.
+
+### A migration consequence worth remembering
+
+v11 is additive, so a picture card previously fed by `data-cards.json` SURVIVES
+the migration with nothing refreshing it -- it keeps its last frame forever and
+looks fine. Both interim cards were replaced with real `weather`/`rss` cards by
+hand here. Their minted sources (`image-a9773eb4…`, `image-8e361aaf…`) are now
+orphaned in `image-sources.json`; they hold no card reference and are harmless,
+but they are the residue to clear if that file is ever tidied.
+
+### Still owed — nothing was seen on the panel
+
+**The board was powered off throughout.** Every observation above is server-side.
+A server-rendered face on the panel at either mounting, and the predicted ~10 KB
+RLE565 transfer size against the 329,740-byte raw frame, both remain unmeasured,
+as does the OTA download against the -104-byte `.bss` shift.

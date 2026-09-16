@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use crate::ServerState;
 use crate::auth::AdminAuthenticated;
+use crate::data_cards;
 
 pub(crate) fn routes() -> Router<ServerState> {
     Router::new()
@@ -70,13 +71,18 @@ async fn put_config(
     })?;
     let device_config = state.configs().for_device(&device_id);
     let _update = device_config.update.lock().await;
+    let data_card_specs = data_cards::specs_from_config(&config);
 
     let saved_config = config.clone();
     let store = std::sync::Arc::clone(&device_config);
+    let source_state = state.clone();
+    let prepared_specs = data_card_specs.clone();
     let receipt = tokio::task::spawn_blocking(move || {
         saved_config
             .compile(1)
             .map_err(|error| SaveConfigError::Invalid(error.issues))?;
+        data_cards::ensure_sources(&source_state, &prepared_specs)
+            .map_err(SaveConfigError::DataCards)?;
         store
             .store
             .save(&saved_config)
@@ -85,6 +91,12 @@ async fn put_config(
     .await
     .map_err(|_| AdminError::WorkerFailed)?
     .map_err(AdminError::from)?;
+
+    // The persisted document is now authoritative even if a currently linked
+    // board later refuses the live apply. Replace server-owned producers here
+    // so a removed card cannot keep fetching until the next successful PUT or
+    // process restart.
+    data_cards::replace_refreshers(&state, &device_id, data_card_specs);
 
     if let Some(runtime) = state
         .device_link(&device_id)
@@ -451,6 +463,7 @@ mod tests {
 
 enum SaveConfigError {
     Invalid(Vec<ValidationIssue>),
+    DataCards(String),
     Store(StoreError),
 }
 
@@ -475,6 +488,7 @@ impl From<SaveConfigError> for AdminError {
             SaveConfigError::Store(error) => Self::Store {
                 message: error.to_string(),
             },
+            SaveConfigError::DataCards(message) => Self::Store { message },
         }
     }
 }

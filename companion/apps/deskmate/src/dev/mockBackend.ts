@@ -159,6 +159,21 @@ function validate(draft: AppConfig): DraftValidation {
           push(`${at}.source_id`, "missing-reference", "Choose an existing picture source.");
         }
         break;
+      case "weather":
+        if (!card.location.trim()) {
+          push(`${at}.location`, "empty", "Type a location.");
+        }
+        break;
+      case "rss":
+        if (!/^https?:\/\//.test(card.feed_url)) {
+          push(`${at}.feed_url`, "invalid-source", "Use an HTTP or HTTPS feed URL.");
+        }
+        break;
+      case "token":
+        if (!card.coin_id.trim()) {
+          push(`${at}.coin_id`, "empty", "Type a CoinGecko coin ID.");
+        }
+        break;
     }
     if (card.alert.kind !== "none" && card.alert.hold.kind === "seconds") {
       const held = card.alert.hold.value;
@@ -265,11 +280,11 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
       const cardId = args?.cardId as string;
       const card = config.cards.find((candidate) => candidate.id === cardId);
       if (!card) throw { category: "not-found", message: "No such card." };
-      if (card.kind === "picture" && snapshot.device.tier === "local") {
+      if (card.kind !== "clock" && card.kind !== "pomodoro" && snapshot.device.tier === "local") {
         return {
           png_base64: null,
           sample: false,
-          state: "Picture cards render on the server",
+          state: "This card renders on the server",
         } as T;
       }
       const timer = snapshot.pomodoros.find((candidate) => candidate.card_id === cardId);

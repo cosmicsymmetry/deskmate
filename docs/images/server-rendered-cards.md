@@ -2,10 +2,10 @@
 
 ## What these are
 
-A weather, RSS or token card is an **image source the server pushes to itself**. There is
-no new card kind: the owner creates one ordinary `picture` card pointing at a source id,
-and a task inside the server fetches the data, draws the face, and hands the frame to the
-same `ImageSourceStore::accept` an external producer's PNG arrives through.
+A weather, RSS or token card is a first-class config kind backed by **an image source the
+server pushes to itself**. A task inside the server fetches the data, draws the face, and
+hands the frame to the same `ImageSourceStore::accept` an external producer's PNG arrives
+through. The source id is derived from card identity and its credential is never minted.
 
 So everything downstream is the picture-card path that already works on hardware: the
 durable asset, the keep-set, the device notify, the staleness inference, the GC. What is
@@ -17,72 +17,33 @@ draw.
 
 ## Setting one up
 
-Three steps, and the first two are the same as for any picture card.
+Add the card in the companion window and fill in its own settings:
 
-1. **Mint an image source** and keep the id. The token is not needed — the server pushes
-   to its own store directly, not over HTTP.
+- **Weather:** choose Weather, type a city or place in Location, then choose metric or
+  imperial units.
+- **RSS:** choose RSS, paste an `http` or `https` feed URL, and give the feed a short
+  title for the face.
+- **Token:** choose Token, enter CoinGecko's coin id (for example `solana`) and the quote
+  currency (for example `usd`).
 
-   ```sh
-   curl -sX POST https://deskmate.rodi.one/v1/images \
-     -H "Authorization: Bearer $DESKMATE_ADMIN_TOKEN" \
-     -H 'Content-Type: application/json' \
-     -d '{"name": "Weather"}'
-   # {"id":"src_9f3a...","token":"..."}
-   ```
-
-2. **Add a picture card** in the companion window naming that `source_id`.
-
-3. **Write the spec file** and restart the server. The default path is
-   `data-cards.json` inside `DESKMATE_CONFIG_DIR`; `DESKMATE_DATA_CARDS` overrides it.
-
-   ```json
-   [
-     {
-       "source_id": "src_9f3a...",
-       "refresh_seconds": 900,
-       "face": { "kind": "weather", "location": "Dubai", "units": "metric" }
-     },
-     {
-       "source_id": "src_2b71...",
-       "refresh_seconds": 900,
-       "face": {
-         "kind": "rss",
-         "url": "https://news.ycombinator.com/rss",
-         "title": "Hacker News"
-       }
-     },
-     {
-       "source_id": "src_4c08...",
-       "refresh_seconds": 300,
-       "face": { "kind": "token", "coin_id": "solana", "currency": "usd" }
-     }
-   ]
-   ```
-
-   The face config is a nested object rather than flattened alongside
-   `source_id`, and that is load-bearing: serde's `deny_unknown_fields` and
-   `flatten` do not work together, so flattening would have meant giving up the
-   typo protection described below. One level of braces buys it back.
-
-A missing file means no server-rendered cards, which is the ordinary case and not an
-error. A **malformed** file fails the start, deliberately: a server that came up with
-silently missing cards would present as "the panel stopped updating" with nothing in the
-log. Unknown fields are refused too, so `"unit"` does not quietly become the default
-`"units"`.
+Save once. The server derives one spec and the private source id `card-{card-id}` from
+that config card, creates the source without a bearer token, and begins refreshing it
+immediately. Editing or removing the card replaces its refresher without a restart.
+There is no source dropdown, source-minting step, environment variable or secondary JSON
+file.
 
 ## The fields
 
-Every field below `face` sits inside it; `source_id` and `refresh_seconds` sit
-outside.
+These fields sit directly on the corresponding card in schema v11. All three also carry
+the common card fields documented in `docs/config/v11.md`.
 
 | Field | Applies to | Meaning |
 | --- | --- | --- |
-| `source_id` | all | The minted image source. The picture card names the same id. |
-| `refresh_seconds` | all | Clamped to 60 s…6 h. Default 900. |
+| `refresh` | all | `interval { minutes }`; defaults to 15 minutes in the companion. The server still clamps the resulting cadence to 60 s…6 h. |
 | `location` | weather | A place name, geocoded by Open-Meteo. The geocoder's own display name is what the face shows, so the panel says what the forecast is actually for. |
 | `units` | weather | `metric` (default) or `imperial`. |
-| `url` | rss | The feed. RSS 2.0 and Atom both parse. |
-| `title` | rss | The eyebrow. Feeds name themselves inconsistently and often at length, so this is the owner's words. |
+| `feed_url` | rss | The feed. RSS 2.0 and Atom both parse. |
+| `feed_title` | rss | The eyebrow. Feeds name themselves inconsistently and often at length, so this is the owner's words. |
 | `coin_id` | token | CoinGecko's **id**, e.g. `solana` — not the ticker. Lowercase letters, digits and hyphens only. |
 | `currency` | token | Quote currency, default `usd`. |
 | `api_key` | token | Optional CoinGecko demo key. |
@@ -92,20 +53,20 @@ outside.
 | Card | Endpoint | Key needed |
 | --- | --- | --- |
 | weather | `api.open-meteo.com` + `geocoding-api.open-meteo.com` | No |
-| rss | whatever `url` names | No |
+| rss | whatever `feed_url` names | No |
 | token | `api.coingecko.com/api/v3/coins/markets` and `/market_chart` | No, but the free tier is rate-limited |
 
 The token card spends **two** requests per refresh, and only the first is required. A
 rate-limited or slow `market_chart` leaves a face with a price and no sparkline, which is
 a worse face but a true one; refusing the whole refresh would replace a correct price
-with a stale badge because a decoration was unavailable. Keep `refresh_seconds` at 300 or
-above on the free tier.
+with a stale badge because a decoration was unavailable. Keep the interval at five
+minutes or above on the free tier.
 
 ## The server makes outbound HTTP again
 
 It did not between `e137294` (2026-09-11) and this change. `CLAUDE.md`'s current-state
-section says so and carries the two traps this cost; the config contract in
-`docs/config/v10.md` is unaffected, because no card kind and no schema field moved.
+section says so and carries the two traps this cost; the current config contract is
+`docs/config/v11.md`.
 
 Every request goes through `crates/server/src/egress.rs`, the SSRF guard the plugin
 system used: scheme checks, the RFC1918/loopback/link-local/metadata deny list,
@@ -176,10 +137,7 @@ Both are worth keeping in mind before adding a face.
 
 ## What this is not
 
-Native card kinds. A weather card is still a picture card plus a line in a file, so the
-companion window shows it as "Picture — Weather" and has no editor for the location or
-the feed URL. Schema v11 would fix that, and it is a strictly additive change on top of
-this: the providers, the faces, the frames and the delivery do not move. The spec file is
-where the authority honestly sits until the window grows the editors — putting fields in
-the config document that no window can author and no migration can repair is how this
-project came to delete two card families.
+This is not a revival of the device-rendered data-card family or the plugin registry.
+Weather, RSS and Token are explicit config kinds with explicit editors, but their faces
+remain native Rust rendered on the server. There is no manifest, expression language,
+template catalog or face selector, and delivery still uses the one proven raster path.

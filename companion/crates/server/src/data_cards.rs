@@ -3,8 +3,8 @@
 //! # What this is, and what it deliberately is not
 //!
 //! A weather, RSS or token card here is an **image source the server pushes to
-//! itself**. The owner creates one picture card pointing at the source; a task
-//! in this module fetches the data on an interval, renders the face, and hands
+//! itself**. The device config owns the face settings; a task in this module
+//! fetches the data on an interval, renders the face, and hands
 //! the frame to [`crate::image_sources::ImageSourceStore::accept`] -- the exact
 //! call an external producer's PNG arrives through.
 //!
@@ -13,32 +13,14 @@
 //! staleness inference, the GC. This module adds a producer, not a delivery
 //! path.
 //!
-//! What it is not is a new card *kind*. `docs/config/v10.md` still has three
-//! (`clock`, `pomodoro`, `picture`) and nothing here changes that. Native
-//! kinds would put these cards in the companion window with their own editors
-//! instead of requiring a hand-written spec file plus a picture card pointed at
-//! a source id -- that is schema v11's job, and it is a strictly cosmetic
-//! improvement on top of this: the fetch, the faces and the frames do not
-//! change.
-//!
-//! # Why the specs live in a file rather than in the config document
-//!
-//! Because the config document is the *companion's* document, and the
-//! companion has no UI for these yet. Putting a half-schema in it -- fields no
-//! window can author and no migration can repair -- is how this repository
-//! ended up deleting two card families. A server-side file is honest about
-//! where the authority currently sits and costs nothing to delete when the
-//! window grows the editors.
-
-use std::path::Path;
 use std::time::Duration;
 
+use app_core::{AppConfig, CardSettings, RefreshPolicy};
 use chrono::Utc;
 use providers::Provider as _;
 use providers::rss::{RssOptions, RssProvider};
 use providers::token::{TokenOptions, TokenProvider};
 use providers::weather::{WeatherOptions, WeatherProvider, WeatherUnits};
-use serde::Deserialize;
 
 use crate::ServerState;
 use crate::egress_client::EgressHttpClient;
@@ -56,40 +38,25 @@ const MIN_REFRESH: Duration = Duration::from_secs(60);
 /// for a day.
 const MAX_REFRESH: Duration = Duration::from_hours(6);
 
-/// One server-rendered card.
-///
-/// The face config is a nested object rather than flattened into this struct,
-/// and that is not a style choice: serde's `deny_unknown_fields` and
-/// `flatten` do not work together -- the outer struct rejects every flattened
-/// field as unknown. Flattening therefore meant giving up the typo protection,
-/// which is the one thing this file most needs, because a spec is hand-written
-/// and a silently-defaulted field presents as a card that is subtly wrong
-/// forever. Nesting costs one level of braces and keeps both sides strict.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// The internal rendering input for one first-class data card. It stays
+/// separate from `CardSettings` so the provider/render loop has one small,
+/// stable vocabulary and cannot accidentally retain the whole device config.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataCardSpec {
-    /// The image source this card pushes to, as `POST /v1/images` minted it.
-    /// The owner's picture card names the same id.
+    /// A server-owned source derived from immutable card identity.
     pub source_id: String,
-    #[serde(default = "default_refresh_seconds")]
     pub refresh_seconds: u64,
     pub face: FaceSpec,
 }
 
-const fn default_refresh_seconds() -> u64 {
-    900
-}
-
 /// Which face, and what it needs to know.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FaceSpec {
     Weather {
         /// A place name, geocoded by the provider. Not coordinates: the owner
         /// types a city, and the geocoder's own display name is what the face
         /// shows, so the panel says what the forecast is actually for.
         location: String,
-        #[serde(default)]
         units: Units,
     },
     Rss {
@@ -101,23 +68,25 @@ pub enum FaceSpec {
     Token {
         /// `CoinGecko`'s coin id, e.g. `solana`.
         coin_id: String,
-        #[serde(default = "default_currency")]
         currency: String,
-        #[serde(default)]
         api_key: Option<String>,
     },
 }
 
-fn default_currency() -> String {
-    "usd".to_owned()
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Units {
     #[default]
     Metric,
     Imperial,
+}
+
+impl From<app_core::Units> for Units {
+    fn from(units: app_core::Units) -> Self {
+        match units {
+            app_core::Units::Metric => Self::Metric,
+            app_core::Units::Imperial => Self::Imperial,
+        }
+    }
 }
 
 impl From<Units> for WeatherUnits {
@@ -129,26 +98,110 @@ impl From<Units> for WeatherUnits {
     }
 }
 
-/// Reads the spec file, or returns nothing when there is none.
-///
-/// A missing file is the ordinary case -- most deployments have no
-/// server-rendered cards -- so it is not an error. A *malformed* file is, and
-/// loudly: silently running with zero cards because a comma was missing would
-/// present as "the panel stopped updating" with nothing in the log.
-pub fn load_specs(path: &Path) -> Result<Vec<DataCardSpec>, String> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(format!("{}: {error}", path.display())),
-    };
-    let specs: Vec<DataCardSpec> =
-        serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", path.display()))?;
-    for spec in &specs {
-        if spec.source_id.trim().is_empty() {
-            return Err(format!("{}: a spec has an empty source_id", path.display()));
+/// Derives the server's complete refresher set from the validated device
+/// document. One data-card object becomes one spec and one deterministic image
+/// source; ordinary picture cards remain external producers and are skipped.
+pub fn specs_from_config(config: &AppConfig) -> Vec<DataCardSpec> {
+    config
+        .cards
+        .iter()
+        .filter_map(|card| {
+            let refresh_seconds = match card.refresh() {
+                RefreshPolicy::Interval { minutes } => u64::from(minutes).saturating_mul(60),
+                RefreshPolicy::DeviceLocal | RefreshPolicy::Manual => return None,
+            };
+            let source_id = card.source_id()?.into_owned();
+            let face = match card {
+                CardSettings::Weather {
+                    location, units, ..
+                } => FaceSpec::Weather {
+                    location: location.clone(),
+                    units: (*units).into(),
+                },
+                CardSettings::Rss {
+                    feed_url,
+                    feed_title,
+                    ..
+                } => FaceSpec::Rss {
+                    url: feed_url.clone(),
+                    title: feed_title.clone(),
+                },
+                CardSettings::Token {
+                    coin_id,
+                    currency,
+                    api_key,
+                    ..
+                } => FaceSpec::Token {
+                    coin_id: coin_id.clone(),
+                    currency: currency.clone(),
+                    api_key: api_key.clone(),
+                },
+                CardSettings::Clock { .. }
+                | CardSettings::Pomodoro { .. }
+                | CardSettings::Picture { .. } => return None,
+            };
+            Some(DataCardSpec {
+                source_id,
+                refresh_seconds,
+                face,
+            })
+        })
+        .collect()
+}
+
+/// Registers every deterministic source before its refresher can produce a
+/// frame. The store creates these records without minting or returning a bearer
+/// token: the producer is this process and calls `accept` directly.
+pub(crate) fn ensure_sources(state: &ServerState, specs: &[DataCardSpec]) -> Result<(), String> {
+    let sources: Vec<_> = specs
+        .iter()
+        .map(|spec| (spec.source_id.clone(), face_name(&spec.face).to_owned()))
+        .collect();
+    state
+        .image_sources()
+        .ensure_server_sources(&sources, protocol::MAX_ASSET_DIGESTS)
+        .map_err(|error| error.to_string())
+}
+
+fn face_name(face: &FaceSpec) -> &'static str {
+    match face {
+        FaceSpec::Weather { .. } => "Weather",
+        FaceSpec::Rss { .. } => "RSS",
+        FaceSpec::Token { .. } => "Token",
+    }
+}
+
+/// Rebuilds the refresher sets from every persisted device config at process
+/// start. A board is normally powered off, so tying this work to a WebSocket
+/// connection would leave its server-rendered cards frozen precisely during
+/// the ordinary disconnected state.
+pub async fn start_refreshers_from_stored_configs(state: &ServerState) {
+    for device_id in state.registry_device_ids() {
+        let device_config = state.configs().for_device(&device_id);
+        let load_store = std::sync::Arc::clone(&device_config);
+        let Ok(outcome) = tokio::task::spawn_blocking(move || load_store.store.load()).await else {
+            tracing::error!(device_id = %device_id, "data-card config loader panicked");
+            continue;
+        };
+        let config = outcome.into_config();
+        let specs = specs_from_config(&config);
+        let ensure_state = state.clone();
+        let ensure_specs = specs.clone();
+        match tokio::task::spawn_blocking(move || ensure_sources(&ensure_state, &ensure_specs))
+            .await
+        {
+            Ok(Ok(())) => replace_refreshers(state, &device_id, specs),
+            Ok(Err(error)) => tracing::error!(
+                device_id = %device_id,
+                %error,
+                "server-rendered card sources could not be prepared"
+            ),
+            Err(_) => tracing::error!(
+                device_id = %device_id,
+                "data-card source preparation panicked"
+            ),
         }
     }
-    Ok(specs)
 }
 
 /// Renders one spec's face, fetching whatever it needs.
@@ -271,12 +324,27 @@ impl FaceProvider {
 ///
 /// Each card gets its own task so a slow feed cannot delay a token price, and
 /// so one card's repeated failure is visible as one card's problem.
-pub fn spawn_refreshers(state: &ServerState, specs: Vec<DataCardSpec>) {
-    for spec in specs {
-        let refresh = Duration::from_secs(spec.refresh_seconds).clamp(MIN_REFRESH, MAX_REFRESH);
-        let state = state.clone();
-        tokio::spawn(async move { refresh_loop(state, spec, refresh).await });
-    }
+pub fn spawn_refreshers(
+    state: &ServerState,
+    specs: Vec<DataCardSpec>,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    specs
+        .into_iter()
+        .map(|spec| {
+            let refresh = Duration::from_secs(spec.refresh_seconds).clamp(MIN_REFRESH, MAX_REFRESH);
+            let state = state.clone();
+            tokio::spawn(async move { refresh_loop(state, spec, refresh).await })
+        })
+        .collect()
+}
+
+/// Cancels the old tasks for one device and installs the set derived from its
+/// newly accepted config. Task ownership is per device even though v2 is
+/// single-tenant, so a later multi-device deployment cannot make one save
+/// cancel another device's cards.
+pub(crate) fn replace_refreshers(state: &ServerState, device_id: &str, specs: Vec<DataCardSpec>) {
+    let handles = spawn_refreshers(state, specs);
+    state.replace_data_card_refreshers(device_id, handles);
 }
 
 async fn refresh_loop(state: ServerState, spec: DataCardSpec, refresh: Duration) {
@@ -387,107 +455,78 @@ async fn refresh_loop(state: ServerState, spec: DataCardSpec, refresh: Duration)
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn write(contents: &str) -> tempfile::TempDir {
-        let directory = tempfile::tempdir().expect("a temp directory");
-        std::fs::write(directory.path().join("cards.json"), contents).expect("the spec is written");
-        directory
-    }
+    use app_core::{CardAlert, Units as ConfigUnits, WidgetTapAction};
 
     #[test]
-    fn a_missing_spec_file_is_no_cards_rather_than_an_error() {
-        // The ordinary deployment. An error here would make every server
-        // without server-rendered cards fail to start.
-        let specs = load_specs(Path::new("/nonexistent/deskmate/cards.json"))
-            .expect("a missing file is not an error");
-        assert!(specs.is_empty());
-    }
+    fn the_three_specs_are_derived_from_real_config_card_types() {
+        let config = AppConfig {
+            cards: vec![
+                CardSettings::Weather {
+                    id: "outside".into(),
+                    title: "Dubai".into(),
+                    location: "Dubai".into(),
+                    units: ConfigUnits::Imperial,
+                    tap_action: WidgetTapAction::None,
+                    refresh: RefreshPolicy::Interval { minutes: 15 },
+                    alert: CardAlert::None,
+                    dwell_seconds: None,
+                },
+                CardSettings::Rss {
+                    id: "headlines".into(),
+                    title: "News".into(),
+                    feed_url: "https://example.test/feed".into(),
+                    feed_title: "Hacker News".into(),
+                    tap_action: WidgetTapAction::None,
+                    refresh: RefreshPolicy::Interval { minutes: 30 },
+                    alert: CardAlert::None,
+                    dwell_seconds: None,
+                },
+                CardSettings::Token {
+                    id: "market".into(),
+                    title: "SOL".into(),
+                    coin_id: "solana".into(),
+                    currency: "eur".into(),
+                    api_key: Some("demo-key".into()),
+                    tap_action: WidgetTapAction::None,
+                    refresh: RefreshPolicy::Interval { minutes: 5 },
+                    alert: CardAlert::None,
+                    dwell_seconds: None,
+                },
+            ],
+            ..AppConfig::default()
+        };
+        config.validate().expect("the real config is valid");
 
-    #[test]
-    fn the_three_faces_parse_with_their_defaults() {
-        let directory = write(
-            r#"[
-                {"source_id": "abc", "face": {"kind": "weather", "location": "Dubai"}},
-                {"source_id": "def", "face": {"kind": "rss", "url": "https://example.test/feed", "title": "News"}},
-                {"source_id": "ghi", "face": {"kind": "token", "coin_id": "solana"}}
-            ]"#,
-        );
-        let specs = load_specs(&directory.path().join("cards.json")).expect("the specs parse");
+        let specs = specs_from_config(&config);
         assert_eq!(specs.len(), 3);
+        assert_eq!(specs[0].source_id, "card-outside");
         assert_eq!(specs[0].refresh_seconds, 900);
-        assert!(matches!(
+        assert_eq!(
             specs[0].face,
             FaceSpec::Weather {
-                units: Units::Metric,
-                ..
+                location: "Dubai".into(),
+                units: Units::Imperial,
             }
-        ));
-        match &specs[2].face {
+        );
+        assert_eq!(specs[1].source_id, "card-headlines");
+        assert_eq!(specs[1].refresh_seconds, 1_800);
+        assert_eq!(
+            specs[1].face,
+            FaceSpec::Rss {
+                url: "https://example.test/feed".into(),
+                title: "Hacker News".into(),
+            }
+        );
+        assert_eq!(specs[2].source_id, "card-market");
+        assert_eq!(specs[2].refresh_seconds, 300);
+        assert_eq!(
+            specs[2].face,
             FaceSpec::Token {
-                currency, api_key, ..
-            } => {
-                assert_eq!(currency, "usd");
-                assert!(api_key.is_none());
+                coin_id: "solana".into(),
+                currency: "eur".into(),
+                api_key: Some("demo-key".into()),
             }
-            other => panic!("expected a token card, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_malformed_spec_file_is_a_loud_error_rather_than_zero_cards() {
-        let directory = write(r#"[{"source_id": "abc", "face": {"kind": "weather"}}]"#);
-        let error = load_specs(&directory.path().join("cards.json"))
-            .expect_err("a weather card without a location is refused");
-        assert!(
-            error.contains("location"),
-            "the message names the field: {error}"
         );
-    }
-
-    #[test]
-    fn an_unknown_field_is_refused_rather_than_silently_ignored() {
-        // `deny_unknown_fields` is what turns a typo into a startup error
-        // instead of a card that quietly uses a default forever.
-        let directory = write(
-            r#"[{"source_id": "abc", "face": {"kind": "weather", "location": "Dubai", "unit": "imperial"}}]"#,
-        );
-        assert!(
-            load_specs(&directory.path().join("cards.json")).is_err(),
-            "\"unit\" is not \"units\" and must not be accepted"
-        );
-    }
-
-    #[test]
-    fn an_unknown_outer_field_is_refused_too() {
-        // The regression `flatten` caused: with it, `deny_unknown_fields` on
-        // this struct rejected the face's own fields, so it had to be removed
-        // and every typo -- inner and outer -- became a silent default.
-        let directory = write(
-            r#"[{"source_id": "abc", "refresh_second": 60, "face": {"kind": "weather", "location": "Dubai"}}]"#,
-        );
-        assert!(
-            load_specs(&directory.path().join("cards.json")).is_err(),
-            "\"refresh_second\" is not \"refresh_seconds\""
-        );
-    }
-
-    #[test]
-    fn an_unknown_kind_is_refused() {
-        let directory =
-            write(r#"[{"source_id": "abc", "face": {"kind": "calendar", "url": "x"}}]"#);
-        assert!(
-            load_specs(&directory.path().join("cards.json")).is_err(),
-            "the retired card kinds do not come back through this file"
-        );
-    }
-
-    #[test]
-    fn an_empty_source_id_is_refused() {
-        let directory =
-            write(r#"[{"source_id": "  ", "face": {"kind": "weather", "location": "Dubai"}}]"#);
-        let error = load_specs(&directory.path().join("cards.json"))
-            .expect_err("a blank source id is refused");
-        assert!(error.contains("source_id"));
     }
 
     #[test]
@@ -500,15 +539,9 @@ mod tests {
 
     #[test]
     fn imperial_units_reach_the_provider() {
-        let directory = write(
-            r#"[{"source_id": "abc", "face": {"kind": "weather", "location": "Austin", "units": "imperial"}}]"#,
-        );
-        let specs = load_specs(&directory.path().join("cards.json")).expect("the spec parses");
-        match &specs[0].face {
-            FaceSpec::Weather { units, .. } => {
-                assert!(matches!(WeatherUnits::from(*units), WeatherUnits::Imperial));
-            }
-            other => panic!("expected a weather card, got {other:?}"),
-        }
+        assert!(matches!(
+            WeatherUnits::from(Units::Imperial),
+            WeatherUnits::Imperial
+        ));
     }
 }

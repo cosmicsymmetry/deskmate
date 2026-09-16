@@ -1,6 +1,9 @@
 # Server-rendered data cards
 
-Status: implemented on `feat/server-side-cards`. Owner direction, 2026-09-12, verbatim:
+Status: implemented on `feat/server-side-cards`, then superseded in part by
+`2026-09-16-first-class-data-cards-design.md`. The face, provider and delivery decisions
+below remain current; the spec-file authority and “not new card kinds” decision are the
+historical interim that schema v11 replaced. Owner direction, 2026-09-12, verbatim:
 
 > Let's create a few new cards in a separate worktree. Fully rendered.
 >

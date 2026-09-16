@@ -152,18 +152,18 @@ pub(super) fn initial_snapshot(config: &AppConfig, diagnostics: RuntimeDiagnosti
         .iter()
         .filter(|card| compiled_card_ids.contains(card.id()))
     {
-        match card {
-            CardSettings::Pomodoro {
-                id,
-                duration_seconds,
-                ..
-            } => pomodoros.push(PomodoroSnapshot {
+        if let CardSettings::Pomodoro {
+            id,
+            duration_seconds,
+            ..
+        } = card
+        {
+            pomodoros.push(PomodoroSnapshot {
                 card_id: id.clone(),
                 state: PomodoroState::Idle,
                 duration_seconds: *duration_seconds,
                 remaining_seconds: *duration_seconds,
-            }),
-            CardSettings::Picture { .. } | CardSettings::Clock { .. } => {}
+            });
         }
     }
     AppSnapshot {

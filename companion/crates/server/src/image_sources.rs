@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use app_core::config::MAX_IMAGE_SOURCES;
+use app_core::config::{MAX_CARD_ID_LEN, MAX_IMAGE_SOURCES};
 use app_core::secure_file;
 use chrono::{DateTime, SecondsFormat, Utc};
 use rand::RngCore;
@@ -228,6 +228,57 @@ impl ImageSourceStore {
         *state = candidate;
 
         Ok(MintedSource { id, token })
+    }
+
+    /// Ensures deterministic sources owned by the server itself exist, without
+    /// minting a bearer token that no HTTP producer should ever receive.
+    ///
+    /// The whole requested set is capacity-checked and persisted as one
+    /// candidate so a config with several new data cards cannot register only
+    /// a prefix and then fail halfway through. Existing ids are left untouched:
+    /// this also makes the operation idempotent across startup and every save.
+    pub(crate) fn ensure_server_sources(
+        &self,
+        sources: &[(String, String)],
+        durable_digests_available: usize,
+    ) -> Result<(), ImageSourceError> {
+        let mut state = self.lock();
+        let mut candidate = state.clone();
+        for (id, name) in sources {
+            if !valid_source_id(id) {
+                return Err(storage_error("server source has an invalid id"));
+            }
+            if candidate.sources.iter().any(|source| source.id == *id) {
+                continue;
+            }
+            if candidate.sources.len() >= MAX_IMAGE_SOURCES {
+                return Err(ImageSourceError::Capacity);
+            }
+            if candidate.sources.len() >= durable_digests_available {
+                return Err(ImageSourceError::DigestBudget {
+                    available: durable_digests_available,
+                });
+            }
+
+            // No plaintext token is generated. A random digest keeps the
+            // persisted record's existing closed shape while making the source
+            // computationally unauthenticatable through the producer route.
+            let mut token_digest = [0_u8; 32];
+            rand::rng().fill_bytes(&mut token_digest);
+            candidate.sources.push(SourceRecord {
+                id: id.clone(),
+                name: name.clone(),
+                token_digest,
+                recent_push_times: Vec::new(),
+                frame: None,
+            });
+        }
+        if candidate.sources.len() == state.sources.len() {
+            return Ok(());
+        }
+        save_store(&self.root, &candidate)?;
+        *state = candidate;
+        Ok(())
     }
 
     pub(crate) fn revoke(&self, id: &str) -> Result<(), ImageSourceError> {
@@ -526,7 +577,17 @@ fn remove_frame(root: &Path, id: &str) -> Result<(), ImageSourceError> {
 }
 
 fn frame_path(root: &Path, id: &str) -> PathBuf {
-    root.join(IMAGE_FRAME_DIRECTORY).join(format!("{id}.bin"))
+    let file_stem = if valid_minted_source_id(id) {
+        id.to_owned()
+    } else {
+        // Card ids are user-authored UTF-8 and may contain path separators. The
+        // source id remains the settled `card-{id}` value everywhere public;
+        // only its on-disk filename is made path-safe and fixed-width.
+        let digest: [u8; 32] = Sha256::digest(id.as_bytes()).into();
+        format!("card-{}", protocol::digest_hex(&digest))
+    };
+    root.join(IMAGE_FRAME_DIRECTORY)
+        .join(format!("{file_stem}.bin"))
 }
 
 fn sync_parent_best_effort(parent: &Path, path: &Path) {
@@ -601,6 +662,13 @@ fn random_source_id() -> String {
 }
 
 fn valid_source_id(id: &str) -> bool {
+    valid_minted_source_id(id)
+        || id
+            .strip_prefix("card-")
+            .is_some_and(|card_id| !card_id.trim().is_empty() && card_id.len() <= MAX_CARD_ID_LEN)
+}
+
+fn valid_minted_source_id(id: &str) -> bool {
     id.len() == "image-".len() + SOURCE_ID_RANDOM_HEX_LEN
         && id.starts_with("image-")
         && id["image-".len()..]
@@ -676,6 +744,44 @@ mod tests {
 
         assert_eq!(store.authenticate(&source.token), Some(source.id));
         assert_eq!(store.authenticate(&"00".repeat(32)), None);
+    }
+
+    #[test]
+    fn a_server_owned_source_is_idempotent_and_accepts_frames_without_a_token() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("store");
+        let sources = vec![("card-outside".to_owned(), "Weather".to_owned())];
+
+        store
+            .ensure_server_sources(&sources, MAX_IMAGE_SOURCES)
+            .expect("register server source");
+        store
+            .ensure_server_sources(&sources, MAX_IMAGE_SOURCES)
+            .expect("registering it again is a no-op");
+
+        let summaries = store.summaries(at(0));
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, "card-outside");
+        assert_eq!(summaries[0].name, "Weather");
+        assert!(matches!(
+            store.accept("card-outside", canonical_frame(0x2a), at(0)),
+            Ok(AcceptOutcome::Changed { .. })
+        ));
+
+        drop(store);
+        let reloaded = ImageSourceStore::new(temp.path().to_path_buf()).expect("reload store");
+        assert!(reloaded.frame("card-outside", at(1)).is_some());
+    }
+
+    #[test]
+    fn a_server_source_with_path_characters_stays_inside_the_frame_directory() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let id = "card-../outside";
+        let path = frame_path(temp.path(), id);
+        let frame_directory = temp.path().join(IMAGE_FRAME_DIRECTORY);
+
+        assert_eq!(path.parent(), Some(frame_directory.as_path()));
+        assert!(!path.file_name().unwrap().to_string_lossy().contains(".."));
     }
 
     #[test]

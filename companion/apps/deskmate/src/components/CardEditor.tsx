@@ -180,6 +180,93 @@ export function CardEditor({
           </label>
         )}
 
+        {card.kind === "weather" && (
+          <>
+            <label className="field">
+              <span>Location</span>
+              <input
+                value={card.location}
+                maxLength={256}
+                placeholder="Dubai"
+                onChange={(event) => onChange({ ...card, location: event.currentTarget.value })}
+                aria-invalid={fieldIssues("location").length > 0}
+              />
+              <FieldIssues issues={fieldIssues("location")} />
+            </label>
+            <fieldset className="field">
+              <legend>Units</legend>
+              <div className="segmented-control" aria-label="Weather units">
+                {(["metric", "imperial"] as const).map((units) => (
+                  <button
+                    key={units}
+                    type="button"
+                    aria-pressed={card.units === units}
+                    onClick={() => onChange({ ...card, units })}
+                  >
+                    {units === "metric" ? "Metric" : "Imperial"}
+                  </button>
+                ))}
+              </div>
+            </fieldset>
+          </>
+        )}
+
+        {card.kind === "rss" && (
+          <>
+            <label className="field">
+              <span>Feed URL</span>
+              <input
+                type="url"
+                value={card.feed_url}
+                maxLength={2048}
+                placeholder="https://example.com/feed.xml"
+                onChange={(event) => onChange({ ...card, feed_url: event.currentTarget.value })}
+                aria-invalid={fieldIssues("feed_url").length > 0}
+              />
+              <FieldIssues issues={fieldIssues("feed_url")} />
+            </label>
+            <label className="field">
+              <span>Feed title</span>
+              <input
+                value={card.feed_title}
+                maxLength={64}
+                placeholder="Hacker News"
+                onChange={(event) => onChange({ ...card, feed_title: event.currentTarget.value })}
+                aria-invalid={fieldIssues("feed_title").length > 0}
+              />
+              <FieldIssues issues={fieldIssues("feed_title")} />
+            </label>
+          </>
+        )}
+
+        {card.kind === "token" && (
+          <>
+            <label className="field">
+              <span>Coin ID</span>
+              <input
+                value={card.coin_id}
+                maxLength={128}
+                placeholder="solana"
+                onChange={(event) => onChange({ ...card, coin_id: event.currentTarget.value })}
+                aria-invalid={fieldIssues("coin_id").length > 0}
+              />
+              <small>Use CoinGecko’s coin ID, not its ticker.</small>
+              <FieldIssues issues={fieldIssues("coin_id")} />
+            </label>
+            <label className="field">
+              <span>Currency</span>
+              <input
+                value={card.currency}
+                maxLength={16}
+                placeholder="usd"
+                onChange={(event) => onChange({ ...card, currency: event.currentTarget.value })}
+                aria-invalid={fieldIssues("currency").length > 0}
+              />
+              <FieldIssues issues={fieldIssues("currency")} />
+            </label>
+          </>
+        )}
+
         {card.kind === "pomodoro" && (
           <>
             <label className="field">

@@ -1,10 +1,10 @@
-use app_core::config::ImageSource;
+use app_core::config::{DERIVED_SOURCE_PREFIX, ImageSource};
 use app_core::{
     AlertHold, AppConfig, AppSnapshot, AssetKind, AssetSettings, AssetSource,
     CURRENT_SCHEMA_VERSION, CardAlert, CardDataSnapshot, CardError, CardErrorKind, CardField,
     CardFieldValue, CardSettings, CarouselAdvance, ConnectionState, DeviceCounters, DeviceSnapshot,
     DisplayTemplate, MAX_ASSET_BYTES, PersistenceState, PomodoroSnapshot, PomodoroState,
-    RefreshPolicy, RuntimeDiagnostics, RuntimeState, ValidationCode, WidgetTapAction,
+    RefreshPolicy, RuntimeDiagnostics, RuntimeState, Units, ValidationCode, WidgetTapAction,
 };
 use protocol::{CAPABILITY_ASSET_TRANSFER, Message, TapAction, encode_message};
 
@@ -203,8 +203,8 @@ fn malformed_and_unknown_json_are_rejected_by_serde() {
     assert!(serde_json::from_str::<AppConfig>(MALFORMED_JSON).is_err());
 
     let with_unknown = DEFAULT_JSON.replace(
-        "\"schema_version\": 10,",
-        "\"schema_version\": 10, \"unexpected\": true,",
+        "\"schema_version\": 11,",
+        "\"schema_version\": 11, \"unexpected\": true,",
     );
     // A schema bump moves this anchor, and a `replace` that matches nothing
     // returns the input unchanged -- which would leave the assertion below
@@ -703,6 +703,167 @@ fn picture_card(id: &str, source_id: &str) -> CardSettings {
     }
 }
 
+fn weather_card(id: &str, location: &str) -> CardSettings {
+    CardSettings::Weather {
+        id: id.to_owned(),
+        title: String::new(),
+        location: location.to_owned(),
+        units: Units::Metric,
+        tap_action: WidgetTapAction::None,
+        refresh: RefreshPolicy::Interval { minutes: 15 },
+        alert: CardAlert::None,
+        dwell_seconds: None,
+    }
+}
+
+fn rss_card(id: &str, feed_url: &str) -> CardSettings {
+    CardSettings::Rss {
+        id: id.to_owned(),
+        title: String::new(),
+        feed_url: feed_url.to_owned(),
+        feed_title: "News".to_owned(),
+        tap_action: WidgetTapAction::None,
+        refresh: RefreshPolicy::Interval { minutes: 15 },
+        alert: CardAlert::None,
+        dwell_seconds: None,
+    }
+}
+
+fn token_card(id: &str, coin_id: &str) -> CardSettings {
+    CardSettings::Token {
+        id: id.to_owned(),
+        title: String::new(),
+        coin_id: coin_id.to_owned(),
+        currency: "usd".to_owned(),
+        api_key: None,
+        tap_action: WidgetTapAction::None,
+        refresh: RefreshPolicy::Interval { minutes: 15 },
+        alert: CardAlert::None,
+        dwell_seconds: None,
+    }
+}
+
+#[test]
+fn raster_card_source_ids_are_stored_only_for_external_pictures() {
+    assert_eq!(
+        picture_card("shot", "producer-source")
+            .source_id()
+            .as_deref(),
+        Some("producer-source")
+    );
+    assert_eq!(
+        weather_card("outside", "Dubai").source_id().as_deref(),
+        Some("card-outside")
+    );
+    assert_eq!(
+        rss_card("headlines", "https://example.test/feed")
+            .source_id()
+            .as_deref(),
+        Some("card-headlines")
+    );
+    assert_eq!(
+        token_card("market", "solana").source_id().as_deref(),
+        Some("card-market")
+    );
+    assert!(clock_card("clock").source_id().is_none());
+}
+
+#[test]
+fn a_declared_image_source_may_not_squat_the_derived_namespace() {
+    // A declared `card-outside` and a weather card with id `outside` resolve to
+    // ONE source id, so the card's refresher and whatever pushes to the declared
+    // source would overwrite each other's frames with nothing in the log to say
+    // so. Reserving the prefix on the declared side is the whole guard: a
+    // picture card may only name a source that exists, so refusing the
+    // declaration also closes the reference.
+    let mut config = single_card_config(weather_card("outside", "Dubai"));
+    config.image_sources.push(ImageSource {
+        id: format!("{DERIVED_SOURCE_PREFIX}outside"),
+        name: "Squatter".to_owned(),
+    });
+
+    let issues = config
+        .validate()
+        .expect_err("a declared source inside the derived namespace must be rejected")
+        .issues;
+    assert!(
+        issues.iter().any(|issue| {
+            issue.path == "image_sources[0].id" && issue.code == ValidationCode::InvalidSource
+        }),
+        "missing the reserved-prefix refusal in {issues:?}"
+    );
+}
+
+#[test]
+fn every_new_data_card_reports_its_own_invalid_field_path() {
+    for (card, expected_path, expected_code) in [
+        (
+            weather_card("outside", "  "),
+            "cards[0].location",
+            ValidationCode::Empty,
+        ),
+        (
+            rss_card("headlines", "file:///etc/passwd"),
+            "cards[0].feed_url",
+            ValidationCode::InvalidSource,
+        ),
+        (
+            token_card("market", ""),
+            "cards[0].coin_id",
+            ValidationCode::Empty,
+        ),
+    ] {
+        let issues = single_card_config(card)
+            .validate()
+            .expect_err("the invalid data-card field must be rejected")
+            .issues;
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.path == expected_path && issue.code == expected_code),
+            "missing ({expected_path:?}, {expected_code:?}) in {issues:?}"
+        );
+    }
+}
+
+#[test]
+fn data_card_defaults_deserialize_through_the_real_card_type() {
+    let weather: CardSettings = serde_json::from_value(serde_json::json!({
+        "kind": "weather",
+        "id": "outside",
+        "title": "",
+        "location": "Dubai",
+        "tap_action": { "kind": "none" },
+        "refresh": { "kind": "interval", "minutes": 15 },
+        "alert": { "kind": "none" },
+        "dwell_seconds": null
+    }))
+    .expect("weather default units");
+    assert!(matches!(
+        weather,
+        CardSettings::Weather {
+            units: Units::Metric,
+            ..
+        }
+    ));
+
+    let token: CardSettings = serde_json::from_value(serde_json::json!({
+        "kind": "token",
+        "id": "market",
+        "title": "",
+        "coin_id": "solana",
+        "tap_action": { "kind": "none" },
+        "refresh": { "kind": "interval", "minutes": 15 },
+        "alert": { "kind": "none" },
+        "dwell_seconds": null
+    }))
+    .expect("token defaults");
+    assert!(matches!(
+        token,
+        CardSettings::Token { currency, api_key: None, .. } if currency == "usd"
+    ));
+}
+
 #[test]
 fn a_picture_card_naming_a_known_source_validates() {
     let mut config = AppConfig {
@@ -834,6 +995,9 @@ fn every_freshly_added_card_kind_validates_and_compiles() {
             alert: CardAlert::None,
             dwell_seconds: None,
         },
+        weather_card("weather", "Dubai"),
+        rss_card("rss", "https://example.test/feed"),
+        token_card("token", "solana"),
     ];
 
     for card in cards {
@@ -892,13 +1056,13 @@ fn card_data_serializes_as_tagged_values_for_the_preview() {
 // -- Schema v10: the card list is the loop ---------------------------------
 
 #[test]
-fn default_config_is_v10_with_one_card() {
+fn default_config_is_v11_with_one_card() {
     let config = AppConfig::default();
     // A literal, not `CURRENT_SCHEMA_VERSION`: this test exists to catch a bump that
     // forgot to update `AppConfig::default()`, and comparing the constant to itself
     // could never fail that way. The boundary tests in `tests/store.rs` keep the
     // same literal discipline for the same reason.
-    assert_eq!(config.schema_version, 10);
+    assert_eq!(config.schema_version, 11);
     assert_eq!(config.cards.len(), 1);
     assert_eq!(config.advance, CarouselAdvance::Manual);
     assert!(config.validate().is_ok());

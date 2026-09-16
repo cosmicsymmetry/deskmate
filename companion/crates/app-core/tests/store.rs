@@ -8,8 +8,8 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use app_core::{
-    AlertHold, AppConfig, CURRENT_SCHEMA_VERSION, CardAlert, CardSettings, CarouselAdvance,
-    ConfigOrigin, ConfigStore, DisplayOrientation, DisplayTemplate, LoadOutcome,
+    AlertHold, AppConfig, AppPreferences, CURRENT_SCHEMA_VERSION, CardAlert, CardSettings,
+    CarouselAdvance, ConfigOrigin, ConfigStore, DisplayOrientation, DisplayTemplate, LoadOutcome,
     MAX_CONFIG_FILE_BYTES, RefreshPolicy, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE, StoreError,
     WidgetTapAction,
 };
@@ -101,6 +101,27 @@ fn missing_file_loads_defaults_without_writing() {
     assert_eq!(outcome.config(), &AppConfig::default());
     assert_eq!(outcome.recovery(), None);
     assert!(!path.exists());
+}
+
+#[test]
+fn v10_document_migrates_additively_and_reports_its_origin() {
+    let directory = test_directory("v10-additive-migration");
+    let path = directory.path().join("config.json");
+    let v10 = AppConfig {
+        schema_version: 10,
+        preferences: AppPreferences {
+            timezone: "Asia/Tbilisi".into(),
+            ..AppPreferences::default()
+        },
+        ..AppConfig::default()
+    };
+    fs::write(&path, serde_json::to_vec_pretty(&v10).unwrap()).unwrap();
+
+    let outcome = ConfigStore::new(&path).load();
+    assert_eq!(outcome.origin(), ConfigOrigin::MigratedV10);
+    assert_eq!(outcome.config().schema_version, 11);
+    assert_eq!(outcome.config().preferences.timezone, "Asia/Tbilisi");
+    assert_eq!(outcome.config().cards, v10.cards);
 }
 
 #[test]
@@ -357,7 +378,7 @@ fn a_v6_document_migrates_to_v9_with_no_image_sources_and_loses_nothing() {
 
     assert_eq!(loaded.origin(), ConfigOrigin::MigratedV6);
     assert_eq!(config.schema_version, app_core::CURRENT_SCHEMA_VERSION);
-    assert_eq!(config.schema_version, 10);
+    assert_eq!(config.schema_version, 11);
     assert!(config.image_sources.is_empty(), "v6 knew no sources");
     // Lossless: everything else survived untouched.
     assert_eq!(config.cards.len(), 1);
@@ -575,7 +596,7 @@ fn a_future_schema_is_a_recoverable_error_preserving_bytes() {
     assert!(matches!(
         outcome.recovery(),
         Some(StoreError::UnsupportedVersion {
-            found: 11,
+            found: 12,
             supported: CURRENT_SCHEMA_VERSION
         })
     ));

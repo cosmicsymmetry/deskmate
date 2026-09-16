@@ -92,10 +92,8 @@ pub(super) fn record_asset_sync_refusals(state: &mut WorkerState, message: &str)
         .config
         .cards
         .iter()
-        .filter_map(|card| match card {
-            CardSettings::Picture { id, .. } => Some(id.clone()),
-            _ => None,
-        })
+        .filter(|card| card.source_id().is_some())
+        .map(|card| card.id().to_owned())
         .collect();
     for card_id in card_ids {
         record_scene_refusal(

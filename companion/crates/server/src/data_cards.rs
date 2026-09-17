@@ -175,6 +175,73 @@ pub struct FaceFieldOption {
 /// means adding one server-side descriptor here; the companion never switches on
 /// `kind` and needs no release of its own.
 #[must_use]
+/// The faces this server knows how to create, as blank defaults.
+///
+/// The companion's add menu is built from this list, which is why the menu can
+/// offer "Weather" without the app knowing what a weather face is. Adding a
+/// fourth face here is what makes it appear in the window -- no app change.
+pub fn creatable_faces() -> Vec<FaceDescriptor> {
+    [
+        FaceSpec::Weather {
+            location: String::new(),
+            units: Units::Metric,
+        },
+        FaceSpec::Rss {
+            url: String::new(),
+            title: String::new(),
+        },
+        FaceSpec::Token {
+            coin_id: String::new(),
+            currency: default_currency(),
+            api_key: None,
+        },
+    ]
+    .iter()
+    .map(face_descriptor)
+    .collect()
+}
+
+/// A blank face of `kind`, or `None` if this server cannot draw that kind.
+fn blank_face(kind: &str) -> Option<FaceSpec> {
+    creatable_faces()
+        .into_iter()
+        .find(|descriptor| descriptor.kind == kind)
+        .map(|_| match kind {
+            "weather" => FaceSpec::Weather {
+                location: String::new(),
+                units: Units::Metric,
+            },
+            "rss" => FaceSpec::Rss {
+                url: String::new(),
+                title: String::new(),
+            },
+            _ => FaceSpec::Token {
+                coin_id: String::new(),
+                currency: default_currency(),
+                api_key: None,
+            },
+        })
+}
+
+/// Whether a face has everything it needs to be fetched.
+///
+/// A card added from the menu starts blank, and a blank weather face has no city
+/// to ask about. Fetching anyway would fail every cycle and fill the journal with
+/// errors the owner cannot act on until they type one. So an incomplete face is
+/// stored but not refreshed, and the card shows the ordinary "no frame yet"
+/// state until its settings are filled in.
+pub(crate) fn face_is_complete(face: &FaceSpec) -> bool {
+    face_descriptor(face)
+        .fields
+        .iter()
+        .all(|field| match field {
+            FaceFieldDescriptor::Text { value, .. } | FaceFieldDescriptor::Url { value, .. } => {
+                !value.trim().is_empty()
+            }
+            FaceFieldDescriptor::Enum { .. } => true,
+        })
+}
+
 pub fn face_descriptor(face: &FaceSpec) -> FaceDescriptor {
     let text = |key: &str, label: &str, value: &str, placeholder: &str| FaceFieldDescriptor::Text {
         key: key.to_owned(),
@@ -447,6 +514,15 @@ pub fn spawn_refreshers(state: &ServerState, spec_path: PathBuf, specs: Vec<Data
     data_cards.specs = specs;
     let specs = data_cards.specs.clone();
     for spec in specs {
+        // A card added from the menu is stored blank and stays unfetched until
+        // its settings are filled in, so restarting must not start it either.
+        if !face_is_complete(&spec.face) {
+            tracing::info!(
+                source_id = %spec.source_id,
+                "a server-rendered card has no settings yet and is not being fetched"
+            );
+            continue;
+        }
         data_cards
             .tasks
             .insert(spec.source_id.clone(), spawn_refresher(state.clone(), spec));
@@ -542,6 +618,64 @@ pub(crate) fn update_face_fields(
         )),
     );
     Ok(face_descriptor(&updated_spec.face))
+}
+
+/// Attaches a blank face of `kind` to a freshly minted source.
+///
+/// Called right after `POST /v1/images` mints the source, so the companion's
+/// "Weather" menu item is one round trip: mint, attach, add a card. The spec is
+/// persisted immediately -- a face that exists only in memory would vanish on the
+/// next restart and leave a card pointing at a source nothing draws.
+pub(crate) fn create_face(
+    state: &ServerState,
+    runtime: &tokio::runtime::Handle,
+    source_id: &str,
+    kind: &str,
+) -> Result<FaceDescriptor, FaceUpdateError> {
+    let face = blank_face(kind).ok_or_else(|| FaceUpdateError::UnknownField(kind.to_owned()))?;
+    let mut data_cards = state
+        .inner
+        .data_cards
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if data_cards
+        .specs
+        .iter()
+        .any(|spec| spec.source_id == source_id)
+    {
+        return Err(FaceUpdateError::InvalidField {
+            field: "source_id".into(),
+            message: "this source already has a face".into(),
+        });
+    }
+
+    let spec = DataCardSpec {
+        source_id: source_id.to_owned(),
+        refresh_seconds: default_refresh_seconds(),
+        face,
+    };
+    let mut updated_specs = data_cards.specs.clone();
+    updated_specs.push(spec.clone());
+    let bytes = serde_json::to_vec_pretty(&updated_specs)
+        .map_err(|error| FaceUpdateError::Encode(error.to_string()))?;
+    app_core::secure_file::write_and_replace(&data_cards.spec_path, &bytes).map_err(|error| {
+        let (operation, message) = error.into_strings("data-card spec");
+        FaceUpdateError::Persist(format!("{operation}: {message}"))
+    })?;
+    data_cards.specs = updated_specs;
+
+    // A blank face is not fetched; see `face_is_complete`.
+    if face_is_complete(&spec.face) {
+        data_cards.tasks.insert(
+            source_id.to_owned(),
+            runtime.spawn(refresh_loop(
+                state.clone(),
+                spec.clone(),
+                Duration::from_secs(spec.refresh_seconds).clamp(MIN_REFRESH, MAX_REFRESH),
+            )),
+        );
+    }
+    Ok(face_descriptor(&spec.face))
 }
 
 fn validate_face_fields(

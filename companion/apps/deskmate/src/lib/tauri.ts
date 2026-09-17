@@ -164,8 +164,17 @@ export function renderCardPreview(cardId: string): Promise<PreviewFrame> {
   return invokeTyped("render_card_preview", { cardId });
 }
 
-export function mintImageSource(name: string): Promise<MintedImageSource> {
-  return invokeTyped("mint_image_source", { sourceName: name });
+export function mintImageSource(
+  name: string,
+  faceKind?: string,
+): Promise<MintedImageSource> {
+  return invokeTyped("mint_image_source", { sourceName: name, faceKind: faceKind ?? null });
+}
+
+/// The faces the server can draw. The add menu is built from this, which is why
+/// "Weather" can appear in the window without the app knowing what weather is.
+export function listCreatableFaces(): Promise<FaceDescriptor[]> {
+  return invokeTyped("list_creatable_faces");
 }
 
 export function listImageSources(): Promise<ImageSourceDescriptor[]> {

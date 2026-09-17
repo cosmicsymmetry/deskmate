@@ -917,6 +917,53 @@ describe("settings accessibility and states", () => {
     }
   });
 
+  test("the add menu offers the faces the server says it can draw", async () => {
+    // The app does not know what weather is: it renders whatever the server
+    // listed, so a fourth face appears here with no app change at all.
+    let chosen: { kind: string; label: string } | null = null;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <CardList
+            config={cardListConfig([])}
+            issues={[]}
+            pomodoros={[]}
+            ownershipTier="networked"
+            selectedCardId={null}
+            onSelect={() => {}}
+            onAdd={() => {}}
+            onChange={() => {}}
+            onRemove={() => {}}
+            creatableFaces={[
+              { kind: "weather", label: "Weather", fields: [] },
+              { kind: "sunrise", label: "Sunrise", fields: [] },
+            ]}
+            onAddFace={(kind, label) => {
+              chosen = { kind, label };
+            }}
+          />,
+        ),
+      );
+      await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
+      const menu = container.querySelector('[role="menu"]');
+      expect(menu?.textContent).toContain("Weather");
+      // A face this app has never heard of still reaches the menu.
+      expect(menu?.textContent).toContain("Sunrise");
+
+      const weatherItem = [
+        ...(menu?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? []),
+      ].find((button) => button.textContent?.includes("Weather"));
+      await act(async () => weatherItem?.click());
+      expect(chosen).toEqual({ kind: "weather", label: "Weather" });
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("the add menu offers an unused picture source and omits one already in the loop", async () => {
     const used = { id: "used-source", name: "Already shown" };
     const unused = { id: "unused-source", name: "Bring this back" };
@@ -1002,7 +1049,7 @@ describe("settings accessibility and states", () => {
       });
       expect(coreInvocations).toContainEqual({
         command: "mint_image_source",
-        args: { sourceName: "Picture" },
+        args: { sourceName: "Picture", faceKind: null },
       });
 
       const tiles = container.querySelectorAll<HTMLButtonElement>(".card-tile__body");
@@ -2499,8 +2546,10 @@ describe("settings accessibility and states", () => {
       token: "plaintext-once",
       push_url: "https://desk.example/v1/images/plaintext-once",
     });
+    // faceKind rides along on every mint: null for an external producer, a kind
+    // when the owner picked a server-drawn face from the menu.
     expect(coreInvocations).toEqual([
-      { command: "mint_image_source", args: { sourceName: "Picture" } },
+      { command: "mint_image_source", args: { sourceName: "Picture", faceKind: null } },
     ]);
   });
 });

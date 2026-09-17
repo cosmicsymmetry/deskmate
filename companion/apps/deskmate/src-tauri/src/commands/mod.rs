@@ -1775,7 +1775,7 @@ pub(crate) mod tests {
             format!(r#"{{"id":"picture-source","token":"{token}"}}"#),
         );
 
-        let minted = mint_server_image_source(&context, "Picture").unwrap();
+        let minted = mint_server_image_source(&context, "Picture", None).unwrap();
 
         let request = server.join().unwrap();
         let normalized = request.to_ascii_lowercase();

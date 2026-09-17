@@ -12,6 +12,11 @@ use super::*;
 #[serde(deny_unknown_fields)]
 pub(super) struct MintImageSourceRequest<'a> {
     pub(super) name: &'a str,
+    /// Set when the owner picked a server-drawn face from the add menu. The
+    /// server mints the source and attaches the face in one request, so a card
+    /// arrives ready rather than needing a second round trip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) face_kind: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -94,6 +99,7 @@ struct ImageRouteErrorBody {
 pub(super) fn mint_server_image_source(
     context: &ServerQueryContext,
     name: &str,
+    face_kind: Option<&str>,
 ) -> Result<MintedImageSource, IpcError> {
     validate_target(
         name,
@@ -102,10 +108,11 @@ pub(super) fn mint_server_image_source(
     )?;
     let settings = context.network_store.load().settings().clone();
     let url = crate::server_client::server_url(&settings.server_url, &["v1", "images"])?;
-    let body =
-        serde_json::to_vec(&MintImageSourceRequest { name }).map_err(|_| IpcError::Internal {
+    let body = serde_json::to_vec(&MintImageSourceRequest { name, face_kind }).map_err(|_| {
+        IpcError::Internal {
             message: "the picture source request could not be encoded".into(),
-        })?;
+        }
+    })?;
     let minted: ServerMintedImageSource = context.with_admin_token(|token| {
         let mut response = context
             .agent
@@ -163,9 +170,40 @@ async fn on_server_worker<T: Send + 'static>(
 pub async fn mint_image_source(
     state: State<'_, DesktopState>,
     source_name: String,
+    face_kind: Option<String>,
 ) -> Result<MintedImageSource, IpcError> {
     let context = ServerQueryContext::from_desktop(&state);
-    on_server_worker(move || mint_server_image_source(&context, &source_name)).await
+    on_server_worker(move || mint_server_image_source(&context, &source_name, face_kind.as_deref()))
+        .await
+}
+
+#[tauri::command]
+pub async fn list_creatable_faces(
+    state: State<'_, DesktopState>,
+) -> Result<Vec<FaceDescriptor>, IpcError> {
+    let context = ServerQueryContext::from_desktop(&state);
+    on_server_worker(move || list_server_creatable_faces(&context)).await
+}
+
+pub(super) fn list_server_creatable_faces(
+    context: &ServerQueryContext,
+) -> Result<Vec<FaceDescriptor>, IpcError> {
+    let settings = context.network_store.load().settings().clone();
+    let url = crate::server_client::server_url(&settings.server_url, &["v1", "faces"])?;
+    let body = context.with_admin_token(|token| {
+        let response = context
+            .agent
+            .get(url.as_str())
+            .header("Authorization", format!("Bearer {token}"))
+            .call()
+            .map_err(|_| unreachable_server())?;
+        read_image_source_response(response)
+    })?;
+    let faces: Vec<FaceDescriptor> =
+        serde_json::from_slice(&body).map_err(|_| IpcError::IncompatibleServer {
+            message: "the server listed faces this app could not read".into(),
+        })?;
+    Ok(faces)
 }
 
 #[tauri::command]

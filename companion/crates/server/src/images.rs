@@ -27,6 +27,7 @@ const MAX_FACE_SETTINGS_BODY_BYTES: usize = 16 * 1024;
 pub(crate) fn routes() -> Router<ServerState> {
     Router::new()
         .route("/v1/images", get(list_sources).post(mint_source))
+        .route("/v1/faces", get(list_creatable_faces))
         .route(
             "/v1/images/{key}",
             post(push_image)
@@ -93,6 +94,12 @@ fn is_png_content_type(headers: &HeaderMap) -> bool {
 #[serde(deny_unknown_fields)]
 struct MintSourceRequest {
     name: String,
+    /// When present, the minted source is a face this server draws itself rather
+    /// than one an external producer pushes to. The companion sends this when the
+    /// owner picks "Weather" from the add menu, so that one click yields a card
+    /// that is already wired up.
+    #[serde(default)]
+    face_kind: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -160,6 +167,17 @@ async fn update_face(
     Ok(Json(updated))
 }
 
+/// The faces this server can draw, for the companion's add menu.
+///
+/// The app renders this list verbatim -- it is what lets "Weather" appear in the
+/// window without the app knowing what weather is.
+async fn list_creatable_faces(
+    _state: State<ServerState>,
+    _admin: AdminAuthenticated,
+) -> Json<Vec<crate::data_cards::FaceDescriptor>> {
+    Json(crate::data_cards::creatable_faces())
+}
+
 async fn mint_source(
     State(state): State<ServerState>,
     _admin: AdminAuthenticated,
@@ -173,11 +191,37 @@ async fn mint_source(
     // The store's smaller source ceiling remains the ordinary limiting factor,
     // but passing the wire ceiling keeps the two independent bounds explicit.
     let available = protocol::MAX_ASSET_DIGESTS;
-    let minted =
-        tokio::task::spawn_blocking(move || state.image_sources().mint(&request.name, available))
-            .await
-            .map_err(|_| ImageRouteError::WorkerFailed)?
-            .map_err(|error| map_mint_error(&error))?;
+    let face_kind = request.face_kind.clone();
+    let mint_state = state.clone();
+    let minted = tokio::task::spawn_blocking(move || {
+        mint_state.image_sources().mint(&request.name, available)
+    })
+    .await
+    .map_err(|_| ImageRouteError::WorkerFailed)?
+    .map_err(|error| map_mint_error(&error))?;
+
+    // A server-drawn face is attached in the same request. If attaching fails the
+    // source is revoked rather than left behind: a half-made source shows up in
+    // the add menu as something the owner never asked for and cannot explain.
+    if let Some(kind) = face_kind {
+        let runtime = tokio::runtime::Handle::current();
+        let face_state = state.clone();
+        let source_id = minted.id.clone();
+        let attached = tokio::task::spawn_blocking(move || {
+            crate::data_cards::create_face(&face_state, &runtime, &source_id, &kind)
+        })
+        .await
+        .map_err(|_| ImageRouteError::WorkerFailed)?;
+        if let Err(error) = attached {
+            let revoke_state = state.clone();
+            let orphan = minted.id.clone();
+            let _ =
+                tokio::task::spawn_blocking(move || revoke_state.image_sources().revoke(&orphan))
+                    .await;
+            return Err(map_face_update_error(&error));
+        }
+    }
+
     Ok(Json(MintSourceResponse {
         id: minted.id,
         token: minted.token,

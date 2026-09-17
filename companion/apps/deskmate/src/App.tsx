@@ -18,6 +18,7 @@ import {
   firstSelectableCard,
   issuesForCard,
   issuesForPath,
+  nextCardName,
   removeCard,
   unclaimedIssues,
   updateWidget,
@@ -25,6 +26,7 @@ import {
 import {
   controlPomodoro,
   getAutostartStatus,
+  listCreatableFaces,
   mintImageSource,
   resumePushing,
   setAutostartEnabled,
@@ -37,6 +39,7 @@ import type {
   CardSettings,
   DisplayOrientation,
   DraftValidation,
+  FaceDescriptor,
   IpcError,
   ImageSource,
   MintedImageSource,
@@ -99,6 +102,29 @@ export function App() {
     cardId: string;
     access: MintedImageSource;
   } | null>(null);
+
+  const [creatableFaces, setCreatableFaces] = useState<FaceDescriptor[]>([]);
+
+  // Asked once: the list only changes when the server is redeployed, and a
+  // failure here must not block the window -- the menu simply offers the
+  // built-in kinds, exactly as it did before the server could draw anything.
+  useEffect(() => {
+    let cancelled = false;
+    void listCreatableFaces()
+      .then((faces) => {
+        if (!cancelled) {
+          setCreatableFaces(faces);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCreatableFaces([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!snapshot || dirty) {
@@ -265,8 +291,7 @@ export function App() {
     if (!currentDraft) {
       return;
     }
-    const sourceNumber = currentDraft.image_sources.length + 1;
-    const sourceName = sourceNumber === 1 ? "Picture" : `Picture ${sourceNumber}`;
+    const sourceName = nextCardName(currentDraft, "Picture");
     setBusyAction("picture-source");
     setCommandError(null);
     void mintImageSource(sourceName)
@@ -279,6 +304,25 @@ export function App() {
         if (cardId) {
           setMintedPicture({ cardId, access });
         }
+      })
+      .catch((nextError) => setCommandError(toIpcError(nextError)))
+      .finally(() => setBusyAction(null));
+  };
+
+  /// Adding a server-drawn card: name it, mint a source carrying that face, and
+  /// put the card in the loop. The owner types nothing -- the name is chosen and
+  /// the source never surfaces.
+  const handleAddFace = (kind: string, label: string) => {
+    const currentDraft = draftRef.current;
+    if (!currentDraft) {
+      return;
+    }
+    const name = nextCardName(currentDraft, label);
+    setBusyAction("picture-source");
+    setCommandError(null);
+    void mintImageSource(name, kind)
+      .then((access) => {
+        handleAdd({ kind: "picture", sourceId: access.source_id, sourceName: name });
       })
       .catch((nextError) => setCommandError(toIpcError(nextError)))
       .finally(() => setBusyAction(null));
@@ -555,6 +599,8 @@ export function App() {
             onSelect={handleSelectCard}
             onAdd={handleAdd}
             onAddPicture={handleAddPicture}
+            creatableFaces={creatableFaces}
+            onAddFace={handleAddFace}
             pictureBusy={busyAction === "picture-source"}
             onChange={replaceDraft}
             onRemove={handleRemoveCard}

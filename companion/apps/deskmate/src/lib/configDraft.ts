@@ -100,6 +100,36 @@ function nextId(prefix: string, used: Set<string>): string {
  * What the caller is asking to add. Picture sources are minted asynchronously,
  * while built-ins need only their kind.
  */
+/// The next free name for a card of `label`, so the owner never has to type one.
+///
+/// First is the bare label ("Weather"), then "Weather 2", "Weather 3". Numbering
+/// looks for the lowest FREE slot rather than counting existing cards: after
+/// deleting "Weather 2" of three, the next card is "Weather 2" again, not a
+/// second "Weather 4". Counting by length is what produced two sources both
+/// called "Picture 2" in the live store.
+export function nextCardName(config: AppConfig, label: string): string {
+  const taken = new Set<string>();
+  for (const card of config.cards) {
+    const typed = cardTitle(card);
+    if (typed) {
+      taken.add(typed);
+    }
+  }
+  for (const source of config.image_sources) {
+    taken.add(source.name);
+  }
+  if (!taken.has(label)) {
+    return label;
+  }
+  for (let suffix = 2; suffix < 1_000; suffix += 1) {
+    const candidate = `${label} ${suffix}`;
+    if (!taken.has(candidate)) {
+      return candidate;
+    }
+  }
+  return label;
+}
+
 export type AddCardRequest =
   | AddableCardKind
   | { kind: "picture"; sourceId: string; sourceName: string };

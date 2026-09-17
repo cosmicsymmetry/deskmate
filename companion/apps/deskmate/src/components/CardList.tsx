@@ -27,6 +27,7 @@ import {
   type AppConfig,
   type CardSettings,
   type DeviceTier,
+  type FaceDescriptor,
   type ImageSource,
   type PomodoroSnapshot,
   type ValidationIssue,
@@ -43,6 +44,10 @@ interface CardListProps {
   onSelect: (cardId: string) => void;
   onAdd: (kind: AddableCardKind) => void;
   onAddPicture?: (source: ImageSource | null) => void;
+  /// Faces the server can draw, as it listed them. Rendered verbatim: the app
+  /// does not know what any of them is.
+  creatableFaces?: FaceDescriptor[];
+  onAddFace?: (kind: string, label: string) => void;
   pictureBusy?: boolean;
   onChange: (config: AppConfig) => void;
   onRemove: (cardId: string) => void;
@@ -99,6 +104,8 @@ export function CardList({
   onSelect,
   onAdd,
   onAddPicture = () => {},
+  creatableFaces = [],
+  onAddFace = () => {},
   pictureBusy = false,
   onChange,
   onRemove,
@@ -509,11 +516,38 @@ export function CardList({
                     </button>
                   );
                 })}
+                {/* The server's own faces sit beside the built-in kinds because
+                    the owner does not care which side of the wire draws them.
+                    Picking one names the card itself; nothing is typed. */}
+                {creatableFaces.map((face, faceIndex) => {
+                  const index = addableKinds.length + faceIndex;
+                  const choose = () => onAddFace(face.kind, face.label);
+                  return (
+                    <button
+                      ref={(element) => {
+                        if (element) {
+                          menuItemRefs.current[index] = element;
+                        }
+                      }}
+                      type="button"
+                      className="menu__item"
+                      role="menuitem"
+                      key={face.kind}
+                      onClick={choose}
+                      onKeyDown={(event) => onMenuKeyDown(event, index, choose)}
+                    >
+                      <span>
+                        <strong>{face.label}</strong>
+                        <small>Drawn on the server</small>
+                      </span>
+                    </button>
+                  );
+                })}
               </fieldset>
               <fieldset className="menu__group">
                 <legend className="tile-label menu__label">Pictures</legend>
                 {unusedPictureSources.map((source, sourceIndex) => {
-                  const index = addableKinds.length + sourceIndex;
+                  const index = addableKinds.length + creatableFaces.length + sourceIndex;
                   const choose = () => choosePicture(source);
                   return (
                     <button
@@ -539,7 +573,7 @@ export function CardList({
                 <button
                   ref={(element) => {
                     if (element) {
-                      menuItemRefs.current[addableKinds.length + unusedPictureSources.length] =
+                      menuItemRefs.current[addableKinds.length + creatableFaces.length + unusedPictureSources.length] =
                         element;
                     }
                   }}
@@ -549,7 +583,7 @@ export function CardList({
                   disabled={!canMintPictureSource || pictureBusy}
                   onClick={() => choosePicture(null)}
                   onKeyDown={(event) =>
-                    onMenuKeyDown(event, addableKinds.length + unusedPictureSources.length, () =>
+                    onMenuKeyDown(event, addableKinds.length + creatableFaces.length + unusedPictureSources.length, () =>
                       choosePicture(null),
                     )
                   }

@@ -20,6 +20,7 @@ import {
   loopSegments,
   moveCard,
   moveEntry,
+  nextCardName,
   nextLoopCardId,
   numberValue,
   removeCard,
@@ -551,5 +552,46 @@ describe("cardMoveFromKey", () => {
     expect(cardMoveFromKey("ArrowRight", true)).toBe(1);
     expect(cardMoveFromKey("ArrowDown", false)).toBe(0);
     expect(cardMoveFromKey("Enter", true)).toBe(0);
+  });
+});
+
+describe("automatic card naming", () => {
+  test("the first card takes the bare label and later ones are numbered", () => {
+    const config = initialConfig();
+    expect(nextCardName(config, "Weather")).toBe("Weather");
+
+    const withOne = {
+      ...config,
+      image_sources: [{ id: "a", name: "Weather" }],
+    };
+    expect(nextCardName(withOne, "Weather")).toBe("Weather 2");
+
+    const withTwo = {
+      ...config,
+      image_sources: [
+        { id: "a", name: "Weather" },
+        { id: "b", name: "Weather 2" },
+      ],
+    };
+    expect(nextCardName(withTwo, "Weather")).toBe("Weather 3");
+  });
+
+  test("a freed number is reused instead of counting upward forever", () => {
+    // Counting existing entries is what produced two sources both called
+    // "Picture 2" in the live store: delete the middle one and the next mint
+    // collides with a name that is still taken.
+    const config = {
+      ...initialConfig(),
+      image_sources: [
+        { id: "a", name: "Weather" },
+        { id: "c", name: "Weather 3" },
+      ],
+    };
+    expect(nextCardName(config, "Weather")).toBe("Weather 2");
+  });
+
+  test("a name typed on a card is respected, not just source names", () => {
+    const config = initialConfig();
+    expect(nextCardName(config, "Desk")).toBe("Desk 2");
   });
 });

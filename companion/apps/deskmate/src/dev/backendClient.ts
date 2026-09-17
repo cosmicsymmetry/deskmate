@@ -65,7 +65,42 @@ function draftPayload(config: AppConfig): { json: string } {
   return { json: JSON.stringify(config) };
 }
 
+export const SESSION_REQUIRED_MESSAGE =
+  "This browser is not signed in. Enter the admin token to continue.";
+
+/** The harness can be asked to render the signed-out state with `?scenario=signedout`. */
+function signedOutScenario(): boolean {
+  return new URLSearchParams(window.location.search).get("scenario") === "signedout";
+}
+
+export function isSessionMissing(error: IpcError): boolean {
+  return error.category === "runtime-unavailable" && error.message === SESSION_REQUIRED_MESSAGE;
+}
+
+let mockSignedIn = !signedOutScenario();
+
+export function signIn(adminToken: string): Promise<void> {
+  if (adminToken.trim() === "") {
+    return Promise.reject(
+      new DeskmateCommandError({
+        category: "runtime-unavailable",
+        message: SESSION_REQUIRED_MESSAGE,
+      }),
+    );
+  }
+  mockSignedIn = true;
+  return Promise.resolve();
+}
+
 export function getAppSnapshot(): Promise<AppSnapshot> {
+  if (!mockSignedIn) {
+    return Promise.reject(
+      new DeskmateCommandError({
+        category: "runtime-unavailable",
+        message: SESSION_REQUIRED_MESSAGE,
+      }),
+    );
+  }
   return mockInvoke("get_app_snapshot");
 }
 

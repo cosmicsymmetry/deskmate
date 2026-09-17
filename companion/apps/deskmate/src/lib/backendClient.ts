@@ -80,6 +80,32 @@ function fail(details: IpcError): never {
 }
 
 /**
+ * What a missing session reads as.
+ *
+ * A 401 arrives with no body -- the server answers bare, so it never echoes what
+ * was presented -- so the client is what turns it into a message.
+ */
+export const SESSION_REQUIRED_MESSAGE =
+  "This browser is not signed in. Enter the admin token to continue.";
+
+/**
+ * Whether this failure is "no session" rather than anything else.
+ *
+ * Exported because the window has to tell the two apart: every other failure is
+ * answered by retrying, and this one is answered by signing in. Asking the
+ * module that constructed the error keeps that knowledge in one place instead of
+ * spreading a string comparison through the UI.
+ */
+export function isSessionMissing(error: IpcError): boolean {
+  return error.category === "runtime-unavailable" && error.message === SESSION_REQUIRED_MESSAGE;
+}
+
+/** Signs this browser in with the admin token, without selecting a display. */
+export async function signIn(adminToken: string): Promise<void> {
+  await request<void>("POST", "/v1/app/session", { token: adminToken });
+}
+
+/**
  * The device this window is looking at.
  *
  * Every route below is device-scoped while the UI above still speaks about "the
@@ -167,7 +193,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     // UI offer the one action that fixes it rather than a generic failure.
     fail({
       category: "runtime-unavailable",
-      message: "This browser is not signed in. Enter the admin token to continue.",
+      message: SESSION_REQUIRED_MESSAGE,
     });
   }
 

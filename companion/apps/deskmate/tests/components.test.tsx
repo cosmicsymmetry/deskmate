@@ -214,7 +214,101 @@ describe("settings accessibility and states", () => {
   test("renders a non-blocking loading state before the first backend snapshot", () => {
     const html = renderToStaticMarkup(<App />);
     expect(html).toContain("Waking the display");
-    expect(html).toContain("background service keeps running");
+    // The reassurance is about the server now, not a Mac agent: closing this tab
+    // does not stop the display being updated.
+    expect(html).toContain("whether or not this window is open");
+  });
+
+  test("a missing session offers the way in, not just a retry", async () => {
+    // Found by driving the real browser: the screen named the admin token and
+    // then gave nowhere to type it, because the sign-in lived inside Settings --
+    // which needs the snapshot that had just failed to load. A retry button
+    // cannot fix a missing credential, so the screen has to carry the field.
+    snapshotImpl = async () => {
+      throw new backendModule.DeskmateCommandError({
+        category: "runtime-unavailable",
+        message: backendModule.SESSION_REQUIRED_MESSAGE,
+      });
+    };
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<App />));
+      await waitFor(() => {
+        expect(container.textContent).toContain("Sign in to Deskmate");
+        expect(container.querySelector('input[type="password"]')).not.toBeNull();
+        expect(buttonWithText(container, "Sign in")).toBeDefined();
+      });
+      expect(buttonWithText(container, "Try again")).toBeUndefined();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      snapshotImpl = async () => snapshot;
+    }
+  });
+
+  test("signing in fills the device id the first load could not know", async () => {
+    // The first network-settings fetch happens before this browser has a
+    // session, so it comes back with no device id. Refreshing only the snapshot
+    // left the Settings sheet showing an empty Device ID for the rest of the
+    // session -- visible only by actually signing in, which is how this was found.
+    let signedIn = false;
+    networkSettingsImpl = async () => ({
+      server_url: "https://desk.example",
+      device_id: signedIn ? "dev-0005" : "",
+      tier: "networked",
+    });
+    snapshotImpl = async () => {
+      if (!signedIn) {
+        throw new backendModule.DeskmateCommandError({
+          category: "runtime-unavailable",
+          message: backendModule.SESSION_REQUIRED_MESSAGE,
+        });
+      }
+      return snapshot;
+    };
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<App />));
+      await waitFor(() => expect(container.textContent).toContain("Sign in to Deskmate"));
+
+      signedIn = true;
+      const token = container.querySelector<HTMLInputElement>('input[type="password"]');
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(
+          token,
+          "admin-secret",
+        );
+        token?.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await act(async () => buttonWithText(container, "Sign in")?.click());
+
+      const settingsButton = () =>
+        [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
+          button.textContent?.includes("Settings"),
+        );
+      await waitFor(() => expect(settingsButton()).toBeDefined());
+      await act(async () => settingsButton()?.click());
+      await waitFor(() => {
+        const deviceId = [...container.querySelectorAll<HTMLInputElement>("input")].find(
+          (input) => input.value === "dev-0005",
+        );
+        expect(deviceId).toBeDefined();
+      });
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      snapshotImpl = async () => snapshot;
+      networkSettingsImpl = async () => ({
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        tier: "local",
+      });
+    }
   });
 
   function renderCardEditor(

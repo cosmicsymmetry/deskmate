@@ -30,6 +30,8 @@ import {
   resumePushing,
   toIpcError,
   validateConfigDraft,
+  isSessionMissing,
+  signIn,
 } from "./lib/backend";
 import type {
   AppConfig,
@@ -90,6 +92,9 @@ export function App() {
   const [commandError, setCommandError] = useState<IpcError | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [signInToken, setSignInToken] = useState("");
+  const [signingIn, setSigningIn] = useState(false);
+  const [signInError, setSignInError] = useState<string | null>(null);
   const [mintedPicture, setMintedPicture] = useState<{
     cardId: string;
     access: MintedImageSource;
@@ -167,17 +172,67 @@ export function App() {
       <main className="startup" aria-busy="true">
         <span className="startup__ring" aria-hidden="true" />
         <h1>Waking the display…</h1>
-        <p>The background service keeps running even if you close this window.</p>
+        <p>The server keeps the display updated whether or not this window is open.</p>
       </main>
     );
   }
 
   if (!snapshot || !draft) {
+    // A missing session is the one failure with a specific answer, so it gets a
+    // specific screen. Everything else is "retry", and offering only that when
+    // the real problem is "sign in" made the window a dead end: it named the
+    // admin token and then gave nowhere to type it.
+    if (stateError && isSessionMissing(stateError)) {
+      return (
+        <main className="startup startup--error">
+          <span className="startup__ring startup__ring--error" aria-hidden="true" />
+          <h1>Sign in to Deskmate</h1>
+          <p role="alert">{stateError.message}</p>
+          <form
+            className="startup__form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              setSigningIn(true);
+              setSignInError(null);
+              void signIn(signInToken)
+                .then(() => {
+                  setSignInToken("");
+                  return refresh();
+                })
+                .catch((next) => setSignInError(toIpcError(next).message))
+                .finally(() => setSigningIn(false));
+            }}
+          >
+            <label className="field">
+              <span>Admin token</span>
+              <input
+                type="password"
+                value={signInToken}
+                autoComplete="current-password"
+                onChange={(event) => setSignInToken(event.currentTarget.value)}
+              />
+            </label>
+            <button
+              className="button button--primary"
+              type="submit"
+              disabled={signingIn || signInToken === ""}
+            >
+              {signingIn ? "Signing in…" : "Sign in"}
+            </button>
+            {signInError && (
+              <span className="save-error" role="alert">
+                {signInError}
+              </span>
+            )}
+          </form>
+        </main>
+      );
+    }
     return (
       <main className="startup startup--error">
         <span className="startup__ring startup__ring--error" aria-hidden="true" />
         <h1>Settings could not be loaded</h1>
-        <p role="alert">{stateError?.message ?? "The background service is unavailable."}</p>
+        <p role="alert">{stateError?.message ?? "The server is unavailable."}</p>
         <button className="button button--primary" type="button" onClick={() => void refresh()}>
           Try again
         </button>

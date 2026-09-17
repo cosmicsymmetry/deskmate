@@ -206,10 +206,15 @@ export function useAppState(): AppStateValue {
   const refresh = useCallback(async () => {
     try {
       acceptSnapshot(await getAppSnapshot());
+      // Network settings are refetched with the snapshot, not only on mount.
+      // The first fetch happens before this browser has a session, so it comes
+      // back with no device id; without this the Settings sheet kept showing an
+      // empty Device ID for the whole session after signing in.
+      acceptNetworkSettings(await getNetworkSettings());
     } catch (next) {
       acceptError(toIpcError(next));
     }
-  }, [acceptError, acceptSnapshot]);
+  }, [acceptError, acceptNetworkSettings, acceptSnapshot]);
 
   const saveServerAccess = useCallback(
     async (serverUrl: string, deviceId: string, adminToken: string) => {

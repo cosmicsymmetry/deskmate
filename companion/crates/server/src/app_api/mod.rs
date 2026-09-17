@@ -211,6 +211,15 @@ struct DeviceRow {
     /// opening on the first of those shows an empty loop for a display that is
     /// not the one on the desk.
     has_saved_config: bool,
+    /// When that configuration was last written, in unix seconds.
+    ///
+    /// The tie-breaker `has_saved_config` alone could not provide. The live
+    /// server has three configured identities and only one panel; the one being
+    /// worked on is the one whose configuration was written most recently, and
+    /// that is a fact the filesystem already knows. `None` when there is no
+    /// saved configuration, or when the timestamp cannot be read -- a missing
+    /// value ranks last rather than pretending to be old.
+    configured_at: Option<i64>,
 }
 
 async fn list_devices(
@@ -222,11 +231,21 @@ async fn list_devices(
         .into_iter()
         .map(|id| {
             let connected = state.device_is_linked(&id);
-            let has_saved_config = state.configs().for_device(&id).store.path().exists();
+            let path = state.configs().for_device(&id).store.path().to_path_buf();
+            let configured_at = std::fs::metadata(&path)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|modified| {
+                    modified
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
+                });
             DeviceRow {
                 id,
                 connected,
-                has_saved_config,
+                has_saved_config: path.exists(),
+                configured_at,
             }
         })
         .collect();

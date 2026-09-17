@@ -540,4 +540,12 @@ async fn the_device_list_says_which_identities_have_ever_been_configured() {
     };
     assert_eq!(row(&first.device_id)["has_saved_config"], false);
     assert_eq!(row(&second.device_id)["has_saved_config"], true);
+    // The recency stamp is the tie-breaker `has_saved_config` cannot provide:
+    // the live server has three configured identities and one panel, so the
+    // window has to prefer the one most recently written to.
+    assert!(row(&first.device_id)["configured_at"].is_null());
+    assert!(
+        row(&second.device_id)["configured_at"].as_i64().is_some(),
+        "a written configuration must carry when it was written"
+    );
 }

@@ -95,6 +95,7 @@ interface DeviceRow {
   id: string;
   connected: boolean;
   has_saved_config: boolean;
+  configured_at: number | null;
 }
 
 function rememberedDeviceId(): string | null {
@@ -120,16 +121,25 @@ function rememberDeviceId(id: string): void {
  *
  * Registry order is mint order, not usefulness: a server that has minted spare
  * identities lists several that were never configured, and opening on the first
- * of those shows an empty loop for a display nobody owns. So an explicit choice
- * wins, then a display that is actually linked right now, then one that has been
- * configured, and only then the first id in the list.
+ * of those shows an empty loop for a display nobody owns. Worse, "has ever been
+ * configured" is not enough on its own -- the live server has three configured
+ * identities and one panel.
+ *
+ * So: an id the operator typed wins outright, then a display that is linked
+ * right now, then the one configured most recently, then the first id. The
+ * recency step is what actually resolves a retired identity from the working
+ * one, because the working one is the one being saved to.
  */
 function pickDevice(devices: DeviceRow[]): DeviceRow | undefined {
   const remembered = rememberedDeviceId();
+  const mostRecentlyConfigured = devices
+    .filter((device) => device.has_saved_config)
+    .sort((left, right) => (right.configured_at ?? 0) - (left.configured_at ?? 0))
+    .at(0);
   return (
     devices.find((device) => device.id === remembered) ??
     devices.find((device) => device.connected) ??
-    devices.find((device) => device.has_saved_config) ??
+    mostRecentlyConfigured ??
     devices.at(0)
   );
 }

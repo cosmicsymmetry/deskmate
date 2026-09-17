@@ -203,18 +203,31 @@ async fn logout() -> Response {
 struct DeviceRow {
     id: String,
     connected: bool,
+    /// Whether this identity has ever been configured.
+    ///
+    /// Reported because the window has to open on *a* display and the registry's
+    /// order is mint order, not usefulness: a server that has minted spare
+    /// identities over time lists several that were never configured, and
+    /// opening on the first of those shows an empty loop for a display that is
+    /// not the one on the desk.
+    has_saved_config: bool,
 }
 
 async fn list_devices(
     State(state): State<ServerState>,
     _operator: OperatorAuthenticated,
 ) -> Json<Vec<DeviceRow>> {
-    let rows = state
-        .registry_device_ids()
+    let ids = state.registry_device_ids();
+    let rows = ids
         .into_iter()
         .map(|id| {
             let connected = state.device_is_linked(&id);
-            DeviceRow { id, connected }
+            let has_saved_config = state.configs().for_device(&id).store.path().exists();
+            DeviceRow {
+                id,
+                connected,
+                has_saved_config,
+            }
         })
         .collect();
     Json(rows)

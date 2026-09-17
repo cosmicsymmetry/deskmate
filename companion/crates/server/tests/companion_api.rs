@@ -495,3 +495,49 @@ async fn session_cookie(client: &Client, server: &TestServer) -> String {
         .expect("cookie name=value")
         .to_owned()
 }
+
+#[tokio::test]
+async fn the_device_list_says_which_identities_have_ever_been_configured() {
+    // The window opens on one display, and registry order is mint order. A
+    // server that has minted spare identities over time lists several that were
+    // never configured; without this flag the window would open on the first of
+    // those and show an empty loop for a display nobody owns. Observed on the
+    // live server, which lists dev-0001 first and keeps the real panel at
+    // dev-0005.
+    let (server, _state) = spawn().await;
+    let client = Client::new();
+    let first = mint_device(&client, &server).await;
+    let second = mint_device(&client, &server).await;
+
+    let configured = snapshot(&client, &server, &second.device_id).await;
+    let saved = client
+        .put(format!(
+            "{}/v1/app/{}/config",
+            server.base_url, second.device_id
+        ))
+        .bearer_auth(ADMIN_TOKEN)
+        .header("content-type", "application/json")
+        .body(serde_json::json!({ "json": configured["config"].to_string() }).to_string())
+        .send()
+        .await
+        .expect("save config");
+    assert_eq!(saved.status(), StatusCode::OK);
+
+    let listed = client
+        .get(format!("{}/v1/app/devices", server.base_url))
+        .bearer_auth(ADMIN_TOKEN)
+        .send()
+        .await
+        .expect("devices");
+    let rows = json_body(listed).await;
+    let row = |id: &str| {
+        rows.as_array()
+            .expect("device rows")
+            .iter()
+            .find(|row| row["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("{id} missing from the device list"))
+    };
+    assert_eq!(row(&first.device_id)["has_saved_config"], false);
+    assert_eq!(row(&second.device_id)["has_saved_config"], true);
+}

@@ -82,16 +82,56 @@ function fail(details: IpcError): never {
 /**
  * The device this window is looking at.
  *
- * Resolved once from `/v1/app/devices` and remembered, because every route below
- * is device-scoped while the UI above still speaks about "the display". The Mac
- * app got this from its own settings file; a browser has no such file, and the
- * server already knows the answer.
+ * Every route below is device-scoped while the UI above still speaks about "the
+ * display", so one id has to be chosen. The Mac app read it from its own
+ * settings file; a browser has none, and the server already knows the answer.
  */
 let selectedDeviceId: string | null = null;
+
+/** Where an explicit choice is remembered between visits. */
+const DEVICE_KEY = "deskmate.device_id";
 
 interface DeviceRow {
   id: string;
   connected: boolean;
+  has_saved_config: boolean;
+}
+
+function rememberedDeviceId(): string | null {
+  try {
+    return window.localStorage.getItem(DEVICE_KEY);
+  } catch {
+    // Storage can be denied outright (private windows, blocked site data). That
+    // is not a failure: it just means the choice is not remembered.
+    return null;
+  }
+}
+
+function rememberDeviceId(id: string): void {
+  try {
+    window.localStorage.setItem(DEVICE_KEY, id);
+  } catch {
+    // See `rememberedDeviceId`.
+  }
+}
+
+/**
+ * Picks the display this window should open on.
+ *
+ * Registry order is mint order, not usefulness: a server that has minted spare
+ * identities lists several that were never configured, and opening on the first
+ * of those shows an empty loop for a display nobody owns. So an explicit choice
+ * wins, then a display that is actually linked right now, then one that has been
+ * configured, and only then the first id in the list.
+ */
+function pickDevice(devices: DeviceRow[]): DeviceRow | undefined {
+  const remembered = rememberedDeviceId();
+  return (
+    devices.find((device) => device.id === remembered) ??
+    devices.find((device) => device.connected) ??
+    devices.find((device) => device.has_saved_config) ??
+    devices.at(0)
+  );
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -146,15 +186,15 @@ async function deviceId(): Promise<string> {
     return selectedDeviceId;
   }
   const devices = await request<DeviceRow[]>("GET", "/v1/app/devices");
-  const first = devices.at(0);
-  if (!first) {
+  const chosen = pickDevice(devices);
+  if (!chosen) {
     fail({
       category: "not-found",
       message: "This server owns no display yet. Mint one before configuring it.",
     });
   }
-  selectedDeviceId = first.id;
-  return first.id;
+  selectedDeviceId = chosen.id;
+  return chosen.id;
 }
 
 async function devicePath(suffix: string): Promise<string> {
@@ -243,7 +283,15 @@ export async function setServerEndpoint(
   adminToken: string,
 ): Promise<NetworkSettings> {
   await request<void>("POST", "/v1/app/session", { token: adminToken });
-  selectedDeviceId = requestedDeviceId.trim() === "" ? null : requestedDeviceId.trim();
+  const requested = requestedDeviceId.trim();
+  if (requested === "") {
+    selectedDeviceId = null;
+  } else {
+    // An id typed into the panel is an explicit choice and outlives the tab,
+    // which is the only way to reach a second display on a multi-display server.
+    selectedDeviceId = requested;
+    rememberDeviceId(requested);
+  }
   return getNetworkSettings();
 }
 

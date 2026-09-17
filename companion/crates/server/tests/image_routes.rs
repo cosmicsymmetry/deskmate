@@ -209,13 +209,18 @@ async fn a_body_that_is_not_a_png_is_rejected() {
     let client = Client::new();
     let source = mint(&client, &server, "PNG-only panel").await;
 
+    // Deliberately SMALL. A one-mebibyte body would be rejected for its size as
+    // well as its type, so a correct server answering 413 would fail this test --
+    // and, because the server closes as soon as it decides while the client is
+    // still writing a megabyte, the write itself failed with ConnectionReset
+    // about one run in three. The size rule has its own test above.
     let response = push(
         &client,
         &server,
         &source.token,
         None,
         "application/octet-stream",
-        vec![0; ONE_MEBIBYTE + 1],
+        vec![0; 32],
     )
     .await;
 

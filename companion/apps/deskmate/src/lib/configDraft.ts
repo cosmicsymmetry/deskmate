@@ -165,7 +165,11 @@ export function addCard(
     card = {
       kind: request.kind,
       ...common,
-      title: "",
+      // The name the caller already chose, not blank. A card added from the menu
+      // arrived with an empty title and leaned on the tile falling back to the
+      // source name, which left the Name field empty and put the owner's only
+      // visible name on the SOURCE rather than on the card.
+      title: request.sourceName,
       source_id: request.sourceId,
       refresh: { kind: "manual" },
     };

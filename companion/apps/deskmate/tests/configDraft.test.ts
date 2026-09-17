@@ -144,7 +144,9 @@ describe("configuration draft helpers", () => {
     expect(config.cards.at(-1)).toEqual({
       kind: "picture",
       id: "picture",
-      title: "",
+      // The card carries the name, not just the source. A blank title left the
+      // Name field empty and made the source the only thing actually named.
+      title: "Claude limits",
       source_id: "limits",
       tap_action: { kind: "none" },
       refresh: { kind: "manual" },

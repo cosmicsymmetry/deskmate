@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use server::data_cards;
 use server::firmware::FirmwareCatalog;
-use server::{ServerState, app};
+use server::{ServerState, app_with_web};
 
 // Loopback, not `0.0.0.0`: per `deploy/README.md` §4, a Cloudflare Tunnel is
 // the *only* sanctioned ingress. A default that binds every interface would
@@ -264,6 +264,26 @@ async fn main() {
          unspecified under launchd/systemd",
         config_dir.display()
     );
+    // The browser companion's built assets. Unset means the UI is simply not
+    // served and this process behaves exactly as it did before the companion
+    // existed -- which is what a deployment that has not shipped a `dist/` yet
+    // should do, rather than answering every path with a 404 page.
+    let web_dir = std::env::var("DESKMATE_WEB_DIR").ok().map(PathBuf::from);
+    if let Some(web_dir) = web_dir.as_ref() {
+        assert!(
+            web_dir.is_absolute(),
+            "DESKMATE_WEB_DIR must be an absolute path (got {}); a relative path \
+             resolves against the process's working directory, which is \
+             unspecified under launchd/systemd",
+            web_dir.display()
+        );
+        assert!(
+            web_dir.join("index.html").is_file(),
+            "DESKMATE_WEB_DIR ({}) has no index.html -- point it at the built \
+             companion (apps/deskmate/dist), not at its parent",
+            web_dir.display()
+        );
+    }
     let data_card_spec_path = data_card_spec_path(&config_dir);
     let firmware_version = required_firmware_version(std::env::var("DESKMATE_FIRMWARE_VERSION"));
     let admin_token = std::env::var("DESKMATE_ADMIN_TOKEN")
@@ -328,7 +348,13 @@ async fn main() {
     tracing::info!(address = %local_addr, "deskmate server listening");
 
     let shutdown_state = state.clone();
-    axum::serve(listener, app(state))
+    if let Some(web_dir) = web_dir.as_ref() {
+        tracing::info!(directory = %web_dir.display(), "serving the web companion");
+    } else {
+        tracing::info!("no web companion configured (DESKMATE_WEB_DIR unset)");
+    }
+
+    axum::serve(listener, app_with_web(state, web_dir))
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("server exited with an error");

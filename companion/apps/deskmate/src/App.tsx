@@ -25,14 +25,12 @@ import {
 } from "./lib/configDraft";
 import {
   controlPomodoro,
-  getAutostartStatus,
   listCreatableFaces,
   mintImageSource,
   resumePushing,
-  setAutostartEnabled,
   toIpcError,
   validateConfigDraft,
-} from "./lib/tauri";
+} from "./lib/backend";
 import type {
   AppConfig,
   AppSnapshot,
@@ -78,10 +76,6 @@ export function App() {
     ownershipTier,
     saveConfig,
     saveServerAccess,
-    pairDevice,
-    unpairDevice,
-    factoryReset,
-    chooseLocalMode,
   } = useAppState();
   const [draft, setDraft] = useState<AppConfig | null>(null);
   const draftRef = useRef<AppConfig | null>(draft);
@@ -95,8 +89,6 @@ export function App() {
   const [saveState, setSaveState] = useState<SaveState>({ kind: "idle" });
   const [commandError, setCommandError] = useState<IpcError | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [autostartEnabled, setAutostartValue] = useState(false);
-  const [autostartMismatch, setAutostartMismatch] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [mintedPicture, setMintedPicture] = useState<{
     cardId: string;
@@ -169,25 +161,6 @@ export function App() {
       window.clearTimeout(timeout);
     };
   }, [draft]);
-
-  useEffect(() => {
-    let active = true;
-    void getAutostartStatus()
-      .then((status) => {
-        if (active) {
-          setAutostartValue(status.enabled);
-          setAutostartMismatch(status.enabled !== status.preference_enabled);
-        }
-      })
-      .catch((nextError) => {
-        if (active) {
-          setCommandError(toIpcError(nextError));
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
 
   if (loading && !snapshot) {
     return (
@@ -405,18 +378,6 @@ export function App() {
     }
     void runAction("timer", () => controlPomodoro(selectedCardId, action satisfies PomodoroAction));
   };
-  const handleAutostart = (enabled: boolean) => {
-    setBusyAction("autostart");
-    setCommandError(null);
-    void setAutostartEnabled(enabled)
-      .then((status) => {
-        setAutostartValue(status.enabled);
-        setAutostartMismatch(status.enabled !== status.preference_enabled);
-        return refresh();
-      })
-      .catch((nextError) => setCommandError(toIpcError(nextError)))
-      .finally(() => setBusyAction(null));
-  };
 
   const persistenceError =
     snapshot.persistence.kind === "recoverable-error" ? snapshot.persistence.message : null;
@@ -501,16 +462,12 @@ export function App() {
             </aside>
           )}
 
-          {(persistenceError || autostartMismatch) && (
+          {persistenceError && (
             <aside className="notice notice--warn" role="status">
               <div>
-                <strong>
-                  {persistenceError ? "Settings file needs attention" : "Start-at-login differs"}
-                </strong>
+                <strong>Settings file needs attention</strong>
                 <p>
-                  {persistenceError
-                    ? `${persistenceError}. The unreadable file was left untouched; review the settings shown here before saving a fresh valid configuration.`
-                    : "The operating-system setting and saved preference differ. Choose your preference below to reconcile them."}
+                  {`${persistenceError}. The unreadable file was left untouched; review the settings shown here before saving a fresh valid configuration.`}
                 </p>
               </div>
             </aside>
@@ -678,18 +635,6 @@ export function App() {
               </select>
               <small>Saved with your layout and reapplied whenever the display reconnects.</small>
             </label>
-            <label className="check-field">
-              <input
-                type="checkbox"
-                checked={autostartEnabled}
-                disabled={busyAction === "autostart"}
-                onChange={(event) => handleAutostart(event.currentTarget.checked)}
-              />
-              <span>
-                <strong>Start Deskmate when I sign in</strong>
-                <small>Disabled until you opt in.</small>
-              </span>
-            </label>
           </div>
         </section>
 
@@ -714,26 +659,8 @@ export function App() {
               serverUrl: networkSettings.server_url,
               deviceId: networkSettings.device_id,
             }}
-            onPair={async (input) => {
-              await pairDevice(input);
-              await refresh();
-            }}
-            onUnpair={async () => {
-              await unpairDevice();
-              await refresh();
-            }}
-            onFactoryReset={async () => {
-              await factoryReset();
-              await refresh();
-            }}
-            onSaveServerAccess={saveServerAccess}
-            allowLocalOverride={
-              snapshot.device.tier === null &&
-              networkSettings.tier !== "local" &&
-              Boolean(networkSettings.server_url || networkSettings.device_id)
-            }
-            onUseLocalMode={async () => {
-              await chooseLocalMode();
+            onSaveServerAccess={async (serverUrl, deviceId, adminToken) => {
+              await saveServerAccess(serverUrl, deviceId, adminToken);
               await refresh();
             }}
           />

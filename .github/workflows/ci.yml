@@ -57,9 +57,12 @@ jobs:
       - name: frontend tests
         working-directory: companion/apps/deskmate
         run: bun test
-      - name: tauri release bundle
+      - name: frontend typecheck
         working-directory: companion/apps/deskmate
-        run: bunx tauri build
+        run: bun run check
+      - name: frontend production build
+        working-directory: companion/apps/deskmate
+        run: bun run build
       - name: install cargo-audit
         uses: taiki-e/install-action@v2
         with:
@@ -72,11 +75,13 @@ jobs:
         working-directory: companion/apps/deskmate
         run: bun audit
         continue-on-error: true
-      - name: upload dmg
+      # The companion is deployed by copying this directory to the server's
+      # DESKMATE_WEB_DIR, so the artifact is the built site, not an installer.
+      - name: upload companion
         uses: actions/upload-artifact@v4
         with:
-          name: deskmate-dmg
-          path: companion/target/release/bundle/dmg/*.dmg
+          name: deskmate-web
+          path: companion/apps/deskmate/dist
           retention-days: 14
           if-no-files-found: error
 

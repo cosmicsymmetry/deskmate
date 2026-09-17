@@ -63,13 +63,7 @@ function compactDuration(totalSeconds: number): string {
  *
  * The ring and legend display the loop; the grid is the one place its order changes.
  */
-export function LoopRing({
-  config,
-  issues,
-  selectedCardId,
-  onSelect,
-  onChange,
-}: LoopRingProps) {
+export function LoopRing({ config, issues, selectedCardId, onSelect, onChange }: LoopRingProps) {
   const isTimed = config.advance.kind === "timed";
   const segments = useMemo(() => loopSegments(config), [config]);
   const total = loopSeconds(config);

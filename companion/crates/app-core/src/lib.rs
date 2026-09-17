@@ -39,7 +39,8 @@ pub use render_negotiation::{
 };
 pub use runtime::{
     DeviceConnection, ImageSourceFrame, ImageSourceHost, RuntimeDevice, RuntimeHandle,
-    RuntimeOptions, RuntimeSubscription, SerialRuntimeDevice, preview_card_scene,
+    RuntimeOptions, RuntimeSubscription, SerialRuntimeDevice, empty_device, initial_snapshot,
+    preview_card_scene,
 };
 pub use scene_build::{
     AnalogClockCard, BakedFontMetrics, ClockCard, NumericAdvances, ProgressRingCard,

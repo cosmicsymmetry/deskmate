@@ -136,7 +136,6 @@ export interface IconGlyphMapping {
 
 export type CarouselAdvance = { kind: "manual" } | { kind: "timed"; default_dwell_seconds: number };
 
-
 export interface UpdaterSettings {
   channel: "stable" | "beta" | "manual";
   checks: "disabled" | "notify";
@@ -223,24 +222,11 @@ export type DeviceWifiState = "down" | "connecting" | "connected" | "failed";
 
 export type DeviceOtaState = "idle" | "checking" | "downloading" | "pending-verify" | "failed";
 
-/** The persisted, non-secret portion of the Mac app's server settings. */
+/** What this window is talking to: its own origin, and the display it configures. */
 export interface NetworkSettings {
   server_url: string;
   device_id: string;
   tier: DeviceTier | null;
-}
-
-/**
- * A write-only provisioning request. Secret fields are accepted by IPC but are
- * deliberately absent from every response, snapshot, and event type.
- */
-export interface ProvisionDeviceInput {
-  ssid: string;
-  passphrase: string;
-  server_url: string;
-  device_id: string;
-  device_token: string;
-  tier: DeviceTier;
 }
 
 /**
@@ -331,11 +317,6 @@ export interface ConfigApplyResult {
   save: SaveReceipt;
 }
 
-export interface AutostartStatus {
-  enabled: boolean;
-  preference_enabled: boolean;
-}
-
 /**
  * `png_base64` is null exactly when the renderer produced no pixels; `state` then
  * carries the word for why. Built-in cards keep `png_base64` set and `state`
@@ -352,22 +333,26 @@ type MessageError<Category extends string> = {
   message: string;
 };
 
+/**
+ * Every failure the server can hand this window, and nothing else.
+ *
+ * The union shrank with the move to HTTP: `runtime-busy`, `incompatible-server`,
+ * `autostart`, `window` and `unsupported` described a desktop process talking to
+ * a cable, and no route emits them now. Listing a category the server cannot
+ * produce would make `toIpcError` accept a shape nothing sends and invite a
+ * branch that can never run.
+ */
 export type IpcError =
   | MessageError<"invalid-payload">
   | (MessageError<"payload-too-large"> & { maximum_bytes: number })
   | (MessageError<"validation"> & { issues: ValidationIssue[] })
   | MessageError<"persistence">
-  | MessageError<"runtime-busy">
   | MessageError<"runtime-unavailable">
-  | MessageError<"incompatible-server">
   | MessageError<"not-found">
   | MessageError<"device">
-  | MessageError<"autostart">
-  | MessageError<"window">
-  | MessageError<"internal">
-  | MessageError<"unsupported">;
+  | MessageError<"internal">;
 
-// This fixture shape is generated from Rust serialization in a backend test, then
+// This fixture shape is generated from Rust serialization in a server test, then
 // compiled against these declarations. Either side changing makes CI fail.
 export interface IpcContractFixtures {
   snapshot: AppSnapshot;
@@ -395,6 +380,5 @@ export interface IpcContractFixtures {
   errors: IpcError[];
   draft_validation: DraftValidation;
   config_apply_result: ConfigApplyResult;
-  autostart_status: AutostartStatus;
   preview_frame: PreviewFrame;
 }

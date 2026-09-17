@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
-import { act, type ComponentProps, useState } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -16,25 +16,38 @@ import {
   issuesForPath,
   unclaimedIssues,
 } from "../src/lib/configDraft";
-import * as tauriModule from "../src/lib/tauri";
+import * as backendModule from "../src/lib/backend";
 
 // Keep a reference to the real picture-source wrapper before `mock.module`
-// replaces the module namespace in place, then mock the Tauri bridge beneath it.
-const coreInvocations: { command: string; args?: Record<string, unknown> }[] = [];
-mock.module("@tauri-apps/api/core", () => ({
-  invoke: async (command: string, args?: Record<string, unknown>) => {
-    coreInvocations.push({ command, args });
-    if (command === "mint_image_source" && args?.sourceName) {
-      return {
-        source_id: "picture-source",
-        token: "plaintext-once",
-        push_url: "https://desk.example/v1/images/plaintext-once",
-      };
-    }
-    return [];
-  },
-}));
-const realMintImageSource = tauriModule.mintImageSource;
+// replaces the module namespace in place, then stub the transport beneath it.
+//
+// The transport is `fetch` now rather than Tauri's `invoke`, so what is recorded
+// is the request the browser would actually make. That is the point of asserting
+// on it at all: the mint has to reach `/v1/images` with the name and face kind in
+// the body, and a test that only checked a command string could not have told a
+// correct request from one aimed at the wrong route.
+const httpCalls: { method: string; path: string; body: unknown }[] = [];
+const jsonResponse = (value: unknown) =>
+  new Response(JSON.stringify(value), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  const path = typeof input === "string" ? input : input.toString();
+  const method = init?.method ?? "GET";
+  const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+  httpCalls.push({ method, path, body });
+  if (method === "POST" && path === "/v1/images") {
+    return jsonResponse({
+      source_id: "picture-source",
+      token: "plaintext-once",
+      push_url: "https://desk.example/v1/images/plaintext-once",
+    });
+  }
+  return jsonResponse([]);
+}) as typeof fetch;
+
+const realMintImageSource = backendModule.mintImageSource;
 
 import type {
   AppConfig,
@@ -48,7 +61,6 @@ import type {
   MintedImageSource,
   NetworkSettings,
   PreviewFrame,
-  ProvisionDeviceInput,
   ValidationIssue,
 } from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
@@ -80,12 +92,7 @@ let networkSettingsImpl: () => Promise<NetworkSettings> = async () => ({
   device_id: "desk-1",
   tier: "local",
 });
-let provisionImpl: (input: ProvisionDeviceInput) => Promise<NetworkSettings> = async (input) => ({
-  server_url: input.server_url,
-  device_id: input.device_id,
-  tier: input.tier,
-});
-let setServerEndpointImpl: (
+const setServerEndpointImpl: (
   serverUrl: string,
   deviceId: string,
   adminToken: string,
@@ -93,11 +100,6 @@ let setServerEndpointImpl: (
   server_url: serverUrl,
   device_id: deviceId,
   tier: "networked",
-});
-let useLocalOwnershipImpl: () => Promise<NetworkSettings> = async () => ({
-  server_url: "https://desk.example",
-  device_id: "desk-1",
-  tier: "local",
 });
 let imageSourcesImpl: () => Promise<ImageSourceDescriptor[]> = async () => [];
 let updateImageSourceFaceImpl: (
@@ -107,8 +109,8 @@ let updateImageSourceFaceImpl: (
   throw new Error("updateImageSourceFace not configured for this test");
 };
 
-mock.module("../src/lib/tauri", () => ({
-  ...tauriModule,
+mock.module("../src/lib/backend", () => ({
+  ...backendModule,
   renderCardPreview: (cardId: string) => previewImpl(cardId),
   getAppSnapshot: () => snapshotImpl(),
   listenToAppState: async () => () => {},
@@ -116,14 +118,11 @@ mock.module("../src/lib/tauri", () => ({
   saveApplyConfig: (config: AppConfig) => saveImpl(config),
   saveServerConfig: (config: AppConfig) => serverSaveImpl(config),
   getNetworkSettings: () => networkSettingsImpl(),
-  provisionDevice: (input: ProvisionDeviceInput) => provisionImpl(input),
   setServerEndpoint: (serverUrl: string, deviceId: string, adminToken: string) =>
     setServerEndpointImpl(serverUrl, deviceId, adminToken),
-  chooseLocalOwnership: () => useLocalOwnershipImpl(),
   listImageSources: () => imageSourcesImpl(),
   updateImageSourceFace: (sourceId: string, fields: Record<string, string>) =>
     updateImageSourceFaceImpl(sourceId, fields),
-  getAutostartStatus: async () => ({ enabled: false, preference_enabled: false }),
 }));
 
 /// Renders into a live DOM root (unlike this file's other `renderToStaticMarkup`
@@ -178,20 +177,6 @@ function clockCard(
     tap_action: { kind: "none" },
     refresh: { kind: "device-local" },
     alert,
-    dwell_seconds: null,
-  };
-}
-
-function pomodoroCard(id: string, label = `Card ${id}`): CardSettings {
-  return {
-    kind: "pomodoro",
-    id,
-    label,
-    duration_seconds: 1500,
-    template: { kind: "progress-ring" },
-    tap_action: { kind: "start-pause" },
-    refresh: { kind: "device-local" },
-    alert: { kind: "on-timer-finish", hold: { kind: "until-dismissed" } },
     dwell_seconds: null,
   };
 }
@@ -287,20 +272,19 @@ describe("settings accessibility and states", () => {
           otaState: "idle",
         }}
         settings={publicSettingsWithStoredSecrets}
-        onPair={async () => {}}
-        onUnpair={async () => {}}
-        onFactoryReset={async () => {}}
+        onSaveServerAccess={async () => {}}
       />,
     );
   }
 
-  test("network panel shows the device as locally owned before provisioning", () => {
+  test("a cable-owned display is named as such, and still points saves at the server", () => {
+    // The panel can no longer change ownership, so what it owes the reader is an
+    // accurate statement of where an edit made here will actually land. A display
+    // owned by a cable is the case where that answer is surprising.
     const html = renderNetworkPanel({ tier: "local", wifiState: "down", ip: "" });
-    expect(ownershipLabel("local")).toBe("Owned by this Mac");
-    expect(html).toContain("saved on this Mac and sent to the display over USB");
-    expect(html).not.toContain("saved to the server");
-    expect(html).toContain("Server base URL");
-    expect(html).toContain("secure WebSocket device link");
+    expect(ownershipLabel("local")).toBe("Owned by a cable");
+    expect(html).toContain("owned by a cable");
+    expect(html).toContain("only once it is owned by the server");
   });
 
   test("network panel says where settings are written once networked", () => {
@@ -329,199 +313,64 @@ describe("settings accessibility and states", () => {
     expect(html).not.toContain("stored-admin-secret");
   });
 
-  test("network panel accepts secrets once and clears them after pairing", async () => {
-    let submitted: Parameters<ComponentProps<typeof NetworkPanel>["onPair"]>[0] | null = null;
+  test("the panel offers no cable operation it cannot perform", () => {
+    // Provisioning, unpairing and factory reset write the display's own settings
+    // over USB. A browser has no cable, so the controls are gone rather than
+    // present-and-failing -- which is the whole reason this assertion is by
+    // absence: a stub that threw would have rendered an identical-looking button.
+    const html = renderNetworkPanel({ tier: "networked", wifiState: "connected", ip: "10.0.0.2" });
+    expect(html).not.toContain("Pair with server");
+    expect(html).not.toContain("Return to local ownership");
+    expect(html).not.toContain("Factory-reset");
+    expect(html).not.toContain("WiFi passphrase");
+    expect(html).not.toContain("Device token");
+  });
+
+  test("signing in submits the admin token once and then clears it", async () => {
+    const attempts: { serverUrl: string; deviceId: string; adminToken: string }[] = [];
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
-    const setInput = (labelText: string, value: string) => {
-      const label = [...container.querySelectorAll("label")].find((candidate) =>
-        candidate.querySelector("span")?.textContent?.includes(labelText),
-      );
-      const input = label?.querySelector("input");
-      expect(input).not.toBeNull();
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, value);
-      input?.dispatchEvent(new Event("input", { bubbles: true }));
-    };
-    const inputValue = (labelText: string) =>
-      [...container.querySelectorAll("label")]
-        .find((candidate) => candidate.querySelector("span")?.textContent?.includes(labelText))
-        ?.querySelector("input")?.value;
-
     try {
       await act(async () =>
         root.render(
           <NetworkPanel
             device={{
-              tier: "local",
-              wifiState: "down",
-              wifiRssi: null,
-              ip: "",
+              tier: "networked",
+              link: "server link",
+              wifiState: "connected",
+              wifiRssi: -54,
+              ip: "10.0.0.2",
               lastNetworkError: null,
               otaState: "idle",
             }}
-            settings={{
-              serverUrl: "https://desk.example",
-              deviceId: "desk-1",
+            settings={{ serverUrl: "https://desk.example", deviceId: "desk-1" }}
+            onSaveServerAccess={async (serverUrl, deviceId, adminToken) => {
+              attempts.push({ serverUrl, deviceId, adminToken });
             }}
-            onPair={async (input) => {
-              submitted = input;
-            }}
-            onUnpair={async () => {}}
-            onFactoryReset={async () => {}}
-            onSaveServerAccess={async () => {}}
           />,
         ),
       );
+
+      const token = container.querySelector<HTMLInputElement>('input[type="password"]');
+      expect(token).not.toBeNull();
       await act(async () => {
-        setInput("WiFi network", "home-network");
-        setInput("WiFi passphrase", "wifi-secret-92");
-        setInput("Device token", "device-secret-17");
-        setInput("Admin token", "admin-secret-46");
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(
+          token,
+          "admin-secret",
+        );
+        token?.dispatchEvent(new Event("input", { bubbles: true }));
       });
-      const pair = buttonWithText(container, "Pair with server");
-      expect(pair?.disabled).toBe(false);
-      await act(async () => pair?.click());
+      await act(async () => buttonWithText(container, "Sign in")?.click());
 
-      expect(submitted).toMatchObject({
-        ssid: "home-network",
-        passphrase: "wifi-secret-92",
-        server_url: "https://desk.example",
-        device_id: "desk-1",
-        device_token: "device-secret-17",
-        admin_token: "admin-secret-46",
-        tier: "networked",
-      });
-      expect(inputValue("WiFi passphrase")).toBe("");
-      expect(inputValue("Device token")).toBe("");
-      expect(inputValue("Admin token")).toBe("");
-      expect(inputValue("WiFi network")).toBe("home-network");
-      expect(inputValue("Server base URL")).toBe("https://desk.example");
-      expect(inputValue("Device ID")).toBe("desk-1");
+      await waitFor(() => expect(attempts).toHaveLength(1));
+      expect(attempts[0]?.adminToken).toBe("admin-secret");
+      // Cleared after use: the token buys a session and is not kept in the DOM
+      // where a later screenshot or a stray autofill could resurface it.
+      await waitFor(() => expect(token?.value).toBe(""));
     } finally {
       await act(async () => root.unmount());
       container.remove();
-    }
-  });
-
-  test("the mounted pairing flow provisions before persisting server access", async () => {
-    const order: string[] = [];
-    let serverAccess: [string, string, string] | null = null;
-    snapshotImpl = async () => snapshot;
-    networkSettingsImpl = async () => ({
-      server_url: "https://desk.example",
-      device_id: "desk-1",
-      tier: "local",
-    });
-    provisionImpl = async (input) => {
-      order.push("provision");
-      return {
-        server_url: input.server_url,
-        device_id: input.device_id,
-        tier: input.tier,
-      };
-    };
-    setServerEndpointImpl = async (serverUrl, deviceId, adminToken) => {
-      order.push("server-access");
-      serverAccess = [serverUrl, deviceId, adminToken];
-      return { server_url: serverUrl, device_id: deviceId, tier: "networked" };
-    };
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
-
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    const setInput = (labelText: string, value: string) => {
-      const label = [...container.querySelectorAll("label")].find((candidate) =>
-        candidate.querySelector("span")?.textContent?.includes(labelText),
-      );
-      const input = label?.querySelector("input");
-      expect(input).not.toBeNull();
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, value);
-      input?.dispatchEvent(new Event("input", { bubbles: true }));
-    };
-
-    try {
-      await act(async () => root.render(<App />));
-      await waitFor(() => expect(container.textContent).toContain("Pair with server"));
-      await act(async () => {
-        setInput("WiFi network", "home-network");
-        setInput("WiFi passphrase", "wifi-secret");
-        setInput("Device token", "device-secret");
-        setInput("Admin token", "admin-secret");
-      });
-      const pair = buttonWithText(container, "Pair with server");
-      expect(pair?.disabled).toBe(false);
-      await act(async () => pair?.click());
-      await waitFor(() => expect(order).toHaveLength(2));
-
-      expect(order).toEqual(["provision", "server-access"]);
-      expect(serverAccess).toEqual(["https://desk.example", "desk-1", "admin-secret"]);
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-      provisionImpl = async (input) => ({
-        server_url: input.server_url,
-        device_id: input.device_id,
-        tier: input.tier,
-      });
-      setServerEndpointImpl = async (serverUrl, deviceId) => ({
-        server_url: serverUrl,
-        device_id: deviceId,
-        tier: "networked",
-      });
-    }
-  });
-
-  test("an unplugged incomplete pairing can explicitly return this Mac to local routing", async () => {
-    snapshotImpl = async () => ({
-      ...(structuredClone(snapshot) as AppSnapshot),
-      device: {
-        ...(structuredClone(snapshot.device) as AppSnapshot["device"]),
-        tier: null,
-      },
-    });
-    networkSettingsImpl = async () => ({
-      server_url: "https://desk.example",
-      device_id: "desk-1",
-      tier: null,
-    });
-    let overrideCalls = 0;
-    useLocalOwnershipImpl = async () => {
-      overrideCalls += 1;
-      return {
-        server_url: "https://desk.example",
-        device_id: "desk-1",
-        tier: "local",
-      };
-    };
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
-
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<App />));
-      await waitFor(() => expect(buttonWithText(container, "Use local on this Mac")).toBeDefined());
-      expect(container.textContent).toContain("changes only the Mac's routing");
-      await act(async () => buttonWithText(container, "Use local on this Mac")?.click());
-      await waitFor(() => expect(overrideCalls).toBe(1));
-      await waitFor(() => expect(buttonWithText(container, "Save & apply")).toBeDefined());
-      expect(buttonWithText(container, "Use local on this Mac")).toBeUndefined();
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-      snapshotImpl = async () => snapshot;
-      networkSettingsImpl = async () => ({
-        server_url: "https://desk.example",
-        device_id: "desk-1",
-        tier: "local",
-      });
-      useLocalOwnershipImpl = async () => ({
-        server_url: "https://desk.example",
-        device_id: "desk-1",
-        tier: "local",
-      });
     }
   });
 
@@ -1028,7 +877,7 @@ describe("settings accessibility and states", () => {
       tier: "networked",
     });
     previewImpl = async () => ({ png_base64: null, sample: false, state: null });
-    coreInvocations.length = 0;
+    httpCalls.length = 0;
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -1047,9 +896,10 @@ describe("settings accessibility and states", () => {
           "plaintext-once",
         );
       });
-      expect(coreInvocations).toContainEqual({
-        command: "mint_image_source",
-        args: { sourceName: "Picture", faceKind: null },
+      expect(httpCalls).toContainEqual({
+        method: "POST",
+        path: "/v1/images",
+        body: { name: "Picture", face_kind: null },
       });
 
       const tiles = container.querySelectorAll<HTMLButtonElement>(".card-tile__body");
@@ -1884,7 +1734,7 @@ describe("settings accessibility and states", () => {
       tier: "networked",
     });
     serverSaveImpl = async () => {
-      throw new tauriModule.DeskmateCommandError({
+      throw new backendModule.DeskmateCommandError({
         category: "validation",
         message: "the server rejected this configuration with 7 validation issue(s)",
         issues: Array.from({ length: 7 }, (_, index) => ({
@@ -2539,7 +2389,7 @@ describe("settings accessibility and states", () => {
   });
 
   test("minting a picture source makes a server round trip with the source name", async () => {
-    coreInvocations.length = 0;
+    httpCalls.length = 0;
 
     expect(await realMintImageSource("Picture")).toEqual({
       source_id: "picture-source",
@@ -2548,8 +2398,8 @@ describe("settings accessibility and states", () => {
     });
     // faceKind rides along on every mint: null for an external producer, a kind
     // when the owner picked a server-drawn face from the menu.
-    expect(coreInvocations).toEqual([
-      { command: "mint_image_source", args: { sourceName: "Picture", faceKind: null } },
+    expect(httpCalls).toEqual([
+      { method: "POST", path: "/v1/images", body: { name: "Picture", face_kind: null } },
     ]);
   });
 });

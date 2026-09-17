@@ -16,10 +16,21 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::ServerState;
-use crate::auth::AdminAuthenticated;
+// The operator gate, not the raw admin-bearer one. These are the routes the
+// browser companion calls to list, mint and configure image sources, and a
+// browser carries a session cookie rather than a bearer -- gating them on the
+// bearer alone made every one of them answer 401 from the window while every
+// test that used a bearer passed. `OperatorAuthenticated` still accepts the
+// admin bearer, so scripts are unaffected; it is the same privilege reached by
+// a second carrier, not a wider one.
+//
+// The producer push route below is deliberately NOT covered by this: it
+// authenticates a per-source producer credential, which is a different and much
+// narrower thing than an operator.
 use crate::auth::bearer_token;
 use crate::image_ingest::{ImageIngestError, canonical_frame_from_png};
 use crate::image_sources::{AcceptOutcome, ImageSourceError};
+use crate::oauth::session::OperatorAuthenticated;
 
 const MAX_IMAGE_BODY_BYTES: usize = 1024 * 1024;
 const MAX_FACE_SETTINGS_BODY_BYTES: usize = 16 * 1024;
@@ -123,7 +134,7 @@ struct UpdateFaceRequest {
 
 async fn list_sources(
     State(state): State<ServerState>,
-    _admin: AdminAuthenticated,
+    _operator: OperatorAuthenticated,
 ) -> Json<Vec<ImageSourceDescriptor>> {
     let sources = state
         .image_sources()
@@ -140,7 +151,7 @@ async fn list_sources(
 
 async fn update_face(
     State(state): State<ServerState>,
-    _admin: AdminAuthenticated,
+    _operator: OperatorAuthenticated,
     Path(source_id): Path<String>,
     payload: Result<Json<UpdateFaceRequest>, JsonRejection>,
 ) -> Result<Json<crate::data_cards::FaceDescriptor>, ImageRouteError> {
@@ -173,14 +184,14 @@ async fn update_face(
 /// window without the app knowing what weather is.
 async fn list_creatable_faces(
     _state: State<ServerState>,
-    _admin: AdminAuthenticated,
+    _operator: OperatorAuthenticated,
 ) -> Json<Vec<crate::data_cards::FaceDescriptor>> {
     Json(crate::data_cards::creatable_faces())
 }
 
 async fn mint_source(
     State(state): State<ServerState>,
-    _admin: AdminAuthenticated,
+    _operator: OperatorAuthenticated,
     payload: Result<Json<MintSourceRequest>, JsonRejection>,
 ) -> Result<Json<MintSourceResponse>, ImageRouteError> {
     let Json(request) = payload.map_err(|rejection| ImageRouteError::InvalidJson {
@@ -230,7 +241,7 @@ async fn mint_source(
 
 async fn revoke_source(
     State(state): State<ServerState>,
-    _admin: AdminAuthenticated,
+    _operator: OperatorAuthenticated,
     Path(source_id): Path<String>,
 ) -> Result<StatusCode, ImageRouteError> {
     tokio::task::spawn_blocking(move || state.image_sources().revoke(&source_id))

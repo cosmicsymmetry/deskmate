@@ -6,7 +6,6 @@ import type {
   ValidationIssue,
 } from "./types";
 
-
 export const MAX_CARDS = 8;
 export const MAX_IMAGE_SOURCES = 8;
 
@@ -273,11 +272,7 @@ export function moveEntry(config: AppConfig, from: number, to: number): AppConfi
   return { ...copyConfig(config), cards: next };
 }
 
-export function setCardDwell(
-  config: AppConfig,
-  cardId: string,
-  dwell: number | null,
-): AppConfig {
+export function setCardDwell(config: AppConfig, cardId: string, dwell: number | null): AppConfig {
   const index = config.cards.findIndex((card) => card.id === cardId);
   if (index < 0 || config.cards[index].dwell_seconds === dwell) {
     return config;

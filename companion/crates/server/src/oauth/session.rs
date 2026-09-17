@@ -152,9 +152,13 @@ impl FromRequestParts<ServerState> for OperatorAuthenticated {
                 sid: "bearer-admin".to_string(),
             });
         }
-        if let Some(runtime) = state.integrations()
-            && let Some(value) = session_cookie_value(parts)
-            && let Some(claims) = runtime.sessions().verify(&value, Utc::now())
+        // The state's own signer, not `integrations().sessions()`. Both are keyed
+        // by the admin token and mint identical values, but the integration
+        // runtime is absent on a deployment that configures no OAuth provider --
+        // and reading the cookie through it meant no cookie was ever accepted
+        // there, which would leave the browser companion permanently logged out.
+        if let Some(value) = session_cookie_value(parts)
+            && let Some(claims) = state.sessions().verify(&value, Utc::now())
         {
             return Ok(Self { sid: claims.sid });
         }

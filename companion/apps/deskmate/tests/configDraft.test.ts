@@ -29,11 +29,7 @@ import {
   tapActionDescription,
   unclaimedIssues,
 } from "../src/lib/configDraft";
-import type {
-  AppConfig,
-  CardSettings,
-  ValidationIssue,
-} from "../src/lib/types";
+import type { AppConfig, CardSettings, ValidationIssue } from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
 
 function initialConfig(): AppConfig {
@@ -182,11 +178,7 @@ describe("configuration draft helpers", () => {
   });
 
   test("every freshly-added card kind defaults to a template the wire actually implements", () => {
-    const compilableTemplates = new Set([
-      "digital-clock",
-      "analog-clock",
-      "progress-ring",
-    ]);
+    const compilableTemplates = new Set(["digital-clock", "analog-clock", "progress-ring"]);
     const expectedTemplateKind: Record<string, string> = {
       clock: "digital-clock",
       pomodoro: "progress-ring",
@@ -219,9 +211,7 @@ describe("configuration draft helpers", () => {
 
   test("the loop is the card list, in order", () => {
     const withCards = addCard(addCard(initialConfig(), "pomodoro").config, "clock").config;
-    expect(loopEntries(withCards)).toEqual(
-      withCards.cards.map((card, index) => ({ index, card })),
-    );
+    expect(loopEntries(withCards)).toEqual(withCards.cards.map((card, index) => ({ index, card })));
   });
 
   test("moves cards with clamped targets and index-safe source boundaries", () => {

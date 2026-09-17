@@ -144,7 +144,15 @@ impl SnapshotPublisher {
     }
 }
 
-pub(super) fn initial_snapshot(config: &AppConfig, diagnostics: RuntimeDiagnostics) -> AppSnapshot {
+/// The snapshot a configuration describes before any device has spoken: the
+/// cards it declares, one idle pomodoro per pomodoro card, and no device facts.
+///
+/// Public because the server serves this same shape to the browser companion
+/// when the board is not linked -- which is the common case, since the board is
+/// normally powered off. Building it here rather than in the server keeps one
+/// answer to "what does a snapshot look like before the device speaks", so the
+/// offline view and a starting runtime cannot drift apart.
+pub fn initial_snapshot(config: &AppConfig, diagnostics: RuntimeDiagnostics) -> AppSnapshot {
     let mut pomodoros = Vec::new();
     let compiled_card_ids: BTreeSet<&str> = config.compiled_card_ids().into_iter().collect();
     for card in config
@@ -181,7 +189,10 @@ pub(super) fn initial_snapshot(config: &AppConfig, diagnostics: RuntimeDiagnosti
     }
 }
 
-pub(super) fn empty_device(connection: ConnectionState) -> DeviceSnapshot {
+/// A device snapshot that claims nothing but its connection state. Public for
+/// the same reason [`initial_snapshot`] is: the server reports a board it has no
+/// link to as disconnected-and-otherwise-unknown, rather than inventing facts.
+pub fn empty_device(connection: ConnectionState) -> DeviceSnapshot {
     DeviceSnapshot {
         connection,
         port_name: None,

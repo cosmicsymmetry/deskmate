@@ -573,8 +573,9 @@ export function CardList({
                 <button
                   ref={(element) => {
                     if (element) {
-                      menuItemRefs.current[addableKinds.length + creatableFaces.length + unusedPictureSources.length] =
-                        element;
+                      menuItemRefs.current[
+                        addableKinds.length + creatableFaces.length + unusedPictureSources.length
+                      ] = element;
                     }
                   }}
                   type="button"
@@ -583,8 +584,10 @@ export function CardList({
                   disabled={!canMintPictureSource || pictureBusy}
                   onClick={() => choosePicture(null)}
                   onKeyDown={(event) =>
-                    onMenuKeyDown(event, addableKinds.length + creatableFaces.length + unusedPictureSources.length, () =>
-                      choosePicture(null),
+                    onMenuKeyDown(
+                      event,
+                      addableKinds.length + creatableFaces.length + unusedPictureSources.length,
+                      () => choosePicture(null),
                     )
                   }
                 >

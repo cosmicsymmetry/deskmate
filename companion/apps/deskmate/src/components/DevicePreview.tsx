@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { renderCardPreview } from "../lib/tauri";
+import { renderCardPreview } from "../lib/backend";
 import type { CardSettings, DisplayOrientation } from "../lib/types";
 
 interface DevicePreviewProps {

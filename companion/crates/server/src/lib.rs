@@ -14,6 +14,8 @@
 //! `firmware`.
 
 mod admin;
+// The browser companion's API: the Tauri command set, re-homed as HTTP.
+mod app_api;
 pub use app_core::asset_sync;
 mod auth;
 // Server-rendered data cards: the server pushing frames to its own image
@@ -37,11 +39,15 @@ mod image_staleness;
 mod images;
 mod manage;
 pub mod oauth;
+// The one LVGL simulator this process owns, and the card previews it renders.
+mod preview;
 pub mod producer_credentials;
 pub mod registry;
 pub mod runtime_device;
 pub mod secrets;
 mod store;
+// Serves the companion's built assets from DESKMATE_WEB_DIR.
+mod web;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -83,6 +89,17 @@ use runtime_device::SocketConnector;
 /// caps cannot deadlock each other.
 const MAX_CONCURRENT_REQUESTS: usize = 64;
 
+/// The process's single card-preview renderer, started on first use.
+///
+/// One per process, not one per `ServerState`: `lvgl_sim::Simulator` owns LVGL's
+/// global state, so a second one is not a second renderer but a corruption of the
+/// first. Tests construct many states and would otherwise start many simulators.
+static PREVIEW: OnceLock<preview::PreviewHandle> = OnceLock::new();
+
+pub(crate) fn preview_handle() -> &'static preview::PreviewHandle {
+    PREVIEW.get_or_init(preview::spawn)
+}
+
 /// How long any single request may take to produce a response. Generous for
 /// a firmware-check round trip; irrelevant to an established device link,
 /// whose handler returns as soon as the WebSocket upgrade completes -- the
@@ -105,6 +122,14 @@ struct StateInner {
     data_cards: Mutex<data_cards::DataCardState>,
     producer_credentials: Arc<producer_credentials::ProducerCredentialStore>,
     admin_token: String,
+    /// Signs and verifies the operator session cookie. Keyed by the admin token,
+    /// exactly as `IntegrationRuntime`'s own signer is -- but held here, so a
+    /// deployment with no OAuth integrations configured still has sessions. The
+    /// browser companion is the reason that matters: it authenticates once with
+    /// the admin token and then carries a cookie, and gating that on Google
+    /// integrations being present would have made the whole UI unreachable on a
+    /// server that simply does not use them.
+    sessions: oauth::session::SessionSigner,
     firmware: FirmwareCatalog,
     configs: store::DeviceConfigStores,
     /// The OAuth integration runtime, attached at startup by `set_integrations`
@@ -148,6 +173,7 @@ impl ServerState {
                 image_sources: Arc::new(image_sources),
                 data_cards: Mutex::new(data_cards::DataCardState::new(data_card_spec_path)),
                 producer_credentials: Arc::new(producer_credentials),
+                sessions: oauth::session::SessionSigner::from_admin_token(&admin_token),
                 admin_token,
                 firmware,
                 configs: store::DeviceConfigStores::new(config_directory),
@@ -182,6 +208,11 @@ impl ServerState {
     #[must_use]
     pub fn registry(&self) -> &Registry {
         &self.inner.registry
+    }
+
+    /// The operator session signer. Always present -- see the field's own note.
+    pub(crate) fn sessions(&self) -> &oauth::session::SessionSigner {
+        &self.inner.sessions
     }
 
     pub(crate) fn image_sources(&self) -> &Arc<image_sources::ImageSourceStore> {
@@ -407,23 +438,38 @@ impl Drop for LinkLease {
 /// `load_shed()` must therefore sit directly outside the concurrency
 /// limiter (not just anywhere above it), which is why it is threaded
 /// between `HandleErrorLayer` and `GlobalConcurrencyLimitLayer` below.
+/// The router, with no companion UI mounted. `app_with_web` adds it.
 pub fn app(state: ServerState) -> Router {
+    app_with_web(state, None)
+}
+
+/// The router, optionally serving the browser companion from `web_root`.
+///
+/// The UI is mounted as a fallback *outside* the `/v1` namespace, so adding it
+/// cannot shadow an API route: `web::asset` answers 404 for any `/v1` path it is
+/// handed, and every real API route matches before the fallback is consulted.
+pub fn app_with_web(state: ServerState, web_root: Option<PathBuf>) -> Router {
     let middleware = ServiceBuilder::new()
         .layer(HandleErrorLayer::new(handle_middleware_error))
         .load_shed()
         .layer(GlobalConcurrencyLimitLayer::new(MAX_CONCURRENT_REQUESTS))
         .timeout(REQUEST_TIMEOUT);
 
-    Router::new()
+    let router = Router::new()
         .route("/v1/device/link", get(device_link::handler))
         .route("/v1/device/firmware", get(firmware::check))
         .route("/v1/firmware/{filename}", get(firmware::download))
         .merge(admin::routes())
+        .merge(app_api::routes())
         .merge(images::routes())
         .merge(manage::routes())
         .merge(oauth::routes::routes())
         .layer(middleware)
-        .with_state(state)
+        .with_state(state);
+    match web_root {
+        Some(root) => router.merge(web::routes(web::WebRoot::new(root))),
+        None => router,
+    }
 }
 
 /// Converts whatever error the middleware stack above can produce into a

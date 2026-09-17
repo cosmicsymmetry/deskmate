@@ -8,7 +8,7 @@ import {
   setCardDwell,
   tapActionDescription,
 } from "../lib/configDraft";
-import { listImageSources, toIpcError, updateImageSourceFace } from "../lib/tauri";
+import { listImageSources, toIpcError, updateImageSourceFace } from "../lib/backend";
 import type {
   AlertHold,
   AppConfig,

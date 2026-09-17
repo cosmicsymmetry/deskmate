@@ -2,17 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   DeskmateCommandError,
-  factoryResetDevice,
   getAppSnapshot,
   getNetworkSettings,
   listenToAppState,
-  provisionDevice,
   saveApplyConfig,
   saveServerConfig,
   setServerEndpoint,
   toIpcError,
-  chooseLocalOwnership,
-} from "./tauri";
+} from "./backend";
 import type {
   AppConfig,
   AppSnapshot,
@@ -20,7 +17,6 @@ import type {
   DeviceTier,
   IpcError,
   NetworkSettings,
-  ProvisionDeviceInput,
 } from "./types";
 
 interface EventTargetLike {
@@ -118,14 +114,6 @@ export interface AppStateValue {
   ownershipTier: DeviceTier | null;
   saveConfig: (config: AppConfig) => Promise<ConfigApplyResult>;
   saveServerAccess: (serverUrl: string, deviceId: string, adminToken: string) => Promise<void>;
-  pairDevice: (input: PairDeviceInput) => Promise<void>;
-  unpairDevice: () => Promise<void>;
-  factoryReset: () => Promise<void>;
-  chooseLocalMode: () => Promise<void>;
-}
-
-export interface PairDeviceInput extends ProvisionDeviceInput {
-  admin_token: string;
 }
 
 interface ConfigSaveDestinations {
@@ -231,43 +219,6 @@ export function useAppState(): AppStateValue {
     [acceptNetworkSettings],
   );
 
-  const pairDevice = useCallback(
-    async (input: PairDeviceInput) => {
-      const settings = await provisionDevice({
-        ssid: input.ssid,
-        passphrase: input.passphrase,
-        server_url: input.server_url,
-        device_id: input.device_id,
-        device_token: input.device_token,
-        tier: input.tier,
-      });
-      acceptNetworkSettings(settings);
-      await saveServerAccess(input.server_url, input.device_id, input.admin_token);
-    },
-    [acceptNetworkSettings, saveServerAccess],
-  );
-
-  const unpairDevice = useCallback(async () => {
-    const settings = await provisionDevice({
-      ssid: "",
-      passphrase: "",
-      server_url: networkSettingsRef.current.server_url,
-      device_id: networkSettingsRef.current.device_id,
-      device_token: "",
-      tier: "local",
-    });
-    acceptNetworkSettings(settings);
-  }, [acceptNetworkSettings]);
-
-  const factoryReset = useCallback(async () => {
-    await factoryResetDevice();
-    acceptNetworkSettings(await getNetworkSettings());
-  }, [acceptNetworkSettings]);
-
-  const chooseLocalMode = useCallback(async () => {
-    acceptNetworkSettings(await chooseLocalOwnership());
-  }, [acceptNetworkSettings]);
-
   const saveConfig = useCallback(async (config: AppConfig) => {
     const liveTier = snapshotRef.current?.device.tier ?? null;
     const tier =
@@ -339,9 +290,5 @@ export function useAppState(): AppStateValue {
     ownershipTier,
     saveConfig,
     saveServerAccess,
-    pairDevice,
-    unpairDevice,
-    factoryReset,
-    chooseLocalMode,
   };
 }

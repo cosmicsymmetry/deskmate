@@ -1,10 +1,10 @@
 /**
  * Dev-only in-browser stand-in for the Rust runtime.
  *
- * Enabled by `VITE_DESKMATE_MOCK=1`, which makes `vite.config.ts` alias
- * `@tauri-apps/api/core` and `@tauri-apps/api/event` at the two modules beside this
- * one. No application code imports anything from `src/dev/`, so a production build
- * resolves the real bridge and never reaches this file.
+ * Reached through `src/dev/backendClient.ts`, which `vite.config.ts` aliases in
+ * place of the real HTTP client under `VITE_DESKMATE_MOCK=1`. No application code
+ * imports anything from `src/dev/`, so a production build resolves the real
+ * client and never reaches this file.
  *
  * Scenarios let a whole device state be selected from the URL — `?scenario=offline`,
  * `?scenario=local`, `?scenario=invalid`, `?scenario=firstrun`, `?scenario=empty` —
@@ -49,7 +49,6 @@ const scenario = currentScenario();
 let config: AppConfig = mockConfig();
 let network: NetworkSettings = mockNetworkSettings();
 let snapshot: AppSnapshot = mockSnapshot(config);
-let autostart = { enabled: true, preference_enabled: true };
 let mockFace: FaceDescriptor = {
   kind: "server-face",
   label: "Source settings",
@@ -223,7 +222,7 @@ window.setInterval(() => {
 
 /**
  * The mock's argument bag. Every command that reads arguments is always called with
- * them by `src/lib/tauri.ts`, so a missing bag is a harness bug — surfaced as the
+ * them by `src/dev/backendClient.ts`, so a missing bag is a harness bug — surfaced as the
  * same typed IPC error shape the real backend would return, not a TypeError.
  */
 function requireArgs(args: Record<string, unknown> | undefined): Record<string, unknown> {
@@ -242,8 +241,6 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
       return delay(snapshot) as Promise<T>;
     case "get_network_settings":
       return delay(network) as Promise<T>;
-    case "get_autostart_status":
-      return delay(autostart) as Promise<T>;
     case "mint_image_source": {
       const sourceNumber = config.image_sources.length + 1;
       const token = `dev-picture-token-${sourceNumber}`;
@@ -271,10 +268,6 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
         })),
       };
       return delay(mockFace) as Promise<T>;
-    }
-    case "set_autostart_enabled": {
-      autostart = { enabled: Boolean(args?.enabled), preference_enabled: Boolean(args?.enabled) };
-      return delay(autostart) as Promise<T>;
     }
     case "validate_config_draft": {
       const draft = JSON.parse((requireArgs(args).draft as { json: string }).json) as AppConfig;
@@ -344,31 +337,6 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
       };
       return delay(network) as Promise<T>;
     }
-    case "provision_device": {
-      const request = args?.request as {
-        server_url: string;
-        device_id: string;
-        tier: "local" | "networked";
-      };
-      network = {
-        server_url: request.server_url,
-        device_id: request.device_id,
-        tier: request.tier,
-      };
-      snapshot.device.tier = request.tier;
-      publish();
-      return delay(network, 600) as Promise<T>;
-    }
-    case "factory_reset_device":
-      network = { server_url: "", device_id: "", tier: null };
-      snapshot.device.tier = null;
-      publish();
-      return delay(undefined as T, 600);
-    case "use_local_ownership":
-      network = { ...network, tier: "local" };
-      snapshot.device.tier = "local";
-      publish();
-      return delay(network) as Promise<T>;
     default:
       throw { category: "not-found", message: `mock backend has no command \`${command}\`` };
   }

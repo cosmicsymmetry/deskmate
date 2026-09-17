@@ -18,7 +18,7 @@ Read these before changing code:
    acceptance criteria.
 4. `docs/hardware/board-notes.md` - verified board facts, component versions, and
    hardware quirks.
-5. The frozen contracts: `docs/config/v11.md` (config) and `docs/protocol/v2.md` (wire).
+5. The frozen contracts: `docs/config/v10.md` (config) and `docs/protocol/v2.md` (wire).
    These state the contracts; nothing else does, including this file.
 
 `docs/history.md` is the narrative record. It is not normative and several of its
@@ -33,7 +33,7 @@ of letting code and documentation diverge.
 The narrative of how the project got here is `docs/history.md`, which nothing loads by
 default. This section states only what is true now.
 
-- **Config schema v11** (`docs/config/v11.md`), **protocol v2** (`docs/protocol/v2.md`,
+- **Config schema v10** (`docs/config/v10.md`), **protocol v2** (`docs/protocol/v2.md`,
   frozen; v1 is marked superseded and kept as the record of what flashed firmware
   speaks), `PROTOCOL_CURRENT_CAPABILITIES` **2016**. Protocol v2 is **NOT additive**: it
   removes `PushData` (type 5 is now `PushTimer`), the template/size-class/
@@ -47,17 +47,17 @@ default. This section states only what is true now.
   A `docs/config/vN.md` exists if and only if
   the store can still read vN, so the set shrinks as migrations retire; v4 is the oldest
   readable version and a pre-v4 document is a typed `UnsupportedVersion` refusal.
-- **Six card kinds: clock, pomodoro, picture, weather, RSS and token.** Clock and
-  pomodoro tick on the device between host pushes. Picture is a raster frame from an
-  external producer. Weather, RSS and Token are first-class config kinds whose raster
-  frames the server produces. The old device-rendered data-card family and manifest-based
-  plugins are still gone; these three explicit kinds do not restore either registry.
+- **Three card kinds: clock, pomodoro, picture.** Clock and pomodoro tick on the device
+  between host pushes. A picture card's face is a raster frame, frozen between pushes,
+  from one of two producers: an external one POSTing a PNG, or **the server itself**. The
+  device-rendered data cards (calendar, weather, json-feed, rss) went in v8 and
+  manifest-based plugins in v9, and neither is coming back as a card kind.
 - **The server renders weather, RSS and token faces, and therefore makes outbound HTTP
   again** (`docs/images/server-rendered-cards.md`). It did not between `e137294` and
-  `feat/server-side-cards`. Each is a first-class schema-v11 card whose deterministic
-  image source the server pushes to itself. The device config is the only face-spec
-  authority; there is no `data-cards.json` or source selector. The wire is untouched.
-  Every outbound request goes through
+  `feat/server-side-cards`. These are **not new card kinds**: each is an image source the
+  server pushes to itself, named by an ordinary picture card, configured in
+  `data-cards.json` under `DESKMATE_CONFIG_DIR` (or `DESKMATE_DATA_CARDS`). Schema stays
+  v10 and the wire is untouched. Every outbound request goes through
   `crates/server/src/egress.rs` -- the same SSRF guard the plugin system used, restored
   whole -- and `EgressHttpClient` is the only HTTP client the provider layer is given.
   **A face is rastered, not composed as a scene**, because `SCENE_MAX_NODES` is 24, a
@@ -173,6 +173,23 @@ Each of these cost this project real time at least once.
 
 These are decisions, not defaults. Changing one needs the owner, not a judgement call.
 
+- **A NEW DATA FACE IS A SERVER-SIDE PRODUCER, NEVER A NEW CARD KIND.** A card gets its
+  face exactly two ways: on-device (clock, pomodoro, which must tick between host
+  pushes), or as a raster frame a producer pushes to an image source. Anything that does
+  not need device-local fast refresh is a script on the server that renders a picture.
+  Weather, RSS and a token price are producers. **Do not add a card kind for one, and do
+  not treat a complaint about the settings window as permission to.** This was violated
+  on 2026-09-16 by `e2b103c` (schema v11, six card kinds, 42 files, an ordered two-stage
+  deploy) in response to a request that was purely about what the tiles looked like; it
+  was reverted the next day. The rule was already written here and in `324c981`/`e137294`
+  at the time.
+- **The three expensive boundaries are `CURRENT_SCHEMA_VERSION`, the wire, and firmware
+  statics.** Cost in this repo is set by which boundary a change crosses, not by how many
+  lines it touches. A schema bump forces a migration, a redeploy, an app rebuild and a
+  strict deploy order; a wire or firmware-statics change adds a USB flash and a mandatory
+  on-board OTA re-verification. **Crossing one needs explicit owner authorization**, the
+  same as a tag. A change that stays inside `apps/deskmate/src/` costs an app rebuild and
+  nothing else -- reach for that first and say what it would cost before proposing more.
 - **The window has ONE LOOP, and since schema v10 so does the document.** The
   complication tile grid *is* the loop, in loop order, and it is where the order changes.
   Adding a card is one dashed slot at the end of the grid, and appending to `cards` IS
@@ -191,11 +208,6 @@ These are decisions, not defaults. Changing one needs the owner, not a judgement
   `cardTitle()` (the owner's words, null when never typed) is a quiet second line beside
   it, never absent, because two cards can share a template. Every control acting on one
   entry names `template — title`.
-- **Card identity is stated, not selected.** A Weather card edits its location and units;
-  an RSS card edits its feed; a Token card edits its coin and currency. No dropdown may
-  turn one kind, plugin or server-rendered face into another. Picture keeps a source
-  selector because selecting an external producer is the Picture kind's authored data,
-  not a hidden kind change.
 - **`DESIGN.md` is the visual language** (The Modular Face); product truth is
   `PRODUCT.md`. `docs/design/companion-visual-language.md` is superseded. A label above a
   heading and a card inside a card are both out. `ui-rounded` is the numeral face because

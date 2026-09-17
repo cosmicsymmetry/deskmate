@@ -477,12 +477,11 @@ impl WorkerState {
                         now,
                     );
                 }
-                card if card.source_id().is_some() => {
-                    let id = card.id();
-                    // A raster-backed card has no fetcher in app-core. Its
-                    // frames arrive through the image-source host, whether an
-                    // external producer or the server itself supplied them, so
-                    // there is no runtime deadline to arm here.
+                CardSettings::Picture { id, .. } => {
+                    // A picture card has no fetcher to poll. Its frames arrive
+                    // by webhook, pushed by an external producer, so there is no
+                    // fetch loop here to schedule and no deadline to arm --
+                    // which is also why rotating onto one costs nothing.
                     //
                     // With no host there is additionally nothing holding a
                     // frame, so the compiled placeholder fields are a stand-in
@@ -491,7 +490,7 @@ impl WorkerState {
                         self.latest_fields.remove(id);
                     }
                 }
-                _ => {}
+                CardSettings::Clock { .. } => {}
             }
         }
         let rotation_card_ids = rotation_card_ids(&self.config);
@@ -876,12 +875,18 @@ fn apply_image_source_update(
     if !state.connected {
         return Err(RuntimeError::DeviceDisconnected);
     }
-    let visible_uses_source =
-        state.active_card.as_deref().is_some_and(|active_id| {
-            state.config.cards.iter().any(|card| {
-                card.id() == active_id && card.source_id().as_deref() == Some(source_id)
-            })
-        });
+    let visible_uses_source = state.active_card.as_deref().is_some_and(|active_id| {
+        state.config.cards.iter().any(|card| {
+            matches!(
+                card,
+                CardSettings::Picture {
+                    id,
+                    source_id: configured_source,
+                    ..
+                } if id == active_id && configured_source == source_id
+            )
+        })
+    });
 
     // Read one authoritative host snapshot before touching the device. A stale
     // queued notification must not reconcile a set that no longer contains
@@ -1096,13 +1101,12 @@ fn run_scheduled_work(
 
 fn detect_active_picture_face_change(state: &mut WorkerState) {
     let Some((card_id, source_id)) = state.active_card.as_deref().and_then(|active_id| {
-        let card = state
-            .config
-            .cards
-            .iter()
-            .find(|card| card.id() == active_id)?;
-        card.source_id()
-            .map(|source_id| (card.id().to_owned(), source_id.into_owned()))
+        state.config.cards.iter().find_map(|card| match card {
+            CardSettings::Picture { id, source_id, .. } if id == active_id => {
+                Some((id.clone(), source_id.clone()))
+            }
+            _ => None,
+        })
     }) else {
         return;
     };
@@ -1378,7 +1382,7 @@ mod tests {
                 alert,
                 dwell_seconds,
             },
-            other => other,
+            other @ CardSettings::Picture { .. } => other,
         }
     }
 

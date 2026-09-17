@@ -1,8 +1,8 @@
 //! The settings window's card preview.
 //!
 //! It renders the same scene `build_card_scene` would push to the device, so
-//! the preview is what the panel shows by construction. A raster-backed card
-//! is not drawn here -- its frames live on the server.
+//! the preview is what the panel shows by construction. A picture card is
+//! not drawn here -- its frames live on the server.
 //!
 //! Split out of `commands.rs` unchanged on 2026-09-11. The glob keeps name
 //! resolution identical to when this was one file.
@@ -22,8 +22,8 @@ use super::*;
 /// so the settings UI can badge it, without the renderer itself lying about what it
 /// drew.
 ///
-/// Raster-backed cards have no `DisplayTemplate`: their frame is pushed or rendered
-/// by the server and is not reconstructed by this simulator.
+/// Picture cards have no `DisplayTemplate`: their frame is pushed by the external
+/// producer and is not reconstructed by this simulator.
 #[tauri::command]
 pub async fn render_card_preview(
     state: State<'_, DesktopState>,
@@ -40,8 +40,8 @@ pub async fn render_card_preview(
             message: format!("no card with id {card_id:?}"),
         })?;
 
-    if card.source_id().is_some() {
-        return Ok(unrendered_server_frame(RASTER_PREVIEW_IS_SERVER_OWNED));
+    if matches!(card, CardSettings::Picture { .. }) {
+        return Ok(unrendered_server_frame(PICTURE_PREVIEW_IS_PUSH_ONLY));
     }
 
     let data = snapshot
@@ -142,8 +142,8 @@ pub(super) fn preview_seconds_to_ms(seconds: i64) -> u32 {
         .saturating_mul(1_000)
 }
 
-pub(crate) const RASTER_PREVIEW_IS_SERVER_OWNED: &str =
-    "This card shows the last frame rendered or pushed by its server source";
+pub(crate) const PICTURE_PREVIEW_IS_PUSH_ONLY: &str =
+    "Picture cards show the last frame pushed by their source";
 
 pub(super) fn unrendered_server_frame(state: &str) -> PreviewFrame {
     PreviewFrame {

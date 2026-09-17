@@ -40,7 +40,7 @@ async function flushPromises() {
 
 describe("startAppStateSubscription", () => {
   test("the subscription fixture is the current schema with one loop", () => {
-    expect(snapshot.config.schema_version).toBe(11);
+    expect(snapshot.config.schema_version).toBe(10);
     expect(snapshot.config.advance).toEqual({ kind: "timed", default_dwell_seconds: 30 });
   });
 

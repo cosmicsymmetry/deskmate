@@ -58,11 +58,11 @@ pub(super) fn build_card_scene(
         .find(|card| card.id() == card_id)
         .ok_or_else(|| format!("card {card_id:?} is not present in the active configuration"))?;
     let metrics = &BakedFontMetrics::SHIPPED;
-    let scene = if let Some(source_id) = card.source_id() {
+    let scene = if let CardSettings::Picture { source_id, .. } = card {
         let host = image_source_host.ok_or_else(|| {
             format!("card {card_id:?} cannot render because no image source host is configured")
         })?;
-        match host.image_source_frame(&source_id) {
+        match host.image_source_frame(source_id) {
             Some(frame) => with_scene_data_state(
                 frame_face_scene(revision, frame.digest),
                 SceneDataState {
@@ -118,9 +118,9 @@ pub fn preview_card_scene(
         .iter()
         .find(|card| card.id() == card_id)
         .ok_or_else(|| format!("card {card_id:?} is not present in the active configuration"))?;
-    if card.source_id().is_some() {
+    if matches!(card, CardSettings::Picture { .. }) {
         return Err(format!(
-            "card {card_id:?} is raster-backed; its frame lives on the server"
+            "card {card_id:?} is a picture card; its frame lives on the server"
         ));
     }
     build_card_scene(config, card_id, fields, None, 1).map(|push| push.scene)
@@ -409,7 +409,7 @@ pub(super) fn built_picture_face(
     let is_picture = config
         .cards
         .iter()
-        .any(|card| card.id() == card_id && card.source_id().is_some());
+        .any(|card| matches!(card, CardSettings::Picture { id, .. } if id == card_id));
     if !is_picture {
         return (false, None);
     }

@@ -48,9 +48,6 @@ interface CardListProps {
 const addableKinds: { kind: AddableCardKind; description: string }[] = [
   { kind: "clock", description: "Time and date" },
   { kind: "pomodoro", description: "Focus timer" },
-  { kind: "weather", description: "Forecast for a city" },
-  { kind: "rss", description: "Headlines from a feed" },
-  { kind: "token", description: "Price and 24-hour trend" },
 ];
 
 /** The live fact that makes a tile a complication rather than a list row. */
@@ -77,12 +74,6 @@ function tileValue(
     }
     case "picture":
       return "PNG";
-    case "weather":
-      return card.location || "Set location";
-    case "rss":
-      return card.feed_title || "Set feed";
-    case "token":
-      return card.coin_id || "Set coin";
   }
 }
 
@@ -317,10 +308,7 @@ export function CardList({
     const hasAlert = card.alert.kind !== "none";
     const pomodoro = pomodoros.find((candidate) => candidate.card_id === card.id);
     const label = controlLabel(card);
-    const serverFlag =
-      card.kind !== "clock" && card.kind !== "pomodoro" && ownershipTier === "local"
-        ? "needs the server"
-        : null;
+    const pictureFlag = card.kind === "picture" && ownershipTier === "local" ? "needs the server" : null;
     return (
       <li
         key={`loop:${index}:${card.id}`}
@@ -356,7 +344,7 @@ export function CardList({
           {cardTitle(card) && <span className="card-tile__name">{cardTitle(card)}</span>}
         </button>
         <span className="card-tile__flags">
-          {serverFlag && <span className="flag">{serverFlag}</span>}
+          {pictureFlag && <span className="flag">{pictureFlag}</span>}
           {hasAlert && <span className="flag flag--alert">alerts</span>}
         </span>
         <button
@@ -374,23 +362,23 @@ export function CardList({
           <Icon name="close" />
         </button>
         <span className="card-tile__moves">
-          <button
-            type="button"
-            aria-label={`Move ${label} earlier`}
-            disabled={index === 0}
-            onClick={() => moveBy(card.id, -1)}
-          >
-            <Icon name="left" />
-          </button>
-          <button
-            type="button"
-            aria-label={`Move ${label} later`}
-            disabled={index === entries.length - 1}
-            onClick={() => moveBy(card.id, 1)}
-          >
-            <Icon name="right" />
-          </button>
-        </span>
+            <button
+              type="button"
+              aria-label={`Move ${label} earlier`}
+              disabled={index === 0}
+              onClick={() => moveBy(card.id, -1)}
+            >
+              <Icon name="left" />
+            </button>
+            <button
+              type="button"
+              aria-label={`Move ${label} later`}
+              disabled={index === entries.length - 1}
+              onClick={() => moveBy(card.id, 1)}
+            >
+              <Icon name="right" />
+            </button>
+          </span>
         <FieldIssues issues={tileIssues} className="card-tile__issues" />
       </li>
     );

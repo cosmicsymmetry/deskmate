@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 
@@ -117,40 +116,6 @@ mod strict_tagged_enum {
             alert: super::CardAlert,
             dwell_seconds: Option<u16>,
         },
-        Weather {
-            id: String,
-            title: String,
-            location: String,
-            #[serde(default)]
-            units: super::Units,
-            tap_action: super::WidgetTapAction,
-            refresh: super::RefreshPolicy,
-            alert: super::CardAlert,
-            dwell_seconds: Option<u16>,
-        },
-        Rss {
-            id: String,
-            title: String,
-            feed_url: String,
-            feed_title: String,
-            tap_action: super::WidgetTapAction,
-            refresh: super::RefreshPolicy,
-            alert: super::CardAlert,
-            dwell_seconds: Option<u16>,
-        },
-        Token {
-            id: String,
-            title: String,
-            coin_id: String,
-            #[serde(default = "super::default_currency")]
-            currency: String,
-            #[serde(default)]
-            api_key: Option<String>,
-            tap_action: super::WidgetTapAction,
-            refresh: super::RefreshPolicy,
-            alert: super::CardAlert,
-            dwell_seconds: Option<u16>,
-        },
     }
 
     /// Type-aware validation of allowed fields for each enum type.
@@ -264,40 +229,6 @@ mod strict_tagged_enum {
                     "alert",
                     "dwell_seconds",
                 ]),
-                "weather" => Some(&[
-                    "kind",
-                    "id",
-                    "title",
-                    "location",
-                    "units",
-                    "tap_action",
-                    "refresh",
-                    "alert",
-                    "dwell_seconds",
-                ]),
-                "rss" => Some(&[
-                    "kind",
-                    "id",
-                    "title",
-                    "feed_url",
-                    "feed_title",
-                    "tap_action",
-                    "refresh",
-                    "alert",
-                    "dwell_seconds",
-                ]),
-                "token" => Some(&[
-                    "kind",
-                    "id",
-                    "title",
-                    "coin_id",
-                    "currency",
-                    "api_key",
-                    "tap_action",
-                    "refresh",
-                    "alert",
-                    "dwell_seconds",
-                ]),
                 _ => None,
             }
         }
@@ -327,12 +258,8 @@ mod strict_tagged_enum {
     }
 }
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 11;
+pub const CURRENT_SCHEMA_VERSION: u32 = 10;
 pub const MAX_WIDGET_TITLE_LEN: usize = 64;
-pub const MAX_DATA_CARD_LOCATION_LEN: usize = 256;
-pub const MAX_DATA_CARD_COIN_ID_LEN: usize = 128;
-pub const MAX_DATA_CARD_CURRENCY_LEN: usize = 16;
-pub const MAX_DATA_CARD_API_KEY_LEN: usize = 512;
 pub const MAX_TIMEZONE_LEN: usize = 64;
 pub const MAX_ACTION_URL_LEN: usize = 2_048;
 pub const MAX_ASSETS: usize = 16;
@@ -355,14 +282,6 @@ pub const MAX_PLAYLIST_NAME_LEN: usize = 48;
 /// not just this number.
 pub const MAX_IMAGE_SOURCES: usize = 8;
 pub const MAX_IMAGE_SOURCE_NAME_LEN: usize = 48;
-
-/// The namespace `CardSettings::source_id` derives server-rendered source ids
-/// into. It is reserved: an owner-declared `image_sources` entry may not use it,
-/// because a declared `card-weather` and a weather card with id `weather` would
-/// resolve to one source and silently overwrite each other's frames. Reserving
-/// the prefix on the declared side is enough -- a picture card may only name a
-/// source that exists, so it can never reach the derived namespace.
-pub const DERIVED_SOURCE_PREFIX: &str = "card-";
 // Every compiled card can lower to one wire widget, so the card cap must never exceed
 // what the protocol's `ApplyConfig` encoder accepts.
 const _: () = assert!(MAX_CONFIG_CARDS <= protocol::MAX_CONFIG_CARDS);
@@ -482,16 +401,6 @@ impl AppConfig {
                 true,
                 &mut issues,
             );
-            if source.id.starts_with(DERIVED_SOURCE_PREFIX) {
-                issues.push(ValidationIssue::new(
-                    format!("{path}.id"),
-                    ValidationCode::InvalidSource,
-                    format!(
-                        "the {DERIVED_SOURCE_PREFIX:?} prefix is reserved for \
-                         server-rendered cards and cannot be declared"
-                    ),
-                ));
-            }
             if !seen_source_ids.insert(source.id.as_str()) {
                 issues.push(ValidationIssue::new(
                     format!("{path}.id"),
@@ -684,14 +593,6 @@ pub enum DisplayOrientation {
     #[default]
     Landscape,
     LandscapeFlipped,
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Units {
-    #[default]
-    Metric,
-    Imperial,
 }
 
 impl DisplayOrientation {
@@ -954,43 +855,6 @@ pub enum CardSettings {
         alert: CardAlert,
         dwell_seconds: Option<u16>,
     },
-    /// A weather face rendered by the server and delivered through the same
-    /// durable full-canvas image path as `Picture`.
-    Weather {
-        id: String,
-        title: String,
-        location: String,
-        units: Units,
-        tap_action: WidgetTapAction,
-        refresh: RefreshPolicy,
-        alert: CardAlert,
-        dwell_seconds: Option<u16>,
-    },
-    /// An RSS face rendered by the server. `feed_title` labels the feed inside
-    /// the face; `title` remains the owner's card name in the settings window.
-    Rss {
-        id: String,
-        title: String,
-        feed_url: String,
-        feed_title: String,
-        tap_action: WidgetTapAction,
-        refresh: RefreshPolicy,
-        alert: CardAlert,
-        dwell_seconds: Option<u16>,
-    },
-    /// A token-price face rendered by the server. The optional key is passed
-    /// only to the existing `CoinGecko` provider and never enters the wire.
-    Token {
-        id: String,
-        title: String,
-        coin_id: String,
-        currency: String,
-        api_key: Option<String>,
-        tap_action: WidgetTapAction,
-        refresh: RefreshPolicy,
-        alert: CardAlert,
-        dwell_seconds: Option<u16>,
-    },
 }
 
 impl<'de> Deserialize<'de> for CardSettings {
@@ -1059,65 +923,6 @@ impl<'de> Deserialize<'de> for CardSettings {
                 alert,
                 dwell_seconds,
             },
-            strict_tagged_enum::CardSettingsInner::Weather {
-                id,
-                title,
-                location,
-                units,
-                tap_action,
-                refresh,
-                alert,
-                dwell_seconds,
-            } => CardSettings::Weather {
-                id,
-                title,
-                location,
-                units,
-                tap_action,
-                refresh,
-                alert,
-                dwell_seconds,
-            },
-            strict_tagged_enum::CardSettingsInner::Rss {
-                id,
-                title,
-                feed_url,
-                feed_title,
-                tap_action,
-                refresh,
-                alert,
-                dwell_seconds,
-            } => CardSettings::Rss {
-                id,
-                title,
-                feed_url,
-                feed_title,
-                tap_action,
-                refresh,
-                alert,
-                dwell_seconds,
-            },
-            strict_tagged_enum::CardSettingsInner::Token {
-                id,
-                title,
-                coin_id,
-                currency,
-                api_key,
-                tap_action,
-                refresh,
-                alert,
-                dwell_seconds,
-            } => CardSettings::Token {
-                id,
-                title,
-                coin_id,
-                currency,
-                api_key,
-                tap_action,
-                refresh,
-                alert,
-                dwell_seconds,
-            },
         })
     }
 }
@@ -1125,28 +930,7 @@ impl<'de> Deserialize<'de> for CardSettings {
 impl CardSettings {
     pub fn id(&self) -> &str {
         match self {
-            Self::Clock { id, .. }
-            | Self::Pomodoro { id, .. }
-            | Self::Picture { id, .. }
-            | Self::Weather { id, .. }
-            | Self::Rss { id, .. }
-            | Self::Token { id, .. } => id,
-        }
-    }
-
-    /// The image source a raster-backed card resolves through.
-    ///
-    /// External pictures retain their stored producer-owned source id. The
-    /// three server-rendered kinds derive one from immutable card identity, so
-    /// editing a city, feed or coin never turns the card into another card and
-    /// never asks the owner to declare a server-owned source.
-    pub fn source_id(&self) -> Option<Cow<'_, str>> {
-        match self {
-            Self::Picture { source_id, .. } => Some(Cow::Borrowed(source_id)),
-            Self::Weather { id, .. } | Self::Rss { id, .. } | Self::Token { id, .. } => {
-                Some(Cow::Owned(format!("{DERIVED_SOURCE_PREFIX}{id}")))
-            }
-            Self::Clock { .. } | Self::Pomodoro { .. } => None,
+            Self::Clock { id, .. } | Self::Pomodoro { id, .. } | Self::Picture { id, .. } => id,
         }
     }
 
@@ -1154,10 +938,7 @@ impl CardSettings {
         match self {
             Self::Clock { alert, .. }
             | Self::Pomodoro { alert, .. }
-            | Self::Picture { alert, .. }
-            | Self::Weather { alert, .. }
-            | Self::Rss { alert, .. }
-            | Self::Token { alert, .. } => *alert,
+            | Self::Picture { alert, .. } => *alert,
         }
     }
 
@@ -1165,24 +946,19 @@ impl CardSettings {
         match self {
             Self::Clock { refresh, .. }
             | Self::Pomodoro { refresh, .. }
-            | Self::Picture { refresh, .. }
-            | Self::Weather { refresh, .. }
-            | Self::Rss { refresh, .. }
-            | Self::Token { refresh, .. } => *refresh,
+            | Self::Picture { refresh, .. } => *refresh,
         }
     }
 
-    /// `None` for raster-backed cards: the image is already the complete face,
-    /// so there is no `DisplayTemplate` to select.
+    /// `None` for picture cards: the picture is already the complete face, so
+    /// there is no `DisplayTemplate` to select.
     ///
     /// Since protocol v2 this is purely host state -- it selects which scene
     /// builder draws the card -- and the wire carries no template at all.
     pub fn template(&self) -> Option<&DisplayTemplate> {
         match self {
             Self::Clock { template, .. } | Self::Pomodoro { template, .. } => Some(template),
-            Self::Picture { .. } | Self::Weather { .. } | Self::Rss { .. } | Self::Token { .. } => {
-                None
-            }
+            Self::Picture { .. } => None,
         }
     }
 
@@ -1192,10 +968,7 @@ impl CardSettings {
         match self {
             Self::Clock { dwell_seconds, .. }
             | Self::Pomodoro { dwell_seconds, .. }
-            | Self::Picture { dwell_seconds, .. }
-            | Self::Weather { dwell_seconds, .. }
-            | Self::Rss { dwell_seconds, .. }
-            | Self::Token { dwell_seconds, .. } => *dwell_seconds,
+            | Self::Picture { dwell_seconds, .. } => *dwell_seconds,
         }
     }
 
@@ -1203,10 +976,7 @@ impl CardSettings {
         match self {
             Self::Clock { tap_action, .. }
             | Self::Pomodoro { tap_action, .. }
-            | Self::Picture { tap_action, .. }
-            | Self::Weather { tap_action, .. }
-            | Self::Rss { tap_action, .. }
-            | Self::Token { tap_action, .. } => tap_action,
+            | Self::Picture { tap_action, .. } => tap_action,
         }
     }
 
@@ -1298,116 +1068,6 @@ impl CardSettings {
                     issues,
                 );
             }
-            Self::Weather {
-                title,
-                location,
-                tap_action,
-                refresh,
-                ..
-            } => {
-                validate_text(
-                    &format!("{path}.title"),
-                    title,
-                    MAX_WIDGET_TITLE_LEN,
-                    false,
-                    issues,
-                );
-                validate_text(
-                    &format!("{path}.location"),
-                    location,
-                    MAX_DATA_CARD_LOCATION_LEN,
-                    true,
-                    issues,
-                );
-                validate_composition(
-                    path,
-                    CardBehavior::DataCard,
-                    None,
-                    tap_action,
-                    *refresh,
-                    issues,
-                );
-            }
-            Self::Rss {
-                title,
-                feed_url,
-                feed_title,
-                tap_action,
-                refresh,
-                ..
-            } => {
-                validate_text(
-                    &format!("{path}.title"),
-                    title,
-                    MAX_WIDGET_TITLE_LEN,
-                    false,
-                    issues,
-                );
-                validate_http_url(&format!("{path}.feed_url"), feed_url, issues);
-                validate_text(
-                    &format!("{path}.feed_title"),
-                    feed_title,
-                    MAX_WIDGET_TITLE_LEN,
-                    false,
-                    issues,
-                );
-                validate_composition(
-                    path,
-                    CardBehavior::DataCard,
-                    None,
-                    tap_action,
-                    *refresh,
-                    issues,
-                );
-            }
-            Self::Token {
-                title,
-                coin_id,
-                currency,
-                api_key,
-                tap_action,
-                refresh,
-                ..
-            } => {
-                validate_text(
-                    &format!("{path}.title"),
-                    title,
-                    MAX_WIDGET_TITLE_LEN,
-                    false,
-                    issues,
-                );
-                validate_text(
-                    &format!("{path}.coin_id"),
-                    coin_id,
-                    MAX_DATA_CARD_COIN_ID_LEN,
-                    true,
-                    issues,
-                );
-                validate_text(
-                    &format!("{path}.currency"),
-                    currency,
-                    MAX_DATA_CARD_CURRENCY_LEN,
-                    true,
-                    issues,
-                );
-                if let Some(api_key) = api_key {
-                    validate_text(
-                        &format!("{path}.api_key"),
-                        api_key,
-                        MAX_DATA_CARD_API_KEY_LEN,
-                        false,
-                        issues,
-                    );
-                }
-                validate_composition(
-                    path,
-                    CardBehavior::DataCard,
-                    None,
-                    tap_action,
-                    *refresh,
-                    issues,
-                );
-            }
         }
         self.tap_action()
             .validate(&format!("{path}.tap_action"), issues);
@@ -1465,12 +1125,8 @@ impl CardSettings {
                 bool_field("stale", false),
                 text_field("error", ""),
             ],
-            // Raster-backed cards use this placeholder shape until their first
-            // frame arrives, whether the producer is external or the server.
-            Self::Picture { title, .. }
-            | Self::Weather { title, .. }
-            | Self::Rss { title, .. }
-            | Self::Token { title, .. } => vec![
+            // Picture uses this placeholder shape until its first frame arrives.
+            Self::Picture { title, .. } => vec![
                 text_field("title", title),
                 bool_field("stale", true),
                 text_field("error", "Waiting for picture"),
@@ -1493,17 +1149,9 @@ impl CardSettings {
                 remaining_ms: duration_seconds.saturating_mul(1_000),
                 running: false,
             }),
-            Self::Clock { .. }
-            | Self::Picture { .. }
-            | Self::Weather { .. }
-            | Self::Rss { .. }
-            | Self::Token { .. } => None,
+            Self::Clock { .. } | Self::Picture { .. } => None,
         }
     }
-}
-
-fn default_currency() -> String {
-    "usd".to_owned()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1732,7 +1380,6 @@ enum CardBehavior {
     Clock,
     Pomodoro,
     Picture,
-    DataCard,
 }
 
 fn validate_composition(
@@ -1743,8 +1390,8 @@ fn validate_composition(
     refresh: RefreshPolicy,
     issues: &mut Vec<ValidationIssue>,
 ) {
-    // `template` is `None` only for raster-backed cards: they render from a
-    // host-built scene, not one of the built-in `DisplayTemplate`s, so there
+    // `template` is `None` only for picture cards: they render from a host-built
+    // scene, not one of the six built-in `DisplayTemplate`s, so there
     // is no template/card field-compatibility pairing to check and no
     // template-gated tap-action rule to enforce here. The card-gated tap-action
     // and refresh-policy checks below still apply to every kind.
@@ -1774,11 +1421,11 @@ fn validate_composition(
             // before persisting and `wire_config()` refused to lower that template at
             // the time.
             CardBehavior::Pomodoro => matches!(template, DisplayTemplate::ProgressRing),
-            // Raster-backed cards never pass `Some(template)` — see the comment
+            // Picture cards never pass `Some(template)` — see the comment
             // above. This arm is unreachable by construction today, but the function
             // validates untrusted config content, so it returns a safe `false` (an
             // `InvalidComposition` issue) rather than panicking if that ever changes.
-            CardBehavior::Picture | CardBehavior::DataCard => false,
+            CardBehavior::Picture => false,
         };
         if !template_supported {
             issues.push(ValidationIssue::new(
@@ -1826,7 +1473,6 @@ fn validate_composition(
             refresh,
             RefreshPolicy::Manual | RefreshPolicy::Interval { .. }
         ),
-        CardBehavior::DataCard => matches!(refresh, RefreshPolicy::Interval { .. }),
     };
     if !refresh_supported {
         issues.push(ValidationIssue::new(

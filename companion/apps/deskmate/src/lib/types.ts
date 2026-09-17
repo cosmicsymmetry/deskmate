@@ -35,8 +35,6 @@ export type RefreshPolicy =
   | { kind: "manual" }
   | { kind: "interval"; minutes: number };
 
-export type Units = "metric" | "imperial";
-
 export type AlertHold = { kind: "until-dismissed" } | { kind: "seconds"; value: number };
 
 export type CardAlert = { kind: "none" } | { kind: "on-timer-finish"; hold: AlertHold };
@@ -73,40 +71,6 @@ export type CardSettings =
       refresh: RefreshPolicy;
       alert: CardAlert;
       dwell_seconds: number | null;
-    }
-  | {
-      kind: "weather";
-      id: string;
-      title: string;
-      location: string;
-      units: Units;
-      tap_action: WidgetTapAction;
-      refresh: RefreshPolicy;
-      alert: CardAlert;
-      dwell_seconds: number | null;
-    }
-  | {
-      kind: "rss";
-      id: string;
-      title: string;
-      feed_url: string;
-      feed_title: string;
-      tap_action: WidgetTapAction;
-      refresh: RefreshPolicy;
-      alert: CardAlert;
-      dwell_seconds: number | null;
-    }
-  | {
-      kind: "token";
-      id: string;
-      title: string;
-      coin_id: string;
-      currency: string;
-      api_key: string | null;
-      tap_action: WidgetTapAction;
-      refresh: RefreshPolicy;
-      alert: CardAlert;
-      dwell_seconds: number | null;
     };
 
 export type CardKind = CardSettings["kind"];
@@ -137,6 +101,7 @@ export interface IconGlyphMapping {
 }
 
 export type CarouselAdvance = { kind: "manual" } | { kind: "timed"; default_dwell_seconds: number };
+
 
 export interface UpdaterSettings {
   channel: "stable" | "beta" | "manual";
@@ -340,7 +305,7 @@ export interface AutostartStatus {
 /**
  * `png_base64` is null exactly when the renderer produced no pixels; `state` then
  * carries the word for why. Built-in cards keep `png_base64` set and `state`
- * null; a raster-backed card explains that its server source owns the frame.
+ * null; a picture explains that its source owns the pushed frame.
  */
 export interface PreviewFrame {
   png_base64: string | null;

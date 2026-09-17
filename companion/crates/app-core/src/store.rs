@@ -121,7 +121,6 @@ pub enum ConfigOrigin {
     MigratedV7,
     MigratedV8,
     MigratedV9,
-    MigratedV10,
     LastGood,
 }
 
@@ -407,7 +406,7 @@ fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> 
     let header: VersionHeader = parse_json(text)?;
     let (config, origin) = match header.schema_version {
         CURRENT_SCHEMA_VERSION => (parse_json(text)?, ConfigOrigin::Current),
-        version @ (4..=10) => {
+        version @ (4..=9) => {
             // v4's asset variants (`icon { width, height }`, `font { pixel_size,
             // glyph_ranges }`) encoded the pre-tiny_ttf design where glyphs were
             // baked at a fixed size. `config.rs`'s compile step has always
@@ -422,9 +421,7 @@ fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> 
             // which `#[serde(default)]` supplies for older documents. v8 and v9 are
             // subtractive bumps: remove retired card objects and their playlist
             // references while the JSON still has enough information to recognize
-            // them, then deserialize the surviving current shape strictly. v11 is
-            // additive, so a v10 document already has the current document shape and
-            // needs only the version bump applied below.
+            // them, then deserialize the surviving current shape strictly.
             let legacy = drop_retired_cards_from_json(text)?;
             let origin = match version {
                 4 => ConfigOrigin::MigratedV4,
@@ -433,7 +430,6 @@ fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> 
                 7 => ConfigOrigin::MigratedV7,
                 8 => ConfigOrigin::MigratedV8,
                 9 => ConfigOrigin::MigratedV9,
-                10 => ConfigOrigin::MigratedV10,
                 _ => unreachable!(),
             };
             (

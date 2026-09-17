@@ -149,18 +149,6 @@ export function renderMockFrame(
     case "picture":
       pictureFrame(ctx, card.title);
       break;
-    case "weather":
-      pictureFrame(ctx, card.location || "Weather");
-      break;
-    case "rss":
-      pictureFrame(ctx, card.feed_title || "RSS");
-      break;
-    case "token":
-      pictureFrame(
-        ctx,
-        card.coin_id ? `${card.coin_id} · ${card.currency.toUpperCase()}` : "Token",
-      );
-      break;
   }
 
   return canvas.toDataURL("image/png").replace(/^data:image\/png;base64,/, "");

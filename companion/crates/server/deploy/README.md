@@ -118,10 +118,25 @@ account running the agent/daemon.
 
 ### Server-rendered data cards (optional)
 
-Weather, RSS and Token are configured as first-class cards in the companion window; the
-saved device config is the only face-spec authority. No separate source, token, file or
-restart is required. See `docs/images/server-rendered-cards.md` for the fields and data
-sources.
+If this deployment draws its own weather, RSS or token faces, it also needs a spec
+file. `data-cards.json.example` in this directory is a starting point;
+`docs/images/server-rendered-cards.md` is the reference.
+
+```sh
+# One image source per card. Keep the id; the token is only needed by an
+# external producer, and the server pushes to its own store directly.
+curl -sX POST https://deskmate.rodi.one/v1/images \
+  -H "Authorization: Bearer $DESKMATE_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "Weather"}'
+
+sudo install -m 0644 data-cards.json.example \
+  /var/lib/deskmate/configs/data-cards.json
+sudo $EDITOR /var/lib/deskmate/configs/data-cards.json
+```
+
+Then add one `picture` card per source in the companion window, naming the same
+`source_id`, and restart the server.
 
 Two consequences worth stating before you enable this:
 
@@ -131,8 +146,9 @@ Two consequences worth stating before you enable this:
   metadata deny list, resolve-then-pin against DNS rebinding, per-hop re-validation
   across redirects, a body cap and a wall-clock budget. But the surface is non-zero
   again, where between `e137294` and `feat/server-side-cards` it was zero.
-- **Config remains strict.** Unknown fields, invalid URLs and missing required card
-  values are refused by the same typed config validation used for every device save.
+- **A malformed spec file fails the start.** Deliberately: a server that came up with
+  cards silently missing presents as "the panel stopped updating" with nothing in the
+  log. Unknown fields are refused too, so a typo does not quietly take a default.
 
 ## 3a. Run under systemd (Linux)
 

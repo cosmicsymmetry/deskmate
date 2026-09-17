@@ -22,9 +22,8 @@ pub use config::{
     MAX_CARD_ID_LEN, MAX_CARD_REFRESH_MINUTES, MAX_CONFIG_CARDS, MAX_DWELL_SECONDS,
     MAX_HOST_ACTION_TARGET_LEN, MAX_ICON_GLYPH_NAME_LEN, MAX_ICON_GLYPHS, MAX_PLAYLIST_NAME_LEN,
     MAX_TIMEZONE_LEN, MAX_TOTAL_ASSET_BYTES, MAX_WIDGET_TITLE_LEN, MIN_ALERT_HOLD_SECONDS,
-    MIN_CARD_REFRESH_MINUTES, MIN_DWELL_SECONDS, RefreshPolicy, Units, UpdateChannel,
-    UpdateCheckPolicy, UpdaterSettings, ValidationCode, ValidationIssue, WidgetTapAction,
-    utc_offset_minutes,
+    MIN_CARD_REFRESH_MINUTES, MIN_DWELL_SECONDS, RefreshPolicy, UpdateChannel, UpdateCheckPolicy,
+    UpdaterSettings, ValidationCode, ValidationIssue, WidgetTapAction, utc_offset_minutes,
 };
 pub use network_settings::{
     MAX_NETWORK_SETTINGS_FILE_BYTES, NETWORK_SETTINGS_FORMAT_VERSION, NetworkSettings,

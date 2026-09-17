@@ -114,10 +114,6 @@ struct StateInner {
     /// Production paths are operator-owned and leave this as `None`.
     _config_temp_dir: Option<tempfile::TempDir>,
     device_links: Mutex<HashMap<registry::DeviceId, Arc<LiveLink>>>,
-    /// One replaceable task set per device config. Keeping the handles makes a
-    /// config edit authoritative: cards removed from the document stop fetching
-    /// immediately instead of living until process restart.
-    data_card_refreshers: Mutex<HashMap<registry::DeviceId, Vec<tokio::task::JoinHandle<()>>>>,
     /// Bounds concurrent `/v1/device/link` connections. `Arc`-wrapped
     /// separately from `StateInner` because `Semaphore::try_acquire_owned`
     /// needs an owned `Arc<Semaphore>` to hand a `'static` permit to the
@@ -155,7 +151,6 @@ impl ServerState {
                 integrations: OnceLock::new(),
                 _config_temp_dir: config_temp_dir,
                 device_links: Mutex::new(HashMap::new()),
-                data_card_refreshers: Mutex::new(HashMap::new()),
                 link_slots: Arc::new(tokio::sync::Semaphore::new(
                     device_link::MAX_CONCURRENT_LINKS,
                 )),
@@ -274,36 +269,9 @@ impl ServerState {
             .cloned()
     }
 
-    pub(crate) fn replace_data_card_refreshers(
-        &self,
-        device_id: &str,
-        handles: Vec<tokio::task::JoinHandle<()>>,
-    ) {
-        let previous = self
-            .inner
-            .data_card_refreshers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(device_id.to_owned(), handles)
-            .unwrap_or_default();
-        for handle in previous {
-            handle.abort();
-        }
-    }
-
     /// Stops every per-device runtime retained by this server. The operation
     /// is idempotent and is called after Axum drains on process shutdown.
     pub fn shutdown(&self) {
-        let refreshers = std::mem::take(
-            &mut *self
-                .inner
-                .data_card_refreshers
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
-        for handle in refreshers.into_values().flatten() {
-            handle.abort();
-        }
         let links: Vec<_> = self
             .inner
             .device_links

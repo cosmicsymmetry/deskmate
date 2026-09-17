@@ -28,7 +28,11 @@ import {
   tapActionDescription,
   unclaimedIssues,
 } from "../src/lib/configDraft";
-import type { AppConfig, CardSettings, ValidationIssue } from "../src/lib/types";
+import type {
+  AppConfig,
+  CardSettings,
+  ValidationIssue,
+} from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
 
 function initialConfig(): AppConfig {
@@ -166,7 +170,7 @@ describe("configuration draft helpers", () => {
   });
 
   test("adding every kind produces a reachable, addable card", () => {
-    const kinds = ["clock", "pomodoro", "weather", "rss", "token"] as const;
+    const kinds = ["clock", "pomodoro"] as const;
     let config: AppConfig = { ...initialConfig(), cards: [] };
     for (const kind of kinds) {
       config = addCard(config, kind).config;
@@ -174,53 +178,12 @@ describe("configuration draft helpers", () => {
     expect(config.cards.map((card) => card.kind)).toEqual([...kinds]);
   });
 
-  test("new data cards start with server refresh defaults and their required fields", () => {
-    let config: AppConfig = { ...initialConfig(), cards: [] };
-    for (const kind of ["weather", "rss", "token"] as const) {
-      config = addCard(config, kind).config;
-    }
-
-    expect(config.cards).toEqual([
-      {
-        kind: "weather",
-        id: "weather",
-        title: "",
-        location: "",
-        units: "metric",
-        tap_action: { kind: "none" },
-        refresh: { kind: "interval", minutes: 15 },
-        alert: { kind: "none" },
-        dwell_seconds: null,
-      },
-      {
-        kind: "rss",
-        id: "rss",
-        title: "",
-        feed_url: "",
-        feed_title: "",
-        tap_action: { kind: "none" },
-        refresh: { kind: "interval", minutes: 15 },
-        alert: { kind: "none" },
-        dwell_seconds: null,
-      },
-      {
-        kind: "token",
-        id: "token",
-        title: "",
-        coin_id: "",
-        currency: "usd",
-        api_key: null,
-        tap_action: { kind: "none" },
-        refresh: { kind: "interval", minutes: 15 },
-        alert: { kind: "none" },
-        dwell_seconds: null,
-      },
-    ]);
-    expect(config.image_sources).toEqual([]);
-  });
-
   test("every freshly-added card kind defaults to a template the wire actually implements", () => {
-    const compilableTemplates = new Set(["digital-clock", "analog-clock", "progress-ring"]);
+    const compilableTemplates = new Set([
+      "digital-clock",
+      "analog-clock",
+      "progress-ring",
+    ]);
     const expectedTemplateKind: Record<string, string> = {
       clock: "digital-clock",
       pomodoro: "progress-ring",
@@ -253,7 +216,9 @@ describe("configuration draft helpers", () => {
 
   test("the loop is the card list, in order", () => {
     const withCards = addCard(addCard(initialConfig(), "pomodoro").config, "clock").config;
-    expect(loopEntries(withCards)).toEqual(withCards.cards.map((card, index) => ({ index, card })));
+    expect(loopEntries(withCards)).toEqual(
+      withCards.cards.map((card, index) => ({ index, card })),
+    );
   });
 
   test("moves cards with clamped targets and index-safe source boundaries", () => {
@@ -508,7 +473,7 @@ describe("configuration draft helpers", () => {
 
   test("contract fixtures expose cards, not widgets or screens", () => {
     const config = ipcContractFixtures.snapshot.config;
-    expect(config.schema_version).toBe(11);
+    expect(config.schema_version).toBe(10);
     expect(Array.isArray(config.cards)).toBe(true);
     expect("playlists" in config).toBe(false);
     expect("widgets" in config).toBe(false);
@@ -532,9 +497,6 @@ describe("configuration draft helpers", () => {
       "clock",
       "picture",
       "pomodoro",
-      "rss",
-      "token",
-      "weather",
     ]);
     expect(ipcContractFixtures.device_capabilities).toContain("volatile-assets");
   });

@@ -6,6 +6,7 @@ import type {
   ValidationIssue,
 } from "./types";
 
+
 export const MAX_CARDS = 8;
 
 export function copyConfig(config: AppConfig): AppConfig {
@@ -14,9 +15,7 @@ export function copyConfig(config: AppConfig): AppConfig {
     preferences: { ...config.preferences },
     cards: config.cards.map((card) => ({
       ...card,
-      ...(card.kind === "clock" || card.kind === "pomodoro"
-        ? { template: { ...card.template } }
-        : {}),
+      ...(card.kind === "picture" ? {} : { template: { ...card.template } }),
       tap_action: { ...card.tap_action },
       refresh: { ...card.refresh },
       alert: { ...card.alert },
@@ -46,12 +45,6 @@ export function cardName(card: CardSettings): string {
       return card.label || "Pomodoro";
     case "picture":
       return card.title || "Picture";
-    case "weather":
-      return card.title || card.location || "Weather";
-    case "rss":
-      return card.title || card.feed_title || "RSS";
-    case "token":
-      return card.title || card.coin_id || "Token";
   }
 }
 
@@ -88,12 +81,6 @@ export function cardKindName(kind: AddableCardKind): string {
       return "Digital clock";
     case "pomodoro":
       return "Pomodoro";
-    case "weather":
-      return "Weather";
-    case "rss":
-      return "RSS";
-    case "token":
-      return "Token";
   }
 }
 
@@ -175,37 +162,6 @@ export function addCard(
           alert: { kind: "on-timer-finish", hold: { kind: "until-dismissed" } },
         };
         break;
-      case "weather":
-        card = {
-          kind: request,
-          ...common,
-          title: "",
-          location: "",
-          units: "metric",
-          refresh: { kind: "interval", minutes: 15 },
-        };
-        break;
-      case "rss":
-        card = {
-          kind: request,
-          ...common,
-          title: "",
-          feed_url: "",
-          feed_title: "",
-          refresh: { kind: "interval", minutes: 15 },
-        };
-        break;
-      case "token":
-        card = {
-          kind: request,
-          ...common,
-          title: "",
-          coin_id: "",
-          currency: "usd",
-          api_key: null,
-          refresh: { kind: "interval", minutes: 15 },
-        };
-        break;
     }
   }
 
@@ -282,7 +238,11 @@ export function moveEntry(config: AppConfig, from: number, to: number): AppConfi
   return { ...copyConfig(config), cards: next };
 }
 
-export function setCardDwell(config: AppConfig, cardId: string, dwell: number | null): AppConfig {
+export function setCardDwell(
+  config: AppConfig,
+  cardId: string,
+  dwell: number | null,
+): AppConfig {
   const index = config.cards.findIndex((card) => card.id === cardId);
   if (index < 0 || config.cards[index].dwell_seconds === dwell) {
     return config;

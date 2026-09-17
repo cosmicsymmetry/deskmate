@@ -6,11 +6,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use app_core::{
-    AdminConfigErrorBody, AppConfig, CardField, CardFieldValue, ConfigStore, DisplayOrientation,
-    MAX_CARD_ID_LEN, MAX_CONFIG_FILE_BYTES, MAX_DEVICE_ID_LEN, MAX_DEVICE_TOKEN_LEN, MAX_PSK_LEN,
-    MAX_SERVER_URL_LEN, MAX_SSID_LEN, NetworkConfig, NetworkSettings, NetworkSettingsStore,
-    NetworkSettingsStoreError, NetworkSettingsUpdate, PomodoroAction, ProvisioningTier,
-    RuntimeError, RuntimeHandle, SaveReceipt, StoreError, ValidationIssue, utc_offset_minutes,
+    AdminConfigErrorBody, AppConfig, CardField, CardFieldValue, CardSettings, ConfigStore,
+    DisplayOrientation, MAX_CARD_ID_LEN, MAX_CONFIG_FILE_BYTES, MAX_DEVICE_ID_LEN,
+    MAX_DEVICE_TOKEN_LEN, MAX_PSK_LEN, MAX_SERVER_URL_LEN, MAX_SSID_LEN, NetworkConfig,
+    NetworkSettings, NetworkSettingsStore, NetworkSettingsStoreError, NetworkSettingsUpdate,
+    PomodoroAction, ProvisioningTier, RuntimeError, RuntimeHandle, SaveReceipt, StoreError,
+    ValidationIssue, utc_offset_minutes,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -457,7 +458,7 @@ pub(crate) mod tests {
         CardFieldValue, CardSettings, CarouselAdvance, ConnectionState, DeviceCapability,
         DeviceCounters, DeviceSnapshot, DisplayOrientation, DisplayTemplate, IconGlyphMapping,
         PersistenceState, PomodoroSnapshot, PomodoroState, RefreshPolicy, RuntimeDiagnostics,
-        RuntimeError, RuntimeState, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE, StoreWarning, Units,
+        RuntimeError, RuntimeState, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE, StoreWarning,
         UpdateChannel, UpdateCheckPolicy, UpdaterSettings, ValidationCode, WidgetTapAction,
     };
     use serde::Serialize;
@@ -1349,9 +1350,6 @@ pub(crate) mod tests {
             CardSettings::Clock { .. } => "clock",
             CardSettings::Pomodoro { .. } => "pomodoro",
             CardSettings::Picture { .. } => "picture",
-            CardSettings::Weather { .. } => "weather",
-            CardSettings::Rss { .. } => "rss",
-            CardSettings::Token { .. } => "token",
         }
     }
 
@@ -1391,37 +1389,6 @@ pub(crate) mod tests {
                 source_id: "limits".into(),
                 tap_action: WidgetTapAction::None,
                 refresh: RefreshPolicy::Manual,
-                alert: CardAlert::None,
-                dwell_seconds: None,
-            },
-            CardSettings::Weather {
-                id: "weather".into(),
-                title: "Weather".into(),
-                location: "Tbilisi".into(),
-                units: Units::Metric,
-                tap_action: WidgetTapAction::None,
-                refresh: RefreshPolicy::Interval { minutes: 15 },
-                alert: CardAlert::None,
-                dwell_seconds: None,
-            },
-            CardSettings::Rss {
-                id: "rss".into(),
-                title: "News".into(),
-                feed_url: "https://example.com/feed.xml".into(),
-                feed_title: "Example News".into(),
-                tap_action: WidgetTapAction::None,
-                refresh: RefreshPolicy::Interval { minutes: 15 },
-                alert: CardAlert::None,
-                dwell_seconds: None,
-            },
-            CardSettings::Token {
-                id: "token".into(),
-                title: "Bitcoin".into(),
-                coin_id: "bitcoin".into(),
-                currency: "usd".into(),
-                api_key: None,
-                tap_action: WidgetTapAction::None,
-                refresh: RefreshPolicy::Interval { minutes: 15 },
                 alert: CardAlert::None,
                 dwell_seconds: None,
             },
@@ -1726,22 +1693,17 @@ pub(crate) mod tests {
             .iter()
             .map(contract_card_kind)
             .collect::<Vec<_>>();
-        assert_eq!(
-            kinds,
-            ["clock", "pomodoro", "picture", "weather", "rss", "token"]
-        );
+        assert_eq!(kinds, ["clock", "pomodoro", "picture"]);
     }
 
     #[test]
-    fn a_raster_preview_explains_that_the_server_source_owns_the_frame() {
+    fn a_picture_preview_explains_that_the_source_owns_the_frame() {
         assert_eq!(
-            unrendered_server_frame(RASTER_PREVIEW_IS_SERVER_OWNED),
+            unrendered_server_frame(PICTURE_PREVIEW_IS_PUSH_ONLY),
             PreviewFrame {
                 png_base64: None,
                 sample: false,
-                state: Some(
-                    "This card shows the last frame rendered or pushed by its server source".into()
-                ),
+                state: Some("Picture cards show the last frame pushed by their source".into()),
             }
         );
     }

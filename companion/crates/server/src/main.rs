@@ -2,7 +2,7 @@
 //! environment and serves the device-facing router until it receives
 //! `SIGINT`/`SIGTERM`, per the deployment contract in `deploy/README.md`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use server::data_cards;
@@ -264,6 +264,7 @@ async fn main() {
          unspecified under launchd/systemd",
         config_dir.display()
     );
+    let data_card_spec_path = data_card_spec_path(&config_dir);
     let firmware_version = required_firmware_version(std::env::var("DESKMATE_FIRMWARE_VERSION"));
     let admin_token = std::env::var("DESKMATE_ADMIN_TOKEN")
         .expect("DESKMATE_ADMIN_TOKEN must be set -- see deploy/README.md");
@@ -301,10 +302,21 @@ async fn main() {
         tracing::info!("google oauth integration enabled");
     }
 
-    // Data-card authority is the same per-device document the companion edits.
-    // Start those tasks even while the board is off; later config PUTs replace
-    // each device's set in place without a server restart.
-    data_cards::start_refreshers_from_stored_configs(&state).await;
+    // Server-rendered data cards, if this deployment has any. The specs are
+    // read before the listener binds so a malformed file fails the start
+    // rather than leaving a server up with silently missing cards.
+    //
+    // A refresh task is spawned per card and lives as long as the process; the
+    // graceful shutdown below drains connections, and an in-flight fetch is
+    // abandoned with it. That is safe because a card's durable state is the
+    // frame already in the store: losing a refresh loses nothing but the tick.
+    let data_card_specs = data_cards::load_specs(&data_card_spec_path)
+        .unwrap_or_else(|error| panic!("DESKMATE_DATA_CARDS is unreadable: {error}"));
+    if data_card_specs.is_empty() {
+        tracing::info!("no server-rendered data cards configured");
+    } else {
+        data_cards::spawn_refreshers(&state, data_card_specs);
+    }
 
     let listener = tokio::net::TcpListener::bind(&bind_address)
         .await
@@ -334,6 +346,16 @@ fn required_firmware_version(value: Result<String, std::env::VarError>) -> Strin
 }
 
 /// Resolves once `SIGINT` (Ctrl-C) or, on Unix, `SIGTERM` is received, so
+/// Where the server-rendered card specs live.
+///
+/// `DESKMATE_DATA_CARDS` overrides it; the default sits beside the rest of the
+/// server's state in the config directory, so a deployment that backs that up
+/// backs up its cards too.
+fn data_card_spec_path(config_dir: &Path) -> PathBuf {
+    std::env::var("DESKMATE_DATA_CARDS")
+        .map_or_else(|_| config_dir.join("data-cards.json"), PathBuf::from)
+}
+
 /// `axum::serve` can drain in-flight connections before the process exits.
 async fn shutdown_signal() {
     let ctrl_c = async {

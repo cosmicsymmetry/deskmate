@@ -1260,39 +1260,6 @@ fieldset legend {
   line-height: 1.45;
 }
 
-.segmented-control {
-  display: flex;
-  gap: 1px;
-  padding: 2px;
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-control);
-  background: var(--tile-2);
-}
-
-.segmented-control button {
-  flex: 1;
-  padding: 7px 11px;
-  border: 0;
-  border-radius: calc(var(--r-control) - 3px);
-  background: transparent;
-  color: var(--ink-2);
-  font-size: 0.76rem;
-  font-weight: 600;
-  transition:
-    background 150ms var(--ease),
-    color 150ms var(--ease);
-}
-
-.segmented-control button:hover {
-  background: var(--tile-3);
-}
-
-.segmented-control button[aria-pressed="true"] {
-  background: var(--tile);
-  color: var(--ink);
-  font-weight: 650;
-}
-
 /* Feed trouble for the card being edited, with its one recovery action inline. */
 .data-note {
   display: flex;

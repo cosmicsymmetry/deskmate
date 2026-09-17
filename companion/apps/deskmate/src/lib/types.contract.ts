@@ -4,7 +4,7 @@ import type { IpcContractFixtures } from "./types";
 export const ipcContractFixtures = {
   "snapshot": {
     "config": {
-      "schema_version": 11,
+      "schema_version": 10,
       "preferences": {
         "timezone": "Asia/Tbilisi",
         "autostart": true,
@@ -63,61 +63,6 @@ export const ipcContractFixtures = {
           },
           "refresh": {
             "kind": "manual"
-          },
-          "alert": {
-            "kind": "none"
-          },
-          "dwell_seconds": null
-        },
-        {
-          "kind": "weather",
-          "id": "weather",
-          "title": "Weather",
-          "location": "Tbilisi",
-          "units": "metric",
-          "tap_action": {
-            "kind": "none"
-          },
-          "refresh": {
-            "kind": "interval",
-            "minutes": 15
-          },
-          "alert": {
-            "kind": "none"
-          },
-          "dwell_seconds": null
-        },
-        {
-          "kind": "rss",
-          "id": "rss",
-          "title": "News",
-          "feed_url": "https://example.com/feed.xml",
-          "feed_title": "Example News",
-          "tap_action": {
-            "kind": "none"
-          },
-          "refresh": {
-            "kind": "interval",
-            "minutes": 15
-          },
-          "alert": {
-            "kind": "none"
-          },
-          "dwell_seconds": null
-        },
-        {
-          "kind": "token",
-          "id": "token",
-          "title": "Bitcoin",
-          "coin_id": "bitcoin",
-          "currency": "usd",
-          "api_key": null,
-          "tap_action": {
-            "kind": "none"
-          },
-          "refresh": {
-            "kind": "interval",
-            "minutes": 15
           },
           "alert": {
             "kind": "none"
@@ -241,7 +186,7 @@ export const ipcContractFixtures = {
   },
   "configs": [
     {
-      "schema_version": 11,
+      "schema_version": 10,
       "preferences": {
         "timezone": "Asia/Tbilisi",
         "autostart": true,
@@ -300,61 +245,6 @@ export const ipcContractFixtures = {
           },
           "refresh": {
             "kind": "manual"
-          },
-          "alert": {
-            "kind": "none"
-          },
-          "dwell_seconds": null
-        },
-        {
-          "kind": "weather",
-          "id": "weather",
-          "title": "Weather",
-          "location": "Tbilisi",
-          "units": "metric",
-          "tap_action": {
-            "kind": "none"
-          },
-          "refresh": {
-            "kind": "interval",
-            "minutes": 15
-          },
-          "alert": {
-            "kind": "none"
-          },
-          "dwell_seconds": null
-        },
-        {
-          "kind": "rss",
-          "id": "rss",
-          "title": "News",
-          "feed_url": "https://example.com/feed.xml",
-          "feed_title": "Example News",
-          "tap_action": {
-            "kind": "none"
-          },
-          "refresh": {
-            "kind": "interval",
-            "minutes": 15
-          },
-          "alert": {
-            "kind": "none"
-          },
-          "dwell_seconds": null
-        },
-        {
-          "kind": "token",
-          "id": "token",
-          "title": "Bitcoin",
-          "coin_id": "bitcoin",
-          "currency": "usd",
-          "api_key": null,
-          "tap_action": {
-            "kind": "none"
-          },
-          "refresh": {
-            "kind": "interval",
-            "minutes": 15
           },
           "alert": {
             "kind": "none"
@@ -431,61 +321,6 @@ export const ipcContractFixtures = {
       },
       "refresh": {
         "kind": "manual"
-      },
-      "alert": {
-        "kind": "none"
-      },
-      "dwell_seconds": null
-    },
-    {
-      "kind": "weather",
-      "id": "weather",
-      "title": "Weather",
-      "location": "Tbilisi",
-      "units": "metric",
-      "tap_action": {
-        "kind": "none"
-      },
-      "refresh": {
-        "kind": "interval",
-        "minutes": 15
-      },
-      "alert": {
-        "kind": "none"
-      },
-      "dwell_seconds": null
-    },
-    {
-      "kind": "rss",
-      "id": "rss",
-      "title": "News",
-      "feed_url": "https://example.com/feed.xml",
-      "feed_title": "Example News",
-      "tap_action": {
-        "kind": "none"
-      },
-      "refresh": {
-        "kind": "interval",
-        "minutes": 15
-      },
-      "alert": {
-        "kind": "none"
-      },
-      "dwell_seconds": null
-    },
-    {
-      "kind": "token",
-      "id": "token",
-      "title": "Bitcoin",
-      "coin_id": "bitcoin",
-      "currency": "usd",
-      "api_key": null,
-      "tap_action": {
-        "kind": "none"
-      },
-      "refresh": {
-        "kind": "interval",
-        "minutes": 15
       },
       "alert": {
         "kind": "none"

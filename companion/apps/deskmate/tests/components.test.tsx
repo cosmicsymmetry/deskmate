@@ -197,49 +197,6 @@ function pictureCard(id = "picture-card"): CardSettings {
   };
 }
 
-function weatherCard(id = "weather-card"): CardSettings {
-  return {
-    kind: "weather",
-    id,
-    title: "",
-    location: "Dubai",
-    units: "metric",
-    tap_action: { kind: "none" },
-    refresh: { kind: "interval", minutes: 15 },
-    alert: { kind: "none" },
-    dwell_seconds: null,
-  };
-}
-
-function rssCard(id = "rss-card"): CardSettings {
-  return {
-    kind: "rss",
-    id,
-    title: "",
-    feed_url: "https://example.com/feed.xml",
-    feed_title: "Example News",
-    tap_action: { kind: "none" },
-    refresh: { kind: "interval", minutes: 15 },
-    alert: { kind: "none" },
-    dwell_seconds: null,
-  };
-}
-
-function tokenCard(id = "token-card"): CardSettings {
-  return {
-    kind: "token",
-    id,
-    title: "",
-    coin_id: "bitcoin",
-    currency: "usd",
-    api_key: null,
-    tap_action: { kind: "none" },
-    refresh: { kind: "interval", minutes: 15 },
-    alert: { kind: "none" },
-    dwell_seconds: null,
-  };
-}
-
 /// `cards` IS the loop since schema v10, so there is no second argument: a card's
 /// position in this list is its position in the loop.
 function cardListConfig(cardList: CardSettings[]): AppConfig {
@@ -613,54 +570,6 @@ describe("settings accessibility and states", () => {
     expect(clockHtml).toContain("<span>Name</span>");
     expect(clockHtml).not.toContain("<span>Heading</span>");
     expect(renderCardEditor(pictureCard())).toContain("<span>Name</span>");
-    expect(renderCardEditor(weatherCard())).toContain("<span>Name</span>");
-    expect(renderCardEditor(rssCard())).toContain("<span>Name</span>");
-    expect(renderCardEditor(tokenCard())).toContain("<span>Name</span>");
-  });
-
-  test("data-card editors expose their settled fields without picture-source controls", () => {
-    const weather = renderCardEditor(weatherCard());
-    expect(weather).toContain('id="editor-heading">Weather<');
-    expect(weather).toContain("<span>Location</span>");
-    expect(weather).toContain("Weather units");
-
-    const rss = renderCardEditor(rssCard());
-    expect(rss).toContain('id="editor-heading">RSS<');
-    expect(rss).toContain("<span>Feed URL</span>");
-    expect(rss).toContain("<span>Feed title</span>");
-
-    const token = renderCardEditor(tokenCard());
-    expect(token).toContain('id="editor-heading">Token<');
-    expect(token).toContain("<span>Coin ID</span>");
-    expect(token).toContain("<span>Currency</span>");
-
-    for (const html of [weather, rss, token]) {
-      expect(html).not.toContain("Picture source");
-    }
-  });
-
-  test("data-card tiles lead with their kind and configured live value", () => {
-    const dataCards = [weatherCard(), rssCard(), tokenCard()];
-    const html = renderToStaticMarkup(
-      <CardList
-        config={cardListConfig(dataCards)}
-        issues={[]}
-        pomodoros={[]}
-        ownershipTier="networked"
-        selectedCardId={null}
-        onSelect={() => {}}
-        onAdd={() => {}}
-        onChange={() => {}}
-        onRemove={() => {}}
-      />,
-    );
-
-    expect(html).toContain('class="tile-label">Weather<');
-    expect(html).toContain('class="card-tile__value numeral">Dubai<');
-    expect(html).toContain('class="tile-label">RSS<');
-    expect(html).toContain('class="card-tile__value numeral">Example News<');
-    expect(html).toContain('class="tile-label">Token<');
-    expect(html).toContain('class="card-tile__value numeral">bitcoin<');
   });
 
   test("a card is called the same thing everywhere, and that is its template", () => {
@@ -1263,10 +1172,9 @@ describe("settings accessibility and states", () => {
       const menuText = container.querySelector('[role="menu"]')?.textContent;
       expect(menuText).toContain("Digital clock");
       expect(menuText).toContain("Pomodoro");
-      expect(menuText).toContain("Weather");
+      expect(menuText).not.toContain("Weather");
       expect(menuText).not.toContain("Calendar");
-      expect(menuText).toContain("RSS");
-      expect(menuText).toContain("Token");
+      expect(menuText).not.toContain("RSS");
 
       const firstItem = container.querySelector<HTMLButtonElement>('[role="menuitem"]');
       await act(async () => {
@@ -1382,13 +1290,19 @@ describe("settings accessibility and states", () => {
       );
       expect(earlier).not.toBeNull();
       await act(async () => earlier?.click());
-      expect(latest.cards.map((card) => card.id)).toEqual(["second", "first"]);
+      expect(latest.cards.map((card) => card.id)).toEqual([
+        "second",
+        "first",
+      ]);
 
       const later = container.querySelector<HTMLButtonElement>(
         'button[aria-label="Move Digital clock — Up next later"]',
       );
       await act(async () => later?.click());
-      expect(latest.cards.map((card) => card.id)).toEqual(["first", "second"]);
+      expect(latest.cards.map((card) => card.id)).toEqual([
+        "first",
+        "second",
+      ]);
 
       let selectedTile = [
         ...container.querySelectorAll<HTMLButtonElement>(".card-tile .card-tile__body"),
@@ -1399,7 +1313,10 @@ describe("settings accessibility and states", () => {
           new KeyboardEvent("keydown", { key: "ArrowRight", altKey: true, bubbles: true }),
         );
       });
-      expect(latest.cards.map((card) => card.id)).toEqual(["second", "first"]);
+      expect(latest.cards.map((card) => card.id)).toEqual([
+        "second",
+        "first",
+      ]);
 
       selectedTile = [
         ...container.querySelectorAll<HTMLButtonElement>(".card-tile .card-tile__body"),
@@ -1409,7 +1326,10 @@ describe("settings accessibility and states", () => {
           new KeyboardEvent("keydown", { key: "ArrowLeft", altKey: true, bubbles: true }),
         );
       });
-      expect(latest.cards.map((card) => card.id)).toEqual(["first", "second"]);
+      expect(latest.cards.map((card) => card.id)).toEqual([
+        "first",
+        "second",
+      ]);
     } finally {
       await act(async () => root.unmount());
       container.remove();

@@ -1,5 +1,5 @@
 {
-  "schema_version": 11,
+  "schema_version": 10,
   "preferences": {
     "timezone": "Asia/Tbilisi",
     "autostart": true,

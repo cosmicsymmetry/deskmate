@@ -256,25 +256,20 @@ export function CardEditor({
 
         {card.kind === "picture" && (
           <>
-            <label className="field">
+            {/* Stated, not selected. A dropdown here implied that re-pointing a
+                card at another source was a safe edit, when it silently turned the
+                card into a different card -- the same reasoning that retired the
+                plugin dropdown in 324c981. The source is chosen once, when the
+                card is added. */}
+            <div className="field">
               <span>Picture source</span>
-              <select
-                value={card.source_id}
-                onChange={(event) => onChange({ ...card, source_id: event.currentTarget.value })}
-                aria-invalid={fieldIssues("source_id").length > 0}
-              >
-                {!config.image_sources.some((source) => source.id === card.source_id) && (
-                  <option value={card.source_id}>{`${card.source_id} · Missing source`}</option>
-                )}
-                {config.image_sources.map((source) => (
-                  <option key={source.id} value={source.id}>
-                    {source.name}
-                  </option>
-                ))}
-              </select>
+              <strong>
+                {config.image_sources.find((source) => source.id === card.source_id)?.name ??
+                  `${card.source_id} · Missing source`}
+              </strong>
               <small>{card.source_id}</small>
               <FieldIssues issues={fieldIssues("source_id")} />
-            </label>
+            </div>
 
             {pictureAccess?.source_id === card.source_id && (
               <div className="field" role="status">

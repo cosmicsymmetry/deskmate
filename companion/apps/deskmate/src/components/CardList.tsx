@@ -26,6 +26,7 @@ import {
   type AppConfig,
   type CardSettings,
   type DeviceTier,
+  type ImageSource,
   type PomodoroSnapshot,
   type ValidationIssue,
 } from "../lib/types";
@@ -56,6 +57,7 @@ function tileValue(
   pomodoro: PomodoroSnapshot | undefined,
   now: Date,
   timezone: string,
+  sources: ImageSource[],
 ): string {
   switch (card.kind) {
     case "clock":
@@ -73,7 +75,10 @@ function tileValue(
       return `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
     }
     case "picture":
-      return "PNG";
+      // "PNG" is a file format, not a live fact -- it read the same on every
+      // picture card, which is what made three of them indistinguishable in the
+      // grid. The source is the one thing that differs between them.
+      return sources.find((source) => source.id === card.source_id)?.name ?? "Missing source";
   }
 }
 
@@ -308,7 +313,9 @@ export function CardList({
     const hasAlert = card.alert.kind !== "none";
     const pomodoro = pomodoros.find((candidate) => candidate.card_id === card.id);
     const label = controlLabel(card);
-    const pictureFlag = card.kind === "picture" && ownershipTier === "local" ? "needs the server" : null;
+    const pictureFlag =
+      card.kind === "picture" && ownershipTier === "local" ? "needs the server" : null;
+    const value = tileValue(card, pomodoro, now, config.preferences.timezone, config.image_sources);
     return (
       <li
         key={`loop:${index}:${card.id}`}
@@ -338,10 +345,12 @@ export function CardList({
           onKeyDown={(event) => onTileKeyDown(event, card.id)}
         >
           <span className="tile-label">{cardLabel(card)}</span>
-          <strong className="card-tile__value numeral">
-            {tileValue(card, pomodoro, now, config.preferences.timezone)}
-          </strong>
-          {cardTitle(card) && <span className="card-tile__name">{cardTitle(card)}</span>}
+          <strong className="card-tile__value numeral">{value}</strong>
+          {/* A picture's value IS its source name, and the owner usually types the
+              same words as the title. Printing both would say it twice. */}
+          {cardTitle(card) && cardTitle(card) !== value && (
+            <span className="card-tile__name">{cardTitle(card)}</span>
+          )}
         </button>
         <span className="card-tile__flags">
           {pictureFlag && <span className="flag">{pictureFlag}</span>}
@@ -362,23 +371,23 @@ export function CardList({
           <Icon name="close" />
         </button>
         <span className="card-tile__moves">
-            <button
-              type="button"
-              aria-label={`Move ${label} earlier`}
-              disabled={index === 0}
-              onClick={() => moveBy(card.id, -1)}
-            >
-              <Icon name="left" />
-            </button>
-            <button
-              type="button"
-              aria-label={`Move ${label} later`}
-              disabled={index === entries.length - 1}
-              onClick={() => moveBy(card.id, 1)}
-            >
-              <Icon name="right" />
-            </button>
-          </span>
+          <button
+            type="button"
+            aria-label={`Move ${label} earlier`}
+            disabled={index === 0}
+            onClick={() => moveBy(card.id, -1)}
+          >
+            <Icon name="left" />
+          </button>
+          <button
+            type="button"
+            aria-label={`Move ${label} later`}
+            disabled={index === entries.length - 1}
+            onClick={() => moveBy(card.id, 1)}
+          >
+            <Icon name="right" />
+          </button>
+        </span>
         <FieldIssues issues={tileIssues} className="card-tile__issues" />
       </li>
     );

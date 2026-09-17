@@ -653,11 +653,69 @@ describe("settings accessibility and states", () => {
     );
 
     expect(html).toContain('class="tile-label">Picture<');
-    expect(html).toContain('<strong class="card-tile__value numeral">PNG</strong>');
+    // The template still names the card, but the tile's live fact is now the
+    // SOURCE. "PNG" read identically on every picture card, which is what made a
+    // grid of them indistinguishable.
+    expect(html).toContain('<strong class="card-tile__value numeral">Claude limits</strong>');
+    expect(html).not.toContain('numeral">PNG<');
     expect(html).toContain('class="card-tile__name">Limits<');
     expect(html).toContain('aria-label="Move Picture — Limits earlier"');
     expect(html).toContain('aria-label="Remove Picture — Limits');
     expect(html).toContain('<span class="flag">needs the server</span>');
+  });
+
+  test("a picture card states its source instead of offering a menu of them", () => {
+    // 324c981 retired the plugin dropdown because rendering identity as a select
+    // implied that changing it was a safe edit, when it silently turned the card
+    // into a different card. The picture source is the same kind of identity.
+    const html = renderCardEditor(pictureCard());
+
+    expect(html).toContain("Picture source");
+    expect(html).toContain("Claude limits");
+    expect(html).toContain("limits-source");
+    expect(html).not.toContain("<select");
+  });
+
+  test("a picture card whose source no longer exists says so rather than silently renaming", () => {
+    const orphan = { ...pictureCard(), source_id: "deleted-source" };
+    const html = renderToStaticMarkup(
+      <CardEditor
+        card={orphan}
+        config={cardListConfig([pictureCard()])}
+        issues={[]}
+        entryIssues={[]}
+        cardError={null}
+        pomodoro={null}
+        timerBusy={false}
+        pictureAccess={null}
+        onChange={() => {}}
+        onConfigChange={() => {}}
+        onRemove={() => {}}
+        onTimerAction={() => {}}
+      />,
+    );
+
+    expect(html).toContain("deleted-source · Missing source");
+  });
+
+  test("a tile does not print the source name twice when the title repeats it", () => {
+    const named = { ...pictureCard(), title: "Claude limits" };
+    const html = renderToStaticMarkup(
+      <CardList
+        config={cardListConfig([named])}
+        issues={[]}
+        pomodoros={[]}
+        ownershipTier="local"
+        selectedCardId={named.id}
+        onSelect={() => {}}
+        onAdd={() => {}}
+        onChange={() => {}}
+        onRemove={() => {}}
+      />,
+    );
+
+    expect(html).toContain('numeral">Claude limits</strong>');
+    expect(html).not.toContain("card-tile__name");
   });
 
   test("a picture editor shows source access once, immediately after minting", () => {
@@ -1290,19 +1348,13 @@ describe("settings accessibility and states", () => {
       );
       expect(earlier).not.toBeNull();
       await act(async () => earlier?.click());
-      expect(latest.cards.map((card) => card.id)).toEqual([
-        "second",
-        "first",
-      ]);
+      expect(latest.cards.map((card) => card.id)).toEqual(["second", "first"]);
 
       const later = container.querySelector<HTMLButtonElement>(
         'button[aria-label="Move Digital clock — Up next later"]',
       );
       await act(async () => later?.click());
-      expect(latest.cards.map((card) => card.id)).toEqual([
-        "first",
-        "second",
-      ]);
+      expect(latest.cards.map((card) => card.id)).toEqual(["first", "second"]);
 
       let selectedTile = [
         ...container.querySelectorAll<HTMLButtonElement>(".card-tile .card-tile__body"),
@@ -1313,10 +1365,7 @@ describe("settings accessibility and states", () => {
           new KeyboardEvent("keydown", { key: "ArrowRight", altKey: true, bubbles: true }),
         );
       });
-      expect(latest.cards.map((card) => card.id)).toEqual([
-        "second",
-        "first",
-      ]);
+      expect(latest.cards.map((card) => card.id)).toEqual(["second", "first"]);
 
       selectedTile = [
         ...container.querySelectorAll<HTMLButtonElement>(".card-tile .card-tile__body"),
@@ -1326,10 +1375,7 @@ describe("settings accessibility and states", () => {
           new KeyboardEvent("keydown", { key: "ArrowLeft", altKey: true, bubbles: true }),
         );
       });
-      expect(latest.cards.map((card) => card.id)).toEqual([
-        "first",
-        "second",
-      ]);
+      expect(latest.cards.map((card) => card.id)).toEqual(["first", "second"]);
     } finally {
       await act(async () => root.unmount());
       container.remove();

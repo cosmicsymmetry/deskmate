@@ -262,29 +262,57 @@ Tailscale address explicitly.
 **Export from `git archive HEAD`, never from the working tree.** A dirty tree deploys code
 nobody can reproduce.
 
-**The export is `companion/` only, so nothing the server compiles may live outside it.**
-An `include_bytes!` path that climbs out of `companion/` builds fine on the Mac and then
-fails to compile on the VM, where that path does not exist. This has happened twice, both
-times for the bundled Inter faces; they now live at
-`companion/crates/server/assets/fonts/`. To check before deploying, build the export in
-isolation:
+**The payload is `companion/` plus part of `firmware/`, and nothing the server compiles
+may live outside it.** An `include_bytes!` path that climbs out of the payload builds
+fine on the Mac and then fails to compile on the VM, where that path does not exist.
+This has happened three times: twice for the bundled Inter faces (now at
+`companion/crates/server/assets/fonts/`), and once when the card preview moved into the
+server -- `lvgl-sim` compiles the firmware's own LVGL, scene decoder and fonts, which
+live under `firmware/`.
+
+**`firmware/managed_components/` is gitignored**, so it cannot come from `git archive`:
+those are third-party sources the ESP-IDF component manager fetches, pinned by the
+tracked `firmware/dependencies.lock`. They are the one part of the payload copied from
+the working tree, and they are copied without `tests/`, `demos/`, `docs/`, `scripts/`
+and `examples/`, which are 121 MB of the 180 MB and none of it compiled. If the VM's copy
+is ever lost or suspect, `idf.py -C firmware reconfigure` refetches exactly what the lock
+file names.
+
+To check before deploying, build the export in isolation:
 
 ```sh
 rm -rf /tmp/deskmate-exportcheck && mkdir -p /tmp/deskmate-exportcheck
-git archive HEAD companion | tar -x -C /tmp/deskmate-exportcheck
+git archive HEAD companion firmware | tar -x -C /tmp/deskmate-exportcheck
+rsync -a --exclude 'tests/' --exclude 'demos/' --exclude 'docs/' --exclude 'scripts/' \
+  --exclude 'examples/' firmware/managed_components/ \
+  /tmp/deskmate-exportcheck/firmware/managed_components/
 (cd /tmp/deskmate-exportcheck/companion && cargo build --release -p server)
 ```
 
 ```sh
 # On the Mac, from the repository root:
 rm -rf /tmp/deskmate-deploy && mkdir -p /tmp/deskmate-deploy
-git archive HEAD companion | tar -x -C /tmp/deskmate-deploy
+git archive HEAD companion firmware | tar -x -C /tmp/deskmate-deploy
 
 # Sources only. `target/` on the VM is root-owned and left by the previous deploy:
 # keeping it turns a cold build into roughly 40 seconds, so the exclude below is what
 # protects it from --delete. Never drop it.
 rsync -a --delete --exclude 'target/' \
   /tmp/deskmate-deploy/companion/ rodion@100.93.166.123:~/deskmate-build/companion/
+
+# The tracked firmware sources. `managed_components/` is excluded here because it is
+# not in the export at all -- it is synced separately, below.
+rsync -a --delete --exclude 'managed_components/' \
+  /tmp/deskmate-deploy/firmware/ rodion@100.93.166.123:~/deskmate-build/firmware/
+
+# The component-manager sources, from the working tree. Only needed when they change,
+# which is when firmware/dependencies.lock changes.
+rsync -a --delete --exclude 'tests/' --exclude 'demos/' --exclude 'docs/' \
+  --exclude 'scripts/' --exclude 'examples/' \
+  firmware/managed_components/lvgl__lvgl/ \
+  rodion@100.93.166.123:~/deskmate-build/firmware/managed_components/lvgl__lvgl/
+rsync -a --delete firmware/managed_components/espressif__cbor/ \
+  rodion@100.93.166.123:~/deskmate-build/firmware/managed_components/espressif__cbor/
 ```
 
 Build and install on the VM. The container image must match
@@ -307,6 +335,29 @@ second deploy of a day destroyed the first one's rollback target while reporting
 It also stamps UTC deliberately — the VM runs UTC while the Mac driving the deploy may not,
 so a local date can name a backup for the wrong day. Note the two same-day names already on
 the box (`.bak-20260910`, `.bak-20260910-rle`) are the scar from that.
+
+### The browser companion
+
+The UI is a directory of built assets, not something compiled into the binary, so
+shipping a UI change is a copy and needs no Rust build and no restart -- the server
+reads each file per request.
+
+```sh
+# On the Mac:
+(cd companion/apps/deskmate && bun run build)
+rsync -a --delete companion/apps/deskmate/dist/ rodion@100.93.166.123:/tmp/deskmate-web/
+
+# On the VM. The service runs under DynamicUser, so its StateDirectory really lives at
+# /var/lib/private/deskmate and the files must be owned by deskmate-server:
+sudo -n rsync -a --delete --chown=deskmate-server:deskmate-server \
+  /tmp/deskmate-web/ /var/lib/private/deskmate/web/
+```
+
+`DESKMATE_WEB_DIR=/var/lib/deskmate/web` in `/etc/deskmate/server.env` is what mounts it.
+The server refuses to start if that path is set and has no `index.html`, rather than
+serving 404s that look like a routing bug.
+
+**A binary change still needs the install and restart below. A UI-only change does not.**
 
 Restart and read the service log:
 

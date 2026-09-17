@@ -66,15 +66,42 @@ default. This section states only what is true now.
   one *scene* renderer.
 - **Every card face is a host-pushed scene**, and there is exactly **one renderer**. The
   hand-written C templates stopped shipping at stage 3a and their reference oracle was
-  deleted on 2026-09-11. The settings-window preview builds the same scene
+  deleted on 2026-09-11. The companion's card preview builds the same scene
   `build_card_scene` would push, so preview and panel agree by construction. **Do not
   add a second renderer to "check" the first** -- that is what the retired parity gate
   was, and it kept three dead templates alive to have something to compare against.
+- **THE COMPANION IS A WEB APP, and `apps/deskmate/src-tauri` is deleted.** Every
+  surface the Mac app presented for a networked device is served by the server it
+  configures, at `https://deskmate.rodi.one/`. The Tauri command set became
+  `crates/server/src/app_api/`, gated by the operator session cookie the window trades
+  the admin token for. The React source under `apps/deskmate/src/` did not change shape:
+  `src/lib/backend.ts` is a one-line barrel over `./backendClient`, and
+  `vite.config.ts` aliases that single specifier to `src/dev/backendClient.ts` under
+  `VITE_DESKMATE_MOCK=1` -- so there is exactly one seam and three implementations of it
+  (HTTP, mock, and whatever comes next). Design:
+  `docs/superpowers/specs/2026-09-18-deskmate-web-companion-design.md`.
+  - **Gone with it, deliberately**: provisioning, factory reset, the local-ownership
+    switch, autostart, and the whole local tier. They are cable operations, a browser has
+    no cable, and `crates/deskmate-cli` performs all of them. They were deleted rather
+    than stubbed -- a control that always fails is worse than an absent one.
+  - **The SPA is served from a directory, never embedded.** `DESKMATE_WEB_DIR` points at
+    a built `dist/`, read per request, so a UI change is `bun run build` plus an rsync
+    with no Rust build and no restart. That is the whole point; do not "simplify" it into
+    the binary.
 - **Live deployment**: `deskmate.rodi.one` on the owner's homelab (docker-vm, reachable
   over Tailscale), behind Cloudflare -> cloudflared -> Caddy, systemd unit in
   `companion/crates/server/deploy/`. Built for linux/x86_64 in a throwaway
   `rust:1.98-bookworm` container over an rsync'd `git archive HEAD` export -- never the
-  working tree. Device URL `wss://deskmate.rodi.one/v1/device/link`.
+  working tree. **The export is `companion/` AND `firmware/` now**, because the server
+  compiles the panel's own LVGL for the card preview; `firmware/managed_components/` is
+  gitignored and is the one part copied from the working tree, pinned by the tracked
+  `firmware/dependencies.lock`. Device URL `wss://deskmate.rodi.one/v1/device/link`.
+  - **Caddy gates the browser paths ONLY** (`/`, `/assets/*`, `/v1/app/*`,
+    `/v1/manage/*`). `/v1/device/*`, `/v1/firmware/*`, `/v1/images/*` and `/v1/devices/*`
+    carry their own credential in `Authorization`, which `basic_auth` would eat -- a
+    host-wide gate breaks the device link outright. The two gates do not contend: Caddy
+    reads `Authorization: Basic`, the app reads a `Cookie`. The app's gate is the real
+    one, because the server binds a LAN address Caddy cannot be in front of.
 - **Milestones**: V1 and V2 are exited and tagged (`v1` at `7abd496`, `v2` at `fdf85ba`).
   V3 (server host) is in progress; **sub-projects 1-4 are merged to `main`** (`fb15060`,
   2026-09-13) and V3 is **schema- and wire-neutral** -- it adds no config field, no wire
@@ -128,21 +155,25 @@ Each of these cost this project real time at least once.
 - **`POST /v1/devices/{id}/scene` accepts any revision, and the device does not
   self-heal from a high one.** Push just above the runtime's current counter, never an
   arbitrary large number.
-- **WKWebView does not move focus to a `<button>` on mousedown; Chrome does.** The dev
-  harness (`VITE_DESKMATE_MOCK=1`) runs in Chrome and cannot see this class of defect,
-  and driving the app with `AXPress` fires `click` with no `mousedown` at all. If a
-  report is about clicking, the only honest checks are a real pointer event in the real
-  app or a unit test replaying the WebKit sequence.
-- **The dev harness mocks `render_card_preview`** (`src/dev/mockPreview.ts`), so a broken
-  Rust preview path renders perfectly in it. `crates/lvgl-sim/tests/preview_path.rs` is
-  the honest check.
+- **The dev harness cannot see anything that needs the server.** `VITE_DESKMATE_MOCK=1`
+  renders every scenario without a backend, which is what makes it useful and what makes
+  it blind: it mocks the preview (`src/dev/mockPreview.ts`), so a broken Rust preview
+  path renders perfectly, and until 2026-09-18 it had no signed-out state, so the window's
+  sign-in dead end survived every test. `crates/lvgl-sim/tests/preview_path.rs` is the
+  honest check for the preview; **driving the real build in Chrome is the honest check for
+  the window**, and it is cheap now that the product is a web page. Two defects were found
+  that way in one sitting, both invisible to 122 passing frontend tests.
+- **A harness must not offer what the shipped app does not have.** When the cable
+  operations were removed, they were removed from `src/dev/backendClient.ts` too. A mock
+  that still answers `provision_device` lets the UI be built against an affordance nobody
+  can reach -- the same shape of blindness as the retired WKWebView/Chrome split, where the
+  harness ran a different engine from the product.
 - **No caller may wait unboundedly on a thread that can block in an OS read.**
-  `SerialTransport::read` can block forever once the USB device behind its fd is gone,
-  which once wedged the entire Mac app and presented as "the app can't save to the
-  server". A stalled session reports `Transport(Disconnected)`, never `Timeout`, because
-  `is_disconnect` is what makes the runtime reconnect.
-- **Reach for `sample <pid>` before reading code** when the app is wedged: the settings
-  preview keeps ticking while the worker thread is dead, so the UI looks alive.
+  `SerialTransport::read` can block forever once the USB device behind its fd is gone.
+  That wedged the whole host process back when the host was the Mac app; the server still
+  links `device`, and `deskmate-cli` still opens serial ports. A stalled session reports
+  `Transport(Disconnected)`, never `Timeout`, because `is_disconnect` is what makes the
+  runtime reconnect.
 - **Green tests say nothing about whether OTA still works**, and `make -C
   firmware/host_tests sanitize` is not optional: two `core/scene_decode.c` bounds guard
   out-of-bounds *writes* that `scene_model_validate()` then reports with the same error
@@ -188,8 +219,10 @@ These are decisions, not defaults. Changing one needs the owner, not a judgement
   lines it touches. A schema bump forces a migration, a redeploy, an app rebuild and a
   strict deploy order; a wire or firmware-statics change adds a USB flash and a mandatory
   on-board OTA re-verification. **Crossing one needs explicit owner authorization**, the
-  same as a tag. A change that stays inside `apps/deskmate/src/` costs an app rebuild and
-  nothing else -- reach for that first and say what it would cost before proposing more.
+  same as a tag. A change that stays inside `apps/deskmate/src/` costs `bun run build` and
+  an rsync of `dist/` -- no Rust build, no restart, because the server reads
+  `DESKMATE_WEB_DIR` per request. Reach for that first and say what it would cost before
+  proposing more.
 - **The window has ONE LOOP, and since schema v10 so does the document.** The
   complication tile grid *is* the loop, in loop order, and it is where the order changes.
   Adding a card is one dashed slot at the end of the grid, and appending to `cards` IS
@@ -326,13 +359,23 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
 cargo test --workspace --doc
-cd apps/deskmate && bun test && bun run check
+cd apps/deskmate && bun test && bun run check && bun run format:check && bun run build
 ```
 
 Both test invocations are required: `--all-targets` adds example and integration
 targets but removes doctests, so neither invocation alone covers the workspace.
 Keep them as separate lines so a failure names the missing coverage directly; do
 not simplify them back to one command. The workspace currently has no bench targets.
+
+`bun run build` is in the list because the companion is now a deployed artifact
+rather than something bundled by `tauri build` in CI: if it does not build, there
+is nothing to ship. `format:check` is there because it was silently red for a
+while, which is what an unenforced gate does.
+
+**For a change to the window itself, none of the above is the real check.** Build
+it, point `DESKMATE_WEB_DIR` at the `dist/`, and drive it in Chrome -- the
+mock harness is blind to everything that needs the server, and the product is a
+web page now, so this costs a minute. See the trap about the harness above.
 
 Budget for this: a cold full run is about 35 minutes on the owner's machine -- 13 for
 clippy, most of the rest for `--all-targets`, whose `server/tests/ownership.rs` does

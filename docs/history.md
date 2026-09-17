@@ -1322,3 +1322,49 @@ nor topical. They are preserved verbatim.
   re-verification. Treat the branch as a design sketch of what brightness would cost, and
   plan it as new work if it is ever wanted. Its worktree was removed 2026-09-09; the
   branch itself is retained.
+
+## 2026-09-18 — the companion moved into the browser
+
+The Mac app is gone. `apps/deskmate/src-tauri` was deleted, not deprecated, and every
+surface it presented for a networked device is now served by the server it configures.
+
+The owner's stated problem was iteration speed: every change cost a server redeploy
+*and* an app rebuild, in that order. Only half of that was the app's fault, and most of
+that half had already been removed — `d51e554` made an image source describe its own
+settings and `3616af0` made the add menu build itself from `/v1/faces`, so a new face
+already needed no app change. What remained was the app as a *distribution* problem: a
+binary to rebuild and relaunch to see a CSS tweak, and one no browser tool could drive.
+
+The migration was cheap for a reason worth recording. `vite.config.ts` had been aliasing
+the IPC bridge to a mock since the harness was built, so "the backend" was already a
+module with two implementations behind one export surface. Adding a third — `fetch` and
+`EventSource` in place of `invoke` and `listen` — changed no function name, no argument
+and no return type, and `tsc` passed on the first run after the swap. The lesson is not
+about Tauri: a seam maintained for testing turned out to be a seam for replacing the
+whole transport.
+
+Two things were nearly lost and had to be moved rather than deleted with their host. The
+TypeScript contract fixture generator lived inside `src-tauri`, and it was the only thing
+pinning the JSON shapes the frontend parses; it now lives in the server crate. And the
+card preview is the firmware's own LVGL over FFI — moving it into the server meant the
+server now compiles sources under `firmware/`, which broke the deploy immediately,
+because the deploy exports `companion/` only and `firmware/managed_components/` is
+gitignored. The payload grew; the runbook says so now.
+
+Three defects were found that the test suite could not see, and all three were found by
+running the thing rather than reading it:
+
+- `/v1/images` and `/v1/faces` were gated on the admin *bearer*. A browser carries a
+  cookie, so every one of them would have answered 401 from the window — while every
+  integration test, which sent a bearer, passed.
+- The signed-out screen said "enter the admin token" and gave nowhere to type it: the
+  sign-in lived inside Settings, which needs the snapshot that had just failed to load.
+  122 frontend tests passed over that dead end.
+- The window opened on `dev-0001`, an identity minted long ago and never configured,
+  because the client took the first row of a list in mint order. Three identities on the
+  live server have saved configurations and only one is the panel on the desk; the
+  tie-breaker that actually works is which configuration was written most recently.
+
+The first was caught by asking what a browser sends, the second and third by opening the
+page in Chrome. That last check is new: it is the one the desktop app could never have
+had, and it is now the cheapest honest check in the project.

@@ -5210,3 +5210,53 @@ but they are the residue to clear if that file is ever tidied.
 A server-rendered face on the panel at either mounting, and the predicted ~10 KB
 RLE565 transfer size against the 329,740-byte raw frame, both remain unmeasured,
 as does the OTA download against the -104-byte `.bss` shift.
+
+---
+
+## Schema v11 REVERTED — 2026-09-17 08:09 UTC
+
+The section above records a deploy that no longer stands. `e2b103c` was reverted as
+`9b20b53` on owner direction: it answered a request about what the settings window looked
+like with a schema bump, six card kinds and an ordered two-stage deploy, against a rule
+the repo already stated in `324c981`, `e137294` and `CLAUDE.md`. The rule now sits in
+"Product rules the owner has set" as a prohibition, with the cost attached.
+
+**`faces/weather.rs`, `faces/rss.rs`, `faces/token.rs` and the rasterizer are untouched by
+the revert.** They came from `c637295` and v11 never edited them. The weather face design
+is owner-approved and settled.
+
+| | |
+|---|---|
+| binary now running | `1672065a3ebda88e…` (the v10 build from `a1e5a5f`), restored from `deskmate-server.bak-20260916T120328Z` |
+| `data-cards.json` | restored from `data-cards.json.retired-20260916T120328Z` |
+| `dev-0005.json` | restored from `dev-0005.json.bak-20260916T120515Z` (schema 10, four cards) |
+| v11 state kept | `dev-0005.json.v11-*`, `image-sources.json.v11-*` |
+
+### The rollback was NOT binary-only, and the claim that it would be was wrong
+
+Restoring the binary alone put the server in a restart loop:
+
+```
+panicked at crates/server/src/lib.rs:139: failed to load the image-source store:
+Io { message: "metadata contains an invalid source id" }
+```
+
+v11 derived its source ids as `card-{card_id}` and wrote them into
+`configs/image-sources.json`. **v10 rejects that id shape**, so the older binary could not
+open its own store. Recovery was to delete the two `card-*` entries and their frame files.
+
+**This is a class of risk that is not on the list of expensive boundaries.**
+`CURRENT_SCHEMA_VERSION`, the wire and firmware statics are all versioned and negotiated.
+`image-sources.json` carries a `schema_version` but nothing validates a *new* version's
+ids against an *older* reader, and the file is shared state that both binaries open at
+startup and panic on. **Before claiming a rollback is binary-only, check what the new
+version writes into unversioned or laxly-versioned state that the old one must read.**
+
+### `dev-0005` is powered on and linked
+
+`device link established device_id=dev-0005` at 08:09:55 UTC, on the v10 binary. The board
+being up is unusual -- it is normally off -- and the long-owed hardware checks are
+runnable right now: a server-rendered face on the panel at either mounting, the measured
+RLE565 transfer size against the 329,740-byte raw frame, the capability word read by name,
+and the OTA download against the -104-byte `.bss` shift. **None of them has been run**;
+this note records only that the link came up.

@@ -8,6 +8,7 @@ import type {
 
 
 export const MAX_CARDS = 8;
+export const MAX_IMAGE_SOURCES = 8;
 
 export function copyConfig(config: AppConfig): AppConfig {
   return {

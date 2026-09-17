@@ -2,6 +2,7 @@
 // its command macro contract even when the handler only borrows them internally.
 #![allow(clippy::needless_pass_by_value)]
 
+use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -22,7 +23,10 @@ use tauri_plugin_autostart::ManagerExt;
 use crate::{DesktopSnapshot, DesktopState, NetworkedConfigProjection};
 
 pub(crate) const MAX_SERVER_ERROR_BYTES: usize = 64 * 1_024;
-const MAX_IMAGE_SOURCE_MINT_BYTES: usize = 16 * 1_024;
+const MAX_IMAGE_SOURCE_RESPONSE_BYTES: usize = 64 * 1_024;
+const MAX_FACE_FIELDS: usize = 16;
+const MAX_FACE_FIELD_KEY_BYTES: usize = 64;
+const MAX_FACE_FIELD_VALUE_BYTES: usize = 2_048;
 
 mod config;
 mod network;
@@ -1786,6 +1790,55 @@ pub(crate) mod tests {
                 .push_url
                 .ends_with(&format!("/v1/images/{}", minted.token))
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn listing_image_sources_gets_server_descriptors_with_admin_auth() {
+        let (context, listener, directory) =
+            server_query_fixture("list-picture-sources", app_core::DeviceTier::Networked);
+        let server = answer_once(
+            listener,
+            "200 OK",
+            r#"[{"id":"image-a205","name":"External","face":null},{"id":"image-a977","name":"Managed","face":{"kind":"server-face","label":"Managed face","fields":[{"key":"place","label":"Place","type":"text","value":"Dubai","placeholder":"Dubai"}]}}]"#,
+        );
+
+        let sources = list_server_image_sources(&context).expect("list sources");
+
+        let request = server.join().unwrap();
+        let normalized = request.to_ascii_lowercase();
+        assert!(request.starts_with("GET /v1/images "));
+        assert!(normalized.contains("authorization: bearer admin-secret\r\n"));
+        assert_eq!(sources.len(), 2);
+        assert!(sources[0].face.is_none());
+        assert_eq!(sources[1].face.as_ref().unwrap().fields.len(), 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn updating_image_source_settings_puts_only_descriptor_field_values() {
+        let (context, listener, directory) =
+            server_query_fixture("update-picture-source", app_core::DeviceTier::Networked);
+        let server = answer_once(
+            listener,
+            "200 OK",
+            r#"{"kind":"server-face","label":"Managed face","fields":[{"key":"place","label":"Place","type":"text","value":"Berlin","placeholder":"Dubai"}]}"#,
+        );
+        let request = UpdateImageSourceFaceRequest {
+            source_id: "image-a977".into(),
+            fields: BTreeMap::from([("place".into(), "Berlin".into())]),
+        };
+
+        let descriptor =
+            update_server_image_source_face(&context, request).expect("update settings");
+
+        let request = server.join().unwrap();
+        let normalized = request.to_ascii_lowercase();
+        assert!(request.starts_with("PUT /v1/images/image-a977/face "));
+        assert!(normalized.contains("authorization: bearer admin-secret\r\n"));
+        assert!(normalized.contains("content-type: application/json\r\n"));
+        assert!(request.ends_with(r#"{"fields":{"place":"Berlin"}}"#));
+        assert_eq!(descriptor.label, "Managed face");
         fs::remove_dir_all(directory).unwrap();
     }
 

@@ -16,6 +16,8 @@ import type {
   AppConfig,
   AppSnapshot,
   DraftValidation,
+  FaceDescriptor,
+  ImageSourceDescriptor,
   NetworkSettings,
   ValidationIssue,
 } from "../lib/types";
@@ -48,6 +50,29 @@ let config: AppConfig = mockConfig();
 let network: NetworkSettings = mockNetworkSettings();
 let snapshot: AppSnapshot = mockSnapshot(config);
 let autostart = { enabled: true, preference_enabled: true };
+let mockFace: FaceDescriptor = {
+  kind: "server-face",
+  label: "Source settings",
+  fields: [
+    {
+      key: "place",
+      label: "Place",
+      type: "text",
+      value: "Dubai",
+      placeholder: "Dubai",
+    },
+    {
+      key: "units",
+      label: "Units",
+      type: "enum",
+      value: "metric",
+      options: [
+        { value: "metric", label: "Metric" },
+        { value: "imperial", label: "Imperial" },
+      ],
+    },
+  ],
+};
 const listeners = new Set<(next: AppSnapshot) => void>();
 
 function applyScenario() {
@@ -129,6 +154,13 @@ applyScenario();
 function publish() {
   snapshot = { ...snapshot, config };
   for (const listener of listeners) listener(snapshot);
+}
+
+function imageSourceDescriptors(): ImageSourceDescriptor[] {
+  return config.image_sources.map((source, index) => ({
+    ...source,
+    face: scenario === "picture" && index === 0 ? mockFace : null,
+  }));
 }
 
 // A deliberately partial re-implementation of the backend's rules: enough that every
@@ -220,6 +252,25 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
         token,
         push_url: `${network.server_url.replace(/\/$/, "")}/v1/images/${token}`,
       }) as Promise<T>;
+    }
+    case "list_image_sources":
+      return delay(imageSourceDescriptors()) as Promise<T>;
+    case "update_image_source_face": {
+      const request = requireArgs(args).request as {
+        source_id: string;
+        fields: Record<string, string>;
+      };
+      if (!config.image_sources.some((source) => source.id === request.source_id)) {
+        throw { category: "not-found", message: "This picture source no longer exists." };
+      }
+      mockFace = {
+        ...mockFace,
+        fields: mockFace.fields.map((field) => ({
+          ...field,
+          value: request.fields[field.key] ?? field.value,
+        })),
+      };
+      return delay(mockFace) as Promise<T>;
     }
     case "set_autostart_enabled": {
       autostart = { enabled: Boolean(args?.enabled), preference_enabled: Boolean(args?.enabled) };

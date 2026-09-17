@@ -314,9 +314,8 @@ async fn main() {
         .unwrap_or_else(|error| panic!("DESKMATE_DATA_CARDS is unreadable: {error}"));
     if data_card_specs.is_empty() {
         tracing::info!("no server-rendered data cards configured");
-    } else {
-        data_cards::spawn_refreshers(&state, data_card_specs);
     }
+    data_cards::spawn_refreshers(&state, data_card_spec_path, data_card_specs);
 
     let listener = tokio::net::TcpListener::bind(&bind_address)
         .await

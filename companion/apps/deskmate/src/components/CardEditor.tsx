@@ -1,3 +1,5 @@
+import { useEffect, useRef, useState } from "react";
+
 import {
   cardLabel,
   cardTitle,
@@ -6,12 +8,15 @@ import {
   setCardDwell,
   tapActionDescription,
 } from "../lib/configDraft";
+import { listImageSources, toIpcError, updateImageSourceFace } from "../lib/tauri";
 import type {
   AlertHold,
   AppConfig,
   CardAlert,
   CardError,
   CardSettings,
+  FaceDescriptor,
+  IpcError,
   MintedImageSource,
   PomodoroSnapshot,
   ValidationIssue,
@@ -85,6 +90,175 @@ function HoldSelector({
       </small>
       <FieldIssues issues={issues} />
     </label>
+  );
+}
+
+function descriptorValues(descriptor: FaceDescriptor): Record<string, string> {
+  return Object.fromEntries(descriptor.fields.map((field) => [field.key, field.value]));
+}
+
+function PictureFaceSettings({ sourceId }: { sourceId: string }) {
+  const requestGeneration = useRef(0);
+  const [descriptor, setDescriptor] = useState<FaceDescriptor | null>(null);
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<IpcError | null>(null);
+
+  useEffect(() => {
+    const generation = requestGeneration.current + 1;
+    requestGeneration.current = generation;
+    setDescriptor(null);
+    setValues({});
+    setLoading(true);
+    setSaving(false);
+    setSaved(false);
+    setError(null);
+    void listImageSources()
+      .then((sources) => {
+        if (requestGeneration.current !== generation) {
+          return;
+        }
+        const source = sources.find((candidate) => candidate.id === sourceId);
+        if (!source) {
+          setError({
+            category: "not-found",
+            message: "This picture source no longer exists on the server.",
+          });
+          return;
+        }
+        setDescriptor(source.face);
+        setValues(source.face ? descriptorValues(source.face) : {});
+      })
+      .catch((nextError) => {
+        if (requestGeneration.current === generation) {
+          setError(toIpcError(nextError));
+        }
+      })
+      .finally(() => {
+        if (requestGeneration.current === generation) {
+          setLoading(false);
+        }
+      });
+    return () => {
+      requestGeneration.current += 1;
+    };
+  }, [sourceId]);
+
+  if (loading) {
+    return (
+      <p className="source-settings__status" role="status">
+        Loading source settings…
+      </p>
+    );
+  }
+  if (error && !descriptor) {
+    return (
+      <p className="data-note data-note--bad" role="alert">
+        <span>{error.message}</span>
+      </p>
+    );
+  }
+  // An external producer has no server-owned face settings. Its existing
+  // source identity line above remains the whole UI.
+  if (!descriptor) {
+    return null;
+  }
+
+  const dirty = descriptor.fields.some((field) => values[field.key] !== field.value);
+  const setValue = (key: string, value: string) => {
+    setValues((current) => ({ ...current, [key]: value }));
+    setSaved(false);
+    setError(null);
+  };
+  const save = () => {
+    const generation = requestGeneration.current;
+    setSaving(true);
+    setSaved(false);
+    setError(null);
+    void updateImageSourceFace(sourceId, values)
+      .then((updated) => {
+        if (requestGeneration.current !== generation) {
+          return;
+        }
+        setDescriptor(updated);
+        setValues(descriptorValues(updated));
+        setSaved(true);
+      })
+      .catch((nextError) => {
+        if (requestGeneration.current === generation) {
+          setError(toIpcError(nextError));
+        }
+      })
+      .finally(() => {
+        if (requestGeneration.current === generation) {
+          setSaving(false);
+        }
+      });
+  };
+
+  return (
+    <form
+      className="source-settings"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (dirty && !saving) {
+          save();
+        }
+      }}
+    >
+      <fieldset className="source-settings__fields">
+        <legend>{descriptor.label}</legend>
+        {descriptor.fields.map((field) =>
+          field.type === "enum" ? (
+            <fieldset className="source-settings__enum" key={field.key}>
+              <legend>{field.label}</legend>
+              <div className="source-settings__segments">
+                {field.options.map((option) => (
+                  <button
+                    type="button"
+                    className="source-settings__segment"
+                    aria-pressed={values[field.key] === option.value}
+                    key={option.value}
+                    onClick={() => setValue(field.key, option.value)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </fieldset>
+          ) : (
+            <label className="field" key={field.key}>
+              <span>{field.label}</span>
+              <input
+                type={field.type}
+                required
+                maxLength={2048}
+                value={values[field.key] ?? ""}
+                placeholder={field.placeholder}
+                onChange={(event) => setValue(field.key, event.currentTarget.value)}
+              />
+            </label>
+          ),
+        )}
+      </fieldset>
+      <div className="source-settings__actions">
+        <button className="button button--secondary" type="submit" disabled={!dirty || saving}>
+          {saving ? "Saving…" : "Save source settings"}
+        </button>
+        {saved && (
+          <small role="status">
+            Saved on the server. The refreshed face will use these settings.
+          </small>
+        )}
+      </div>
+      {error && (
+        <p className="data-note data-note--bad" role="alert">
+          <span>{error.message}</span>
+        </p>
+      )}
+    </form>
   );
 }
 
@@ -291,6 +465,8 @@ export function CardEditor({
                 </small>
               </div>
             )}
+
+            <PictureFaceSettings sourceId={card.source_id} />
           </>
         )}
 

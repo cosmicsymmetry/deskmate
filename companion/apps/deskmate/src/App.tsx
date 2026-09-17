@@ -38,6 +38,7 @@ import type {
   DisplayOrientation,
   DraftValidation,
   IpcError,
+  ImageSource,
   MintedImageSource,
   PomodoroAction,
 } from "./lib/types";
@@ -254,8 +255,17 @@ export function App() {
     setMintedPicture((current) => (current?.cardId === cardId ? current : null));
     setSelectedCardId(cardId);
   };
-  const handleAddPicture = () => {
-    const sourceNumber = draft.image_sources.length + 1;
+  const handleAddPicture = (source: ImageSource | null) => {
+    if (source) {
+      setMintedPicture(null);
+      handleAdd({ kind: "picture", sourceId: source.id, sourceName: source.name });
+      return;
+    }
+    const currentDraft = draftRef.current;
+    if (!currentDraft) {
+      return;
+    }
+    const sourceNumber = currentDraft.image_sources.length + 1;
     const sourceName = sourceNumber === 1 ? "Picture" : `Picture ${sourceNumber}`;
     setBusyAction("picture-source");
     setCommandError(null);
@@ -545,6 +555,7 @@ export function App() {
             onSelect={handleSelectCard}
             onAdd={handleAdd}
             onAddPicture={handleAddPicture}
+            pictureBusy={busyAction === "picture-source"}
             onChange={replaceDraft}
             onRemove={handleRemoveCard}
           />

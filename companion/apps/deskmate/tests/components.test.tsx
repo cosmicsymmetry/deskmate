@@ -43,6 +43,8 @@ import type {
   CardSettings,
   ConfigApplyResult,
   DraftValidation,
+  FaceDescriptor,
+  ImageSourceDescriptor,
   MintedImageSource,
   NetworkSettings,
   PreviewFrame,
@@ -97,6 +99,13 @@ let useLocalOwnershipImpl: () => Promise<NetworkSettings> = async () => ({
   device_id: "desk-1",
   tier: "local",
 });
+let imageSourcesImpl: () => Promise<ImageSourceDescriptor[]> = async () => [];
+let updateImageSourceFaceImpl: (
+  sourceId: string,
+  fields: Record<string, string>,
+) => Promise<FaceDescriptor> = async () => {
+  throw new Error("updateImageSourceFace not configured for this test");
+};
 
 mock.module("../src/lib/tauri", () => ({
   ...tauriModule,
@@ -111,6 +120,9 @@ mock.module("../src/lib/tauri", () => ({
   setServerEndpoint: (serverUrl: string, deviceId: string, adminToken: string) =>
     setServerEndpointImpl(serverUrl, deviceId, adminToken),
   chooseLocalOwnership: () => useLocalOwnershipImpl(),
+  listImageSources: () => imageSourcesImpl(),
+  updateImageSourceFace: (sourceId: string, fields: Record<string, string>) =>
+    updateImageSourceFaceImpl(sourceId, fields),
   getAutostartStatus: async () => ({ enabled: false, preference_enabled: false }),
 }));
 
@@ -741,6 +753,123 @@ describe("settings accessibility and states", () => {
     expect(laterRender).not.toContain("This plaintext token is shown once.");
   });
 
+  test("a picture editor renders and saves server-described fields without face-specific logic", async () => {
+    const picture = pictureCard();
+    const descriptor: FaceDescriptor = {
+      kind: "opaque-server-face",
+      label: "Source settings",
+      fields: [
+        {
+          key: "place",
+          label: "Place",
+          type: "text",
+          value: "Dubai",
+          placeholder: "Dubai",
+        },
+        {
+          key: "units",
+          label: "Units",
+          type: "enum",
+          value: "metric",
+          options: [
+            { value: "metric", label: "Metric" },
+            { value: "imperial", label: "Imperial" },
+          ],
+        },
+      ],
+    };
+    imageSourcesImpl = async () => [
+      { id: picture.source_id, name: "Claude limits", face: descriptor },
+    ];
+    let savedFields: Record<string, string> | null = null;
+    updateImageSourceFaceImpl = async (_sourceId, fields) => {
+      savedFields = fields;
+      return {
+        ...descriptor,
+        fields: descriptor.fields.map((field) => ({
+          ...field,
+          value: fields[field.key] ?? field.value,
+        })),
+      };
+    };
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <CardEditor
+            card={picture}
+            config={cardListConfig([picture])}
+            issues={[]}
+            cardError={null}
+            pomodoro={null}
+            timerBusy={false}
+            onChange={() => {}}
+            onConfigChange={() => {}}
+            onRemove={() => {}}
+            onTimerAction={() => {}}
+          />,
+        ),
+      );
+      await waitFor(() => expect(container.textContent).toContain("Source settings"));
+      const place = container.querySelector<HTMLInputElement>('input[placeholder="Dubai"]');
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(
+          place,
+          "Berlin",
+        );
+        place?.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      const imperial = buttonWithText(container, "Imperial");
+      await act(async () => imperial?.click());
+      await act(async () => buttonWithText(container, "Save source settings")?.click());
+
+      await waitFor(() => expect(savedFields).toEqual({ place: "Berlin", units: "imperial" }));
+      expect(container.textContent).toContain("Saved on the server");
+      expect(container.textContent).not.toContain(descriptor.kind);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      imageSourcesImpl = async () => [];
+      updateImageSourceFaceImpl = async () => {
+        throw new Error("updateImageSourceFace not configured for this test");
+      };
+    }
+  });
+
+  test("an external picture producer adds no settings form", async () => {
+    const picture = pictureCard();
+    imageSourcesImpl = async () => [{ id: picture.source_id, name: "Claude limits", face: null }];
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <CardEditor
+            card={picture}
+            config={cardListConfig([picture])}
+            issues={[]}
+            cardError={null}
+            pomodoro={null}
+            timerBusy={false}
+            onChange={() => {}}
+            onConfigChange={() => {}}
+            onRemove={() => {}}
+            onTimerAction={() => {}}
+          />,
+        ),
+      );
+      await waitFor(() => expect(container.textContent).not.toContain("Loading source settings"));
+      expect(container.textContent).not.toContain("Save source settings");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      imageSourcesImpl = async () => [];
+    }
+  });
+
   test("the add menu creates a picture through its own server action", async () => {
     let pictureAdds = 0;
     const container = document.createElement("div");
@@ -767,7 +896,7 @@ describe("settings accessibility and states", () => {
       await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
       expect(container.textContent).toContain("Pictures");
       const items = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
-      const picture = items.find((button) => button.textContent?.includes("A PNG pushed"));
+      const picture = items.find((button) => button.textContent?.includes("New picture source"));
       expect(picture).toBeDefined();
       const beforePicture = items.at(-2);
 
@@ -781,6 +910,54 @@ describe("settings accessibility and states", () => {
 
       await act(async () => picture?.click());
       expect(pictureAdds).toBe(1);
+      expect(container.querySelector('[role="menu"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("the add menu offers an unused picture source and omits one already in the loop", async () => {
+    const used = { id: "used-source", name: "Already shown" };
+    const unused = { id: "unused-source", name: "Bring this back" };
+    const config: AppConfig = {
+      ...cardListConfig([{ ...pictureCard(), source_id: used.id }]),
+      image_sources: [used, unused],
+    };
+    let chosenSource: string | null = null;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <CardList
+            config={config}
+            issues={[]}
+            pomodoros={[]}
+            ownershipTier="networked"
+            selectedCardId={null}
+            onSelect={() => {}}
+            onAdd={() => {}}
+            onAddPicture={(source) => {
+              chosenSource = source?.id ?? null;
+            }}
+            onChange={() => {}}
+            onRemove={() => {}}
+          />,
+        ),
+      );
+      await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
+      const menu = container.querySelector('[role="menu"]');
+      expect(menu?.textContent).toContain(unused.name);
+      expect(menu?.textContent).not.toContain(used.name);
+      expect(menu?.textContent).toContain("New picture source");
+
+      const unusedItem = [
+        ...(menu?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? []),
+      ].find((button) => button.textContent?.includes(unused.name));
+      await act(async () => unusedItem?.click());
+      expect(chosenSource).toBe(unused.id);
       expect(container.querySelector('[role="menu"]')).toBeNull();
     } finally {
       await act(async () => root.unmount());
@@ -814,7 +991,7 @@ describe("settings accessibility and states", () => {
       await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
       const pictureMenuItem = [
         ...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
-      ].find((button) => button.textContent?.includes("A PNG pushed"));
+      ].find((button) => button.textContent?.includes("New picture source"));
       await act(async () => pictureMenuItem?.click());
 
       await waitFor(() => {

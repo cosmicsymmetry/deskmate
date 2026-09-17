@@ -272,20 +272,34 @@ async fn minting_returns_the_plaintext_exactly_once() {
     let source = mint(&client, &server, "One-time token panel").await;
     assert_eq!(source.token.len(), 64);
 
-    for url in [
-        format!("{}/v1/images", server.base_url),
-        format!("{}/v1/images/{}", server.base_url, source.id),
-    ] {
-        let response = client
-            .get(url)
-            .bearer_auth(ADMIN_TOKEN)
-            .send()
+    let list = client
+        .get(format!("{}/v1/images", server.base_url))
+        .bearer_auth(ADMIN_TOKEN)
+        .send()
+        .await
+        .expect("list image sources");
+    assert_eq!(list.status(), StatusCode::OK);
+    let body = list.text().await.expect("GET response body");
+    assert!(!body.contains(&source.token));
+    let listed: serde_json::Value = serde_json::from_str(&body).expect("source descriptor JSON");
+    assert_eq!(listed[0]["id"], source.id);
+    assert_eq!(listed[0]["name"], "One-time token panel");
+    assert!(listed[0]["face"].is_null());
+
+    let by_id = client
+        .get(format!("{}/v1/images/{}", server.base_url, source.id))
+        .bearer_auth(ADMIN_TOKEN)
+        .send()
+        .await
+        .expect("GET source route");
+    assert_eq!(by_id.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert!(
+        !by_id
+            .text()
             .await
-            .expect("GET image route");
-        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
-        let body = response.text().await.expect("GET response body");
-        assert!(!body.contains(&source.token));
-    }
+            .expect("GET source body")
+            .contains(&source.token)
+    );
 
     let response = client
         .delete(format!("{}/v1/images/{}", server.base_url, source.id))
@@ -319,6 +333,13 @@ async fn the_producer_routes_need_no_admin_token_and_the_admin_routes_do() {
         .expect("unauthenticated revoke");
     assert_eq!(unauthenticated_revoke.status(), StatusCode::UNAUTHORIZED);
 
+    let unauthenticated_list = client
+        .get(format!("{}/v1/images", server.base_url))
+        .send()
+        .await
+        .expect("unauthenticated list");
+    assert_eq!(unauthenticated_list.status(), StatusCode::UNAUTHORIZED);
+
     let producer_push = push(
         &client,
         &server,
@@ -329,4 +350,31 @@ async fn the_producer_routes_need_no_admin_token_and_the_admin_routes_do() {
     )
     .await;
     assert_eq!(producer_push.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_source_without_a_server_face_refuses_settings_updates() {
+    let server = spawn().await;
+    let client = Client::new();
+    let source = mint(&client, &server, "External producer").await;
+
+    let response = client
+        .put(format!("{}/v1/images/{}/face", server.base_url, source.id))
+        .bearer_auth(ADMIN_TOKEN)
+        .header("content-type", "application/json")
+        .body(r#"{"fields":{"location":"Berlin"}}"#)
+        .send()
+        .await
+        .expect("update external source");
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body: serde_json::Value =
+        serde_json::from_str(&response.text().await.expect("typed error body"))
+            .expect("typed error JSON");
+    assert_eq!(body["kind"], "face-not-configurable");
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("external producer"))
+    );
 }

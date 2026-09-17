@@ -593,6 +593,8 @@ pub fn run() {
             commands::resume_pushing,
             commands::control_pomodoro,
             commands::mint_image_source,
+            commands::list_image_sources,
+            commands::update_image_source_face,
             commands::get_autostart_status,
             commands::set_autostart_enabled,
             commands::render_card_preview,

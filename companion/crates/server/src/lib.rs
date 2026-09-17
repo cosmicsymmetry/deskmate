@@ -102,6 +102,7 @@ pub struct ServerState {
 struct StateInner {
     registry: Registry,
     image_sources: Arc<image_sources::ImageSourceStore>,
+    data_cards: Mutex<data_cards::DataCardState>,
     producer_credentials: Arc<producer_credentials::ProducerCredentialStore>,
     admin_token: String,
     firmware: FirmwareCatalog,
@@ -135,6 +136,7 @@ impl ServerState {
         registry: Registry,
         config_temp_dir: Option<tempfile::TempDir>,
     ) -> Self {
+        let data_card_spec_path = config_directory.join("data-cards.json");
         let image_sources = image_sources::ImageSourceStore::new(config_directory.clone())
             .expect("failed to load the image-source store");
         let producer_credentials =
@@ -144,6 +146,7 @@ impl ServerState {
             inner: Arc::new(StateInner {
                 registry,
                 image_sources: Arc::new(image_sources),
+                data_cards: Mutex::new(data_cards::DataCardState::new(data_card_spec_path)),
                 producer_credentials: Arc::new(producer_credentials),
                 admin_token,
                 firmware,
@@ -272,6 +275,7 @@ impl ServerState {
     /// Stops every per-device runtime retained by this server. The operation
     /// is idempotent and is called after Axum drains on process shutdown.
     pub fn shutdown(&self) {
+        data_cards::stop_refreshers(self);
         let links: Vec<_> = self
             .inner
             .device_links

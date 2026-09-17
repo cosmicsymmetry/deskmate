@@ -18,6 +18,7 @@ import {
   issuesForPath,
   loopEntries,
   MAX_CARDS,
+  MAX_IMAGE_SOURCES,
   moveEntry,
 } from "../lib/configDraft";
 import { placeAddMenu } from "../lib/menuPlacement";
@@ -41,7 +42,8 @@ interface CardListProps {
   selectedCardId: string | null;
   onSelect: (cardId: string) => void;
   onAdd: (kind: AddableCardKind) => void;
-  onAddPicture?: () => void;
+  onAddPicture?: (source: ImageSource | null) => void;
+  pictureBusy?: boolean;
   onChange: (config: AppConfig) => void;
   onRemove: (cardId: string) => void;
 }
@@ -97,6 +99,7 @@ export function CardList({
   onSelect,
   onAdd,
   onAddPicture = () => {},
+  pictureBusy = false,
   onChange,
   onRemove,
 }: CardListProps) {
@@ -120,6 +123,13 @@ export function CardList({
   const pendingFocusCardIdRef = useRef<string | null>(null);
   const pendingNewCardIdsRef = useRef<Set<string> | null>(null);
   const hasClock = config.cards.some((card) => card.kind === "clock");
+  const referencedSourceIds = new Set(
+    config.cards.flatMap((card) => (card.kind === "picture" ? [card.source_id] : [])),
+  );
+  const unusedPictureSources = config.image_sources.filter(
+    (source) => !referencedSourceIds.has(source.id),
+  );
+  const canMintPictureSource = config.image_sources.length < MAX_IMAGE_SOURCES;
   const entryOrder = entries.map(({ card }) => card.id).join("\u0000");
   const pendingNewCardId = pendingNewCardIdsRef.current
     ? (config.cards.find((card) => !pendingNewCardIdsRef.current?.has(card.id))?.id ?? null)
@@ -232,9 +242,9 @@ export function CardList({
     closeMenu(false);
   };
 
-  const choosePicture = () => {
+  const choosePicture = (source: ImageSource | null) => {
     pendingNewCardIdsRef.current = new Set(config.cards.map((card) => card.id));
-    onAddPicture();
+    onAddPicture(source);
     closeMenu(false);
   };
 
@@ -251,8 +261,14 @@ export function CardList({
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       const direction = event.key === "ArrowDown" ? 1 : -1;
-      const count = addableKinds.length + 1;
-      menuItemRefs.current[(index + direction + count) % count]?.focus();
+      const count = menuItemRefs.current.length;
+      for (let offset = 1; offset <= count; offset += 1) {
+        const candidate = menuItemRefs.current[(index + direction * offset + count) % count];
+        if (candidate && !candidate.disabled) {
+          candidate.focus();
+          break;
+        }
+      }
       return;
     }
     if (event.key === "Enter" || event.key === " ") {
@@ -496,21 +512,55 @@ export function CardList({
               </fieldset>
               <fieldset className="menu__group">
                 <legend className="tile-label menu__label">Pictures</legend>
+                {unusedPictureSources.map((source, sourceIndex) => {
+                  const index = addableKinds.length + sourceIndex;
+                  const choose = () => choosePicture(source);
+                  return (
+                    <button
+                      ref={(element) => {
+                        if (element) {
+                          menuItemRefs.current[index] = element;
+                        }
+                      }}
+                      type="button"
+                      className="menu__item"
+                      role="menuitem"
+                      key={source.id}
+                      onClick={choose}
+                      onKeyDown={(event) => onMenuKeyDown(event, index, choose)}
+                    >
+                      <span>
+                        <strong>{source.name}</strong>
+                        <small>Existing picture source</small>
+                      </span>
+                    </button>
+                  );
+                })}
                 <button
                   ref={(element) => {
                     if (element) {
-                      menuItemRefs.current[addableKinds.length] = element;
+                      menuItemRefs.current[addableKinds.length + unusedPictureSources.length] =
+                        element;
                     }
                   }}
                   type="button"
                   className="menu__item"
                   role="menuitem"
-                  onClick={choosePicture}
-                  onKeyDown={(event) => onMenuKeyDown(event, addableKinds.length, choosePicture)}
+                  disabled={!canMintPictureSource || pictureBusy}
+                  onClick={() => choosePicture(null)}
+                  onKeyDown={(event) =>
+                    onMenuKeyDown(event, addableKinds.length + unusedPictureSources.length, () =>
+                      choosePicture(null),
+                    )
+                  }
                 >
                   <span>
-                    <strong>Picture</strong>
-                    <small>A PNG pushed from anywhere</small>
+                    <strong>{pictureBusy ? "Creating…" : "New picture source"}</strong>
+                    <small>
+                      {canMintPictureSource
+                        ? "Create credentials for a producer"
+                        : `The limit is ${MAX_IMAGE_SOURCES} picture sources`}
+                    </small>
                   </span>
                 </button>
               </fieldset>

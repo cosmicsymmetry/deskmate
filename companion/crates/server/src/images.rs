@@ -1,5 +1,6 @@
 //! Producer-facing picture ingest and admin image-source lifecycle routes.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use app_core::RuntimeError;
@@ -10,7 +11,7 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
@@ -21,14 +22,21 @@ use crate::image_ingest::{ImageIngestError, canonical_frame_from_png};
 use crate::image_sources::{AcceptOutcome, ImageSourceError};
 
 const MAX_IMAGE_BODY_BYTES: usize = 1024 * 1024;
+const MAX_FACE_SETTINGS_BODY_BYTES: usize = 16 * 1024;
 
 pub(crate) fn routes() -> Router<ServerState> {
-    Router::new().route("/v1/images", post(mint_source)).route(
-        "/v1/images/{key}",
-        post(push_image)
-            .layer(DefaultBodyLimit::max(MAX_IMAGE_BODY_BYTES))
-            .delete(revoke_source),
-    )
+    Router::new()
+        .route("/v1/images", get(list_sources).post(mint_source))
+        .route(
+            "/v1/images/{key}",
+            post(push_image)
+                .layer(DefaultBodyLimit::max(MAX_IMAGE_BODY_BYTES))
+                .delete(revoke_source),
+        )
+        .route(
+            "/v1/images/{id}/face",
+            put(update_face).layer(DefaultBodyLimit::max(MAX_FACE_SETTINGS_BODY_BYTES)),
+        )
 }
 
 /// Copies only a well-formed bearer credential from the request parts. The
@@ -91,6 +99,65 @@ struct MintSourceRequest {
 struct MintSourceResponse {
     id: String,
     token: String,
+}
+
+#[derive(Serialize)]
+struct ImageSourceDescriptor {
+    id: String,
+    name: String,
+    face: Option<crate::data_cards::FaceDescriptor>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateFaceRequest {
+    fields: BTreeMap<String, String>,
+}
+
+async fn list_sources(
+    State(state): State<ServerState>,
+    _admin: AdminAuthenticated,
+) -> Json<Vec<ImageSourceDescriptor>> {
+    let sources = state
+        .image_sources()
+        .summaries(chrono::Utc::now())
+        .into_iter()
+        .map(|source| ImageSourceDescriptor {
+            face: crate::data_cards::descriptor_for_source(&state, &source.id),
+            id: source.id,
+            name: source.name,
+        })
+        .collect();
+    Json(sources)
+}
+
+async fn update_face(
+    State(state): State<ServerState>,
+    _admin: AdminAuthenticated,
+    Path(source_id): Path<String>,
+    payload: Result<Json<UpdateFaceRequest>, JsonRejection>,
+) -> Result<Json<crate::data_cards::FaceDescriptor>, ImageRouteError> {
+    let source_exists = state
+        .image_sources()
+        .summaries(chrono::Utc::now())
+        .iter()
+        .any(|source| source.id == source_id);
+    if !source_exists {
+        return Err(ImageRouteError::NotFound);
+    }
+    let Json(request) = payload.map_err(|rejection| ImageRouteError::InvalidJson {
+        status: rejection.status(),
+        message: rejection.body_text(),
+    })?;
+    let runtime = tokio::runtime::Handle::current();
+    let update_state = state.clone();
+    let updated = tokio::task::spawn_blocking(move || {
+        crate::data_cards::update_face_fields(&update_state, &runtime, &source_id, &request.fields)
+    })
+    .await
+    .map_err(|_| ImageRouteError::WorkerFailed)?
+    .map_err(|error| map_face_update_error(&error))?;
+    Ok(Json(updated))
 }
 
 async fn mint_source(
@@ -272,6 +339,18 @@ fn map_accept_error(error: &ImageSourceError) -> ImageRouteError {
     }
 }
 
+fn map_face_update_error(error: &crate::data_cards::FaceUpdateError) -> ImageRouteError {
+    match error {
+        crate::data_cards::FaceUpdateError::NoFace => ImageRouteError::FaceNotConfigurable,
+        crate::data_cards::FaceUpdateError::UnknownField(_)
+        | crate::data_cards::FaceUpdateError::InvalidField { .. } => {
+            ImageRouteError::InvalidFaceFields(error.to_string())
+        }
+        crate::data_cards::FaceUpdateError::Encode(_)
+        | crate::data_cards::FaceUpdateError::Persist(_) => ImageRouteError::Internal,
+    }
+}
+
 #[derive(Debug)]
 enum ImageRouteError {
     ProducerUnauthorized,
@@ -284,6 +363,8 @@ enum ImageRouteError {
     InvalidImage(String),
     RateLimited,
     Capacity,
+    FaceNotConfigurable,
+    InvalidFaceFields(String),
     Internal,
     WorkerFailed,
 }
@@ -299,6 +380,8 @@ enum ErrorBody<'a> {
     InvalidImage { message: &'a str },
     RateLimited { message: &'a str },
     Capacity { message: &'a str },
+    FaceNotConfigurable { message: &'a str },
+    InvalidFaceFields { message: &'a str },
     Internal,
 }
 
@@ -361,6 +444,18 @@ impl IntoResponse for ImageRouteError {
                 Json(ErrorBody::Capacity {
                     message: "the image-source capacity has been reached",
                 }),
+            )
+                .into_response(),
+            Self::FaceNotConfigurable => (
+                StatusCode::CONFLICT,
+                Json(ErrorBody::FaceNotConfigurable {
+                    message: "this image source is fed by an external producer and has no server settings",
+                }),
+            )
+                .into_response(),
+            Self::InvalidFaceFields(message) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ErrorBody::InvalidFaceFields { message: &message }),
             )
                 .into_response(),
             Self::Internal | Self::WorkerFailed => {

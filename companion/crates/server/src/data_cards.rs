@@ -30,7 +30,8 @@
 //! where the authority currently sits and costs nothing to delete when the
 //! window grows the editors.
 
-use std::path::Path;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -38,7 +39,7 @@ use providers::Provider as _;
 use providers::rss::{RssOptions, RssProvider};
 use providers::token::{TokenOptions, TokenProvider};
 use providers::weather::{WeatherOptions, WeatherProvider, WeatherUnits};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::ServerState;
 use crate::egress_client::EgressHttpClient;
@@ -55,6 +56,10 @@ const MIN_REFRESH: Duration = Duration::from_secs(60);
 /// this, so a card that failed once during a network blip does not sit stale
 /// for a day.
 const MAX_REFRESH: Duration = Duration::from_hours(6);
+/// A field value arrives over an internet-facing admin route. This comfortably
+/// covers feed URLs while preventing a tiny settings document from becoming an
+/// unbounded allocation surface.
+const MAX_FACE_FIELD_VALUE_BYTES: usize = 2_048;
 
 /// One server-rendered card.
 ///
@@ -65,7 +70,7 @@ const MAX_REFRESH: Duration = Duration::from_hours(6);
 /// which is the one thing this file most needs, because a spec is hand-written
 /// and a silently-defaulted field presents as a card that is subtly wrong
 /// forever. Nesting costs one level of braces and keeps both sides strict.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DataCardSpec {
     /// The image source this card pushes to, as `POST /v1/images` minted it.
@@ -81,7 +86,7 @@ const fn default_refresh_seconds() -> u64 {
 }
 
 /// Which face, and what it needs to know.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum FaceSpec {
     Weather {
@@ -112,12 +117,162 @@ fn default_currency() -> String {
     "usd".to_owned()
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Units {
     #[default]
     Metric,
     Imperial,
+}
+
+/// The server-owned settings contract rendered by the companion. The app treats
+/// `kind` as opaque metadata and renders only this descriptor's field types.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FaceDescriptor {
+    pub kind: String,
+    pub label: String,
+    pub fields: Vec<FaceFieldDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum FaceFieldDescriptor {
+    Text {
+        key: String,
+        label: String,
+        value: String,
+        placeholder: String,
+    },
+    Url {
+        key: String,
+        label: String,
+        value: String,
+        placeholder: String,
+    },
+    Enum {
+        key: String,
+        label: String,
+        value: String,
+        options: Vec<FaceFieldOption>,
+    },
+}
+
+impl FaceFieldDescriptor {
+    fn key(&self) -> &str {
+        match self {
+            Self::Text { key, .. } | Self::Url { key, .. } | Self::Enum { key, .. } => key,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FaceFieldOption {
+    pub value: String,
+    pub label: String,
+}
+
+/// The only function that teaches the settings UI about a face. Adding a face
+/// means adding one server-side descriptor here; the companion never switches on
+/// `kind` and needs no release of its own.
+#[must_use]
+pub fn face_descriptor(face: &FaceSpec) -> FaceDescriptor {
+    let text = |key: &str, label: &str, value: &str, placeholder: &str| FaceFieldDescriptor::Text {
+        key: key.to_owned(),
+        label: label.to_owned(),
+        value: value.to_owned(),
+        placeholder: placeholder.to_owned(),
+    };
+    let url = |key: &str, label: &str, value: &str, placeholder: &str| FaceFieldDescriptor::Url {
+        key: key.to_owned(),
+        label: label.to_owned(),
+        value: value.to_owned(),
+        placeholder: placeholder.to_owned(),
+    };
+    match face {
+        FaceSpec::Weather { location, units } => FaceDescriptor {
+            kind: "weather".into(),
+            label: "Weather".into(),
+            fields: vec![
+                text("location", "Location", location, "Dubai"),
+                FaceFieldDescriptor::Enum {
+                    key: "units".into(),
+                    label: "Units".into(),
+                    value: match units {
+                        Units::Metric => "metric",
+                        Units::Imperial => "imperial",
+                    }
+                    .into(),
+                    options: vec![
+                        FaceFieldOption {
+                            value: "metric".into(),
+                            label: "Metric".into(),
+                        },
+                        FaceFieldOption {
+                            value: "imperial".into(),
+                            label: "Imperial".into(),
+                        },
+                    ],
+                },
+            ],
+        },
+        FaceSpec::Rss {
+            url: feed_url,
+            title,
+        } => FaceDescriptor {
+            kind: "rss".into(),
+            label: "RSS feed".into(),
+            fields: vec![
+                url("url", "Feed URL", feed_url, "https://example.com/feed.xml"),
+                text("title", "Title", title, "News"),
+            ],
+        },
+        FaceSpec::Token {
+            coin_id, currency, ..
+        } => FaceDescriptor {
+            kind: "token".into(),
+            label: "Token price".into(),
+            // `api_key` is deliberately absent: the descriptor is a readable
+            // response and its field vocabulary has no secret type. An existing
+            // key remains in the spec unchanged when these public fields change.
+            fields: vec![
+                text("coin_id", "Coin ID", coin_id, "solana"),
+                text("currency", "Currency", currency, "usd"),
+            ],
+        },
+    }
+}
+
+/// Server-owned data-card state. The path, parsed specs, and every live task
+/// stay together so an update can atomically replace the persisted spec and the
+/// one refresher that consumes it.
+pub(crate) struct DataCardState {
+    pub(crate) spec_path: PathBuf,
+    pub(crate) specs: Vec<DataCardSpec>,
+    pub(crate) tasks: HashMap<String, tokio::task::JoinHandle<()>>,
+}
+
+impl DataCardState {
+    pub(crate) fn new(spec_path: PathBuf) -> Self {
+        Self {
+            spec_path,
+            specs: Vec::new(),
+            tasks: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum FaceUpdateError {
+    #[error("this image source is fed by an external producer and has no server settings")]
+    NoFace,
+    #[error("unknown face field {0:?}")]
+    UnknownField(String),
+    #[error("{field}: {message}")]
+    InvalidField { field: String, message: String },
+    #[error("the data-card spec could not be encoded: {0}")]
+    Encode(String),
+    #[error("the data-card spec could not be saved: {0}")]
+    Persist(String),
 }
 
 impl From<Units> for WeatherUnits {
@@ -143,9 +298,17 @@ pub fn load_specs(path: &Path) -> Result<Vec<DataCardSpec>, String> {
     };
     let specs: Vec<DataCardSpec> =
         serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", path.display()))?;
+    let mut source_ids = HashSet::with_capacity(specs.len());
     for spec in &specs {
         if spec.source_id.trim().is_empty() {
             return Err(format!("{}: a spec has an empty source_id", path.display()));
+        }
+        if !source_ids.insert(spec.source_id.as_str()) {
+            return Err(format!(
+                "{}: source_id {:?} has more than one spec",
+                path.display(),
+                spec.source_id
+            ));
         }
     }
     Ok(specs)
@@ -267,16 +430,173 @@ impl FaceProvider {
     }
 }
 
-/// Starts one refresh task per spec.
-///
-/// Each card gets its own task so a slow feed cannot delay a token price, and
-/// so one card's repeated failure is visible as one card's problem.
-pub fn spawn_refreshers(state: &ServerState, specs: Vec<DataCardSpec>) {
-    for spec in specs {
-        let refresh = Duration::from_secs(spec.refresh_seconds).clamp(MIN_REFRESH, MAX_REFRESH);
-        let state = state.clone();
-        tokio::spawn(async move { refresh_loop(state, spec, refresh).await });
+/// Retains the spec path, parsed specs, and one task handle per source in
+/// [`ServerState`]. Each card gets its own task so a slow feed cannot delay a
+/// token price, and retaining the handles lets a settings update replace only
+/// the source it changed.
+pub fn spawn_refreshers(state: &ServerState, spec_path: PathBuf, specs: Vec<DataCardSpec>) {
+    let mut data_cards = state
+        .inner
+        .data_cards
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (_, task) in data_cards.tasks.drain() {
+        task.abort();
     }
+    data_cards.spec_path = spec_path;
+    data_cards.specs = specs;
+    let specs = data_cards.specs.clone();
+    for spec in specs {
+        data_cards
+            .tasks
+            .insert(spec.source_id.clone(), spawn_refresher(state.clone(), spec));
+    }
+}
+
+fn spawn_refresher(state: ServerState, spec: DataCardSpec) -> tokio::task::JoinHandle<()> {
+    let refresh = Duration::from_secs(spec.refresh_seconds).clamp(MIN_REFRESH, MAX_REFRESH);
+    tokio::spawn(async move { refresh_loop(state, spec, refresh).await })
+}
+
+/// Stops every retained data-card refresher. Called from the server's existing
+/// graceful shutdown path before the runtime state is released.
+pub(crate) fn stop_refreshers(state: &ServerState) {
+    let mut data_cards = state
+        .inner
+        .data_cards
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (_, task) in data_cards.tasks.drain() {
+        task.abort();
+    }
+}
+
+pub(crate) fn descriptor_for_source(
+    state: &ServerState,
+    source_id: &str,
+) -> Option<FaceDescriptor> {
+    state
+        .inner
+        .data_cards
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .specs
+        .iter()
+        .find(|spec| spec.source_id == source_id)
+        .map(|spec| face_descriptor(&spec.face))
+}
+
+/// Validates and persists one face update, then aborts and replaces exactly
+/// that source's refresher. The descriptor drives validation and mutation, so
+/// face-specific knowledge is confined to [`face_descriptor`].
+pub(crate) fn update_face_fields(
+    state: &ServerState,
+    runtime: &tokio::runtime::Handle,
+    source_id: &str,
+    fields: &BTreeMap<String, String>,
+) -> Result<FaceDescriptor, FaceUpdateError> {
+    let mut data_cards = state
+        .inner
+        .data_cards
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let index = data_cards
+        .specs
+        .iter()
+        .position(|spec| spec.source_id == source_id)
+        .ok_or(FaceUpdateError::NoFace)?;
+    let current = &data_cards.specs[index];
+    let descriptor = face_descriptor(&current.face);
+    validate_face_fields(&descriptor, fields)?;
+
+    let mut face_value = serde_json::to_value(&current.face)
+        .map_err(|error| FaceUpdateError::Encode(error.to_string()))?;
+    let object = face_value
+        .as_object_mut()
+        .ok_or_else(|| FaceUpdateError::Encode("a face did not serialize as an object".into()))?;
+    for (key, value) in fields {
+        object.insert(key.clone(), serde_json::Value::String(value.clone()));
+    }
+    let updated_face: FaceSpec = serde_json::from_value(face_value)
+        .map_err(|error| FaceUpdateError::Encode(error.to_string()))?;
+    let mut updated_specs = data_cards.specs.clone();
+    updated_specs[index].face = updated_face;
+    let bytes = serde_json::to_vec_pretty(&updated_specs)
+        .map_err(|error| FaceUpdateError::Encode(error.to_string()))?;
+    app_core::secure_file::write_and_replace(&data_cards.spec_path, &bytes).map_err(|error| {
+        let (operation, message) = error.into_strings("data-card spec");
+        FaceUpdateError::Persist(format!("{operation}: {message}"))
+    })?;
+
+    let updated_spec = updated_specs[index].clone();
+    data_cards.specs = updated_specs;
+    if let Some(task) = data_cards.tasks.remove(source_id) {
+        task.abort();
+    }
+    data_cards.tasks.insert(
+        source_id.to_owned(),
+        runtime.spawn(refresh_loop(
+            state.clone(),
+            updated_spec.clone(),
+            Duration::from_secs(updated_spec.refresh_seconds).clamp(MIN_REFRESH, MAX_REFRESH),
+        )),
+    );
+    Ok(face_descriptor(&updated_spec.face))
+}
+
+fn validate_face_fields(
+    descriptor: &FaceDescriptor,
+    fields: &BTreeMap<String, String>,
+) -> Result<(), FaceUpdateError> {
+    for (key, value) in fields {
+        let field = descriptor
+            .fields
+            .iter()
+            .find(|field| field.key() == key)
+            .ok_or_else(|| FaceUpdateError::UnknownField(key.clone()))?;
+        if value.len() > MAX_FACE_FIELD_VALUE_BYTES {
+            return Err(FaceUpdateError::InvalidField {
+                field: key.clone(),
+                message: format!("must be at most {MAX_FACE_FIELD_VALUE_BYTES} UTF-8 bytes"),
+            });
+        }
+        if value.chars().any(char::is_control) {
+            return Err(FaceUpdateError::InvalidField {
+                field: key.clone(),
+                message: "must not contain control characters".into(),
+            });
+        }
+        if value.trim().is_empty() {
+            return Err(FaceUpdateError::InvalidField {
+                field: key.clone(),
+                message: "must not be empty".into(),
+            });
+        }
+        match field {
+            FaceFieldDescriptor::Text { .. } => {}
+            FaceFieldDescriptor::Url { .. } => {
+                let parsed = url::Url::parse(value).map_err(|_| FaceUpdateError::InvalidField {
+                    field: key.clone(),
+                    message: "must be an absolute HTTP or HTTPS URL".into(),
+                })?;
+                if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+                    return Err(FaceUpdateError::InvalidField {
+                        field: key.clone(),
+                        message: "must be an absolute HTTP or HTTPS URL".into(),
+                    });
+                }
+            }
+            FaceFieldDescriptor::Enum { options, .. } => {
+                if !options.iter().any(|option| option.value == *value) {
+                    return Err(FaceUpdateError::InvalidField {
+                        field: key.clone(),
+                        message: "has an unsupported value".into(),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn refresh_loop(state: ServerState, spec: DataCardSpec, refresh: Duration) {
@@ -510,5 +830,125 @@ mod tests {
             }
             other => panic!("expected a weather card, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn descriptor_fields_are_derived_from_a_real_face_spec() {
+        let face = FaceSpec::Weather {
+            location: "Dubai".into(),
+            units: Units::Metric,
+        };
+
+        let descriptor = face_descriptor(&face);
+
+        assert_eq!(descriptor.kind, "weather");
+        assert_eq!(descriptor.label, "Weather");
+        assert!(matches!(
+            &descriptor.fields[0],
+            FaceFieldDescriptor::Text { key, value, .. }
+                if key == "location" && value == "Dubai"
+        ));
+        assert!(matches!(
+            &descriptor.fields[1],
+            FaceFieldDescriptor::Enum { key, value, options, .. }
+                if key == "units" && value == "metric" && options.len() == 2
+        ));
+    }
+
+    #[test]
+    fn an_unknown_face_field_key_is_refused() {
+        let descriptor = face_descriptor(&FaceSpec::Weather {
+            location: "Dubai".into(),
+            units: Units::Metric,
+        });
+        let fields = BTreeMap::from([("locaton".into(), "Berlin".into())]);
+
+        assert!(matches!(
+            validate_face_fields(&descriptor, &fields),
+            Err(FaceUpdateError::UnknownField(key)) if key == "locaton"
+        ));
+    }
+
+    #[test]
+    fn a_non_http_face_url_is_refused() {
+        let descriptor = face_descriptor(&FaceSpec::Rss {
+            url: "https://example.test/feed".into(),
+            title: "News".into(),
+        });
+        let fields = BTreeMap::from([("url".into(), "file:///etc/passwd".into())]);
+
+        assert!(matches!(
+            validate_face_fields(&descriptor, &fields),
+            Err(FaceUpdateError::InvalidField { field, .. }) if field == "url"
+        ));
+    }
+
+    #[tokio::test]
+    async fn rewriting_one_spec_preserves_every_other_entry() {
+        let state = ServerState::in_memory();
+        let path = {
+            state
+                .inner
+                .data_cards
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .spec_path
+                .clone()
+        };
+        let untouched = DataCardSpec {
+            source_id: "untouched".into(),
+            refresh_seconds: 3_600,
+            face: FaceSpec::Token {
+                coin_id: "solana".into(),
+                currency: "eur".into(),
+                api_key: Some("still-secret".into()),
+            },
+        };
+        let original = vec![
+            DataCardSpec {
+                source_id: "target".into(),
+                refresh_seconds: 600,
+                face: FaceSpec::Rss {
+                    url: "https://example.test/old.xml".into(),
+                    title: "Old title".into(),
+                },
+            },
+            untouched.clone(),
+        ];
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&original).expect("encode fixture"),
+        )
+        .expect("write fixture");
+        {
+            let mut retained = state
+                .inner
+                .data_cards
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            retained.specs = original;
+        }
+
+        let fields = BTreeMap::from([
+            ("url".into(), "https://example.test/new.xml".into()),
+            ("title".into(), "New title".into()),
+        ]);
+        update_face_fields(
+            &state,
+            &tokio::runtime::Handle::current(),
+            "target",
+            &fields,
+        )
+        .expect("update face");
+
+        let rewritten = load_specs(&path).expect("rewritten specs parse");
+        assert_eq!(rewritten.len(), 2);
+        assert_eq!(rewritten[1], untouched);
+        assert!(matches!(
+            &rewritten[0].face,
+            FaceSpec::Rss { url, title }
+                if url == "https://example.test/new.xml" && title == "New title"
+        ));
+        state.shutdown();
     }
 }

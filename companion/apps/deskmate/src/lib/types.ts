@@ -81,6 +81,40 @@ export interface ImageSource {
   name: string;
 }
 
+export interface ImageSourceDescriptor {
+  id: string;
+  name: string;
+  face: FaceDescriptor | null;
+}
+
+export interface FaceDescriptor {
+  /** Opaque server metadata. The app renders `fields` and never branches on this value. */
+  kind: string;
+  label: string;
+  fields: FaceFieldDescriptor[];
+}
+
+export type FaceFieldDescriptor =
+  | {
+      type: "text" | "url";
+      key: string;
+      label: string;
+      value: string;
+      placeholder: string;
+    }
+  | {
+      type: "enum";
+      key: string;
+      label: string;
+      value: string;
+      options: FaceFieldOption[];
+    };
+
+export interface FaceFieldOption {
+  value: string;
+  label: string;
+}
+
 /** Secret-bearing result returned once when the server creates an image source. */
 export interface MintedImageSource {
   source_id: string;

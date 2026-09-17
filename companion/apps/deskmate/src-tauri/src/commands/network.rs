@@ -31,6 +31,66 @@ pub struct MintedImageSource {
     pub(crate) push_url: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageSourceDescriptor {
+    pub id: String,
+    pub name: String,
+    pub face: Option<FaceDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FaceDescriptor {
+    pub kind: String,
+    pub label: String,
+    pub fields: Vec<FaceFieldDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum FaceFieldDescriptor {
+    Text {
+        key: String,
+        label: String,
+        value: String,
+        placeholder: String,
+    },
+    Url {
+        key: String,
+        label: String,
+        value: String,
+        placeholder: String,
+    },
+    Enum {
+        key: String,
+        label: String,
+        value: String,
+        options: Vec<FaceFieldOption>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FaceFieldOption {
+    pub value: String,
+    pub label: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateImageSourceFaceRequest {
+    pub(super) source_id: String,
+    pub(super) fields: BTreeMap<String, String>,
+}
+
+#[derive(Serialize)]
+struct ServerUpdateFaceRequest<'a> {
+    fields: &'a BTreeMap<String, String>,
+}
+
+#[derive(Deserialize)]
+struct ImageRouteErrorBody {
+    message: Option<String>,
+}
+
 pub(super) fn mint_server_image_source(
     context: &ServerQueryContext,
     name: &str,
@@ -60,7 +120,7 @@ pub(super) fn mint_server_image_source(
         let response_body = response
             .body_mut()
             .with_config()
-            .limit(MAX_IMAGE_SOURCE_MINT_BYTES.saturating_add(1) as u64)
+            .limit(MAX_IMAGE_SOURCE_RESPONSE_BYTES.saturating_add(1) as u64)
             .read_to_vec()
             .map_err(|error| match error {
                 ureq::Error::BodyExceedsLimit(_) => IpcError::RuntimeUnavailable {
@@ -106,6 +166,244 @@ pub async fn mint_image_source(
 ) -> Result<MintedImageSource, IpcError> {
     let context = ServerQueryContext::from_desktop(&state);
     on_server_worker(move || mint_server_image_source(&context, &source_name)).await
+}
+
+#[tauri::command]
+pub async fn list_image_sources(
+    state: State<'_, DesktopState>,
+) -> Result<Vec<ImageSourceDescriptor>, IpcError> {
+    let context = ServerQueryContext::from_desktop(&state);
+    on_server_worker(move || list_server_image_sources(&context)).await
+}
+
+#[tauri::command]
+pub async fn update_image_source_face(
+    state: State<'_, DesktopState>,
+    request: UpdateImageSourceFaceRequest,
+) -> Result<FaceDescriptor, IpcError> {
+    let context = ServerQueryContext::from_desktop(&state);
+    on_server_worker(move || update_server_image_source_face(&context, request)).await
+}
+
+pub(super) fn list_server_image_sources(
+    context: &ServerQueryContext,
+) -> Result<Vec<ImageSourceDescriptor>, IpcError> {
+    let settings = context.network_store.load().settings().clone();
+    let url = crate::server_client::server_url(&settings.server_url, &["v1", "images"])?;
+    let body = context.with_admin_token(|token| {
+        let response = context
+            .agent
+            .get(url.as_str())
+            .header("Authorization", format!("Bearer {token}"))
+            .call()
+            .map_err(|_| unreachable_server())?;
+        read_image_source_response(response)
+    })?;
+    let sources: Vec<ImageSourceDescriptor> =
+        serde_json::from_slice(&body).map_err(|_| IpcError::IncompatibleServer {
+            message: "the server returned image-source settings this app could not read".into(),
+        })?;
+    validate_image_source_descriptors(&sources)?;
+    Ok(sources)
+}
+
+pub(super) fn update_server_image_source_face(
+    context: &ServerQueryContext,
+    request: UpdateImageSourceFaceRequest,
+) -> Result<FaceDescriptor, IpcError> {
+    validate_target(&request.source_id, MAX_CARD_ID_LEN, "picture source ID")?;
+    validate_face_field_values(&request.fields)?;
+    let settings = context.network_store.load().settings().clone();
+    let url = crate::server_client::server_url(
+        &settings.server_url,
+        &["v1", "images", &request.source_id, "face"],
+    )?;
+    let body = serde_json::to_vec(&ServerUpdateFaceRequest {
+        fields: &request.fields,
+    })
+    .map_err(|_| IpcError::Internal {
+        message: "the image-source settings request could not be encoded".into(),
+    })?;
+    let response_body = context.with_admin_token(|token| {
+        let response = context
+            .agent
+            .put(url.as_str())
+            .header("Authorization", format!("Bearer {token}"))
+            .content_type("application/json")
+            .send(&body)
+            .map_err(|_| unreachable_server())?;
+        read_image_source_response(response)
+    })?;
+    let descriptor: FaceDescriptor =
+        serde_json::from_slice(&response_body).map_err(|_| IpcError::IncompatibleServer {
+            message: "the server returned source settings this app could not read".into(),
+        })?;
+    validate_face_descriptor(&descriptor)?;
+    Ok(descriptor)
+}
+
+fn read_image_source_response(
+    mut response: ureq::http::Response<ureq::Body>,
+) -> Result<Vec<u8>, IpcError> {
+    let status = response.status().as_u16();
+    let body = response
+        .body_mut()
+        .with_config()
+        .limit(MAX_IMAGE_SOURCE_RESPONSE_BYTES.saturating_add(1) as u64)
+        .read_to_vec()
+        .map_err(|error| match error {
+            ureq::Error::BodyExceedsLimit(_) => IpcError::RuntimeUnavailable {
+                message: "the server returned an oversized image-source response".into(),
+            },
+            _ => IpcError::RuntimeUnavailable {
+                message: "the server returned an unreadable image-source response".into(),
+            },
+        })?;
+    if body.len() > MAX_IMAGE_SOURCE_RESPONSE_BYTES {
+        return Err(IpcError::RuntimeUnavailable {
+            message: "the server returned an oversized image-source response".into(),
+        });
+    }
+    if !(200..300).contains(&status) {
+        return Err(image_source_server_failure(status, &body));
+    }
+    Ok(body)
+}
+
+fn image_source_server_failure(status: u16, body: &[u8]) -> IpcError {
+    if status == 401 {
+        return IpcError::InvalidPayload {
+            message: "the server rejected the admin token".into(),
+        };
+    }
+    let detail = serde_json::from_slice::<ImageRouteErrorBody>(body)
+        .ok()
+        .and_then(|error| error.message)
+        .filter(|message| !message.trim().is_empty());
+    match status {
+        404 => IpcError::NotFound {
+            message: detail
+                .unwrap_or_else(|| "the picture source was not found on the server".into()),
+        },
+        400..=499 => IpcError::InvalidPayload {
+            message: detail.unwrap_or_else(|| {
+                format!("the server refused the source settings (HTTP {status})")
+            }),
+        },
+        _ => IpcError::RuntimeUnavailable {
+            message: format!("the server rejected the source settings request (HTTP {status})"),
+        },
+    }
+}
+
+fn unreachable_server() -> IpcError {
+    IpcError::RuntimeUnavailable {
+        message: "the configured server could not be reached".into(),
+    }
+}
+
+fn validate_face_field_values(fields: &BTreeMap<String, String>) -> Result<(), IpcError> {
+    if fields.len() > MAX_FACE_FIELDS {
+        return Err(IpcError::InvalidPayload {
+            message: format!("a source may have at most {MAX_FACE_FIELDS} settings fields"),
+        });
+    }
+    for (key, value) in fields {
+        validate_target(key, MAX_FACE_FIELD_KEY_BYTES, "source setting key")?;
+        validate_bounded(value, MAX_FACE_FIELD_VALUE_BYTES, "source setting value")?;
+        if value.chars().any(char::is_control) {
+            return Err(IpcError::InvalidPayload {
+                message: format!("source setting {key:?} contains a control character"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_image_source_descriptors(sources: &[ImageSourceDescriptor]) -> Result<(), IpcError> {
+    if sources.len() > app_core::config::MAX_IMAGE_SOURCES {
+        return Err(IpcError::IncompatibleServer {
+            message: "the server returned more image sources than this app supports".into(),
+        });
+    }
+    for source in sources {
+        validate_target(&source.id, MAX_CARD_ID_LEN, "picture source ID")?;
+        validate_target(
+            &source.name,
+            app_core::config::MAX_IMAGE_SOURCE_NAME_LEN,
+            "picture source name",
+        )?;
+        if let Some(face) = &source.face {
+            validate_face_descriptor(face)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_face_descriptor(descriptor: &FaceDescriptor) -> Result<(), IpcError> {
+    validate_target(&descriptor.kind, MAX_FACE_FIELD_KEY_BYTES, "face kind")?;
+    validate_target(&descriptor.label, 128, "face label")?;
+    if descriptor.fields.len() > MAX_FACE_FIELDS {
+        return Err(IpcError::IncompatibleServer {
+            message: "the server returned too many source settings fields".into(),
+        });
+    }
+    let mut keys = HashSet::with_capacity(descriptor.fields.len());
+    for field in &descriptor.fields {
+        let (key, label, value, placeholder) = match field {
+            FaceFieldDescriptor::Text {
+                key,
+                label,
+                value,
+                placeholder,
+            }
+            | FaceFieldDescriptor::Url {
+                key,
+                label,
+                value,
+                placeholder,
+            } => (key, label, value, Some(placeholder)),
+            FaceFieldDescriptor::Enum {
+                key, label, value, ..
+            } => (key, label, value, None),
+        };
+        validate_target(key, MAX_FACE_FIELD_KEY_BYTES, "source setting key")?;
+        if !keys.insert(key) {
+            return Err(IpcError::IncompatibleServer {
+                message: "the server returned duplicate source setting keys".into(),
+            });
+        }
+        validate_target(label, 128, "source setting label")?;
+        validate_bounded(value, MAX_FACE_FIELD_VALUE_BYTES, "source setting value")?;
+        if let Some(placeholder) = placeholder {
+            validate_bounded(
+                placeholder,
+                MAX_FACE_FIELD_VALUE_BYTES,
+                "source setting placeholder",
+            )?;
+        }
+        if let FaceFieldDescriptor::Enum { options, value, .. } = field {
+            if options.is_empty() || options.len() > MAX_FACE_FIELDS {
+                return Err(IpcError::IncompatibleServer {
+                    message: "the server returned an invalid segmented setting".into(),
+                });
+            }
+            for option in options {
+                validate_target(
+                    &option.value,
+                    MAX_FACE_FIELD_VALUE_BYTES,
+                    "source setting option",
+                )?;
+                validate_target(&option.label, 128, "source setting option label")?;
+            }
+            if !options.iter().any(|option| option.value == *value) {
+                return Err(IpcError::IncompatibleServer {
+                    message: "the server returned an unsupported selected setting".into(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]

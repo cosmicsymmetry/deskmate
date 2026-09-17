@@ -7,6 +7,8 @@ import type {
   AutostartStatus,
   ConfigApplyResult,
   DraftValidation,
+  FaceDescriptor,
+  ImageSourceDescriptor,
   IpcError,
   MintedImageSource,
   NetworkSettings,
@@ -164,6 +166,19 @@ export function renderCardPreview(cardId: string): Promise<PreviewFrame> {
 
 export function mintImageSource(name: string): Promise<MintedImageSource> {
   return invokeTyped("mint_image_source", { sourceName: name });
+}
+
+export function listImageSources(): Promise<ImageSourceDescriptor[]> {
+  return invokeTyped("list_image_sources");
+}
+
+export function updateImageSourceFace(
+  sourceId: string,
+  fields: Record<string, string>,
+): Promise<FaceDescriptor> {
+  return invokeTyped("update_image_source_face", {
+    request: { source_id: sourceId, fields },
+  });
 }
 
 export function listenToAppState(onSnapshot: (snapshot: AppSnapshot) => void): Promise<UnlistenFn> {

@@ -474,6 +474,10 @@ export function CardList({
             </span>
             <span>
               <strong>Add a card</strong>
+              {/* Describes what you GET, which is why it stayed accurate when the
+                  menu grew a third group: a server-side face is added as a
+                  picture card, so there are still only two outcomes. Enumerating
+                  the groups here wrapped to three lines and said less. */}
               <small>Built in or picture</small>
             </span>
           </button>
@@ -516,9 +520,16 @@ export function CardList({
                     </button>
                   );
                 })}
-                {/* The server's own faces sit beside the built-in kinds because
-                    the owner does not care which side of the wire draws them.
-                    Picking one names the card itself; nothing is typed. */}
+              </fieldset>
+              {/* Its own group, not beside the built-in kinds. These are picture
+                  cards whose frames the server draws, and the menu was the only
+                  surface calling them built in -- the tile that appears says
+                  "Picture", as does the editor. A menu that disagrees with what
+                  it produces is the vocabulary version of the mistake e2b103c
+                  made in the schema. Picking one names the card itself; nothing
+                  is typed. */}
+              <fieldset className="menu__group">
+                <legend className="tile-label menu__label">Server-side</legend>
                 {creatableFaces.map((face, faceIndex) => {
                   const index = addableKinds.length + faceIndex;
                   const choose = () => onAddFace(face.kind, face.label);
@@ -538,7 +549,7 @@ export function CardList({
                     >
                       <span>
                         <strong>{face.label}</strong>
-                        <small>Drawn on the server</small>
+                        <small>Added as a picture</small>
                       </span>
                     </button>
                   );

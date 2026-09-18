@@ -861,6 +861,55 @@ describe("settings accessibility and states", () => {
     }
   });
 
+  test("a server-drawn face is not filed under Built in", async () => {
+    // The menu was the only surface calling weather built in. Everything else --
+    // the tile, the editor heading, `cardLabel` -- says "Picture", so the menu
+    // disagreed with what it produced within one click. Worse, "built in" is the
+    // exact claim the schema made in e2b103c and had reverted the next day, so
+    // the vocabulary was re-asserting what the architecture rejected.
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <CardList
+            config={cardListConfig([])}
+            issues={[]}
+            pomodoros={[]}
+            ownershipTier="networked"
+            selectedCardId={null}
+            onSelect={() => {}}
+            onAdd={() => {}}
+            onChange={() => {}}
+            onRemove={() => {}}
+            creatableFaces={[{ kind: "weather", label: "Weather", fields: [] }]}
+            onAddFace={() => {}}
+          />,
+        ),
+      );
+      await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
+
+      const groups = [...container.querySelectorAll(".menu__group")].map((group) => ({
+        legend: group.querySelector("legend")?.textContent?.trim() ?? "",
+        items: [...group.querySelectorAll('[role="menuitem"]')].map(
+          (item) => item.querySelector("strong")?.textContent?.trim() ?? "",
+        ),
+      }));
+
+      const builtIn = groups.find((group) => group.legend === "Built in");
+      const serverSide = groups.find((group) => group.legend === "Server-side");
+      expect(builtIn).toBeDefined();
+      expect(serverSide).toBeDefined();
+      expect(builtIn?.items).toContain("Digital clock");
+      expect(builtIn?.items).not.toContain("Weather");
+      expect(serverSide?.items).toEqual(["Weather"]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("the add menu offers the faces the server says it can draw", async () => {
     // The app does not know what weather is: it renders whatever the server
     // listed, so a fourth face appears here with no app change at all.

@@ -182,7 +182,8 @@ export const ipcContractFixtures = {
       "subscriber_snapshots_overwritten": 6,
       "interrupt_dismissals_ignored": 7
     },
-    "has_saved_config": true
+    "has_saved_config": true,
+    "host_protocol_version": 2
   },
   "configs": [
     {

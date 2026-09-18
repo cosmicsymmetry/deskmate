@@ -165,6 +165,14 @@ export interface AppSnapshot {
   config: AppConfig;
   /** True once a settings document has existed on disk, independent of draft edits. */
   has_saved_config: boolean;
+  /**
+   * The wire version the server speaks.
+   *
+   * Reported rather than hard-coded here: the window used to compare the device's
+   * reported version against a literal `1`, which went stale at the v1 -> v2
+   * migration and made the app claim an incompatibility on every real connection.
+   */
+  host_protocol_version: number;
   runtime: RuntimeState;
   device: DeviceSnapshot;
   pomodoros: PomodoroSnapshot[];

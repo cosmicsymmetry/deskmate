@@ -96,6 +96,11 @@ export function mockSnapshot(config: AppConfig): AppSnapshot {
   return {
     config,
     has_saved_config: true,
+    // The wire the server speaks. Matching the device's `protocol_version` below
+    // is the ordinary case, and the harness has to show the ordinary case: a
+    // fixture where they differ would paint a permanent incompatibility banner
+    // over every screenshot.
+    host_protocol_version: 2,
     runtime: { kind: "running" },
     device: {
       connection: { kind: "online" },

@@ -256,14 +256,24 @@ async fn list_devices(
 // Snapshot
 // ---------------------------------------------------------------------------
 
-/// `AppSnapshot` plus the one fact the runtime deliberately does not own:
-/// whether a settings document has ever existed on disk. Flattened, so the
-/// frontend keeps parsing a single DTO exactly as it did over IPC.
+/// `AppSnapshot` plus the two facts the runtime deliberately does not own:
+/// whether a settings document has ever existed on disk, and which protocol
+/// version this host speaks. Flattened, so the frontend keeps parsing a single
+/// DTO exactly as it did over IPC.
 #[derive(Serialize)]
 pub(crate) struct CompanionSnapshot {
     #[serde(flatten)]
     pub(crate) app: AppSnapshot,
     pub(crate) has_saved_config: bool,
+    /// The wire version this server speaks, straight from `protocol`.
+    ///
+    /// Reported rather than assumed because the window used to hard-code it, and
+    /// the constant went stale at the v1 -> v2 migration: the app compared the
+    /// device's reported 2 against a literal 1 and declared an incompatibility
+    /// on every single connection. It was invisible for as long as the board
+    /// stayed unplugged, which is most of the time. A value carried from the
+    /// crate that defines it cannot drift from it.
+    pub(crate) host_protocol_version: u8,
 }
 
 async fn snapshot(
@@ -294,6 +304,7 @@ async fn read_snapshot(
         return Ok(CompanionSnapshot {
             app,
             has_saved_config: true,
+            host_protocol_version: protocol::PROTOCOL_VERSION,
         });
     }
 
@@ -317,6 +328,7 @@ async fn read_snapshot(
         CompanionSnapshot {
             app,
             has_saved_config,
+            host_protocol_version: protocol::PROTOCOL_VERSION,
         }
     })
     .await

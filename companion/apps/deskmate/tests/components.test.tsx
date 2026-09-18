@@ -1915,11 +1915,16 @@ describe("settings accessibility and states", () => {
     }
   });
 
-  test("a protocol the app cannot speak is stated in the work column, not a status bar", async () => {
-    // The header that used to carry this was removed; the sentence has to survive
-    // the move or a mismatched display fails silently.
+  test("a display speaking the server's own protocol raises nothing", async () => {
+    // The assertion that would have caught a three-week-old lie. The previous
+    // version of this test set the device to protocol 2 and asserted the app
+    // replied "this app speaks protocol 1" -- written when the app really did
+    // speak 1, and left unchanged through the v1 -> v2 migration, after which it
+    // pinned the wrong answer. Every connected board was told it was
+    // incompatible, and only a real connection showed it.
     snapshotImpl = async () => ({
       ...(structuredClone(snapshot) as AppSnapshot),
+      host_protocol_version: 2,
       device: { ...snapshot.device, protocol_version: 2 },
     });
     previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
@@ -1929,7 +1934,44 @@ describe("settings accessibility and states", () => {
     const root = createRoot(container);
     try {
       await act(async () => root.render(<App />));
-      await waitFor(() => expect(container.textContent).toContain("this app speaks protocol 1"));
+      // Wait for the window proper, then assert by absence. The save button's
+      // label depends on ownership, so it is the wrong thing to wait on here.
+      await waitFor(() =>
+        expect(
+          [...container.querySelectorAll("button")].some((button) =>
+            button.textContent?.includes("Settings"),
+          ),
+        ).toBe(true),
+      );
+      expect(container.textContent).not.toContain("speaks protocol");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      snapshotImpl = async () => snapshot;
+    }
+  });
+
+  test("a protocol the server cannot speak is stated in the work column, not a status bar", async () => {
+    // The header that used to carry this was removed; the sentence has to survive
+    // the move or a mismatched display fails silently. A device ahead of the
+    // server is the shape this really takes: firmware is flashed first.
+    snapshotImpl = async () => ({
+      ...(structuredClone(snapshot) as AppSnapshot),
+      host_protocol_version: 2,
+      device: { ...snapshot.device, protocol_version: 3 },
+    });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<App />));
+      await waitFor(() =>
+        expect(container.textContent).toContain(
+          "This display speaks protocol 3; this server speaks protocol 2.",
+        ),
+      );
       // And the door to the settings sheet says something is wrong with it.
       expect(container.querySelector(".topbar__settings.has-attention")).not.toBeNull();
     } finally {

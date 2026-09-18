@@ -146,6 +146,7 @@ fn contract_fixtures() -> ContractFixtures {
     }];
     let snapshot = CompanionSnapshot {
         has_saved_config: true,
+        host_protocol_version: protocol::PROTOCOL_VERSION,
         app: AppSnapshot {
             config: config.clone(),
             runtime: RuntimeState::Error {

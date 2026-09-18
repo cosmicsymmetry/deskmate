@@ -274,7 +274,8 @@ export function App() {
   const networkedTier = ownershipTier === "networked";
   const localTier = ownershipTier === "local";
   const protocolMismatch =
-    snapshot.device.protocol_version !== null && snapshot.device.protocol_version !== 1;
+    snapshot.device.protocol_version !== null &&
+    snapshot.device.protocol_version !== snapshot.host_protocol_version;
   const paused = snapshot.config.preferences.paused || snapshot.runtime.kind === "paused";
   // The settings button is silent while everything is nominal, and carries a dot
   // only for the things whose answers live behind it.
@@ -474,7 +475,7 @@ export function App() {
               <div>
                 <strong>
                   {protocolMismatch
-                    ? `This display speaks protocol ${snapshot.device.protocol_version}; this app speaks protocol 1.`
+                    ? `This display speaks protocol ${snapshot.device.protocol_version}; this server speaks protocol ${snapshot.host_protocol_version}.`
                     : snapshot.runtime.kind === "error"
                       ? snapshot.runtime.message
                       : (commandError ?? stateError)?.message}

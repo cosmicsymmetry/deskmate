@@ -100,10 +100,8 @@ pub(super) fn build_card_scene(
 /// than for pushing: the revision is fixed at 1 and nothing is minted, marked
 /// dirty, or sent.
 ///
-/// This exists so the settings window is not a second renderer. It used to draw
-/// through the retired C templates while the device drew scenes, and a parity
-/// gate kept the two agreeing; there is now one renderer and the preview shows
-/// what the panel shows by construction.
+/// This keeps preview and panel rendering on the same scene-building path, so
+/// the preview shows what the panel shows by construction.
 ///
 /// A `Picture` card has no locally renderable face -- its frames live on the
 /// server, where producers push them, and this process has no

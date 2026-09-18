@@ -404,8 +404,17 @@ pub(crate) fn fit_tracked(
     ellipsize_tracked(text, size, weight, tracking, max_width)
 }
 
+/// Returns `text` unchanged when it fits, otherwise truncates it with an
+/// ellipsis to fit `max_width`.
+pub(crate) fn fit(text: &str, size: f64, weight: u16, max_width: f64) -> String {
+    if text_width(text, size, weight) <= max_width {
+        return text.to_owned();
+    }
+    ellipsize(text, size, weight, max_width)
+}
+
 /// Trims characters off the end until the run plus an ellipsis fits.
-pub(crate) fn ellipsize(text: &str, size: f64, weight: u16, max_width: f64) -> String {
+fn ellipsize(text: &str, size: f64, weight: u16, max_width: f64) -> String {
     const ELLIPSIS: char = '\u{2026}';
     if text_width(text, size, weight) <= max_width {
         let mut ellipsized = text.trim_end().to_owned();

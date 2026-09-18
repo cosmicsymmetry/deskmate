@@ -1,3 +1,16 @@
+> **STATUS — HISTORICAL REVIEW.** Reviewed 2026-08-15; retired 2026-09-18. This
+> document audited the macOS Tauri companion, whose binary and `src-tauri` source tree
+> have been deleted. It is **not a security review of the current web companion or Rust
+> server**. Paths and controls below are preserved as evidence of what was reviewed.
+>
+> Finding carry-forward: F1 (Tauri capabilities), F2 (Tauri CSP), F3 (desktop-shell
+> logging), and F5 (DMG signing) ended with the deleted binary. F4 survives in part:
+> `app-core` still repairs readable config files to mode `0600` and creates atomic
+> replacements at `0600`; the shell-owned `0700` application-directory setup did not
+> carry forward. F6's local-app exception did not carry forward as policy: production
+> server data-card fetches use the server's guarded egress client. These facts do not
+> extend this review's verdicts to the current server.
+
 # V1 Security Review — Companion App
 
 Reviewed: 2026-08-15, commit `b37a1b5a74db95e360f23340cac12c2bba610f78` plus the fixes listed below in the uncommitted review working tree.

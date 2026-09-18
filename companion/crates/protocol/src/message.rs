@@ -16,9 +16,8 @@ pub const MAX_PROTOCOL_VERSION: u8 = 2;
 /// compacted.** A bit's meaning is its identity; reusing a retired number would
 /// make a v1 capability word decode as a plausible v2 one instead of an
 /// obviously wrong one.
-/// Kept as documentation of which numbers must never be re-issued.
-#[allow(dead_code)]
-pub const RETIRED_V1_CAPABILITY_BITS: u64 = 0b1_1111;
+/// The invariant below reserves these numbers so they cannot be re-issued.
+const RETIRED_V1_CAPABILITY_BITS: u64 = 0b1_1111;
 pub const CAPABILITY_ASSET_TRANSFER: u64 = 1 << 5;
 pub const CAPABILITY_FIRMWARE_UPDATE: u64 = 1 << 6;
 pub const CAPABILITY_NETWORKING: u64 = 1 << 7;
@@ -52,6 +51,7 @@ pub const CURRENT_CAPABILITIES: u64 = CAPABILITY_ASSET_TRANSFER
     | CAPABILITY_SCENE_RENDER
     | CAPABILITY_VOLATILE_ASSETS
     | CAPABILITY_DURABLE_ASSET_ENCODING;
+const _: () = assert!(CURRENT_CAPABILITIES & RETIRED_V1_CAPABILITY_BITS == 0);
 pub const LINK_TIMEOUT_MS: u64 = 10_000;
 /// A card id is an identifier the host chose, not free text.
 ///
@@ -215,10 +215,9 @@ pub struct PushScene {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-/// One card in the loop. Protocol v2 carries only what the device still decides
-/// for itself: which card this is, and what a tap on it does. The template, the
-/// size class and the interrupt policy all described a device that rendered the
-/// face, and it has not since stage 3a.
+/// One card in the loop. Protocol v2 carries only what the device decides for
+/// itself: which card this is, and what a tap on it does. The host-rendered scene
+/// carries the face's visual content.
 pub struct CardConfig {
     pub card_id: String,
     pub tap_action: TapAction,
@@ -1995,11 +1994,11 @@ mod tests {
     }
 
     #[test]
-    fn legacy_status_without_additive_m3_or_m4_fields_remains_compatible() {
+    fn status_without_optional_handshake_fields_remains_compatible() {
         let payload = encode_payload(&Message::StatusResponse(status())).unwrap();
-        // The additive networking fields (M4-and-later Task 1) keep the entry
-        // count at or above 24, so the map header stays in its two-byte
-        // extended form regardless of the exact count.
+        // The current status fields keep the entry count at or above 24, so the
+        // map header stays in its two-byte extended form regardless of the
+        // exact count.
         assert_eq!(payload[0], 0xb8, "status should use the extended map form");
         let original_count = payload[1];
         // Keys 21 (latest_interrupt_token), 22 (max_protocol_version), and 23
@@ -2040,7 +2039,7 @@ mod tests {
     }
 
     #[test]
-    fn released_m3_status_reader_can_skip_the_current_handshake_extension() {
+    fn prefix_status_reader_can_skip_the_current_handshake_extension() {
         let payload = encode_payload(&Message::StatusResponse(status())).unwrap();
         let mut decoder = Decoder::new(&payload);
         let len = decoder.map_len().unwrap();

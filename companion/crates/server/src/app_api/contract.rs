@@ -6,10 +6,9 @@
 //! rename that TypeScript has not been told about fails here, and a TypeScript
 //! declaration that no longer describes the Rust fails there.
 //!
-//! Moved from the Mac app's `src-tauri/src/commands/mod.rs` when the companion
-//! became a web app. It had to move rather than be deleted with its host: it was
-//! the only thing pinning the shapes, and nothing else would have noticed them
-//! drifting.
+//! Keeping the fixture generator beside the Rust DTOs makes their serialized
+//! shapes the source of truth and catches drift that either compiler alone
+//! cannot see.
 //!
 //! To regenerate after an intentional DTO change:
 //! `cargo test -p server --lib -- --ignored print_typescript_contract_fixture --nocapture`

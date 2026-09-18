@@ -1,5 +1,10 @@
 # Deskmate v1 — Milestone Roadmap
 
+> **STATUS (updated 2026-09-18): HISTORICAL THROUGH V3.** The milestone rows preserve
+> what shipped and when; the “Current” paragraph below predates completion of the server
+> host and deletion of the Tauri companion. The current companion is the web app served
+> by the Rust server.
+
 Spec: `docs/superpowers/specs/2026-08-03-deskmate-design.md`
 
 **Current:** V1 and V2 are EXITED and TAGGED (`v1` at `7abd496`, `v2` at `fdf85ba`) by

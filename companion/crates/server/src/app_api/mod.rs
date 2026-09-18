@@ -1,14 +1,12 @@
 //! The browser companion's API.
 //!
-//! This is the surface the web app talks to, and it replaces the Mac app's Tauri
-//! command set one-for-one. The shapes are deliberately unchanged: every response
-//! here is the same DTO the `invoke()` bridge returned, so `src/lib/types.ts` and
-//! the generated `types.contract.ts` fixture describe both the old IPC and this
-//! HTTP API without a second vocabulary.
+//! This is the surface the web app talks to. Its response DTOs are checked
+//! against `src/lib/types.ts` through the generated `types.contract.ts` fixture,
+//! so the Rust HTTP API and TypeScript client share one vocabulary.
 //!
-//! Errors are the frontend's own `IpcError` discriminated union, carried in the
-//! body with a matching HTTP status. That is why the app's `toIpcError` survived
-//! the move: the category it switches on is still the category it receives.
+//! Errors use the frontend's `IpcError` discriminated union, carried in the body
+//! with a matching HTTP status. The client switches on the same category that
+//! non-browser callers can infer from the status.
 //!
 //! Every route is behind [`OperatorAuthenticated`]. That is the real gate. The
 //! Caddy `basic_auth` in front of these paths is the edge gate the owner asked
@@ -43,7 +41,8 @@ use crate::oauth::session::{OperatorAuthenticated, SessionSigner, set_cookie_hea
 /// (`oauth::routes::SESSION_TTL`, 12 h) on purpose: that one fronts a consent
 /// flow an operator visits occasionally, this one fronts the window the owner
 /// keeps open, and a daily re-login to read a clock face is friction with no
-/// security to show for it. The credential it is traded for is unchanged.
+/// security to show for it. The admin token is exchanged, not stored by the
+/// browser.
 const SESSION_TTL_DAYS: i64 = 30;
 
 /// Largest configuration document accepted from the browser. Matches the app's
@@ -83,8 +82,8 @@ pub(crate) fn routes() -> Router<ServerState> {
 // Errors
 // ---------------------------------------------------------------------------
 
-/// The frontend's `IpcError`, unchanged. `category` is what the app switches on;
-/// the HTTP status carries the same decision for anything that is not the app.
+/// The frontend's `IpcError` response. `category` is what the app switches on;
+/// the HTTP status carries the same decision for any other client.
 #[derive(Debug, Serialize)]
 #[serde(tag = "category", rename_all = "kebab-case")]
 pub(crate) enum AppApiError {
@@ -264,8 +263,8 @@ async fn list_devices(
 
 /// `AppSnapshot` plus the two facts the runtime deliberately does not own:
 /// whether a settings document has ever existed on disk, and which protocol
-/// version this host speaks. Flattened, so the frontend keeps parsing a single
-/// DTO exactly as it did over IPC.
+/// version this host speaks. Flattened so the frontend receives one snapshot
+/// object rather than a transport-specific envelope.
 #[derive(Serialize)]
 pub(crate) struct CompanionSnapshot {
     #[serde(flatten)]
@@ -273,12 +272,8 @@ pub(crate) struct CompanionSnapshot {
     pub(crate) has_saved_config: bool,
     /// The wire version this server speaks, straight from `protocol`.
     ///
-    /// Reported rather than assumed because the window used to hard-code it, and
-    /// the constant went stale at the v1 -> v2 migration: the app compared the
-    /// device's reported 2 against a literal 1 and declared an incompatibility
-    /// on every single connection. It was invisible for as long as the board
-    /// stayed unplugged, which is most of the time. A value carried from the
-    /// crate that defines it cannot drift from it.
+    /// Reported from the crate that defines the wire contract so the frontend's
+    /// compatibility check cannot drift from the server's actual version.
     pub(crate) host_protocol_version: u8,
 }
 
@@ -358,7 +353,7 @@ fn known_device(state: &ServerState, device_id: &str) -> Result<(), AppApiError>
 // Events
 // ---------------------------------------------------------------------------
 
-/// A snapshot stream, replacing the Tauri `app-state` event.
+/// An SSE snapshot stream using the frontend's `app-state` event name.
 ///
 /// Sends only on change: an idle panel produces SSE keep-alive comments and no
 /// payloads, so an open tab costs nothing to hold.
@@ -463,11 +458,11 @@ fn parse_draft(draft: &DraftPayload) -> Result<AppConfig, AppApiError> {
 /// Reports exactly the issues a save would, so the UI can never call a draft
 /// valid that Save then rejects.
 ///
-/// Both halves of the preflight, as the Tauri command did: `compile()` -- a
-/// strict superset of `validate()`, because it also catches a card with no
-/// `wire_config()` lowering -- and the connected device's capability check. The
-/// revision only matters for its `revision == 0` rejection, so any nonzero
-/// placeholder is right for a draft that is never applied.
+/// The preflight runs both `compile()` -- a strict superset of `validate()`,
+/// because it also catches a card with no `wire_config()` lowering -- and the
+/// connected device's capability check. The revision only matters for its
+/// `revision == 0` rejection, so any nonzero placeholder is right for a draft
+/// that is never applied.
 async fn validate_config(
     State(state): State<ServerState>,
     _operator: OperatorAuthenticated,
@@ -491,8 +486,6 @@ async fn validate_config(
 /// empty list when it is compatible -- or when no device is online to check
 /// against, in which case an offline draft is saved for the next link and gated
 /// then.
-///
-/// Moved from the Mac app's `commands/config.rs` unchanged.
 fn missing_capability_issues(
     device: &DeviceSnapshot,
     required_capabilities: u64,
@@ -516,7 +509,7 @@ fn missing_capability_issues(
 }
 
 /// Names capabilities the way the person reading the settings window needs them.
-/// The raw bitmask this used to print named nothing anyone could act on.
+/// A raw bitmask would name nothing the operator could act on.
 fn describe_capabilities(bits: u64) -> String {
     let mut names: Vec<&'static str> = app_core::DeviceCapability::from_bits(bits)
         .into_iter()
@@ -594,8 +587,8 @@ async fn save_config(
 /// accumulated "Weather 2" and "Weather 3": credentialed sources no card
 /// referenced, offered back in the add menu as things to reuse.
 ///
-/// Revoking against the saved configuration closes that, and closes it for
-/// sources minted before this existed, because every save reconciles.
+/// Revoking against the saved configuration closes that, including for existing
+/// orphaned sources, because every save reconciles.
 ///
 /// **This is a KEEP-set, and that is the shape that has bitten this project
 /// before** (`AssetRelease.digests`, where an empty desired set meant "wipe
@@ -713,9 +706,8 @@ const PICTURE_PREVIEW_IS_PUSH_ONLY: &str =
 /// Renders one card exactly as the firmware's own template would, from the same
 /// scene `build_card_scene` would push.
 ///
-/// This is the one renderer. `CLAUDE.md`'s rule holds: nothing here is a second
-/// implementation to check the first against -- that was the retired parity gate,
-/// and it kept three dead templates alive to have something to compare with.
+/// This is the one renderer: the preview does not maintain a second template
+/// implementation that could drift from the scene sent to the panel.
 async fn preview(
     State(state): State<ServerState>,
     _operator: OperatorAuthenticated,

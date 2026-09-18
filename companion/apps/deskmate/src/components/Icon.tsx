@@ -3,10 +3,9 @@ import type { ReactElement } from "react";
 /**
  * The icon set: authored on one 16px grid, one 1.75 stroke, round caps and joins.
  *
- * Deskmate ships no icon library — the Tauri CSP blocks every external host and
- * nothing is bundled — and the alternative habit, borrowing Unicode glyphs like ×
- * and ↑ as icons, hands their weight and alignment to whatever font resolves. These
- * are drawn instead, so a control's mark carries the same stroke as every other.
+ * Deskmate uses a small inline set rather than loading an icon library for seven
+ * marks. Drawing them also avoids Unicode glyphs such as × and ↑, whose weight and
+ * alignment depend on the resolved font, so every control keeps the same stroke.
  */
 type IconName = "left" | "right" | "close" | "plus" | "check" | "refresh" | "settings";
 

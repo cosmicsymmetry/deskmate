@@ -226,7 +226,7 @@ impl SerialTransport {
             .map_err(|error| DeviceError::Transport(TransportError::Io(error.to_string())))?;
         // The ESP32-S3 ROM may have emitted startup text before application
         // firmware takes ownership. Drain any kernel-side backlog before the
-        // v1 status handshake; runtime application logs are routed to UART0.
+        // status handshake; runtime application logs are routed to UART0.
         port.clear(serialport::ClearBuffer::Input)
             .map_err(|error| DeviceError::Transport(TransportError::Io(error.to_string())))?;
         Ok(Self { port })

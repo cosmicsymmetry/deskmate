@@ -223,7 +223,7 @@ window.setInterval(() => {
 /**
  * The mock's argument bag. Every command that reads arguments is always called with
  * them by `src/dev/backendClient.ts`, so a missing bag is a harness bug — surfaced as the
- * same typed IPC error shape the real backend would return, not a TypeError.
+ * same structured error shape the real backend would return, not a TypeError.
  */
 function requireArgs(args: Record<string, unknown> | undefined): Record<string, unknown> {
   if (!args) {
@@ -235,7 +235,10 @@ function requireArgs(args: Record<string, unknown> | undefined): Record<string, 
 const delay = <T>(value: T, ms = 90): Promise<T> =>
   new Promise((resolve) => window.setTimeout(() => resolve(value), ms));
 
-export async function mockInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+export async function dispatchMockCommand<T>(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
   switch (command) {
     case "get_app_snapshot":
       return delay(snapshot) as Promise<T>;

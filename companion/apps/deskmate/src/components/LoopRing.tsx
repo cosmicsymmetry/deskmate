@@ -29,9 +29,9 @@ const GAP_DEGREES = 2.4;
 /**
  * A segment's position along the `--arc-a` → `--arc-b` ramp, as 0–1.
  *
- * This used to be `index % 4`, which repeated every fifth entry — and the loop holds
- * up to eight. Two arcs sharing a colour breaks the only mapping there is from an arc
- * back to its name in the legend.
+ * A loop holds up to eight entries, so each index is spread across the full ramp.
+ * Repeating a small fixed palette would break the mapping from an arc to its name
+ * in the legend.
  */
 function rampStep(index: number, count: number): number {
   return count < 2 ? 0 : index / (count - 1);

@@ -22,7 +22,7 @@
 //! durable asset competing for the device's `MAX_ASSET_DIGESTS` keep-set
 //! budget, to draw shapes that cost a dozen bytes of path data.
 
-use super::svg::{Anchor, Canvas, Text, count, ellipsize};
+use super::svg::{Anchor, Canvas, Text, count, fit};
 use super::theme::{
     CANVAS_HEIGHT, CANVAS_WIDTH, CONTENT_WIDTH, GRID, GROUND, HERO_STEPS, INK, INK_3, MARGIN,
     RADIUS_MODULE, SIZE_BODY, SIZE_CAPTION, SIZE_EYEBROW, SIZE_SUBHEAD, SURFACE, TRACKING_EYEBROW,
@@ -263,12 +263,7 @@ fn draw_hero(canvas: &mut Canvas, face: &WeatherFace, palette: &Palette) {
 
     let summary_top = reading_cap_top + size * 0.727 + 1.5 * GRID;
     let summary = super::svg::normalize_whitespace(&face.summary);
-    let summary =
-        if crate::face_render::text_width(&summary, SIZE_SUBHEAD, WEIGHT_SEMIBOLD) <= type_room {
-            summary
-        } else {
-            ellipsize(&summary, SIZE_SUBHEAD, WEIGHT_SEMIBOLD, type_room)
-        };
+    let summary = fit(&summary, SIZE_SUBHEAD, WEIGHT_SEMIBOLD, type_room);
     if !summary.is_empty() {
         canvas.text(
             &Text::new(

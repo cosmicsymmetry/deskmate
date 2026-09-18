@@ -1,5 +1,10 @@
 # V1 Packaging & Hardening Implementation Plan
 
+> **STATUS (updated 2026-09-18): DELIVERED IN 2026-08 AND HISTORICAL.** All planned
+> implementation and install-matrix steps were completed. The macOS Tauri companion
+> and its release bundle were later deleted; the commands and paths below record that
+> delivery and are not instructions for building the current web companion.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Close the last V1-exit item: a reproducible 1.0.0 macOS release build gated by GitHub Actions CI, with advisories triaged, a written security review, and a passed hands-on install matrix.

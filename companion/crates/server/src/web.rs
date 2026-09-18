@@ -2,12 +2,10 @@
 //!
 //! The directory comes from `DESKMATE_WEB_DIR` and is **not** embedded in the
 //! binary. That is the point: a UI change then costs a `bun run build` and a file
-//! copy, with no Rust compile and no service restart. Embedding would have made
-//! every CSS tweak a cold build of this workspace, which is the cost the whole
-//! web migration exists to remove.
+//! copy, with no Rust compile and no service restart.
 //!
-//! When the variable is unset the routes are not mounted at all and the server
-//! behaves exactly as it did before the companion existed.
+//! When the variable is unset the routes are not mounted and the server remains
+//! API-only.
 
 use std::path::{Component, Path, PathBuf};
 

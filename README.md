@@ -1,41 +1,35 @@
 # deskmate
 
-Deskmate is a monitor-clip ESP32-S3 AMOLED display, a Rust companion workspace, and a
-Tauri/React settings app. The current product description is [PRODUCT.md](PRODUCT.md),
-and the repository’s durable implementation contract is [CLAUDE.md](CLAUDE.md).
+Deskmate is a monitor-clip ESP32-S3 AMOLED display with a Rust server and a React web
+companion. The current product description is [PRODUCT.md](PRODUCT.md), and the
+repository’s durable implementation contract is [CLAUDE.md](CLAUDE.md).
 
 ## Current state
 
-The live milestone status is in the
-[roadmap](docs/superpowers/plans/2026-08-03-deskmate-roadmap.md). V1 is closed pending
-declaration/tag authorization; V2’s network-owned device path is implemented, with two
-observations still owed. Scene-native rendering is delivered in software. Manifest-based
-plugins and the server-side SVG raster fallback have been retired; server-side cards are
-now pictures pushed by external producers. The remaining work and hardware gates live in
-these active plans:
+The companion is a browser application served by `companion/crates/server`; its React SPA
+lives in `companion/apps/deskmate`. The current application config is frozen at
+[schema v10](docs/config/v10.md), and the wire contract is frozen at
+[protocol v2](docs/protocol/v2.md). Clock and pomodoro render as host-built scenes;
+picture frames use durable device assets. Historical milestones are recorded in the
+[roadmap](docs/superpowers/plans/2026-08-03-deskmate-roadmap.md) and
+[project history](docs/history.md). Hardware observations and unresolved board gates are
+recorded in [board notes](docs/hardware/board-notes.md).
 
-- [V2 networked device](docs/superpowers/plans/2026-08-18-deskmate-v2-networked-device.md)
-- [Picture cards](docs/superpowers/plans/2026-09-10-deskmate-picture-cards.md)
+## Web companion
 
-The current application config is frozen at
-[schema v9](docs/config/v9.md), while the additive wire contract remains
-[protocol v1](docs/protocol/v1.md). Clock and pomodoro render as host-built scenes;
-picture frames use durable device assets. Hardware observations and unresolved board gates
-are recorded in [board notes](docs/hardware/board-notes.md).
-
-## Companion app
-
-With the locked dependencies already installed:
+For UI work without a server or device, run the browser harness:
 
 ```sh
 cd companion/apps/deskmate
-PATH="$HOME/.cargo/bin:$PATH" bun run tauri dev
+VITE_DESKMATE_MOCK=1 bun run dev
 ```
 
-The app authors the card library and playlists, previews built-in cards, configures
-mounting and ownership, and keeps its runtime alive in the tray when the window closes.
-In networked tier the deployed server owns the device; provisioning remains a USB cable
-operation.
+Production builds are static assets served by the Rust server. `DESKMATE_WEB_DIR` must be
+an absolute path to `apps/deskmate/dist`; the complete server environment and deployment
+procedure are in the [server runbook](companion/crates/server/deploy/README.md).
+
+The web companion authors the card loop, previews built-in cards, and configures the
+network-owned device. Provisioning remains a USB cable operation.
 
 Frontend checks run from `companion/apps/deskmate`:
 

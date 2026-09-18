@@ -5,7 +5,7 @@ use protocol::truncate_utf8_to_bytes;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
-use crate::http::{HttpClient, SystemHttpClient, validate_http_url};
+use crate::http::{HttpClient, validate_http_url};
 use crate::{LastGood, Provider, ProviderError, ProviderSnapshot, RefreshPolicy};
 
 pub const MAX_RSS_ITEMS: usize = 5;
@@ -71,12 +71,6 @@ impl<C: HttpClient> RssProvider<C> {
             options,
             state: LastGood::default(),
         }
-    }
-}
-
-impl RssProvider<SystemHttpClient> {
-    pub fn system(options: RssOptions) -> Self {
-        Self::new(SystemHttpClient::default(), options)
     }
 }
 

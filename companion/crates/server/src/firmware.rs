@@ -2,9 +2,9 @@
 //! download it points to. This is the *only* pair a local-tier device ever
 //! touches -- it never sees `/v1/device/link`.
 //!
-//! Both endpoints sit behind a public Cloudflare tunnel from Task 8 onward,
-//! so both are written as if an anonymous internet client is hostile by
-//! default: the download streams instead of buffering, and every
+//! Both endpoints sit behind a public Cloudflare tunnel in production, so both
+//! are written as if an anonymous internet client is hostile by default: the
+//! download streams instead of buffering, and every
 //! attacker-controlled string (the requested version) is bounded before it
 //! touches disk, a filesystem call, or a log line.
 

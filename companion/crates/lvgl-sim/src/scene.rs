@@ -1,5 +1,4 @@
-//! Task 8 (stage 2a): rendering a declarative scene through the firmware's own
-//! interpreter.
+//! Rendering a declarative scene through the firmware's own interpreter.
 //!
 //! The device draws a scene by decoding a CBOR display list into a `scene_t`
 //! and handing it to `firmware/main/ui/scene_view.c`. This module does exactly
@@ -11,7 +10,7 @@
 //! # Why it goes through the decoder
 //!
 //! Filling a `scene_t` field by field over FFI would have been less code. It
-//! would also have made the stage-2a parity gate compare a render of the wire
+//! would also make framebuffer comparisons contrast a render of the wire
 //! format against a render of a hand-built struct — two things that agree only
 //! as long as whoever wrote the FFI marshalling got every field right. Encoding
 //! and decoding instead means the simulator and the device build their
@@ -78,7 +77,6 @@ impl fmt::Display for SceneDecodeReason {
 
 /// `sim_scene_result_t` in `csrc/sim_shim.h`, as the plain `i32` its C enum
 /// compiles to. Kept private: callers only ever see the mapped [`SimError`].
-#[allow(dead_code)]
 mod raw_result {
     pub const OK: i32 = 0;
     pub const ERR_ARGUMENT: i32 = 1;

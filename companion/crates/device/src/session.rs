@@ -212,9 +212,9 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
                 // Reported as a disconnection rather than `Timeout` on purpose.
                 // `Timeout` means the device did not answer over a link that is
                 // still good, so a caller retries on the same session; this means
-                // the session itself will never answer again, and only a
-                // disconnection makes app-core drop it and reconnect. The
-                // physical cause is a cable that went away mid-read.
+                // the session itself will never answer again. The runtime's
+                // disconnect classification is what replaces the session and
+                // reconnects after a cable disappears mid-read.
                 self.stalled.store(true, Ordering::Release);
                 Err(DeviceError::Transport(TransportError::Disconnected))
             }
@@ -536,9 +536,8 @@ impl<T: Transport + Send + 'static> Drop for DeviceSession<T> {
             // The worker is inside a transport read that will not return until
             // the operating system releases it, so both the queued shutdown and
             // the join would block here for as long as that takes. Detach it and
-            // let it end on its own: joining a thread that cannot return is what
-            // once left the desktop app unable to quit after the board was
-            // unplugged.
+            // let it end on its own so dropping the session cannot wedge the
+            // host process after the board is unplugged.
             let _ = self.command_sender.try_send(WorkerCommand::Shutdown);
             return;
         }
@@ -548,8 +547,7 @@ impl<T: Transport + Send + 'static> Drop for DeviceSession<T> {
         // -- an idle session whose cable was pulled -- and `stalled` is only set
         // by a request that missed its deadline. Waiting for the worker to close
         // `finished`, rather than joining it outright, keeps a thread that cannot
-        // return from holding up the caller: joining one is what left the desktop
-        // app still running after "Quit Deskmate".
+        // return from holding up the caller or preventing host shutdown.
         if self
             .finished
             .recv_timeout(self.request_timeout * REPLY_TIMEOUT_FACTOR)
@@ -1508,17 +1506,20 @@ mod tests {
 
     #[test]
     fn firmware_without_scene_render_refuses_push_scene_before_wire_mutation() {
-        let mut legacy = status(0, 0, 100);
-        legacy.capabilities &= !protocol::CAPABILITY_SCENE_RENDER;
-        let (transport, state) = FakeTransport::new(legacy.clone());
-        let session =
-            DeviceSession::with_options(transport, &legacy, options(Duration::from_mins(1), 8));
+        let mut without_scene_render = status(0, 0, 100);
+        without_scene_render.capabilities &= !protocol::CAPABILITY_SCENE_RENDER;
+        let (transport, state) = FakeTransport::new(without_scene_render.clone());
+        let session = DeviceSession::with_options(
+            transport,
+            &without_scene_render,
+            options(Duration::from_mins(1), 8),
+        );
 
         assert_eq!(
             session.push_scene(scene_push(7)),
             Err(DeviceError::MissingCapabilities {
                 required: protocol::CAPABILITY_SCENE_RENDER,
-                available: legacy.capabilities,
+                available: without_scene_render.capabilities,
             })
         );
         assert!(
@@ -1747,8 +1748,8 @@ mod tests {
         );
     }
 
-    /// A transport whose `read` blocks and never returns -- the shape a macOS USB
-    /// serial port takes when the board detaches with a read already in flight.
+    /// A transport whose `read` blocks and never returns -- behavior some USB
+    /// serial drivers exhibit when the board detaches with a read already in flight.
     /// `SessionConnection::transact` checks its deadline only *between* reads, so
     /// `request_timeout` is unreachable in that state and the worker never answers.
     struct StalledTransport {
@@ -1790,9 +1791,8 @@ mod tests {
     /// A stalled transport must not be able to wedge the caller. `request` waits on
     /// the worker's reply, and the worker is the very thing a blocking read stops;
     /// without a deadline of its own that wait is unbounded, and one detached cable
-    /// freezes every caller above it -- in the desktop app, the whole app-core
-    /// runtime worker, which then fails every command with `ResponseTimeout` and
-    /// makes saving impossible.
+    /// freezes every caller above it, including the runtime worker responsible for
+    /// subsequent device commands.
     #[test]
     fn a_transport_read_that_never_returns_cannot_wedge_the_caller() {
         let released = Arc::new(AtomicBool::new(false));
@@ -1834,10 +1834,9 @@ mod tests {
     }
 
     /// Dropping a stalled session must not join the worker, because the worker is
-    /// exactly the thread that cannot return. Joining it is what left the desktop
-    /// app running after "Quit Deskmate" once the board was unplugged: `Drop`
-    /// waited on a blocked read, and the process only exited when the operating
-    /// system finally tore the device node down.
+    /// exactly the thread that cannot return. Otherwise `Drop` waits on the blocked
+    /// read and can prevent the host process from exiting until the operating system
+    /// finally tears the device node down.
     #[test]
     fn dropping_a_stalled_session_does_not_wait_for_a_thread_that_cannot_return() {
         let released = Arc::new(AtomicBool::new(false));
@@ -1887,9 +1886,9 @@ mod tests {
 
     /// `reconnect` hands a fresh transport to the *existing* worker, so a worker
     /// stuck in a read can never take it -- and waiting for its reply is the same
-    /// unbounded wait `request` used to have. app-core reconnects on a timer after
-    /// a disconnection, so leaving this one unbounded would re-wedge the runtime
-    /// moments after the first stall released it.
+    /// unbounded wait `request` guards against. The runtime reconnects on a timer
+    /// after a disconnection, so leaving this one unbounded would re-wedge it
+    /// moments after the first stalled request returned.
     #[test]
     fn reconnecting_a_stalled_session_does_not_wait_on_a_worker_that_cannot_answer() {
         let released = Arc::new(AtomicBool::new(false));

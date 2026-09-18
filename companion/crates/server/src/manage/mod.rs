@@ -1,5 +1,4 @@
-//! The operator's management surface: one page that makes the Mac app
-//! unnecessary for owning a networked device (revision spec §2 item 3).
+//! The operator's management surface for networked devices and integrations.
 //!
 //! Browser-facing, and therefore separate from the `/v1` JSON API: these
 //! handlers render HTML and redirect, while the API keeps its status codes for

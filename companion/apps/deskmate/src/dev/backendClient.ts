@@ -6,11 +6,9 @@
  * `src/dev/`, so a production build resolves the real HTTP client and never
  * reaches this file.
  *
- * Every function here forwards to `mockBackend`'s command dispatcher with the
- * arguments the Tauri bridge used to send. Keeping that indirection -- rather
- * than re-implementing the scenarios against the new function surface -- is what
- * lets the ten `?scenario=` states keep working unchanged through the transport
- * change they know nothing about.
+ * Every function here forwards to `mockBackend`'s command dispatcher. Keeping
+ * scenario state and behavior in that one dispatcher prevents the mock client
+ * from becoming a second implementation of the harness.
  */
 
 import type {
@@ -26,10 +24,7 @@ import type {
   PomodoroAction,
   PreviewFrame,
 } from "../lib/types";
-import { mockInvoke, mockListen } from "./mockBackend";
-
-export const APP_STATE_EVENT = "app-state";
-export const MAX_DRAFT_BYTES = 64 * 1024;
+import { dispatchMockCommand, mockListen } from "./mockBackend";
 
 export class DeskmateCommandError extends Error {
   readonly details: IpcError;
@@ -101,23 +96,23 @@ export function getAppSnapshot(): Promise<AppSnapshot> {
       }),
     );
   }
-  return mockInvoke("get_app_snapshot");
+  return dispatchMockCommand("get_app_snapshot");
 }
 
 export function validateConfigDraft(config: AppConfig): Promise<DraftValidation> {
-  return mockInvoke("validate_config_draft", { draft: draftPayload(config) });
+  return dispatchMockCommand("validate_config_draft", { draft: draftPayload(config) });
 }
 
 export function saveApplyConfig(config: AppConfig): Promise<ConfigApplyResult> {
-  return mockInvoke("save_apply_config", { draft: draftPayload(config) });
+  return dispatchMockCommand("save_apply_config", { draft: draftPayload(config) });
 }
 
 export function saveServerConfig(config: AppConfig): Promise<ConfigApplyResult> {
-  return mockInvoke("save_server_config", { request: { draft: draftPayload(config) } });
+  return dispatchMockCommand("save_server_config", { request: { draft: draftPayload(config) } });
 }
 
 export function getNetworkSettings(): Promise<NetworkSettings> {
-  return mockInvoke("get_network_settings");
+  return dispatchMockCommand("get_network_settings");
 }
 
 export function setServerEndpoint(
@@ -125,46 +120,44 @@ export function setServerEndpoint(
   deviceId: string,
   adminToken: string,
 ): Promise<NetworkSettings> {
-  return mockInvoke("set_server_endpoint", {
+  return dispatchMockCommand("set_server_endpoint", {
     request: { server_url: serverUrl, device_id: deviceId, admin_token: adminToken },
   });
 }
 
 // Deliberately absent, matching `src/lib/backendClient.ts`: provisioning,
-// factory reset, the local-ownership switch and autostart. A harness that offered
-// them would let the UI be developed against affordances the shipped app does not
-// have -- the same class of divergence that made the WKWebView focus defect
-// invisible in Chrome.
+// factory reset, the local-ownership switch and autostart. The harness must not
+// expose affordances the shipped web app cannot perform.
 
 export function resumePushing(): Promise<void> {
-  return mockInvoke("resume_pushing");
+  return dispatchMockCommand("resume_pushing");
 }
 
 export function controlPomodoro(cardId: string, action: PomodoroAction): Promise<void> {
-  return mockInvoke("control_pomodoro", { target: { card_id: cardId }, action });
+  return dispatchMockCommand("control_pomodoro", { target: { card_id: cardId }, action });
 }
 
 export function renderCardPreview(cardId: string): Promise<PreviewFrame> {
-  return mockInvoke("render_card_preview", { cardId });
+  return dispatchMockCommand("render_card_preview", { cardId });
 }
 
 export function mintImageSource(name: string, faceKind?: string): Promise<MintedImageSource> {
-  return mockInvoke("mint_image_source", { sourceName: name, faceKind: faceKind ?? null });
+  return dispatchMockCommand("mint_image_source", { sourceName: name, faceKind: faceKind ?? null });
 }
 
 export function listCreatableFaces(): Promise<FaceDescriptor[]> {
-  return mockInvoke("list_creatable_faces");
+  return dispatchMockCommand("list_creatable_faces");
 }
 
 export function listImageSources(): Promise<ImageSourceDescriptor[]> {
-  return mockInvoke("list_image_sources");
+  return dispatchMockCommand("list_image_sources");
 }
 
 export function updateImageSourceFace(
   sourceId: string,
   fields: Record<string, string>,
 ): Promise<FaceDescriptor> {
-  return mockInvoke("update_image_source_face", {
+  return dispatchMockCommand("update_image_source_face", {
     request: { source_id: sourceId, fields },
   });
 }

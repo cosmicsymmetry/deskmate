@@ -1,5 +1,9 @@
 # Deskmate V3 Server Host — Design Revision (Producer-Side Integrations)
 
+> **HISTORICAL BASELINE NOTE (2026-09-18).** References to the Mac app describe the
+> system this server design was replacing. The current companion is the web app served
+> by that server.
+
 > **This supersedes `2026-09-06-deskmate-v3-server-host-design.md`.** That document is
 > kept, not deleted: it is the record of what sub-projects 1 and 2 were built and
 > reviewed against, and their plans' STATUS headers cite its section numbers. Where the

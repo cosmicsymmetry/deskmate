@@ -35,39 +35,12 @@ export function copyConfig(config: AppConfig): AppConfig {
   };
 }
 
-/// A card's user-facing name: its own title/label when set, otherwise a
-/// sensible fallback. Never the card id — ids are wire identifiers, not
-/// something a person chose or should see.
-export function cardName(card: CardSettings): string {
-  switch (card.kind) {
-    case "clock":
-      return card.title || "Digital clock";
-    case "pomodoro":
-      return card.label || "Pomodoro";
-    case "picture":
-      return card.title || "Picture";
-  }
-}
-
-/**
- * What a card is called on every surface that identifies one: the loop tile, the
- * ring legend, the editor heading, the picker.
- *
- * It is the template's name, not the owner's title, by explicit owner direction: a
- * person meeting a card called "Office" or "Desk" for the first time learns nothing
- * from it, where "Air quality" and "Digital clock" say what the thing is. The owner's own
- * words survive as `cardTitle` — a quiet second line beside the label, never the
- * thing that names the card.
- *
- */
 /**
  * The one name a card goes by.
  *
  * Every surface that identifies a card calls this, so they cannot drift: the
  * tile, the loop list under the ring, and the editor heading all print the same
- * words. That is the replacement for the rule it supersedes -- which said the
- * identifying word was the TEMPLATE, and put "PICTURE" above five different
- * pictures while the line that told them apart sat underneath in grey.
+ * words.
  *
  * A clock is "Clock" because that is the whole truth about it; there is nothing
  * else to say and no way to name one. A picture is its source, which is the only
@@ -299,9 +272,8 @@ export interface LoopEntry {
   card: CardSettings;
 }
 
-/// The loop, in order. Since schema v10 that is simply the card list: there is
-/// no separate playlist, so a loop position with no card behind it -- the
-/// "Missing card" tile this window used to render -- is unrepresentable.
+/// The loop, in order. In schema v10 the card list is the loop, so every position
+/// necessarily contains a card.
 export function loopEntries(config: AppConfig): LoopEntry[] {
   return config.cards.map((card, index) => ({ index, card }));
 }
@@ -375,9 +347,7 @@ export function loopSeconds(config: AppConfig): number | null {
 /// anything.
 export interface LoopSegment {
   cardId: string;
-  /// What the card is called, from `cardIdentity`. There is no second line: the
-  /// template used to lead here with the owner's title beside it, which printed
-  /// "Picture  Weather" where "Weather" was the whole answer.
+  /// What the card is called, from the single `cardIdentity` naming path.
   name: string;
   dwellSeconds: number;
   widthPercent: number;

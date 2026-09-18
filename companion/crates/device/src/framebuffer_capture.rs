@@ -20,9 +20,8 @@ pub const FRAME_HEIGHT: usize = 368;
 /// Bytes in one complete little-endian RGB565 snapshot.
 pub const FRAME_BYTES: usize = FRAME_WIDTH * FRAME_HEIGHT * 2;
 
-/// Dev-only message ids (V1 reset design spec §3.2.3), outside the release
-/// range. They stay out of `protocol` because release hosts must not treat
-/// diagnostics as a supported part of protocol v1.
+/// Dev-only message ids outside the release range. They stay out of `protocol`
+/// because release hosts must not treat diagnostics as part of protocol v2.
 const CAPTURE_REQUEST_TYPE: u8 = 0x7E;
 const CAPTURE_CHUNK_TYPE: u8 = 0x7F;
 const CHUNK_HEADER_LEN: usize = 12;

@@ -44,7 +44,7 @@ describe("startAppStateSubscription", () => {
     expect(snapshot.config.advance).toEqual({ kind: "timed", default_dwell_seconds: 30 });
   });
 
-  test("cleans up when the Tauri listener resolves after unmount", async () => {
+  test("cleans up when the snapshot subscription resolves after unmount", async () => {
     const focusTarget = new FakeEventTarget();
     const visibilityTarget = new FakeEventTarget();
     let resolveListen!: (unlisten: () => void) => void;

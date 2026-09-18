@@ -17,7 +17,6 @@ import {
   firstRunSteps,
   firstSelectableCard,
   issuesForCard,
-  issuesForPath,
   nextCardName,
   removeCard,
   unclaimedIssues,
@@ -48,9 +47,8 @@ import type {
 import { useAppState } from "./lib/useAppState";
 
 /**
- * The USB link in one word, for the settings sheet. It used to be a permanent
- * complication in the window chrome; it is a pairing-and-troubleshooting fact, so
- * it sits with the rest of them now.
+ * The USB link in one word, for the pairing and troubleshooting facts in the
+ * settings sheet.
  */
 function linkLabel(snapshot: AppSnapshot): string {
   switch (snapshot.device.connection.kind) {
@@ -465,8 +463,8 @@ export function App() {
         </aside>
 
         <main className="face__work">
-          {/* What the header alert used to carry. A sentence in the column you are
-              already reading beats a permanent band that is blank 99% of the time. */}
+          {/* Consequential failures stay in the working column where they remain
+              visible without turning nominal state into permanent chrome. */}
           {(protocolMismatch ||
             snapshot.runtime.kind === "error" ||
             commandError ||
@@ -484,9 +482,8 @@ export function App() {
             </aside>
           )}
 
-          {/* Nothing in this window can pause pushing any more — the control was
-              removed as a knob nobody reached for. A config saved while it was still
-              here can still arrive paused, so the way out has to stay reachable. */}
+          {/* The schema can contain a paused configuration even though this page has
+              no pause control, so the recovery action must remain reachable. */}
           {paused && (
             <aside className="notice notice--warn" role="status">
               <div>

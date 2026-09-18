@@ -427,11 +427,8 @@ export function CardEditor({
 
         {card.kind === "picture" && (
           <>
-            {/* Stated, not selected. A dropdown here implied that re-pointing a
-                card at another source was a safe edit, when it silently turned the
-                card into a different card -- the same reasoning that retired the
-                plugin dropdown in 324c981. The source is chosen once, when the
-                card is added. */}
+            {/* Stated, not selected. Re-pointing a card would change its identity,
+                so the source is chosen once when the card is added. */}
             <div className="field">
               <span>Picture source</span>
               <strong>

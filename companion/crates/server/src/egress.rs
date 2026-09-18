@@ -1,19 +1,16 @@
-//! SSRF egress guard for the server's one outbound call: the OAuth token
-//! endpoint.
+//! SSRF egress guard for every outbound HTTP request the server makes.
 //!
-//! This module was written for plugin data fetches -- owner-supplied URLs the
-//! server fetched on a plugin's behalf -- and schema v9 removed those. What
-//! survives is the credential path, and it is now bounded twice over: a
-//! positive allowlist of exactly one host ([`IDENTITY_HOST`]), and, behind it,
-//! the original address-level deny of RFC1918, loopback, link-local and
-//! `169.254.169.254` with resolve-then-pin against DNS rebinding.
+//! Provider GETs accept owner-supplied URLs, so [`fetch`] applies address-level
+//! exclusions for RFC1918, loopback, link-local, `169.254.169.254`, and the other
+//! special-purpose ranges below, with resolve-then-pin protection against DNS
+//! rebinding. Credential-bearing OAuth POSTs use the same address checks and add
+//! a positive allowlist of exactly one host ([`IDENTITY_HOST`]).
 //!
-//! Both layers earn their place. The allowlist states the policy -- the server
-//! is a credential custodian and fetches no card content (revision spec §1) --
-//! while the address checks stop a DNS answer for that one permitted host from
-//! pointing the pinned connection at a homelab neighbour or, on a cloud VM, at
-//! the metadata endpoint. This module is the only place allowed to decide
-//! "yes, fetch that" and the only place that performs the fetch.
+//! The narrower OAuth allowlist prevents credentials from being posted to a
+//! provider URL, while the address checks stop any permitted hostname from
+//! resolving to a homelab neighbour or, on a cloud VM, the metadata endpoint.
+//! This module is the only place allowed to decide "yes, fetch that" and the
+//! only place that performs the fetch.
 //!
 //! # Why hostname validation alone is not enough
 //!
@@ -114,7 +111,7 @@ pub const TOTAL_FETCH_BUDGET: Duration = Duration::from_secs(20);
 /// first response must not be a redirect.
 pub const MAX_REDIRECTS: u8 = 5;
 
-/// Maximum response body size accepted from the token endpoint.
+/// Maximum response body size accepted by either outbound request path.
 pub const MAX_RESPONSE_BODY_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Why a fetch was refused. Every variant is meant to be safe to log and to
@@ -297,11 +294,11 @@ pub fn deny_reason_for_ip(ip: IpAddr) -> Option<DenyReason> {
 
 /// `true` only for an address this module has positively confirmed is
 /// globally-routable unicast -- i.e. `deny_reason_for_ip` found no
-/// applicable exclusion. Exposed mainly for tests/documentation: `fetch`
-/// and `egress_guard` call `deny_reason_for_ip`/`deny_reason_v4` directly
-/// so the informative `DenyReason` is available on the deny path.
+/// applicable exclusion. Production uses the richer `DenyReason`; this boolean
+/// predicate keeps the registry audit table readable.
+#[cfg(test)]
 #[must_use]
-pub fn is_globally_routable(ip: IpAddr) -> bool {
+fn is_globally_routable(ip: IpAddr) -> bool {
     deny_reason_for_ip(ip).is_none()
 }
 
@@ -653,15 +650,9 @@ impl HopResolver for RealResolver {
     }
 }
 
-/// The result of a fetch that ran to completion under the egress guard:
-/// the HTTP status the final (non-redirect) response returned, alongside
-/// its capped body. Added on top of the guard itself (fix round 1 of Task
-/// 7b): [`fetch`] previously returned only `Vec<u8>`, discarding status
-/// entirely, which made a 503 and a 200 indistinguishable to every caller
-/// -- exactly what let a transient server error masquerade as either a
-/// permanent parse failure or, worse, a successful response. A redirect
-/// status now arrives here as itself: the POST client disables redirect
-/// following, and the token endpoint has no reason to issue one.
+/// The result of a request that ran to completion under the egress guard: the
+/// final HTTP status alongside its capped body. GET redirects are followed by
+/// [`fetch`] after re-validation; the POST path returns a redirect status as-is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchResponse {
     pub status: u16,
@@ -709,8 +700,7 @@ fn build_pinned_client(
 /// Fetches `url` under the egress guard: scheme/deny-list checks, DNS
 /// resolve-then-pin, a capped redirect chain (every hop re-validated and
 /// re-pinned from scratch), a capped response body, and an overall wall-clock
-/// budget. This is the only function in this module that touches the
-/// network.
+/// budget. This is the entry point for provider GETs.
 pub async fn fetch(url: &str) -> Result<FetchResponse, EgressError> {
     fetch_with_resolver(url, &RealResolver).await
 }
@@ -809,13 +799,11 @@ async fn fetch_inner(url: &str, resolver: &impl HopResolver) -> Result<FetchResp
 
 /// Refuses a redirect that walks an `https` fetch down onto `http`.
 ///
-/// `egress_guard` deliberately accepts both schemes, because a plugin may name an
-/// `http` feed and that is its own choice. What it cannot express is that a fetch
-/// which *started* encrypted must stay encrypted: the manifest parser pins a
-/// plugin's declared source to `https` (`plugin::manifest::ALLOWED_URL_SCHEME`),
-/// and without this check a single `Location: http://...` silently undoes that pin
-/// for every remaining hop. One curated feed carries a capability token in its URL
-/// path, so a downgraded hop puts a credential on the wire in the clear.
+/// `egress_guard` deliberately accepts both schemes because providers may be
+/// configured with an `http` URL. What it cannot express is that a fetch which
+/// *started* encrypted must stay encrypted: without this check a single
+/// `Location: http://...` silently downgrades every remaining hop and may expose
+/// credentials carried in a configured URL.
 ///
 /// Upgrades (`http` -> `https`) and same-scheme hops are unaffected.
 fn deny_scheme_downgrade(current: &Url, next: &Url) -> Result<(), EgressError> {
@@ -828,13 +816,12 @@ fn deny_scheme_downgrade(current: &Url, next: &Url) -> Result<(), EgressError> {
     Ok(())
 }
 
-/// The server's only permitted outbound host.
+/// The credential-bearing POST path's only permitted outbound host.
 ///
 /// `accounts.google.com` is deliberately absent: consent is a `302` the
 /// *browser* follows, not a request the server issues. `www.googleapis.com` is
-/// absent because the Calendar API is the *producer's* egress. Widening this
-/// constant means the server has started fetching something, which the
-/// revision spec §1 forbids -- three tests fail if it does.
+/// absent because the Calendar API is the *producer's* egress. Provider GETs do
+/// not use this allowlist; they are constrained by the address guard instead.
 pub const IDENTITY_HOST: &str = "oauth2.googleapis.com";
 
 /// POSTs `form` as `application/x-www-form-urlencoded` to `url` under the full
@@ -851,7 +838,7 @@ pub const IDENTITY_HOST: &str = "oauth2.googleapis.com";
 /// resolver-injected tests drive against a loopback listener under a fake
 /// hostname. That path is private to this module and unreachable from
 /// production: [`crate::oauth::transport::EgressTransport`] is the only caller
-/// that reaches the network, and it comes through here.
+/// of this form-post path, and it comes through here.
 ///
 /// [`egress_guard`] runs first so that a bad scheme or a literal denied
 /// address keeps reporting its own specific error rather than being masked by
@@ -1093,7 +1080,7 @@ mod tests {
     async fn the_calendar_api_host_is_not_reachable_from_the_server() {
         // www.googleapis.com is the PRODUCER's egress, never the server's. If
         // this ever stops failing, the server has become a content fetcher
-        // again, which the revision spec §1 forbids outright.
+        // again; consent belongs in the browser rather than server egress.
         let error = super::fetch_post_form(
             "https://www.googleapis.com/calendar/v3/calendars/primary/events",
             &[],
@@ -1294,15 +1281,8 @@ mod tests {
 
     #[tokio::test]
     async fn post_form_returns_the_response_status_for_a_non_2xx_response() {
-        // Fix round 2, item 1: the status capture at the end of
-        // `post_form_inner` (`let status = response.status().as_u16();`) had
-        // no test at THIS level -- `plugin_provider.rs` uses deterministic
-        // fake response sequences to prove status-before-parse and last-good
-        // behavior. This drives the real guarded path (`fetch_with_resolver`,
-        // the same production
-        // composition the redirect-chain test above uses) against a server
-        // that answers 503, and asserts the returned status is 503, not
-        // silently 200.
+        // Drive the real pinned POST path against a server that answers 503 so
+        // the transport cannot silently replace a non-success status with 200.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind a loopback listener");
@@ -1364,11 +1344,9 @@ mod tests {
 
     #[tokio::test]
     async fn post_form_enforces_the_body_cap_against_a_server_that_never_declares_a_length() {
-        // Fix round 2, item 2: the case above alone left the streaming
-        // `limiter.push` check unproven -- a mutation deleting it, alone,
-        // still passed, because the `content_length()` precheck caught
-        // that response before streaming ever started. A hostile server
-        // does not have to be honest: it can simply never send
+        // A declared-length case alone does not exercise the streaming
+        // `limiter.push` check because the `content_length()` precheck rejects
+        // it before streaming starts. A hostile server can simply never send
         // Content-Length at all (chunked transfer-encoding), which is
         // exactly what `Body::from_stream` produces here, since axum only
         // emits Content-Length when it knows the full size upfront. This
@@ -1457,10 +1435,9 @@ mod tests {
         assert_eq!(observed_host, format!("example.invalid:{}", addr.port()));
     }
 
-    /// A redirect must not walk an encrypted fetch down onto cleartext. Every
-    /// plugin's declared source is pinned to `https` at parse time, and this is what
-    /// keeps that pin true for the rest of the chain -- `egress_guard` itself
-    /// accepts `http`, so it will never catch a downgrade on its own.
+    /// A redirect must not walk an encrypted fetch down onto cleartext.
+    /// `egress_guard` itself accepts `http`, so it cannot catch a downgrade
+    /// without the previous hop's scheme.
     #[test]
     fn a_redirect_may_not_downgrade_https_to_http() {
         let secure = Url::parse("https://feeds.example/data.json").expect("url");
@@ -1489,12 +1466,9 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_inner_denies_a_redirect_chain_that_exceeds_max_redirects() {
-        // Fix round 2, item 1: a mutation that turned `redirects.consume()?`
-        // into `let _ = redirects.consume();` passed every prior test,
-        // because the longest redirect chain any test drove was 3 hops --
-        // well under MAX_REDIRECTS (5). A handler that redirects to itself
-        // forever is what actually exercises the cap: `fetch_inner` must
-        // give up after MAX_REDIRECTS hops, not loop indefinitely.
+        // A handler that redirects to itself forever exercises the cap directly:
+        // `fetch_inner` must give up after MAX_REDIRECTS hops, not loop
+        // indefinitely.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind a loopback listener");
@@ -1557,11 +1531,9 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_inner_enforces_the_body_cap_against_a_server_that_never_declares_a_length() {
-        // Fix round 2, item 2: the case above alone left the streaming
-        // `limiter.push` check unproven -- a mutation deleting it, alone,
-        // still passed, because the `content_length()` precheck caught
-        // that response before streaming ever started. A hostile server
-        // does not have to be honest: it can simply never send
+        // A declared-length case alone does not exercise the streaming
+        // `limiter.push` check because the `content_length()` precheck rejects
+        // it before streaming starts. A hostile server can simply never send
         // Content-Length at all (chunked transfer-encoding), which is
         // exactly what `Body::from_stream` produces here, since axum only
         // emits Content-Length when it knows the full size upfront. This
@@ -1637,15 +1609,8 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_returns_the_response_status_for_a_non_2xx_response() {
-        // Fix round 2, item 1: the status capture at the end of
-        // `fetch_inner` (`let status = response.status().as_u16();`) had
-        // no test at THIS level -- `plugin_provider.rs` uses deterministic
-        // fake response sequences to prove status-before-parse and last-good
-        // behavior. This drives the real guarded path (`fetch_with_resolver`,
-        // the same production
-        // composition the redirect-chain test above uses) against a server
-        // that answers 503, and asserts the returned status is 503, not
-        // silently 200.
+        // Drive the real guarded GET path against a server that answers 503 so
+        // provider error handling receives the upstream status unchanged.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind a loopback listener");

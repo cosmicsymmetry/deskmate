@@ -24,8 +24,10 @@ push-timer sets the timer a card's `timer.*` scene bindings resolve against.
 It is the only per-card state protocol v2's device models; everything else a
 face shows is a scene the host builds and pushes.
 
-provision persists over the cable and takes effect on the device's next boot,
-not live.";
+Provisioning (including local/networked ownership changes) and factory reset
+require a USB cable. This CLI is the host's only interface for those cable-only
+operations. Provisioned settings take effect on the device's next boot, not
+live.";
 
 #[derive(Debug)]
 pub(crate) enum AppError {
@@ -542,10 +544,9 @@ fn run() -> Result<(), AppError> {
             }
         }
         CliCommand::Provision { config } => {
-            // A dedicated session (not the lighter DeviceClient used above)
-            // because DeviceSession::provision is where this request lives;
-            // a one-shot session for a single command mirrors the M2
-            // commands in m2.rs (e.g. apply-config).
+            // Cable administration requests are capability-gated by
+            // DeviceSession, so this one-shot command uses a session rather
+            // than the lighter DeviceClient used for basic requests above.
             let connected = connect_session(port)?;
             connected.session.provision(&config)?;
             if json {

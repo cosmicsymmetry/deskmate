@@ -1,5 +1,9 @@
 # Picture cards — a card whose face is a PNG somebody sent us
 
+> **HISTORICAL DESIGN.** Picture cards remain, but references to the Mac app describe
+> their original desktop surface. The Tauri companion was deleted on 2026-09-18 and the
+> current companion is served by the Rust server.
+
 **Status:** approved direction (owner, 2026-09-09). The owner's finding is that adding a
 card the manifest way costs hours of work that produces no product value, and that the
 main card type should instead be a server-side picture: "if the plugin — or I should say

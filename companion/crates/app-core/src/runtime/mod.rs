@@ -17,8 +17,8 @@ use protocol::{
 };
 
 use crate::asset_sync::{AssetSync, AssetSyncError};
-use crate::commands::{CommandReply, PomodoroAction, RuntimeCommand, RuntimeError};
 use crate::render_negotiation;
+use crate::runtime_command::{CommandReply, PomodoroAction, RuntimeCommand, RuntimeError};
 use crate::scheduler::Scheduler;
 use crate::{
     AlertHold, AnalogClockCard, AppConfig, AppSnapshot, BakedFontMetrics, CardAlert,
@@ -1898,8 +1898,8 @@ mod tests {
     }
 
     // F3b: the same index-resolution and re-arm behavior applies to an explicit
-    // `RuntimeCommand::ActivateCard` (the IPC-driven manual activation), which is a
-    // manual override just like a swipe.
+    // `RuntimeCommand::ActivateCard` request, which is a manual override just like
+    // a swipe.
     #[test]
     fn explicit_activate_command_resolves_the_index_within_rotation_ids_and_rearms_the_dwell() {
         let now = Instant::now();

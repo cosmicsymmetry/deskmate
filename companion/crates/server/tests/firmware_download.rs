@@ -4,8 +4,8 @@
 //! exactly where path-traversal attacks live, and a unit test that hands a
 //! pre-decoded string to the sanitizer never touches that layer.
 //!
-//! This route sits behind a public Cloudflare tunnel from Task 8 onward and
-//! is deliberately unauthenticated (images are byte-identical across
+//! This route sits behind a public Cloudflare tunnel in production and is
+//! deliberately unauthenticated (images are byte-identical across
 //! devices and hold no per-device secret -- integrity comes from the
 //! tunnel's TLS), so every case here reflects what a fully anonymous
 //! internet client can throw at it.

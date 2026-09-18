@@ -2624,7 +2624,7 @@ fn manual_advance_playlist_has_no_rotation_deadline() {
 }
 
 // Rotation's pure logic (per-card dwell resolution, manual-mode disarming, in-rotation
-// ordering/skipping/wrap-around, and the swipe/IPC index-resolution edge cases) is
+// ordering/skipping/wrap-around, and the swipe/API index-resolution edge cases) is
 // covered by instant unit tests in `companion/crates/app-core/src/runtime.rs`'s inline
 // `mod tests`, which call `current_dwell`, `rotation_card_ids`, `advance_rotation`,
 // `drain_device_events`, and `process_command` directly with synthetic `Instant`s — no

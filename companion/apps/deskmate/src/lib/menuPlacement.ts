@@ -6,11 +6,8 @@
  * them is not — a jsdom test has no layout to measure.
  *
  * The menu is a popover, so it is placed against the **viewport**, not against
- * the scrolling work column it happens to live in. It used to be positioned
- * absolutely inside `.face__work`, which has `overflow-y: auto` and therefore
- * clipped it, and a flat 300px cap then pushed the final group past the menu's
- * own scroll fold. Its heading stayed on screen with nothing underneath it: the
- * entries were in the DOM, but painted nowhere a click could reach.
+ * the scrolling `.face__work` ancestor that would clip it. Its height is derived
+ * from the available viewport space so every group remains reachable.
  */
 
 /** Matches the `.menu` width in `styles.css`; the two must agree. */

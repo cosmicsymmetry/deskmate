@@ -24,10 +24,9 @@
  * 3. --arc-a/--arc-b ARE A RAMP, NOT STATES. They encode share-of-loop, and only the
  *    ring uses them. Which arc is live is said by luminance, never by hue.
  *
- * 4. NUMERALS ARE ROUNDED AND TABULAR. `ui-rounded` resolves to SF Pro Rounded on
- *    macOS, costs nothing, and passes the Tauri CSP that blocks every font host.
- *    Every duration, time, count and index uses it so digits hold their columns
- *    while they tick.
+ * 4. NUMERALS ARE ROUNDED AND TABULAR. `ui-rounded` uses the platform's rounded
+ *    system face without a font download. Every duration, time, count and index
+ *    uses it so digits hold their columns while they tick.
  *
  * 5. NO STATE IS BEHIND A DISCLOSURE. No tabs, no accordions, no settings drawer.
  *    Focus is by luminance; context stays legible. The one menu — the add-card slot's —
@@ -290,10 +289,8 @@ h3 {
 /* ── Chrome ────────────────────────────────────────────────────────────── */
 
 /*
- * One row, two objects. The four status complications that used to sit here were
- * removed: they answered questions asked twice in a device's life and charged the
- * other thousand sessions for it. What replaces them is a door and, when something
- * is genuinely wrong, a dot on that door.
+ * One row, two objects. Pairing and troubleshooting facts stay behind the settings
+ * door; a dot on that door surfaces the exceptional state without permanent noise.
  */
 .topbar {
   display: flex;
@@ -744,8 +741,7 @@ h3 {
   text-align: left;
 }
 
-/* The template names the row; the owner's words follow it in the same line, quiet,
-   which is what tells two cards of the same kind apart. */
+/* Keep the card identity and dwell on one compact, truncation-safe row. */
 .loop__entry-text {
   display: flex;
   align-items: baseline;
@@ -758,14 +754,6 @@ h3 {
   flex-shrink: 0;
   font-size: 0.8rem;
   font-weight: 540;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.loop__entry-title {
-  overflow: hidden;
-  color: var(--ink-3);
-  font-size: 0.72rem;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
@@ -824,18 +812,12 @@ h3 {
   font-size: 0.66rem;
 }
 
-/* A card is headed by its template; the owner's title is the quiet fact beside it. */
+/* The editor heading uses the same single identity as every card surface. */
 .editor-title {
   display: flex;
   align-items: baseline;
   gap: 9px;
   min-width: 0;
-}
-
-.editor-title__kind {
-  color: var(--ink-3);
-  font-size: 0.72rem;
-  font-weight: 560;
 }
 
 .count-badge {
@@ -969,13 +951,6 @@ fieldset legend {
   color: var(--live);
 }
 
-/* The one thing the data-sources list said that was worth saying, said where it
-   applies: this tile's number is older than it looks. */
-.flag--stale {
-  background: color-mix(in srgb, var(--warn) 20%, transparent);
-  color: var(--warn);
-}
-
 .card-tile__remove {
   display: grid;
   font-size: 0.8rem;
@@ -1053,28 +1028,6 @@ fieldset legend {
 .card-tile__moves button:hover:not(:disabled) {
   background: color-mix(in srgb, var(--act) 14%, var(--tile));
   color: var(--act);
-}
-
-.card-tile--outside .card-tile__flags {
-  row-gap: 5px;
-}
-
-.card-tile--outside .flag {
-  white-space: nowrap;
-}
-
-.card-tile__join {
-  position: relative;
-  z-index: 1;
-  flex-basis: 100%;
-  margin-left: -7px;
-  padding: 2px 7px;
-  color: var(--act);
-  text-align: left;
-}
-
-.card-tile__join:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--act) 12%, transparent);
 }
 
 .card-tile--add {
@@ -1304,8 +1257,7 @@ fieldset legend {
 
 .field input,
 .field select,
-.field textarea,
-.mapping-row input {
+.field textarea {
   padding: 8px 11px;
   width: 100%;
   border: 1px solid var(--hairline);
@@ -1329,14 +1281,12 @@ fieldset legend {
   background: var(--tile);
 }
 
-.field input[aria-invalid="true"],
-.mapping-row input[aria-invalid="true"] {
+.field input[aria-invalid="true"] {
   border-color: var(--bad);
   background: color-mix(in srgb, var(--bad) 7%, var(--tile-2));
 }
 
-.field small,
-.behaviour-hint {
+.field small {
   color: var(--ink-3);
   font-size: 0.69rem;
   line-height: 1.45;
@@ -1441,26 +1391,11 @@ fieldset legend {
   padding: 40px 16px;
 }
 
-.source-picker,
 .alert-fieldset,
-.mapping-list,
 .timer-controls {
   display: flex;
   flex-direction: column;
   gap: 10px;
-}
-
-.source-picker label {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  font-size: 0.78rem;
-  cursor: pointer;
-}
-
-.source-picker input {
-  margin: 2px 0 0;
-  accent-color: var(--act);
 }
 
 .timer-controls {
@@ -1486,17 +1421,6 @@ fieldset legend {
 .timer-controls > div {
   display: flex;
   gap: 7px;
-}
-
-.mapping-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto;
-  align-items: center;
-  gap: 7px;
-}
-
-.mapping-row .field-errors {
-  grid-column: 1 / -1;
 }
 
 .file-picker-row {
@@ -1607,12 +1531,6 @@ fieldset legend {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-}
-
-.network-local-recovery {
-  flex-basis: 100%;
-  color: var(--ink-3);
-  font-size: 0.71rem;
 }
 
 .network-announcement {

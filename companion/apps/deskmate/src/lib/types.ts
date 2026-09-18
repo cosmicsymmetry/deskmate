@@ -168,9 +168,8 @@ export interface AppSnapshot {
   /**
    * The wire version the server speaks.
    *
-   * Reported rather than hard-coded here: the window used to compare the device's
-   * reported version against a literal `1`, which went stale at the v1 -> v2
-   * migration and made the app claim an incompatibility on every real connection.
+   * Reported rather than hard-coded so compatibility checks stay aligned with
+   * the server across protocol revisions.
    */
   host_protocol_version: number;
   runtime: RuntimeState;
@@ -344,11 +343,9 @@ type MessageError<Category extends string> = {
 /**
  * Every failure the server can hand this window, and nothing else.
  *
- * The union shrank with the move to HTTP: `runtime-busy`, `incompatible-server`,
- * `autostart`, `window` and `unsupported` described a desktop process talking to
- * a cable, and no route emits them now. Listing a category the server cannot
- * produce would make `toIpcError` accept a shape nothing sends and invite a
- * branch that can never run.
+ * This union contains only categories emitted by the HTTP API. Listing a category
+ * the server cannot produce would make `toIpcError` accept a shape nothing sends
+ * and invite a branch that can never run.
  */
 export type IpcError =
   | MessageError<"invalid-payload">

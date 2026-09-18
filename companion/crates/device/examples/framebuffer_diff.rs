@@ -1,5 +1,5 @@
-//! Dev-only physical framebuffer diff (V1 reset design spec §3.2.2/§3.2.3,
-//! Task 10). Pushes every device-representable case in the synthetic
+//! Dev-only physical framebuffer diff. Pushes every device-representable case
+//! in the synthetic
 //! `lvgl_sim::cases::scene_cases()`, six-face `lvgl_sim::cases::face_scene_cases()`,
 //! and produced-date overflow matrices to a physically connected device running a
 //! `DESKMATE_DEV_DIAG=1`
@@ -7,7 +7,7 @@
 //! reassembled pixels against `Simulator::render_scene` for the identical
 //! case. This only runs against real hardware: 0x7E/0x7F are dev-build-only
 //! message ids, absent from the release protocol and from
-//! `docs/protocol/v1.md`.
+//! `docs/protocol/v2.md`.
 //!
 //! Requires a device flashed from `idf.py -C firmware -DDESKMATE_DEV_DIAG=1
 //! build`. Against a plain release build every case fails with a timeout
@@ -363,9 +363,9 @@ fn run_case<T: Transport>(
         // the push (InvalidPayload "scene could not be rendered"). This is a
         // harness-pacing artifact, not a renderer defect -- the identical
         // scene renders byte-exact at either orientation run alone. Giving the
-        // teardown a moment removes the race. Found on the board 2026-09-06
-        // (Task 6 Step 5); 500 ms sufficed, this leaves margin. Light,
-        // asset-free cases never hit it, so they never pay it.
+        // teardown a moment removes the race; 500 ms sufficed in hardware
+        // testing, and this leaves margin. Light, asset-free cases never hit
+        // it, so they never pay it.
         if !request.assets.is_empty() {
             thread::sleep(CONFIG_SETTLE);
         }
@@ -566,13 +566,8 @@ mod tests {
             .filter(|(name, request)| exclusion_reason(name, request).is_some())
             .count();
 
-        // The counted-not-assumed numbers this task's report must state.
-        // The counted-not-assumed numbers the next hardware session must state.
-        // The three orphan faces (row-list, big-number-label, icon-badge-text)
-        // were retired on 2026-09-11 with the template oracle that was their
-        // only remaining consumer, taking 34 rows -- and with them the
-        // row-list--truncation-boundary exclusion, which had no case left to
-        // exclude.
+        // Keep these explicit so a changed case inventory cannot silently alter
+        // the hardware-coverage split.
         assert_eq!(
             requests.len(),
             44,
@@ -606,9 +601,7 @@ mod tests {
             );
         }
 
-        // Every face a card can still name. The other three retired with the
-        // template oracle on 2026-09-11; no card had been able to name them
-        // since schema v8.
+        // Every host-rendered face in the current case inventory.
         for prefix in ["digital-clock--", "analog-clock--", "progress-ring--"] {
             assert!(
                 requests.iter().any(|(name, _)| name.starts_with(prefix)),

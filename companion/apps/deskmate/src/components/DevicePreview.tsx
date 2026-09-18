@@ -70,9 +70,8 @@ export function DevicePreview({
   }, [widget?.id, widget?.kind, orientation, dataGeneration]);
 
   return (
-    /* No caption, no resolution, no label. The panel is the one object in the
-       window that looks exactly like the thing it represents, so it identifies
-       itself; anything printed around it was describing what you can already see. */
+    /* The recognizable panel surface identifies itself visually; the section's
+       accessible name supplies the equivalent context without extra chrome. */
     <section className="stage" aria-label="What the display is showing">
       <div className="stage__frame">
         <div className="stage__screen">

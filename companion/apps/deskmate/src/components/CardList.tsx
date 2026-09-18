@@ -14,24 +14,23 @@ import {
   cardLabel,
   cardMoveFromKey,
   cardsContainerIssues,
-  ownerSetName,
   issuesForCard,
-  issuesForPath,
   loopEntries,
   MAX_CARDS,
   MAX_IMAGE_SOURCES,
   moveEntry,
+  ownerSetName,
 } from "../lib/configDraft";
 import { placeAddMenu } from "../lib/menuPlacement";
-import {
-  type AddableCardKind,
-  type AppConfig,
-  type CardSettings,
-  type DeviceTier,
-  type FaceDescriptor,
-  type ImageSource,
-  type PomodoroSnapshot,
-  type ValidationIssue,
+import type {
+  AddableCardKind,
+  AppConfig,
+  CardSettings,
+  DeviceTier,
+  FaceDescriptor,
+  ImageSource,
+  PomodoroSnapshot,
+  ValidationIssue,
 } from "../lib/types";
 import { FieldIssues } from "./FieldIssues";
 import { Icon } from "./Icon";
@@ -326,8 +325,7 @@ export function CardList({
     setDraggedCardId(null);
   };
 
-  // Every card is in the loop since schema v10, so there is no longer a tile
-  // state for one that is not, and a card's own issues already cover its dwell.
+  // Every card is in the schema-v10 loop, and a card's own issues cover its dwell.
   const renderCardTile = (card: CardSettings, index: number) => {
     const tileIssues = issuesForCard(issues, config, card.id);
     const hasAlert = card.alert.kind !== "none";
@@ -364,16 +362,11 @@ export function CardList({
           onClick={() => onSelect(card.id)}
           onKeyDown={(event) => onTileKeyDown(event, card.id)}
         >
-          {/* No template label. "DIGITAL CLOCK" above a clock and "PICTURE"
-              above five different pictures classified what the owner could
-              already see, and the one line that actually distinguishes two
-              cards -- their name -- was the small grey one underneath. */}
+          {/* The card's live value or identity is enough; a template label would
+              only classify what the tile already makes visible. */}
           <strong className="card-tile__value numeral">{value}</strong>
-          {/* Only a name the owner can still set. A clock kept showing "Desk"
-              underneath -- a word seeded at creation that no field could change
-              once Name was removed, so it was decoration claiming to be data.
-              The pomodoro's label survives because it is typed, and drawn on the
-              panel. */}
+          {/* Only a name the owner can set. The pomodoro label qualifies because
+              it is editable and drawn on the panel; frozen creation defaults do not. */}
           {ownerSetName(card) && ownerSetName(card) !== value && (
             <span className="card-tile__name">{ownerSetName(card)}</span>
           )}
@@ -524,12 +517,8 @@ export function CardList({
                   );
                 })}
               </fieldset>
-              {/* Its own group, not beside the built-in kinds. These are picture
-                  cards whose frames the server draws, and the menu was the only
-                  surface calling them built in -- the tile that appears says
-                  "Picture", as does the editor. A menu that disagrees with what
-                  it produces is the vocabulary version of the mistake e2b103c
-                  made in the schema. Picking one names the card itself; nothing
+              {/* Its own group, not beside the built-in kinds: these picture frames
+                  are drawn by the server. Picking one names the card itself; nothing
                   is typed. */}
               <fieldset className="menu__group">
                 <legend className="tile-label menu__label">Server-side</legend>

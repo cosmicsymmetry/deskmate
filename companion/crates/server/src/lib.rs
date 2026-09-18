@@ -7,14 +7,14 @@
 //! contract the firmware ever sees. V3 replaces everything behind it
 //! (accounts, storage, multi-tenancy) without touching that surface.
 //!
-//! Task 8 puts this behind a public Cloudflare tunnel, so `app()` treats
+//! Production exposes this behind a public Cloudflare tunnel, so `app()` treats
 //! every caller as internet-facing and anonymous by default: a single
 //! process-wide concurrency limit, load shedding, and a request timeout
 //! guard every route, on top of the per-route defenses in `device_link` and
 //! `firmware`.
 
 mod admin;
-// The browser companion's API: the Tauri command set, re-homed as HTTP.
+// The browser companion's authenticated HTTP API.
 mod app_api;
 
 /// The event stream's change predicate, re-exported for the integration test

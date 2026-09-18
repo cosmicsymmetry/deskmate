@@ -1,10 +1,9 @@
 pub mod admin;
 pub mod asset_sync;
-pub mod commands;
 pub mod config;
-pub mod network_settings;
 pub mod render_negotiation;
 pub mod runtime;
+mod runtime_command;
 pub mod scene_build;
 mod scheduler;
 pub mod secure_file;
@@ -13,7 +12,6 @@ pub mod store;
 
 pub use admin::AdminConfigErrorBody;
 pub use asset_sync::DesiredAsset;
-pub use commands::{PomodoroAction, RuntimeError};
 pub use config::{
     AlertHold, AppConfig, AppPreferences, AssetKind, AssetSettings, AssetSource,
     CURRENT_SCHEMA_VERSION, CardAlert, CardSettings, CarouselAdvance, CompiledAppConfig,
@@ -24,11 +22,6 @@ pub use config::{
     MAX_TIMEZONE_LEN, MAX_TOTAL_ASSET_BYTES, MAX_WIDGET_TITLE_LEN, MIN_ALERT_HOLD_SECONDS,
     MIN_CARD_REFRESH_MINUTES, MIN_DWELL_SECONDS, RefreshPolicy, UpdateChannel, UpdateCheckPolicy,
     UpdaterSettings, ValidationCode, ValidationIssue, WidgetTapAction, utc_offset_minutes,
-};
-pub use network_settings::{
-    MAX_NETWORK_SETTINGS_FILE_BYTES, NETWORK_SETTINGS_FORMAT_VERSION, NetworkSettings,
-    NetworkSettingsLoadOutcome, NetworkSettingsStore, NetworkSettingsStoreError,
-    NetworkSettingsUpdate,
 };
 pub use protocol::{
     MAX_DEVICE_ID_LEN, MAX_DEVICE_TOKEN_LEN, MAX_PSK_LEN, MAX_SERVER_URL_LEN, MAX_SSID_LEN,
@@ -42,6 +35,7 @@ pub use runtime::{
     RuntimeOptions, RuntimeSubscription, SerialRuntimeDevice, empty_device, initial_snapshot,
     preview_card_scene,
 };
+pub use runtime_command::{PomodoroAction, RuntimeError};
 pub use scene_build::{
     AnalogClockCard, BakedFontMetrics, ClockCard, NumericAdvances, ProgressRingCard,
     SHIPPED_SCENE_SURFACE_COLOR, SceneDataState, TierMetrics, build_analog_clock_scene,

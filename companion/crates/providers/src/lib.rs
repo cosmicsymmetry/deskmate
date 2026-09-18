@@ -10,13 +10,10 @@ use chrono::{DateTime, Utc};
 use protocol::truncate_utf8_to_bytes;
 
 pub const MAX_PROVIDER_RESPONSE_BYTES: usize = 1_048_576;
-pub const MAX_PROVIDER_REDIRECTS: u8 = 3;
-pub const PROVIDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefreshPolicy {
     Interval(Duration),
-    OnDemand,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

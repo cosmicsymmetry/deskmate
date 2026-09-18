@@ -1,5 +1,9 @@
 # Plugin card parity — server-rendered cards feel like built-in cards
 
+> **HISTORICAL DESIGN.** The manifest-plugin path was retired on 2026-09-11 and the
+> Tauri companion was deleted on 2026-09-18. The app surfaces below record the delivered
+> parity work; they are not current architecture.
+
 **Status:** approved direction (owner, 2026-09-06: "the user should not see a difference
 between server rendered cards and regular cards"); approach 2 of the three offered — the
 **server renders the previews**. Design under review.

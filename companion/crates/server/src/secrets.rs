@@ -356,7 +356,7 @@ pub fn acquire_key(
 
 /// Reads [`ENV_KEY_FILE`]/[`ENV_KEY`] and delegates to [`acquire_key`]. The env is
 /// read only here so the resolution logic stays pure and test-parallel-safe.
-pub fn acquire_key_from_env(config_dir: &Path) -> Result<SecretsKey, KeyError> {
+fn acquire_key_from_env(config_dir: &Path) -> Result<SecretsKey, KeyError> {
     let keyfile = std::env::var_os(ENV_KEY_FILE).map(PathBuf::from);
     let inline = std::env::var(ENV_KEY).ok();
     acquire_key(config_dir, keyfile.as_deref(), inline.as_deref())

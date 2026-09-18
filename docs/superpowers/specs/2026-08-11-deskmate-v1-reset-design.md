@@ -1,5 +1,9 @@
 # Deskmate V1 Reset — Design
 
+> **HISTORICAL DESIGN.** The desktop-companion references describe the V1 architecture
+> at the time. The Tauri companion was deleted on 2026-09-18; this is not a description
+> of the current companion.
+
 **Date:** 2026-08-11
 **Status:** Approved section-by-section in brainstorming; supersedes the M4 plan's
 remaining scope (see §7).

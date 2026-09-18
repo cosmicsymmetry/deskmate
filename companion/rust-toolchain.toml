@@ -14,7 +14,8 @@
 # when you do:
 #     cargo fmt --all --check
 #     cargo clippy --workspace --all-targets --locked -- -D warnings
-#     cargo test --workspace --locked
+#     cargo test --workspace --all-targets --locked
+#     cargo test --workspace --doc --locked
 [toolchain]
 channel = "1.98.0"
 components = ["clippy", "rustfmt"]

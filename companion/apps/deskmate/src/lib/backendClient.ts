@@ -1,15 +1,9 @@
 /**
- * The companion's backend, over HTTP.
+ * The companion's typed HTTP client.
  *
- * This file replaces `lib/tauri.ts` and deliberately keeps its exact export
- * surface: the same function names, arguments and return types. Everything above
- * this module -- every component, `useAppState`, every test -- was written
- * against that surface and does not change because the transport did.
- *
- * `invoke(command, args)` became `fetch`, and the `app-state` Tauri event became
- * an `EventSource`. The error shape is unchanged too: the server answers with the
- * same `IpcError` union this module already knew how to raise, so `toIpcError`
- * and every `catch` that switches on `category` still mean what they meant.
+ * Components depend on task-level functions from this module rather than on
+ * routes or response parsing. Requests normalize failures into the shared
+ * `IpcError` union, while snapshots arrive through an `EventSource` subscription.
  *
  * Authentication is a session cookie, obtained by trading the admin token
  * through `setServerEndpoint`. The cookie is `HttpOnly`, so this file can neither
@@ -30,8 +24,8 @@ import type {
   PreviewFrame,
 } from "./types";
 
-export const APP_STATE_EVENT = "app-state";
-export const MAX_DRAFT_BYTES = 64 * 1024;
+const APP_STATE_EVENT = "app-state";
+const MAX_DRAFT_BYTES = 64 * 1024;
 
 const IPC_ERROR_CATEGORIES = new Set<IpcError["category"]>([
   "invalid-payload",
@@ -108,9 +102,9 @@ export async function signIn(adminToken: string): Promise<void> {
 /**
  * The device this window is looking at.
  *
- * Every route below is device-scoped while the UI above still speaks about "the
- * display", so one id has to be chosen. The Mac app read it from its own
- * settings file; a browser has none, and the server already knows the answer.
+ * Every route below is device-scoped while the UI speaks about "the display",
+ * so one id has to be chosen from an explicit remembered selection or the
+ * server's registry.
  */
 let selectedDeviceId: string | null = null;
 
@@ -268,14 +262,7 @@ export function validateConfigDraft(config: AppConfig): Promise<DraftValidation>
   );
 }
 
-/**
- * Both save paths are the same request now.
- *
- * The Mac app had two because it had two owners: a local tier where it wrote the
- * file itself, and a networked tier where it PUT to the server. The browser only
- * ever has the second, so `saveApplyConfig` and `saveServerConfig` converge --
- * kept as two names so the call sites above did not have to change.
- */
+/** Both save entry points use the server-owned configuration route. */
 export function saveApplyConfig(config: AppConfig): Promise<ConfigApplyResult> {
   const draft = draftPayload(config);
   return devicePath("/config").then((path) => request<ConfigApplyResult>("PUT", path, draft));
@@ -305,13 +292,11 @@ export function getNetworkSettings(): Promise<NetworkSettings> {
 }
 
 /**
- * Signs this browser in.
+ * Signs this browser in and optionally selects a display.
  *
- * Named for what it did on the Mac -- where it stored a server endpoint and an
- * admin token -- because the form that calls it is unchanged. Here the endpoint
- * is already known and the admin token is traded for a session cookie, so the
- * same three fields still do the same job: say which server, which display, and
- * prove you may configure it.
+ * The server endpoint is already fixed by the page's origin; the token is traded
+ * for a session cookie, and a non-empty device id selects one display from a
+ * multi-display server.
  */
 export async function setServerEndpoint(
   _serverUrl: string,
@@ -340,10 +325,8 @@ export async function setServerEndpoint(
 /**
  * Clears `preferences.paused`, which is what "Resume sending" means.
  *
- * On the Mac this was a runtime command; here it is a configuration write,
- * because the server's runtime reads the same preference. The escape hatch
- * `CLAUDE.md` requires -- a config that arrives already paused must be
- * resumable -- therefore still works.
+ * The server runtime reads this preference from configuration, so recovering
+ * from an already-paused document is a normal configuration write.
  */
 export async function resumePushing(): Promise<void> {
   const snapshot = await getAppSnapshot();
@@ -362,11 +345,9 @@ export function controlPomodoro(cardId: string, action: PomodoroAction): Promise
   );
 }
 
-// Autostart is not here either: it is a property of an application that starts,
-// and this one is a page. `preferences.autostart` stays in the schema because
-// removing a field would be a schema bump, and it keeps whatever value the owner
-// last saved -- the browser simply does not offer to change something it cannot
-// honour.
+// Autostart is not exposed: it is a property of an application that starts, and
+// this one is a page. `preferences.autostart` stays in the frozen schema and
+// retains its saved value.
 
 export function renderCardPreview(cardId: string): Promise<PreviewFrame> {
   return devicePath("/preview").then((path) =>
@@ -377,14 +358,10 @@ export function renderCardPreview(cardId: string): Promise<PreviewFrame> {
 /**
  * Mints a picture source and returns it in the window's own vocabulary.
  *
- * The route answers `{id, token}`; the window wants `{source_id, token,
- * push_url}`. The Tauri command used to do this translation, and dropping it in
- * the move to HTTP was not a cosmetic loss: the card was then built with
- * `source_id: undefined`, which made `pictureAccess?.source_id ===
- * card.source_id` compare two undefineds, pass a guard meant to keep a null out,
- * and crash the whole window on the next line. The source was already minted by
- * then, so every attempt left one behind -- which is how a server collects
- * "Weather 2", "Weather 3", "Weather 4".
+ * The route answers `{id, token}`; the UI contract requires `{source_id, token,
+ * push_url}`. Validate and translate that response here so a malformed route
+ * response cannot produce an undefined source id after the server has already
+ * minted the source.
  *
  * `push_url` is this page's own origin, for the same reason `getNetworkSettings`
  * reports it: the app is served by the server a producer would push to.
@@ -429,11 +406,10 @@ export function updateImageSourceFace(
 /**
  * The snapshot stream.
  *
- * `EventSource` reconnects on its own, which is the behaviour the Tauri event
- * had for free: a server restart or a dropped tunnel resumes without the window
- * needing to know it happened. A parse failure is skipped rather than thrown,
- * because a malformed frame must not tear down a subscription that will
- * otherwise keep delivering good ones.
+ * `EventSource` reconnects on its own, so a server restart or dropped tunnel
+ * resumes without the page coordinating retries. A parse failure is skipped
+ * rather than thrown, because one malformed frame must not tear down a stream
+ * that can keep delivering good ones.
  */
 export function listenToAppState(onSnapshot: (snapshot: AppSnapshot) => void): Promise<() => void> {
   return devicePath("/events").then((path) => {

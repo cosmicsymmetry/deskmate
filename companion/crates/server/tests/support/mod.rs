@@ -262,59 +262,6 @@ pub async fn flush_socket(socket: &mut DeviceSocket) {
     }
 }
 
-/// Every card-bearing message the device receives during `window`, in order,
-/// answering each one exactly as [`flush_socket`] does.
-///
-/// Link housekeeping -- `StatusRequest`, `TimeSync`, `Heartbeat` -- is
-/// answered but not recorded: it is the transport keeping itself alive, not a
-/// face. Everything that can change what the panel shows is recorded. Note
-/// `reply` panics on any message it does not know, the four asset-transfer
-/// messages included, so an unexpected asset push fails the caller too.
-pub async fn card_messages_during(
-    socket: &mut DeviceSocket,
-    window: std::time::Duration,
-) -> Vec<&'static str> {
-    let deadline = tokio::time::Instant::now() + window;
-    let mut seen = Vec::new();
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return seen;
-        }
-        let Ok(next) = tokio::time::timeout(remaining, socket.next()).await else {
-            return seen;
-        };
-        match next {
-            Some(Ok(WsMessage::Binary(bytes))) => {
-                let frame = protocol::decode_wire_frame(&bytes).expect("transcript frame");
-                let message = protocol::decode_message(&frame).expect("transcript message");
-                if let Some(name) = card_message_name(&message) {
-                    seen.push(name);
-                }
-                reply(socket, frame.request_id, &message).await;
-            }
-            Some(Ok(WsMessage::Ping(payload))) => {
-                socket.send(WsMessage::Pong(payload)).await.unwrap();
-            }
-            Some(Ok(WsMessage::Pong(_))) => {}
-            Some(Ok(other)) => panic!("unexpected transcript WebSocket message: {other:?}"),
-            Some(Err(error)) => panic!("transcript WebSocket read failed: {error}"),
-            None => panic!("socket closed during the transcript window"),
-        }
-    }
-}
-
-fn card_message_name(message: &Message) -> Option<&'static str> {
-    match message {
-        Message::ApplyConfig(_) => Some("ApplyConfig"),
-        Message::PushTimer(_) => Some("PushTimer"),
-        Message::PushScene(_) => Some("PushScene"),
-        Message::ActivateCard(_) => Some("ActivateCard"),
-        Message::TriggerInterrupt(_) => Some("TriggerInterrupt"),
-        _ => None,
-    }
-}
-
 async fn reply(socket: &mut DeviceSocket, request_id: u32, request: &Message) {
     let response = match request {
         Message::StatusRequest => Message::StatusResponse(sample_status()),

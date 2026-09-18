@@ -1,5 +1,9 @@
 # Deskmate V1 Packaging & Hardening — Design
 
+> **HISTORICAL DESIGN.** This records the delivered packaging and review of the former
+> macOS Tauri companion. That binary was deleted on 2026-09-18; its build and release
+> requirements do not apply to the current web companion.
+
 **Status:** Approved 2026-08-15.
 **Supersedes:** M4 Task 9 (`docs/superpowers/plans/2026-08-05-deskmate-m4-v1-completion.md`),
 which the reset spec (`2026-08-11-deskmate-v1-reset-design.md` §7) deferred to V1's exit

@@ -2,13 +2,9 @@
 //!
 //! This crate links the shipping scene interpreter and the hardware-independent
 //! firmware core, so Rust can produce exact device pixels: the goldens, the
-//! settings-window preview and the on-board framebuffer diff all render through
+//! web preview and the on-board framebuffer diff all render through
 //! the same C the device runs. See `build.rs` for the source list and
 //! `csrc/sim_shim.c` for the C-side glue.
-//!
-//! It used to compile the retired C templates too, as an oracle for a parity
-//! gate. That went on 2026-09-11 along with the second renderer it existed to
-//! check.
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,9 +47,6 @@ pub enum SimError {
     AlreadyClaimed,
     /// `sim_init` (`lv_init` + headless display setup) failed.
     InitFailed,
-    /// `sim_render` failed: unknown template kind or field resolution
-    /// failure.
-    RenderFailed,
     /// PNG encoding of a successfully rendered frame failed.
     EncodeFailed,
     /// Task 8: the scene failed `protocol::validate_scene`, the host mirror of
@@ -85,7 +78,6 @@ impl fmt::Display for SimError {
         let message = match self {
             SimError::AlreadyClaimed => "a Simulator already exists in this process",
             SimError::InitFailed => "LVGL simulator initialization failed",
-            SimError::RenderFailed => "template render failed",
             SimError::EncodeFailed => "PNG encoding failed",
             SimError::SceneInvalid(reason) => {
                 return write!(f, "scene rejected by the protocol validator: {reason}");
@@ -122,7 +114,7 @@ static SIMULATOR_CLAIMED: AtomicBool = AtomicBool::new(false);
 /// static display.
 pub struct Simulator {
     // Presence of a raw-pointer-shaped field would suffice, but this makes
-    // intent explicit: `Simulator` must never be `Sync` (`sim_render` is not
+    // intent explicit: `Simulator` must never be `Sync` (the renderer is not
     // reentrant) and should not be assumed `Send` either, since the shim's
     // LVGL state is only ever touched from one thread. Neither is
     // implemented automatically because LVGL's C statics carry no such

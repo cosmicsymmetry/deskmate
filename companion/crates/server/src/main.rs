@@ -264,10 +264,9 @@ async fn main() {
          unspecified under launchd/systemd",
         config_dir.display()
     );
-    // The browser companion's built assets. Unset means the UI is simply not
-    // served and this process behaves exactly as it did before the companion
-    // existed -- which is what a deployment that has not shipped a `dist/` yet
-    // should do, rather than answering every path with a 404 page.
+    // The browser companion's built assets. Unset means the UI routes are not
+    // mounted, which lets API-only deployments run without shipping a `dist/`
+    // directory or answering every unknown path with the SPA's 404 page.
     let web_dir = std::env::var("DESKMATE_WEB_DIR").ok().map(PathBuf::from);
     if let Some(web_dir) = web_dir.as_ref() {
         assert!(

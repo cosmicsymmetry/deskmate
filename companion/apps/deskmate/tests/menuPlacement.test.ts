@@ -30,10 +30,8 @@ describe("add-card menu placement", () => {
   });
 
   /**
-   * The regression. Entries used to sit below a flat 300px cap, under a heading
-   * that stayed visible, so choosing a card did nothing. The window
-   * has room for the whole menu — it just has no room for it *beneath the
-   * button* — so the menu must be shown whole rather than anchored and clipped.
+   * The window has room for the whole menu, just not beneath the button, so the
+   * menu must be shown whole rather than anchored and clipped.
    */
   test("a menu too tall for either side is shown whole rather than anchored", () => {
     const placement = placeAddMenu(lowTrigger, appWindow, fullMenu);

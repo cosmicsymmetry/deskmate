@@ -9,13 +9,19 @@ Read it when you want to know *why* something is the way it is, or when a decisi
 looks arbitrary and you suspect it is not. Do not read it to find out what is true
 today: statements below were true when written and several are explicitly marked as
 having gone stale. `CLAUDE.md` is the only file that states current fact, and the
-frozen contract documents (`docs/config/v9.md`, `docs/protocol/v1.md`) are the only
+frozen contract documents (`docs/config/v10.md`, `docs/protocol/v2.md`) are the only
 ones that state the contracts.
 
 Entries appear roughly in the order they were added, which is neither chronological
 nor topical. They are preserved verbatim.
 
 ---
+
+**Current context — 2026-09-18:** the Tauri companion was deleted and replaced by the
+web companion served by the Rust server. Earlier entries intentionally use the historical
+present and describe the system at the time of their dated work; they are not evidence
+that a desktop companion still exists. The deletion narrative begins under
+“2026-09-18 — the companion moved into the browser” below.
 
 - **MANIFEST-BASED PLUGINS ARE REMOVED; CONFIG SCHEMA IS v9 (2026-09-11).** The
   plugin/provider crates, curated manifests, server registry/fetch/raster paths, admin

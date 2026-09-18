@@ -1,5 +1,9 @@
 # Deskmate — Design
 
+> **HISTORICAL DESIGN.** This document describes the original desktop-companion
+> architecture. The Tauri companion was deleted on 2026-09-18; this is not a current
+> product or implementation contract.
+
 **Date:** 2026-08-03
 **Status:** Approved by Rodion (pending written-spec review)
 

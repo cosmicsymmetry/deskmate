@@ -989,8 +989,8 @@ fn encode_node_payload(encoder: &mut Encoder, node: &SceneNode) {
 /// that hold a `Scene` and want the device's own decoder to build it without
 /// inventing a link: `companion/crates/lvgl-sim` hands the result straight to
 /// `scene_decode()` so the simulator renders a scene it decoded from the wire
-/// shape rather than one it constructed field by field, which is what makes the
-/// stage-2a parity gate compare like with like.
+/// shape rather than one it constructed field by field, so parity checks compare
+/// like with like.
 ///
 /// # Errors
 ///

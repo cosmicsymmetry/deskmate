@@ -17,7 +17,7 @@ use chrono::{DateTime, Utc};
 use protocol::truncate_utf8_to_bytes;
 use serde_json::Value;
 
-use crate::http::{HttpClient, SystemHttpClient};
+use crate::http::HttpClient;
 use crate::{LastGood, Provider, ProviderError, ProviderSnapshot, RefreshPolicy};
 
 /// `CoinGecko`'s free tier permits a handful of calls a minute and each refresh
@@ -78,12 +78,6 @@ impl<C: HttpClient> TokenProvider<C> {
             options,
             state: LastGood::default(),
         }
-    }
-}
-
-impl TokenProvider<SystemHttpClient> {
-    pub fn system(options: TokenOptions) -> Self {
-        Self::new(SystemHttpClient::default(), options)
     }
 }
 

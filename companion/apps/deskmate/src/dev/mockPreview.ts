@@ -1,17 +1,15 @@
 /**
  * Dev-only stand-in for `render_card_preview`.
  *
- * The real command returns exact pixels from the device's own LVGL templates. Nothing
- * in a browser can do that, so this draws a deliberate approximation at the true
+ * The preview endpoint returns exact pixels from the device renderer. Nothing in
+ * a browser can do that, so this draws a deliberate approximation at the true
  * 448x368 and every frame is reported with `sample: true`, which is the same flag the
  * real backend sets when it renders from placeholder data. The UI already labels that
  * state, so a mock frame can never be mistaken for a device frame.
  *
- * Layout rules mirror the ones the firmware actually follows, because getting those
- * wrong would make the app's composition look correct against a lie:
- *  - clock faces carry no title chip and no eyebrow (docs/design + the 2026-08-17 change)
- *  - every other template keeps its title chip
- *  - the canvas is one clean 448x368 with no status strip
+ * Layout rules mirror the device: clocks carry no title or eyebrow, pomodoros put
+ * their label under the ring, pictures own their full frame, and the canvas is one
+ * clean 448x368 surface with no status strip.
  */
 import type { CardSettings } from "../lib/types";
 
@@ -22,20 +20,6 @@ const INK = "#FFFFFF";
 const DIM = "#8A8A8E";
 const GROUND = "#000000";
 const EMIT = "#FFB340";
-
-function chip(ctx: CanvasRenderingContext2D, text: string) {
-  ctx.font = "600 19px ui-sans-serif, system-ui, sans-serif";
-  const width = ctx.measureText(text).width + 28;
-  const x = (PANEL_WIDTH - width) / 2;
-  ctx.fillStyle = "#1C1C1E";
-  ctx.beginPath();
-  ctx.roundRect(x, 26, width, 38, 19);
-  ctx.fill();
-  ctx.fillStyle = DIM;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(text, PANEL_WIDTH / 2, 46);
-}
 
 function clockFace(ctx: CanvasRenderingContext2D, showSeconds: boolean, timezone: string) {
   let now = new Date();
@@ -48,7 +32,7 @@ function clockFace(ctx: CanvasRenderingContext2D, showSeconds: boolean, timezone
   const mm = String(now.getMinutes()).padStart(2, "0");
   const ss = String(now.getSeconds()).padStart(2, "0");
 
-  // Centred on its own canvas, hero at 8 * grid — no chip, no eyebrow.
+  // Centered on its own canvas, with the time as the only hero.
   ctx.textAlign = "center";
   ctx.textBaseline = "alphabetic";
   ctx.fillStyle = INK;

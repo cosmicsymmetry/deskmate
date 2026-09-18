@@ -12,13 +12,13 @@ import { defineConfig } from "vite";
 // One entry, because `src/lib/backend.ts` is the only module that imports
 // `./backendClient`: every other file goes through that barrel, so a new call
 // site cannot accidentally bypass the harness.
-const useMockIpc = process.env.VITE_DESKMATE_MOCK === "1";
+const useMockBackend = process.env.VITE_DESKMATE_MOCK === "1";
 const devModule = (name: string) => fileURLToPath(new URL(`./src/dev/${name}`, import.meta.url));
 
 export default defineConfig({
   plugins: [react()],
   resolve: {
-    alias: useMockIpc ? { "./backendClient": devModule("backendClient.ts") } : {},
+    alias: useMockBackend ? { "./backendClient": devModule("backendClient.ts") } : {},
   },
   clearScreen: false,
   server: {
@@ -30,10 +30,8 @@ export default defineConfig({
   },
   envPrefix: ["VITE_"],
   build: {
-    // The companion is a browser app served over HTTPS by its own server, so the
-    // target is what the owner's browser is, not what a WKWebView was. Kept
-    // modern deliberately: Web Serial (a later cable story) is Chromium-only
-    // anyway, and nothing here needs to run on a browser that predates ES2022.
+    // The companion is served over HTTPS to modern browsers; nothing here needs
+    // to run on a browser that predates ES2022.
     target: "es2022",
     minify: true,
     sourcemap: true,

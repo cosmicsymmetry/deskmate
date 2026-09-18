@@ -1,5 +1,8 @@
 # Deskmate V2 — Networked Device — Design
 
+> **HISTORICAL DESIGN.** V2 was delivered and exited. References to the Mac app describe
+> the architecture at that time; the Tauri companion was deleted on 2026-09-18.
+
 **Date:** 2026-08-18
 **Status:** Approved section-by-section in brainstorming.
 **Prior contracts:** `docs/superpowers/specs/2026-08-03-deskmate-design.md` (base

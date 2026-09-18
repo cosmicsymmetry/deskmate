@@ -352,11 +352,10 @@ pub enum PomodoroState {
 
 /// One live value a card's scene builder reads. Protocol v2 removed the wire's
 /// generic field bag, so this is now purely a HOST-side type: it is what the
-/// runtime keeps per card, what the settings webview renders, and what
-/// `build_card_scene` reads. The wire
-/// deliberately does not derive `Serialize` (it must stay free of
-/// presentation concerns), so this DTO carries the same last-good values
-/// across the IPC boundary instead.
+/// runtime keeps per card, what the settings UI renders, and what
+/// `build_card_scene` reads. The wire type deliberately does not derive
+/// `Serialize` (it must stay free of presentation concerns), so this DTO
+/// carries the same last-good values through the companion API instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum CardFieldValue {

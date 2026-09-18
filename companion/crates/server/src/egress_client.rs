@@ -5,9 +5,8 @@
 //! `providers::http::SystemHttpClient` validates a URL's scheme and refuses
 //! embedded credentials, and that is all. It performs no address checks, so it
 //! will happily fetch `http://192.168.1.1/` or the cloud metadata endpoint.
-//! That was survivable when the providers ran inside the owner's own Mac app;
-//! it is not survivable in the server, which sits on the homelab beside
-//! unrelated services.
+//! Server-side providers run beside unrelated services, so every fetch also
+//! needs address-level SSRF protection.
 //!
 //! [`crate::egress`] already implements the whole guard -- deny-list,
 //! resolve-then-pin against DNS rebinding, per-hop re-validation across

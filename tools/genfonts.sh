@@ -3,9 +3,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 FONT_DIR=firmware/main/ui/fonts
-# The checked-in Inter sources were coupled to the retired server rasterizer. Keep
-# this firmware-generation tool usable without restoring that directory: callers
-# provide equivalent OFL-licensed faces whose digit cmap already selects tabular forms.
+# Font sources are not checked in. Callers provide OFL-licensed faces whose digit
+# cmap already selects tabular forms so generated clocks and timers stay aligned.
 BODY=${DESKMATE_BODY_FONT:?Set DESKMATE_BODY_FONT to a tabular-digit text TTF}
 HERO=${DESKMATE_HERO_FONT:?Set DESKMATE_HERO_FONT to a tabular-digit display TTF}
 # Text tiers: ASCII 0x20-0x7E, the Latin-1 Supplement block 0xA0-0xFF (spec

@@ -30,8 +30,8 @@ WHITE = (255, 255, 255)
 GREY = (138, 138, 142)
 TRACK = (28, 28, 30)
 
-# Bars are neutral on purpose. The shipped face made that decision and this one
-# keeps it, so the card looks the same after moving to a picture.
+# Bars are neutral so usage level is carried by length rather than an extra
+# status colour that would compete with the percentage.
 BAR = (255, 255, 255)
 
 GRID = 8
@@ -91,8 +91,8 @@ def draw_panel(payload):
         )
 
     windows = payload.get("windows") or []
-    # Two stacked full-width rows. Across 400px one percent is 4px of bar, against
-    # under 2px in the two-column layout this replaced.
+    # Two stacked full-width rows make each percentage point about 4px of bar,
+    # keeping small usage changes visible on the fixed-size panel.
     top = 9 * GRID
     row_height = 15 * GRID
     for index, window in enumerate(windows[:2]):

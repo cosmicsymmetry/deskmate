@@ -1,21 +1,17 @@
 //! The card preview the browser companion shows, rendered by the one
 //! `lvgl_sim::Simulator` this process owns.
 //!
-//! Moved here from the Mac app's `src-tauri/src/preview.rs` when the companion
-//! became a web app. The reason for the dedicated thread is unchanged and is a
-//! property of the simulator, not of the host: `Simulator` is not `Sync` and must
-//! never migrate between threads, so exactly one is claimed for the process
-//! lifetime and driven from a single thread.
+//! The dedicated thread is required by the simulator: `Simulator` is not `Sync`
+//! and must never migrate between threads, so exactly one is claimed for the
+//! process lifetime and driven from a single thread.
 //!
 //! Requests arrive on an `mpsc` channel with latest-wins coalescing: if more than
 //! one render is queued when the thread wakes, only the newest renders and every
 //! superseded request is told so explicitly rather than left waiting for an answer
 //! about a card the operator has already navigated away from.
 //!
-//! What is new here is that the callers are now concurrent HTTP handlers rather
-//! than one webview. `render` is therefore `async`-friendly by construction: it
-//! blocks only the thread that calls it, and every axum handler that uses it does
-//! so inside `spawn_blocking`.
+//! Callers are concurrent HTTP handlers. `render` blocks only its calling thread,
+//! and every axum handler that uses it does so inside `spawn_blocking`.
 
 use std::sync::mpsc;
 

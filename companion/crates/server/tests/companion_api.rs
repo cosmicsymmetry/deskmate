@@ -290,8 +290,8 @@ async fn a_pomodoro_command_with_no_board_says_so_instead_of_silently_succeeding
 
 #[tokio::test]
 async fn without_a_web_root_the_ui_paths_are_simply_absent() {
-    // A deployment that has not shipped a `dist/` yet must behave exactly as it
-    // did before the companion existed, rather than answering an HTML 404.
+    // An API-only deployment must leave UI paths unmounted rather than answering
+    // them with the SPA shell.
     let (server, _state) = spawn().await;
     let response = Client::new()
         .get(&server.base_url)

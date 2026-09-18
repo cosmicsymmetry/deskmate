@@ -189,10 +189,11 @@ To stop and unload: `launchctl unload <path-to-plist>`.
 
 ## 4. Expose it: the Cloudflare Tunnel
 
-The device and the Mac app both need a publicly-trusted TLS certificate --
-that's what makes `esp_https_ota` and the WSS link work without embedding a
-private CA on the device. Cloudflare Tunnel is the spec's chosen way to get
-one without opening a port or managing certificates by hand.
+The device's HTTPS/WSS connections and the browser companion need a
+publicly-trusted TLS certificate. For the device, that keeps `esp_https_ota` and
+the WSS link working without embedding a private CA. Cloudflare Tunnel is the
+deployment's chosen way to provide one without opening a port or managing
+certificates by hand.
 
 Install `cloudflared` (`brew install cloudflared` on macOS, or the equivalent
 package for your Linux distribution), then create a **named** tunnel -- named,

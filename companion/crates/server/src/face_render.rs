@@ -44,10 +44,8 @@ use crate::image_ingest::{CanonicalFrame, encode_rgb565};
 /// constraint rather than tidiness: `deploy/README.md`'s recipe exports
 /// `git archive HEAD companion`, so an `include_bytes!` path that climbs out of
 /// `companion/` does not exist on the build VM and the release build fails to
-/// compile. The retired rasterizer included them from `tools/fonts/` and the
-/// answer at the time was to rsync a second directory -- an undocumented step
-/// in a documented recipe. Keeping build inputs inside the crate that includes
-/// them means any export works.
+/// compile. Keeping build inputs inside the crate that includes them makes the
+/// documented export self-contained.
 const INTER_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
 const INTER_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Inter-SemiBold.ttf");
 pub(crate) const FONT_FAMILY: &str = "Inter";

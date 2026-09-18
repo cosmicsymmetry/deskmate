@@ -1,5 +1,9 @@
 # Deskmate legacy subtraction — design
 
+> **HISTORICAL BASELINE NOTE (2026-09-18).** References to the Mac app describe the
+> pre-deletion system that this subtraction work evaluated. The Tauri companion no
+> longer exists.
+
 Date: 2026-09-11. Status: Wave A specified; Waves B and C committed in scope,
 specified at their turn.
 

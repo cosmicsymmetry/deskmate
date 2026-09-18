@@ -605,7 +605,7 @@ impl DisplayOrientation {
 }
 
 /// Computes the UTC offset in minutes for `timezone` at `now`. Shared by the
-/// runtime's device time-sync path (`runtime::send_time_sync`) and the desktop
+/// runtime's device time-sync path (`runtime::send_time_sync`) and the web
 /// preview renderer so both derive the offset from the same configured timezone
 /// through the same formula, rather than each doing its own `chrono_tz` lookup that
 /// could drift from the other.
@@ -1100,7 +1100,7 @@ impl CardSettings {
     /// Protocol v1 sent this bag to the device as `PushData` and seeded the
     /// host's own copy from the same value. Protocol v2's device has no field
     /// model, so this is now purely host state: the input the scene builders
-    /// read, and what the settings window shows as the card's data.
+    /// read, and what the settings UI shows as the card's data.
     pub(crate) fn initial_fields(&self) -> Vec<CardField> {
         match self {
             Self::Clock {

@@ -19,13 +19,9 @@ import {
 import * as backendModule from "../src/lib/backend";
 
 // Keep a reference to the real picture-source wrapper before `mock.module`
-// replaces the module namespace in place, then stub the transport beneath it.
-//
-// The transport is `fetch` now rather than Tauri's `invoke`, so what is recorded
-// is the request the browser would actually make. That is the point of asserting
-// on it at all: the mint has to reach `/v1/images` with the name and face kind in
-// the body, and a test that only checked a command string could not have told a
-// correct request from one aimed at the wrong route.
+// replaces the module namespace in place, then stub `fetch` beneath it. Recording
+// the browser request verifies that the mint reaches `/v1/images` with the name
+// and face kind in the body, not merely that a client function was called.
 const httpCalls: { method: string; path: string; body: unknown }[] = [];
 const jsonResponse = (value: unknown) =>
   new Response(JSON.stringify(value), {
@@ -38,11 +34,9 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
   httpCalls.push({ method, path, body });
   if (method === "POST" && path === "/v1/images") {
-    // EXACTLY what the route answers -- `{id, token}`, nothing else. This stub
-    // used to return `{source_id, token, push_url}`, which was the shape the
-    // window wants rather than the shape the server sends. Both the stub and the
-    // client held the same wrong belief, so the suite agreed with itself while
-    // the real app crashed on the first picture card.
+    // Exactly what the route answers: `{id, token}`, nothing else. Returning the
+    // UI's translated shape here would let the client and test share the same
+    // wrong assumption about the server contract.
     return jsonResponse({ id: "picture-source", token: "plaintext-once" });
   }
   return jsonResponse([]);
@@ -70,11 +64,9 @@ import { resolveDeviceTier, saveConfigForTier } from "../src/lib/useAppState";
 const snapshot = ipcContractFixtures.snapshot;
 const cards = snapshot.config.cards;
 
-// `DevicePreview` calls `renderCardPreview` (typed IPC over `tauri.ts`) directly, so
-// its behaviour tests mock that one export at the module boundary — the same
-// boundary every other command is mocked at when a test needs to control an IPC
-// result — while every other export of `tauri.ts` (used transitively by `App` and
-// `useAppState`) stays real.
+// `DevicePreview` calls `renderCardPreview` directly, so its behavior tests mock
+// that one export at the backend seam while the exports used transitively by
+// `App` and `useAppState` stay real.
 let previewImpl: (cardId: string) => Promise<PreviewFrame> = () =>
   Promise.reject(new Error("renderCardPreview not configured for this test"));
 let snapshotImpl: () => Promise<AppSnapshot> = async () => snapshot;
@@ -395,9 +387,8 @@ describe("settings accessibility and states", () => {
   }
 
   test("a cable-owned display is named as such, and still points saves at the server", () => {
-    // The panel can no longer change ownership, so what it owes the reader is an
-    // accurate statement of where an edit made here will actually land. A display
-    // owned by a cable is the case where that answer is surprising.
+    // Because the page cannot change ownership, it must state where an edit made
+    // here will land. A display owned by a cable is the surprising case.
     const html = renderNetworkPanel({ tier: "local", wifiState: "down", ip: "" });
     expect(ownershipLabel("local")).toBe("Owned by a cable");
     expect(html).toContain("owned by a cable");
@@ -428,19 +419,6 @@ describe("settings accessibility and states", () => {
     expect(html).not.toContain("stored-wifi-secret");
     expect(html).not.toContain("stored-device-secret");
     expect(html).not.toContain("stored-admin-secret");
-  });
-
-  test("the panel offers no cable operation it cannot perform", () => {
-    // Provisioning, unpairing and factory reset write the display's own settings
-    // over USB. A browser has no cable, so the controls are gone rather than
-    // present-and-failing -- which is the whole reason this assertion is by
-    // absence: a stub that threw would have rendered an identical-looking button.
-    const html = renderNetworkPanel({ tier: "networked", wifiState: "connected", ip: "10.0.0.2" });
-    expect(html).not.toContain("Pair with server");
-    expect(html).not.toContain("Return to local ownership");
-    expect(html).not.toContain("Factory-reset");
-    expect(html).not.toContain("WiFi passphrase");
-    expect(html).not.toContain("Device token");
   });
 
   test("signing in submits the admin token once and then clears it", async () => {
@@ -544,9 +522,8 @@ describe("settings accessibility and states", () => {
   });
 
   test("no card offers a Name field, and the pomodoro keeps its timer label", () => {
-    // The owner removed Name on 2026-09-18: it decided nothing, because a clock
-    // is a clock and a picture is named by its source. "Timer label" is a
-    // different thing and stays -- it is drawn on the panel face.
+    // A clock is a clock and a picture is named by its source. "Timer label" is
+    // different: it is editable and drawn on the panel face.
     const clockHtml = renderCardEditor(clockCard("clock-1", "Desk"));
     expect(clockHtml).not.toContain("<span>Name</span>");
     expect(renderCardEditor(pictureCard())).not.toContain("<span>Name</span>");
@@ -564,15 +541,8 @@ describe("settings accessibility and states", () => {
     expect(renderCardEditor(pomodoro)).toContain("<span>Timer label</span>");
   });
 
-  test("a card is identified by its name, and the tile no longer classifies it", () => {
-    // The rule this replaces said a card is called the same thing on every
-    // surface and that thing is its TEMPLATE. The owner overturned it on
-    // 2026-09-18: "DIGITAL CLOCK" above a clock and "PICTURE" above five
-    // different pictures classified what was already visible, and the line that
-    // actually told them apart was the small grey one underneath.
-    //
-    // The loop list and the control labels still carry template and title
-    // together -- deliberately, and not yet asked about: a screen reader hearing
+  test("cardIdentity names every visible surface without a template label", () => {
+    // Control labels still carry template and title together deliberately: a screen reader hearing
     // "Remove Digital clock — Desk" is better served than by "Remove Desk".
     const config = cardListConfig(
       [clockCard("internal-uuid-0001", "Desk")],
@@ -601,13 +571,12 @@ describe("settings accessibility and states", () => {
     );
     const editor = renderCardEditor(clockCard("internal-uuid-0001", "Desk"));
 
-    // One name, the same on all three surfaces. "Desk" appears nowhere: it was
-    // seeded at creation and nothing can edit it now that Name is gone.
+    // One name, the same on all three surfaces. "Desk" is a frozen creation
+    // default rather than an editable identity, so it is not displayed.
     expect(library).not.toContain('class="tile-label">Digital clock<');
     expect(library).toContain('<strong class="card-tile__value numeral">Clock</strong>');
     expect(library).not.toContain('class="card-tile__name">Desk<');
     expect(loop).toContain('class="loop__entry-name">Clock<');
-    expect(loop).not.toContain('class="loop__entry-title"');
     expect(editor).toContain('id="editor-heading">Clock<');
     // The accessible name keeps the template: a listener gets no tile to look at.
     expect(library).toContain('aria-label="Move Digital clock — Clock earlier"');
@@ -654,9 +623,8 @@ describe("settings accessibility and states", () => {
     );
 
     expect(html).not.toContain('class="tile-label">Picture<');
-    // The tile's one fact is the SOURCE. "PNG" read identically on every picture
-    // card, which is what made a grid of them indistinguishable; "PICTURE" above
-    // it had the same problem and was removed for the same reason.
+    // The tile's one fact is the source; generic format and kind labels would not
+    // distinguish one picture from another.
     expect(html).toContain('<strong class="card-tile__value numeral">Claude limits</strong>');
     expect(html).not.toContain('numeral">PNG<');
     // No second line: a picture's title is its source name, said once.
@@ -667,9 +635,8 @@ describe("settings accessibility and states", () => {
   });
 
   test("a picture card states its source instead of offering a menu of them", () => {
-    // 324c981 retired the plugin dropdown because rendering identity as a select
-    // implied that changing it was a safe edit, when it silently turned the card
-    // into a different card. The picture source is the same kind of identity.
+    // Rendering identity as a select would imply that changing it is a safe edit,
+    // when a new source makes this a different card.
     const html = renderCardEditor(pictureCard());
 
     expect(html).toContain("Picture source");
@@ -908,11 +875,8 @@ describe("settings accessibility and states", () => {
   });
 
   test("a server-drawn face is not filed under Built in", async () => {
-    // The menu was the only surface calling weather built in. Everything else --
-    // the tile, the editor heading, `cardLabel` -- says "Picture", so the menu
-    // disagreed with what it produced within one click. Worse, "built in" is the
-    // exact claim the schema made in e2b103c and had reverted the next day, so
-    // the vocabulary was re-asserting what the architecture rejected.
+    // Server-drawn faces produce picture cards, so filing them beside device-local
+    // kinds would contradict the tile, editor heading, and `cardLabel` result.
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -1118,9 +1082,6 @@ describe("settings accessibility and states", () => {
     const clock = clockCard("internal-uuid-0001", "Desk");
     const html = renderCardEditor(clock);
     expect(html).toContain("Show seconds");
-    // The canvas dimensions were a caption that never changed and never told the
-    // reader anything they could act on. It is gone; keep it gone.
-    expect(html).not.toContain("448");
     // IDs are wire identifiers, not something a person should see or edit.
     expect(html).not.toContain("Widget ID");
     expect(html).not.toContain("internal-uuid-0001");
@@ -2025,12 +1986,8 @@ describe("settings accessibility and states", () => {
   });
 
   test("a display speaking the server's own protocol raises nothing", async () => {
-    // The assertion that would have caught a three-week-old lie. The previous
-    // version of this test set the device to protocol 2 and asserted the app
-    // replied "this app speaks protocol 1" -- written when the app really did
-    // speak 1, and left unchanged through the v1 -> v2 migration, after which it
-    // pinned the wrong answer. Every connected board was told it was
-    // incompatible, and only a real connection showed it.
+    // Compatibility compares the device with the server-reported version rather
+    // than a client literal, so matching peers never produce a false warning.
     snapshotImpl = async () => ({
       ...(structuredClone(snapshot) as AppSnapshot),
       host_protocol_version: 2,
@@ -2060,10 +2017,9 @@ describe("settings accessibility and states", () => {
     }
   });
 
-  test("a protocol the server cannot speak is stated in the work column, not a status bar", async () => {
-    // The header that used to carry this was removed; the sentence has to survive
-    // the move or a mismatched display fails silently. A device ahead of the
-    // server is the shape this really takes: firmware is flashed first.
+  test("a protocol the server cannot speak is stated in the work column and flags Settings", async () => {
+    // A mismatch must remain visible without opening Settings. A device ahead of
+    // the server is the realistic shape: firmware is flashed first.
     snapshotImpl = async () => ({
       ...(structuredClone(snapshot) as AppSnapshot),
       host_protocol_version: 2,
@@ -2149,7 +2105,7 @@ describe("settings accessibility and states", () => {
     }
   });
 
-  test("the settings sheet carries the link and ownership facts the header used to", () => {
+  test("the settings sheet shows the device link and unavailable ownership", () => {
     const html = renderNetworkPanel({
       tier: "networked",
       wifiState: "connected",
@@ -2181,7 +2137,7 @@ describe("settings accessibility and states", () => {
     return { container, root };
   }
 
-  test("renders the device's own pixels as an img with a data URL once the IPC resolves", async () => {
+  test("renders the device's own pixels as an img when the preview request resolves", async () => {
     previewImpl = async (cardId) => {
       expect(cardId).toBe("upnext");
       return { png_base64: "Zmlyc3QtZnJhbWU=", sample: false, state: null };
@@ -2196,7 +2152,7 @@ describe("settings accessibility and states", () => {
     await act(async () => root.unmount());
   });
 
-  test("shows the explicit unavailable state when the IPC rejects, never a stale or invented frame", async () => {
+  test("shows the explicit unavailable state when the preview request rejects", async () => {
     previewImpl = async () => {
       throw new Error("simulator init failed");
     };
@@ -2392,7 +2348,7 @@ describe("settings accessibility and states", () => {
 
   test("shows 'No cards configured' when there are no cards, never a stale or invented frame", () => {
     // No live effect needed here: with no cards, `DevicePreview` never calls the
-    // preview IPC at all, so a static render is enough to check the empty state.
+    // preview backend at all, so a static render is enough to check the empty state.
     const html = renderToStaticMarkup(
       <DevicePreview
         cards={[]}

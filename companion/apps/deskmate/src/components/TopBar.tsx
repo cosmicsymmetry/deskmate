@@ -10,12 +10,9 @@ interface TopBarProps {
 /**
  * The whole chrome: a wordmark and the one door out of the working view.
  *
- * The four status complications that used to live here were removed on purpose.
- * Link, owner, Wi-Fi and push state are facts you check twice — once while pairing
- * and once when something is broken — and paying for them with a permanent band
- * across the top of every session was the wrong trade. They live in the settings
- * sheet now; when one of them turns bad, the button carries a single dot and the
- * work column carries the sentence that explains it.
+ * Link, owner, Wi-Fi and push state live in the settings sheet because they are
+ * pairing-and-troubleshooting facts rather than working-view controls. When one
+ * needs attention, the button carries a dot and the work column states the cause.
  */
 export function TopBar({ attention, onOpenSettings }: TopBarProps) {
   return (

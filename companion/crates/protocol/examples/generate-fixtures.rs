@@ -745,8 +745,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(output.join("bad_crc.bin"), &bad_crc)?;
 
     let mut version_frame = Frame::new(1, 6, vec![0xa0]);
-    // v1 is the version this build does NOT speak: it is what the fleet runs
-    // until the rollout session flashes v2.
+    // Use a known protocol version that this v2 build does not speak.
     version_frame.version = 1;
     let unsupported_version = protocol::encode_frame(&version_frame)?;
     fs::write(output.join("unsupported_version.bin"), &unsupported_version)?;

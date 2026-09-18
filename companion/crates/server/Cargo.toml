@@ -10,9 +10,8 @@ app-core = { path = "../app-core" }
 device = { path = "../device" }
 # The card preview the browser companion renders. This is the firmware's own LVGL
 # templates over FFI -- the SAME renderer `build_card_scene` pushes to the panel,
-# not a second one. It moved here from the Mac app's `src-tauri` when the
-# companion became a web app; `crates/lvgl-sim/tests/preview_path.rs` remains the
-# honest check that the path works.
+# not a second implementation. `crates/lvgl-sim/tests/preview_path.rs` checks the
+# complete preview path.
 lvgl-sim = { path = "../lvgl-sim" }
 protocol = { path = "../protocol" }
 providers = { path = "../providers" }

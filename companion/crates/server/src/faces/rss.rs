@@ -3,10 +3,9 @@
 //! # Why the lead dominates
 //!
 //! A panel is glanced at, not read. Five equal headlines at a size that fits
-//! five of them is a face you have to stop and work through, which is the
-//! failure mode of the retired `row-list` template. So the newest item gets
-//! the hero treatment and the rest become a quiet index underneath: the glance
-//! answers "what just happened", and the detail rewards a second look.
+//! five of them is a face you have to stop and work through. So the newest item
+//! gets the hero treatment and the rest become a quiet index underneath: the
+//! glance answers "what just happened", and the detail rewards a second look.
 //!
 //! # Why the layout is computed rather than fixed
 //!
@@ -16,7 +15,7 @@
 //! result, with the leftover height divided among however many follower rows
 //! actually fit.
 
-use super::svg::{Anchor, Canvas, Text, count, ellipsize, wrap};
+use super::svg::{Anchor, Canvas, Text, count, fit, wrap};
 use super::theme::{
     CANVAS_HEIGHT, CANVAS_WIDTH, CONTENT_WIDTH, GOOD, GRID, GROUND, HAIRLINE, INK, INK_2, INK_3,
     MARGIN, SIZE_BODY, SIZE_CAPTION, SIZE_EYEBROW, SIZE_TITLE, TRACKING_EYEBROW, WEIGHT_REGULAR,
@@ -104,13 +103,6 @@ fn ellipsize_eyebrow(feed_title: &str) -> String {
         TRACKING_EYEBROW,
         CONTENT_WIDTH,
     )
-}
-
-fn ellipsize_to_fit(text: &str, size: f64, weight: u16, max_width: f64) -> String {
-    if crate::face_render::text_width(text, size, weight) <= max_width {
-        return text.to_owned();
-    }
-    ellipsize(text, size, weight, max_width)
 }
 
 /// Draws the lead story and returns the y the next element may start at.
@@ -212,7 +204,7 @@ fn draw_followers(canvas: &mut Canvas, followers: &[FeedEntry], top: f64) {
             crate::face_render::text_width(&entry.age, SIZE_CAPTION, WEIGHT_SEMIBOLD) + 1.5 * GRID
         };
         let title_width = CONTENT_WIDTH - age_width;
-        let title = ellipsize_to_fit(
+        let title = fit(
             &super::svg::normalize_whitespace(&entry.title),
             SIZE_BODY,
             WEIGHT_REGULAR,

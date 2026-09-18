@@ -1,9 +1,9 @@
-//! The settings window's preview chain, end to end minus the Tauri glue.
+//! The Rust preview path from app configuration to rendered device pixels.
 //!
 //! `render_card_preview` builds `app_core::preview_card_scene(..)` and hands it
-//! to this simulator. The dev browser harness CANNOT check this: it mocks
+//! to this simulator. The development browser harness cannot check this: it mocks
 //! `render_card_preview` outright (`src/dev/mockPreview.ts`), so a broken Rust
-//! preview path renders perfectly there. This test is the honest check.
+//! preview path renders perfectly there. This test exercises the real path.
 
 use app_core::{AppConfig, CardAlert, CardSettings, RefreshPolicy, WidgetTapAction};
 use lvgl_sim::scene::{SceneRenderRequest, SceneTimer};

@@ -1,6 +1,7 @@
 # Deskmate web companion — design
 
-Status: approved by the owner on 2026-09-18 (direct direction, `/goal`).
+Status: delivered on 2026-09-18 after owner approval (direct direction, `/goal`). The
+migration language below records the change; the web companion is now the current system.
 Supersedes the Tauri desktop app as the companion surface.
 
 ## 1. Why

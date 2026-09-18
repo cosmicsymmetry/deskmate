@@ -6,7 +6,6 @@ import {
   cardMoveFromKey,
   cardsContainerIssues,
   cardTitle,
-  copyConfig,
   firstRunSteps,
   firstSelectableCard,
   formatDuration,
@@ -285,7 +284,7 @@ describe("configuration draft helpers", () => {
   });
 
   test("nextLoopCardId wraps past the last segment", () => {
-    let config = addCard(initialConfig(), "pomodoro").config;
+    const config = addCard(initialConfig(), "pomodoro").config;
     const segments = loopSegments(config);
     expect(nextLoopCardId(segments, "clock")).toBe("pomodoro");
     expect(nextLoopCardId(segments, "pomodoro")).toBe("clock");

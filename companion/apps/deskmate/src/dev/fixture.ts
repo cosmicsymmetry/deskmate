@@ -2,8 +2,8 @@
  * Dev-only fixture state for the browser mock backend.
  *
  * This file never ships: `vite.config.ts` only aliases `./backendClient` to the
- * mock when `VITE_DESKMATE_MOCK=1`, so a production build resolves the real IPC
- * bridge and tree-shakes this module away entirely.
+ * mock when `VITE_DESKMATE_MOCK=1`, so a production build resolves the real HTTP
+ * client and tree-shakes this module away entirely.
  *
  * The shapes here are the ones in `src/lib/types.ts`, which are themselves checked
  * against Rust serialization in CI — so a drift in the backend contract breaks this

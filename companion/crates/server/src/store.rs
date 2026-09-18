@@ -1,12 +1,11 @@
 //! Per-device configuration storage. The schema version tracked here is
-//! whatever `app_core::CURRENT_SCHEMA_VERSION` currently is (v6 as of the
-//! retired card kinds) -- see that constant's doc, not a number pinned in this
-//! comment, which has gone stale before.
+//! whatever `app_core::CURRENT_SCHEMA_VERSION` currently is -- see that
+//! constant's documentation rather than pinning a duplicate number here.
 //!
 //! The server only chooses a path and keeps one [`app_core::ConfigStore`]
 //! alive per provisioned device. Parsing, migration, validation, atomic
-//! replacement, and genuine-last-good semantics stay in `app-core`, shared
-//! with the Mac app.
+//! replacement, and genuine-last-good semantics stay in `app-core`, so every
+//! server entry point uses the same storage rules.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

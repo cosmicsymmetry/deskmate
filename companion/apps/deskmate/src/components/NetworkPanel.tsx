@@ -49,10 +49,9 @@ function readableState(value: string | null): string {
 /**
  * Device facts, and the one credential this window needs.
  *
- * Provisioning, unpairing and factory reset used to live here. They are cable
- * operations -- they write the display's Wi-Fi and server settings over USB --
- * and a browser has no cable, so they are not offered rather than offered and
- * broken. `deskmate-cli` performs all of them; see the web-companion design's §2.
+ * Cable operations are intentionally absent: provisioning, unpairing and factory
+ * reset write the display's own settings over USB, which a browser cannot access.
+ * `deskmate-cli` performs those operations instead.
  */
 export function NetworkPanel({ device, settings, onSaveServerAccess }: NetworkPanelProps) {
   const [serverUrl, setServerUrl] = useState(settings.serverUrl);

@@ -4,21 +4,19 @@ use chrono::{DateTime, Utc};
 use protocol::truncate_utf8_to_bytes;
 use serde_json::Value;
 
-use crate::http::{HttpClient, SystemHttpClient};
+use crate::http::HttpClient;
 use crate::{LastGood, Provider, ProviderError, ProviderSnapshot, RefreshPolicy};
 
 pub const MIN_WEATHER_REFRESH_INTERVAL: Duration = Duration::from_mins(10);
 const GEOCODING_ENDPOINT: &str = "https://geocoding-api.open-meteo.com/v1/search";
 const FORECAST_ENDPOINT: &str = "https://api.open-meteo.com/v1/forecast";
-/// Mirrors the ±2000 tenths bound the firmware declares for the temperature integers
-/// in `firmware/main/core/template_fields.c`. The device is the narrower of the two
-/// and rejects a whole push over it, so the host must not admit a wider window.
+/// Keeps implausible temperatures outside the face renderer's layout range.
+const MIN_TEMPERATURE_DEGREES: f64 = -200.0;
+const MAX_TEMPERATURE_DEGREES: f64 = 200.0;
 /// How many hours the strip can show. The face draws six columns; asking
 /// for a couple more costs nothing and lets a narrower future layout use
 /// them without another round trip.
 pub const MAX_HOURLY_STEPS: usize = 8;
-const MIN_TEMPERATURE_DEGREES: f64 = -200.0;
-const MAX_TEMPERATURE_DEGREES: f64 = 200.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeatherUnits {
@@ -50,13 +48,8 @@ pub struct WeatherReading {
     pub temperature_tenths: i64,
     pub apparent_temperature_tenths: i64,
     pub summary: String,
-    /// The WMO code itself, not a pre-chosen icon name.
-    ///
-    /// The retired device templates needed a string they could look up in a
-    /// baked sprite table, so this provider used to resolve the code to an
-    /// icon name and throw the code away. A server-side face draws the
-    /// condition itself and wants the raw code: it distinguishes freezing rain
-    /// from rain, which no icon name in the old table did.
+    /// The raw WMO code lets the face choose day/night visuals while preserving
+    /// distinctions such as freezing rain versus rain.
     pub weather_code: u16,
     pub is_day: bool,
     pub high_tenths: i64,
@@ -80,12 +73,6 @@ impl<C: HttpClient> WeatherProvider<C> {
             options,
             state: LastGood::default(),
         }
-    }
-}
-
-impl WeatherProvider<SystemHttpClient> {
-    pub fn system(options: WeatherOptions) -> Self {
-        Self::new(SystemHttpClient::default(), options)
     }
 }
 
@@ -191,7 +178,7 @@ fn parse_forecast(
     let apparent = bounded_temperature(finite_number(current, "apparent_temperature")?)?;
     let weather_code = weather_code_of(current)?;
     let is_day = is_day_of(current);
-    let (summary, _) = describe_weather(weather_code, is_day);
+    let summary = weather_summary(weather_code);
 
     // The daily extremes are the first entry of the two-day window, which is
     // today. A forecast that omits them is not an error: the face falls back
@@ -211,14 +198,8 @@ fn parse_forecast(
     })
 }
 
-/// The temperature window this provider admits.
-///
-/// It was inherited from the retired `icon-badge-text` firmware schema, which
-/// declared these integers as -2000..=2000 tenths and refused a whole push
-/// outside it. That schema is gone with protocol v2's template registry, so
-/// nothing on the wire enforces it now -- but a sanity bound is still worth
-/// keeping, because the alternative to refusing a nonsense reading is drawing
-/// it two metres wide on a panel.
+/// The temperature window this provider admits so a nonsensical reading cannot
+/// produce an unrenderable face.
 fn bounded_temperature(value: f64) -> Result<f64, ProviderError> {
     if (MIN_TEMPERATURE_DEGREES..=MAX_TEMPERATURE_DEGREES).contains(&value) {
         Ok(value)
@@ -354,19 +335,17 @@ fn to_tenths(value: f64) -> Result<i64, ProviderError> {
     })
 }
 
-fn describe_weather(code: u16, is_day: bool) -> (&'static str, &'static str) {
+fn weather_summary(code: u16) -> &'static str {
     match code {
-        0 if is_day => ("Clear", "sun"),
-        0 => ("Clear", "moon"),
-        1 | 2 if is_day => ("Partly cloudy", "cloud-sun"),
-        1 | 2 => ("Partly cloudy", "cloud-moon"),
-        3 => ("Overcast", "cloud"),
-        45 | 48 => ("Fog", "fog"),
-        51 | 53 | 55 | 56 | 57 => ("Drizzle", "drizzle"),
-        61 | 63 | 65 | 66 | 67 | 80 | 81 | 82 => ("Rain", "rain"),
-        71 | 73 | 75 | 77 | 85 | 86 => ("Snow", "snow"),
-        95 | 96 | 99 => ("Thunderstorm", "storm"),
-        _ => ("Unknown", "unknown"),
+        0 => "Clear",
+        1 | 2 => "Partly cloudy",
+        3 => "Overcast",
+        45 | 48 => "Fog",
+        51 | 53 | 55 | 56 | 57 => "Drizzle",
+        61 | 63 | 65 | 66 | 67 | 80 | 81 | 82 => "Rain",
+        71 | 73 | 75 | 77 | 85 | 86 => "Snow",
+        95 | 96 | 99 => "Thunderstorm",
+        _ => "Unknown",
     }
 }
 
@@ -448,11 +427,9 @@ mod tests {
         }
     }
 
-    /// The host temperature window must match the ±2000 tenths the firmware declares.
-    /// It used to be ±250.0°, so a reading between 200.0° and 250.0° passed every host
-    /// check and then made the device reject the weather card's entire push.
+    /// Temperatures outside the provider's layout-safe window are rejected.
     #[test]
-    fn temperature_window_matches_the_firmware_declared_range() {
+    fn temperature_window_rejects_values_the_face_cannot_render() {
         let forecast = |celsius: f64| {
             format!(
                 r#"{{"current":{{"temperature_2m":{celsius},"apparent_temperature":{celsius},"weather_code":3,"is_day":1}}}}"#
@@ -465,7 +442,7 @@ mod tests {
         for outside in [200.1, -200.1, 240.0] {
             assert!(
                 parse_forecast(&forecast(outside), "Nowhere", WeatherUnits::Metric).is_err(),
-                "{outside} is outside the firmware's declared range and must be rejected"
+                "{outside} is outside the renderable range and must be rejected"
             );
         }
     }

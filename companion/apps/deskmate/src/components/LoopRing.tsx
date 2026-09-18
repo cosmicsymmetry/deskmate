@@ -343,7 +343,6 @@ export function LoopRing({ config, issues, selectedCardId, onSelect, onChange }:
               >
                 <span className="loop__entry-text">
                   <span className="loop__entry-name">{arc.name}</span>
-                  {arc.title && <span className="loop__entry-title">{arc.title}</span>}
                 </span>
                 {isTimed && <span className="loop__entry-dwell numeral">{arc.dwellSeconds}s</span>}
               </button>

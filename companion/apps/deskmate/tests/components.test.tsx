@@ -197,6 +197,28 @@ function pictureCard(id = "picture-card"): CardSettings {
 
 /// `cards` IS the loop since schema v10, so there is no second argument: a card's
 /// position in this list is its position in the loop.
+/**
+ * A pomodoro with a distinguishable label.
+ *
+ * Tests that need two tellable-apart cards use this rather than two clocks:
+ * since the Name field went, every clock is called "Clock" and two of them are
+ * genuinely indistinguishable on every surface. The timer label is the one name
+ * an owner can still type -- and it is drawn on the panel.
+ */
+function pomodoroCard(id: string, label: string): CardSettings {
+  return {
+    kind: "pomodoro",
+    id,
+    label,
+    duration_seconds: 1500,
+    template: { kind: "progress-ring" },
+    tap_action: { kind: "start-pause" },
+    refresh: { kind: "device-local" },
+    alert: { kind: "none" },
+    dwell_seconds: null,
+  };
+}
+
 function cardListConfig(cardList: CardSettings[]): AppConfig {
   return {
     schema_version: snapshot.config.schema_version,
@@ -579,14 +601,17 @@ describe("settings accessibility and states", () => {
     );
     const editor = renderCardEditor(clockCard("internal-uuid-0001", "Desk"));
 
+    // One name, the same on all three surfaces. "Desk" appears nowhere: it was
+    // seeded at creation and nothing can edit it now that Name is gone.
     expect(library).not.toContain('class="tile-label">Digital clock<');
-    expect(library).toContain('class="card-tile__name">Desk<');
-    expect(library).toContain('aria-label="Move Digital clock — Desk earlier"');
-    expect(library).toContain('aria-label="Move Digital clock — Desk later"');
-    expect(library).toContain('aria-label="Remove Digital clock — Desk');
-    expect(loop).toContain('class="loop__entry-name">Digital clock<');
-    expect(loop).toContain('class="loop__entry-title">Desk<');
-    expect(editor).toContain('id="editor-heading">Digital clock<');
+    expect(library).toContain('<strong class="card-tile__value numeral">Clock</strong>');
+    expect(library).not.toContain('class="card-tile__name">Desk<');
+    expect(loop).toContain('class="loop__entry-name">Clock<');
+    expect(loop).not.toContain('class="loop__entry-title"');
+    expect(editor).toContain('id="editor-heading">Clock<');
+    // The accessible name keeps the template: a listener gets no tile to look at.
+    expect(library).toContain('aria-label="Move Digital clock — Clock earlier"');
+    expect(library).toContain('aria-label="Remove Digital clock — Clock');
   });
 
   test("an untitled card is not labelled with its template twice", () => {
@@ -634,9 +659,10 @@ describe("settings accessibility and states", () => {
     // it had the same problem and was removed for the same reason.
     expect(html).toContain('<strong class="card-tile__value numeral">Claude limits</strong>');
     expect(html).not.toContain('numeral">PNG<');
-    expect(html).toContain('class="card-tile__name">Limits<');
-    expect(html).toContain('aria-label="Move Picture — Limits earlier"');
-    expect(html).toContain('aria-label="Remove Picture — Limits');
+    // No second line: a picture's title is its source name, said once.
+    expect(html).not.toContain('class="card-tile__name"');
+    expect(html).toContain('aria-label="Move Picture — Claude limits earlier"');
+    expect(html).toContain('aria-label="Remove Picture — Claude limits');
     expect(html).toContain('<span class="flag">needs the server</span>');
   });
 
@@ -703,7 +729,7 @@ describe("settings accessibility and states", () => {
     };
     const firstRender = renderCardEditor(picture, [], null, access);
 
-    expect(firstRender).toContain('id="editor-heading">Picture<');
+    expect(firstRender).toContain('id="editor-heading">Claude limits<');
     expect(firstRender).toContain("Claude limits");
     expect(firstRender).toContain(picture.source_id);
     expect(firstRender).toContain(access.push_url);
@@ -1155,7 +1181,7 @@ describe("settings accessibility and states", () => {
     try {
       await act(async () => root.render(<Harness />));
       const dwell = container.querySelector<HTMLInputElement>(
-        'input[aria-label="Stays on the panel for Digital clock — Desk"]',
+        'input[aria-label="Stays on the panel for Clock"]',
       );
       expect(dwell?.placeholder).toBe("20 s, the loop's default");
       expect(dwell?.getAttribute("aria-invalid")).toBe("true");
@@ -1215,7 +1241,10 @@ describe("settings accessibility and states", () => {
   });
 
   test("the grid renders container issues and scopes a card's own issues to its tile", () => {
-    const config = cardListConfig([clockCard("first", "Desk"), clockCard("second", "Up next")]);
+    const config = cardListConfig([
+      pomodoroCard("first", "Desk"),
+      pomodoroCard("second", "Up next"),
+    ]);
     const containerIssue: ValidationIssue = {
       path: "cards",
       code: "out-of-range",
@@ -1547,7 +1576,10 @@ describe("settings accessibility and states", () => {
   });
 
   test("grid move buttons and Alt arrows update active-loop order", async () => {
-    const config = cardListConfig([clockCard("first", "Desk"), clockCard("second", "Up next")]);
+    const config = cardListConfig([
+      pomodoroCard("first", "Desk"),
+      pomodoroCard("second", "Up next"),
+    ]);
     let latest = config;
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -1574,23 +1606,23 @@ describe("settings accessibility and states", () => {
       await act(async () => root.render(<Harness />));
       expect(
         container.querySelector<HTMLButtonElement>(
-          'button[aria-label="Move Digital clock — Desk earlier"]',
+          'button[aria-label="Move Pomodoro — Desk earlier"]',
         )?.disabled,
       ).toBe(true);
       expect(
         container.querySelector<HTMLButtonElement>(
-          'button[aria-label="Move Digital clock — Up next later"]',
+          'button[aria-label="Move Pomodoro — Up next later"]',
         )?.disabled,
       ).toBe(true);
       const earlier = container.querySelector<HTMLButtonElement>(
-        'button[aria-label="Move Digital clock — Up next earlier"]',
+        'button[aria-label="Move Pomodoro — Up next earlier"]',
       );
       expect(earlier).not.toBeNull();
       await act(async () => earlier?.click());
       expect(latest.cards.map((card) => card.id)).toEqual(["second", "first"]);
 
       const later = container.querySelector<HTMLButtonElement>(
-        'button[aria-label="Move Digital clock — Up next later"]',
+        'button[aria-label="Move Pomodoro — Up next later"]',
       );
       await act(async () => later?.click());
       expect(latest.cards.map((card) => card.id)).toEqual(["first", "second"]);
@@ -1622,7 +1654,10 @@ describe("settings accessibility and states", () => {
   });
 
   test("keyboard reorder restores focus to the moved tile body", async () => {
-    const config = cardListConfig([clockCard("first", "Desk"), clockCard("second", "Up next")]);
+    const config = cardListConfig([
+      pomodoroCard("first", "Desk"),
+      pomodoroCard("second", "Up next"),
+    ]);
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -1669,7 +1704,10 @@ describe("settings accessibility and states", () => {
   });
 
   test("dropping a loop tile on itself does not emit a draft change", async () => {
-    const config = cardListConfig([clockCard("first", "Desk"), clockCard("second", "Up next")]);
+    const config = cardListConfig([
+      pomodoroCard("first", "Desk"),
+      pomodoroCard("second", "Up next"),
+    ]);
     let changeCount = 0;
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -2371,10 +2409,13 @@ describe("settings accessibility and states", () => {
     return {
       schema_version: snapshot.config.schema_version,
       preferences: { timezone: "UTC", autostart: false, paused: false, orientation: "landscape" },
+      // Three cards the loop can actually tell apart. Three clocks would all
+      // read "Clock" now, which is true of the product and useless in a test
+      // about which entry is which.
       cards: [
-        { ...clockCard("first", "Desk"), dwell_seconds: 45 },
-        clockCard("second", "Up next"),
-        clockCard("third", "Focus"),
+        { ...pomodoroCard("first", "Desk"), dwell_seconds: 45 },
+        pomodoroCard("second", "Up next"),
+        pomodoroCard("third", "Focus"),
       ],
       image_sources: [],
       assets: [],

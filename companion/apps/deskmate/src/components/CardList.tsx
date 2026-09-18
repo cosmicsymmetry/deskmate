@@ -10,10 +10,11 @@ import {
 } from "react";
 import {
   cardKindName,
+  cardIdentity,
   cardLabel,
   cardMoveFromKey,
   cardsContainerIssues,
-  cardTitle,
+  ownerSetName,
   issuesForCard,
   issuesForPath,
   loopEntries,
@@ -82,10 +83,18 @@ function tileValue(
   }
 }
 
-/** Every control that acts on one card names template and typed title together. */
-function controlLabel(card: CardSettings): string {
-  const title = cardTitle(card);
-  return title ? `${cardLabel(card)} — ${title}` : cardLabel(card);
+/**
+ * The accessible name for a control acting on one card.
+ *
+ * Still template-first, deliberately: "Remove Digital clock — Focus" tells a
+ * screen-reader user what kind of thing is about to go, where "Remove Focus"
+ * does not. This is the one place the template survives, because it is not
+ * visual chrome competing for space -- it is the only context a listener gets.
+ */
+function controlLabel(card: CardSettings, sources: ImageSource[]): string {
+  const identity = cardIdentity(card, sources);
+  const template = cardLabel(card);
+  return identity === template ? template : `${template} — ${identity}`;
 }
 
 export function CardList({
@@ -323,7 +332,7 @@ export function CardList({
     const tileIssues = issuesForCard(issues, config, card.id);
     const hasAlert = card.alert.kind !== "none";
     const pomodoro = pomodoros.find((candidate) => candidate.card_id === card.id);
-    const label = controlLabel(card);
+    const label = controlLabel(card, config.image_sources);
     const pictureFlag =
       card.kind === "picture" && ownershipTier === "local" ? "needs the server" : null;
     const value = tileValue(card, pomodoro, config.image_sources);
@@ -360,10 +369,13 @@ export function CardList({
               already see, and the one line that actually distinguishes two
               cards -- their name -- was the small grey one underneath. */}
           <strong className="card-tile__value numeral">{value}</strong>
-          {/* A picture's value IS its source name, and the owner usually types the
-              same words as the title. Printing both would say it twice. */}
-          {cardTitle(card) && cardTitle(card) !== value && (
-            <span className="card-tile__name">{cardTitle(card)}</span>
+          {/* Only a name the owner can still set. A clock kept showing "Desk"
+              underneath -- a word seeded at creation that no field could change
+              once Name was removed, so it was decoration claiming to be data.
+              The pomodoro's label survives because it is typed, and drawn on the
+              panel. */}
+          {ownerSetName(card) && ownerSetName(card) !== value && (
+            <span className="card-tile__name">{ownerSetName(card)}</span>
           )}
         </button>
         <span className="card-tile__flags">

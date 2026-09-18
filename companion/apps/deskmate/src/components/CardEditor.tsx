@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import {
-  cardLabel,
-  cardTitle,
+  cardIdentity,
   issuesForField,
   numberValue,
   setCardDwell,
@@ -294,8 +293,9 @@ export function CardEditor({
   const fieldIssues = (field: string) => issuesForField(issues, field);
   const setAlert = (alert: CardAlert) => onChange({ ...card, alert });
   const isTimed = config.advance.kind === "timed";
-  const title = cardTitle(card);
-  const controlName = title ? `${cardLabel(card)} — ${title}` : cardLabel(card);
+  // Names the card the way the heading does, so a listener and a reader are
+  // told the same thing about the field they are on.
+  const controlName = cardIdentity(card, config.image_sources);
   // Dwell is a field of the card since schema v10, so its issues arrive with
   // the card's own rather than through a separate playlist-entry path.
   const dwellIssues = fieldIssues("dwell_seconds");
@@ -305,8 +305,10 @@ export function CardEditor({
     <section className="panel" aria-labelledby="editor-heading">
       <div className="panel-heading">
         <div className="editor-title">
-          <h2 id="editor-heading">{cardLabel(card)}</h2>
-          {cardTitle(card) && <span className="editor-title__kind">{cardTitle(card)}</span>}
+          {/* The same words the tile shows. It read "Digital clock  Desk" while
+              the tile it belonged to read "Clock" -- the heading was naming the
+              template and repeating a title nothing could edit. */}
+          <h2 id="editor-heading">{cardIdentity(card, config.image_sources)}</h2>
         </div>
         <button className="text-button text-button--danger" type="button" onClick={onRemove}>
           Remove

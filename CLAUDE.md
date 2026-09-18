@@ -258,10 +258,16 @@ These are decisions, not defaults. Changing one needs the owner, not a judgement
     changed what is offered, not what is stored. A new clock is created unnamed, because
     seeding a word nothing can now change is the confusion this removed. The pomodoro's
     **"Timer label" is NOT this and stays**: it is drawn on the panel face.
-  - **Still template-first, deliberately, and not yet asked about**: the loop list under
-    the ring (`loop__entry-name`/`loop__entry-title`), the editor heading, and the
-    `template — title` accessible names on the move/remove controls. A screen reader
-    hearing "Remove Digital clock — Desk" is better served than by "Remove Desk".
+  - **`cardIdentity()` is the one name, and every visible surface calls it**: the tile,
+    the loop list under the ring, the editor heading. A clock is "Clock", a picture is
+    its source, a pomodoro is its timer label. They cannot drift, because there is one
+    function; that is what replaced a rule the code had already half-abandoned.
+  - **The accessible names on the move/remove controls keep the template**
+    (`Remove Digital clock — Clock`). Not an oversight: it is the only context a
+    listener gets, and it is not competing for space on screen.
+  - **Two clocks are now indistinguishable**, on every surface, and that is the accepted
+    cost of removing the Name field -- there is no longer anything to call one of them.
+    Tests needing two tellable-apart cards use pomodoros, whose timer label survives.
 - **`DESIGN.md` is the visual language** (The Modular Face); product truth is
   `PRODUCT.md`. `docs/design/companion-visual-language.md` is superseded. A label above a
   heading and a card inside a card are both out. `ui-rounded` is the numeral face because

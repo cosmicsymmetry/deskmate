@@ -3,6 +3,7 @@ import type {
   AppConfig,
   CardSettings,
   CarouselAdvance,
+  ImageSource,
   ValidationIssue,
 } from "./types";
 
@@ -59,6 +60,46 @@ export function cardName(card: CardSettings): string {
  * thing that names the card.
  *
  */
+/**
+ * The one name a card goes by.
+ *
+ * Every surface that identifies a card calls this, so they cannot drift: the
+ * tile, the loop list under the ring, and the editor heading all print the same
+ * words. That is the replacement for the rule it supersedes -- which said the
+ * identifying word was the TEMPLATE, and put "PICTURE" above five different
+ * pictures while the line that told them apart sat underneath in grey.
+ *
+ * A clock is "Clock" because that is the whole truth about it; there is nothing
+ * else to say and no way to name one. A picture is its source, which is the only
+ * thing that differs between two of them. A pomodoro is its timer label, which
+ * is the one name the owner can still type -- and which is drawn on the panel.
+ */
+export function cardIdentity(card: CardSettings, sources: ImageSource[]): string {
+  switch (card.kind) {
+    case "clock":
+      return "Clock";
+    case "pomodoro":
+      return card.label.trim() === "" ? "Pomodoro" : card.label;
+    case "picture":
+      return sources.find((source) => source.id === card.source_id)?.name ?? "Missing source";
+  }
+}
+
+/**
+ * The name the owner can still set, or null.
+ *
+ * Only the pomodoro has one: its timer label. A clock's and a picture's `title`
+ * are frozen at creation now that the Name field is gone, so printing them as
+ * "the owner's words" would be showing a word nobody chose and nobody can
+ * change -- which is how a clock kept a "Desk" underneath it.
+ */
+export function ownerSetName(card: CardSettings): string | null {
+  if (card.kind !== "pomodoro") {
+    return null;
+  }
+  return card.label.trim() === "" ? null : card.label;
+}
+
 export function cardLabel(card: CardSettings): string {
   if (card.kind === "picture") {
     return "Picture";
@@ -334,10 +375,10 @@ export function loopSeconds(config: AppConfig): number | null {
 /// anything.
 export interface LoopSegment {
   cardId: string;
+  /// What the card is called, from `cardIdentity`. There is no second line: the
+  /// template used to lead here with the owner's title beside it, which printed
+  /// "Picture  Weather" where "Weather" was the whole answer.
   name: string;
-  /// The owner's own words for this card, or null when they typed none. Two cards
-  /// can share a kind, so the loop needs something besides `name` to tell them apart.
-  title: string | null;
   dwellSeconds: number;
   widthPercent: number;
   offsetPercent: number;
@@ -359,8 +400,7 @@ export function loopSegments(config: AppConfig): LoopSegment[] {
     const widthPercent = total > 0 ? (dwellSeconds[index] / total) * 100 : equalShare;
     const segment: LoopSegment = {
       cardId: card.id,
-      name: cardLabel(card),
-      title: cardTitle(card),
+      name: cardIdentity(card, config.image_sources),
       dwellSeconds: dwellSeconds[index],
       widthPercent,
       offsetPercent: offset,

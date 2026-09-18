@@ -2,12 +2,10 @@
 //!
 //! The assertions here are deliberately *structural* rather than pixel-exact.
 //! A committed golden PNG of anti-aliased type is a test that fails on a
-//! `resvg` upgrade and says nothing about whether the design is good, and this
-//! repository has already paid for a parity gate that kept dead code alive to
-//! have something to compare against. So what is checked is what a face can
-//! actually be wrong about without anybody noticing: text escaping the canvas,
-//! a document that stops parsing, and a frame whose size the asset path would
-//! refuse.
+//! `resvg` upgrade and says nothing about whether the design is good. What is
+//! checked instead is what a face can be wrong about without anybody noticing:
+//! text escaping the canvas, a document that stops parsing, and a frame whose
+//! size the asset path would refuse.
 
 #![cfg(test)]
 

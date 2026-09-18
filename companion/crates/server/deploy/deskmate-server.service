@@ -1,5 +1,5 @@
 [Unit]
-Description=Deskmate V2 server (device link, firmware endpoints)
+Description=Deskmate server (companion, device link, firmware endpoints)
 After=network-online.target
 Wants=network-online.target
 

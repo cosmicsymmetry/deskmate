@@ -431,9 +431,9 @@ mod tests {
             state.clone(),
             &identity.device_id,
             serde_json::json!({
-                "card_id": "old-card",
+                "card_id": "unknown-card",
                 "revision": 17,
-                "template": "retired",
+                "template": "missing-template",
             }),
             true,
         )
@@ -444,7 +444,10 @@ mod tests {
             .await
             .expect("read response body");
         let error: serde_json::Value = serde_json::from_slice(&body).expect("typed JSON response");
-        assert_eq!(error["message"], "unknown scene template \"retired\"");
+        assert_eq!(
+            error["message"],
+            "unknown scene template \"missing-template\""
+        );
         state.shutdown();
     }
 }

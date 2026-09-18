@@ -47,11 +47,9 @@ pub struct RuntimeDiagnostics {
     ///
     /// Not an error on its own: the common cause is benign, a bounded alert
     /// hold expiring host-side and freeing the slot before the user got round
-    /// to tapping the overlay the device is still showing. But it was
-    /// previously invisible, and a hardware session spent time on a tap that
-    /// looked like it did nothing. A nonzero value here says the host saw the
-    /// tap and deliberately declined it, which is a different diagnosis from
-    /// the event never arriving at all.
+    /// to tapping the overlay the device is still showing. A nonzero value
+    /// distinguishes a tap the host deliberately declined from an event that
+    /// never arrived.
     pub interrupt_dismissals_ignored: u64,
 }
 

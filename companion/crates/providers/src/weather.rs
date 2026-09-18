@@ -29,7 +29,6 @@ pub struct WeatherOptions {
     pub location: String,
     pub units: WeatherUnits,
     pub refresh_interval: Duration,
-    pub title: String,
 }
 
 /// One hour of the forecast strip.
@@ -160,15 +159,10 @@ fn fetch_weather(
     }
     let forecast_url = endpoint_with_query(FORECAST_ENDPOINT, &query)?;
     let forecast = client.get_text(&forecast_url)?;
-    parse_forecast(&forecast, &display_location, options.units)
+    parse_forecast(&forecast, &display_location)
 }
 
-fn parse_forecast(
-    body: &str,
-    location: &str,
-    units: WeatherUnits,
-) -> Result<WeatherReading, ProviderError> {
-    let _ = units;
+fn parse_forecast(body: &str, location: &str) -> Result<WeatherReading, ProviderError> {
     let document: Value = serde_json::from_str(body)
         .map_err(|_| ProviderError::MalformedFeed("weather forecast JSON is invalid".into()))?;
     let current = document.get("current").ok_or_else(|| {
@@ -374,7 +368,6 @@ mod tests {
             location: "Tbilisi".into(),
             units,
             refresh_interval: Duration::from_mins(1),
-            title: "Weather".into(),
         }
     }
 
@@ -435,13 +428,13 @@ mod tests {
                 r#"{{"current":{{"temperature_2m":{celsius},"apparent_temperature":{celsius},"weather_code":3,"is_day":1}}}}"#
             )
         };
-        let accepted = parse_forecast(&forecast(200.0), "Nowhere", WeatherUnits::Metric).unwrap();
+        let accepted = parse_forecast(&forecast(200.0), "Nowhere").unwrap();
         assert_eq!(accepted.temperature_tenths, 2000);
         assert_eq!(accepted.apparent_temperature_tenths, 2000);
 
         for outside in [200.1, -200.1, 240.0] {
             assert!(
-                parse_forecast(&forecast(outside), "Nowhere", WeatherUnits::Metric).is_err(),
+                parse_forecast(&forecast(outside), "Nowhere").is_err(),
                 "{outside} is outside the renderable range and must be rejected"
             );
         }

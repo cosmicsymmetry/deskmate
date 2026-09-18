@@ -69,7 +69,6 @@ async fn a_live_weather_card_renders() {
                     .unwrap_or_else(|_| "Dubai".to_owned()),
                 units: WeatherUnits::Metric,
                 refresh_interval: Duration::from_mins(15),
-                title: "Weather".to_owned(),
             },
         )
         .refresh(Utc::now())
@@ -112,7 +111,7 @@ async fn a_live_weather_card_renders() {
             .collect::<Vec<_>>()
     );
 
-    let face = adapt::weather_face(reading, WeatherUnits::Metric, HOURLY_COLUMNS);
+    let face = adapt::weather_face(reading, HOURLY_COLUMNS);
     accept("live--weather", &weather::render(&face));
 }
 
@@ -185,7 +184,6 @@ async fn a_live_rss_card_renders() {
                 url: feed_url,
                 maximum_items: 5,
                 refresh_interval: Duration::from_mins(15),
-                title: "Feed".to_owned(),
             },
         )
         .refresh(Utc::now())

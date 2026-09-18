@@ -10,7 +10,7 @@
 use chrono::{DateTime, Utc};
 use providers::rss::RssFeed;
 use providers::token::TokenQuote;
-use providers::weather::{WeatherReading, WeatherUnits};
+use providers::weather::WeatherReading;
 
 use super::relative_age;
 use super::rss::{FeedEntry, RssFace};
@@ -31,12 +31,7 @@ fn whole_degrees(tenths: i64) -> i32 {
     i32::try_from(rounded).unwrap_or(if rounded < 0 { i32::MIN } else { i32::MAX })
 }
 
-pub(crate) fn weather_face(
-    reading: &WeatherReading,
-    units: WeatherUnits,
-    hourly_columns: usize,
-) -> WeatherFace {
-    let _ = units;
+pub(crate) fn weather_face(reading: &WeatherReading, hourly_columns: usize) -> WeatherFace {
     WeatherFace {
         place: reading.location.clone(),
         temperature: whole_degrees(reading.temperature_tenths),
@@ -175,7 +170,7 @@ mod tests {
                 },
             ],
         };
-        let face = weather_face(&reading, WeatherUnits::Metric, 6);
+        let face = weather_face(&reading, 6);
         assert_eq!(face.temperature, 11);
         assert_eq!(face.high, 13);
         assert_eq!(face.low, 8);
@@ -201,10 +196,7 @@ mod tests {
                 .collect(),
             ..WeatherReading::default()
         };
-        assert_eq!(
-            weather_face(&reading, WeatherUnits::Metric, 6).hourly.len(),
-            6
-        );
+        assert_eq!(weather_face(&reading, 6).hourly.len(), 6);
     }
 
     #[test]

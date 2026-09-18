@@ -19,6 +19,8 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::credential::{DigestDecodeError, decode_digest as decode_credential_digest};
+use crate::credential::{random_token, token_digest};
 use crate::image_ingest::CanonicalFrame;
 use crate::image_staleness::{PUSH_TIME_RING, is_stale};
 use crate::registry::constant_time_eq;
@@ -34,7 +36,7 @@ const CANONICAL_FRAME_BYTES: usize = LVGL_IMAGE_HEADER_BYTES
     + protocol::SCENE_CANVAS_WIDTH as usize * protocol::SCENE_CANVAS_HEIGHT as usize * 2;
 const SOURCE_ID_RANDOM_HEX_LEN: usize = 24;
 
-pub struct ImageSourceStore {
+pub(crate) struct ImageSourceStore {
     root: PathBuf,
     state: Mutex<ImageSourceState>,
 }
@@ -88,7 +90,7 @@ struct ImageSourceState {
 
 /// What the management surface shows about one image source. Carries no bytes
 /// and no credential -- only what a person needs to tell "the producer is
-/// broken" from "the integration needs reconnecting" (revision spec §7).
+/// broken" from "the integration needs reconnecting".
 pub(crate) struct SourceSummary {
     pub(crate) id: String,
     pub(crate) name: String,
@@ -559,38 +561,16 @@ fn storage_error(message: impl Into<String>) -> ImageSourceError {
     }
 }
 
-fn token_digest(token: &str) -> [u8; 32] {
-    Sha256::digest(token.as_bytes()).into()
-}
-
 fn decode_digest(encoded: &str) -> Result<[u8; 32], ImageSourceError> {
-    if encoded.len() != 64 || !encoded.is_ascii() {
-        return Err(storage_error(
+    match decode_credential_digest(encoded) {
+        Ok(digest) => Ok(digest),
+        Err(DigestDecodeError::Length) => Err(storage_error(
             "token digest is not 64 lowercase hexadecimal bytes",
-        ));
+        )),
+        Err(DigestDecodeError::Character) => {
+            Err(storage_error("token digest is not lowercase hexadecimal"))
+        }
     }
-    let mut digest = [0u8; 32];
-    for (output, pair) in digest.iter_mut().zip(encoded.as_bytes().as_chunks::<2>().0) {
-        let high = decode_hex_digit(pair[0])?;
-        let low = decode_hex_digit(pair[1])?;
-        *output = (high << 4) | low;
-    }
-    Ok(digest)
-}
-
-fn decode_hex_digit(byte: u8) -> Result<u8, ImageSourceError> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        _ => Err(storage_error("token digest is not lowercase hexadecimal")),
-    }
-}
-
-/// Generates a random 32-byte token, rendered as 64 lowercase hex characters.
-fn random_token() -> String {
-    let mut bytes = [0u8; 32];
-    rand::rng().fill_bytes(&mut bytes);
-    protocol::digest_hex(&bytes)
 }
 
 fn random_source_id() -> String {

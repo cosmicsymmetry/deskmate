@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod asset_sync;
 pub mod config;
+mod engine;
 pub mod render_negotiation;
 pub mod runtime;
 mod runtime_command;
@@ -37,9 +38,8 @@ pub use runtime::{
 };
 pub use runtime_command::{PomodoroAction, RuntimeError};
 pub use scene_build::{
-    AnalogClockCard, BakedFontMetrics, ClockCard, NumericAdvances, ProgressRingCard,
-    SHIPPED_SCENE_SURFACE_COLOR, SceneDataState, TierMetrics, build_analog_clock_scene,
-    build_digital_clock_scene, build_progress_ring_scene, number_font_tier, text_is_numeric,
+    AnalogClockCard, BakedFontMetrics, ClockCard, ProgressRingCard, SceneDataState,
+    build_analog_clock_scene, build_digital_clock_scene, build_progress_ring_scene,
     with_scene_data_state,
 };
 pub use state::{

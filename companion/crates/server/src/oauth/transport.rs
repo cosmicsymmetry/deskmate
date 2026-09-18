@@ -1,6 +1,6 @@
 //! The token-endpoint transport seam and Google response classification.
 //!
-//! Production sends through the egress guard (spec §6); tests inject a fake so
+//! Production sends through the egress guard; tests inject a fake so
 //! exchange/refresh/revoke are proven without touching Google or the network.
 
 use std::pin::Pin;
@@ -27,7 +27,7 @@ pub trait OAuthTransport: Send + Sync {
     ) -> OAuthFuture<'_, Result<FetchResponse, TransportError>>;
 }
 
-/// Production transport: every call goes through the egress guard (spec §6).
+/// Production transport: every call goes through the egress guard.
 pub struct EgressTransport;
 
 impl OAuthTransport for EgressTransport {
@@ -47,12 +47,12 @@ impl OAuthTransport for EgressTransport {
 }
 
 #[derive(Deserialize)]
-pub struct GoogleTokenResponse {
-    pub access_token: String,
+pub(super) struct GoogleTokenResponse {
+    pub(super) access_token: String,
     #[serde(default)]
-    pub expires_in: u64,
+    pub(super) expires_in: u64,
     #[serde(default)]
-    pub refresh_token: Option<String>,
+    pub(super) refresh_token: Option<String>,
 }
 
 impl std::fmt::Debug for GoogleTokenResponse {
@@ -68,7 +68,7 @@ impl std::fmt::Debug for GoogleTokenResponse {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum TokenEndpointError {
+pub(super) enum TokenEndpointError {
     /// The grant was rejected as no longer valid (revoked, or refresh token
     /// expired). The operator must re-consent -- distinct from a transient error.
     #[error("authorization was revoked or expired (invalid_grant)")]
@@ -90,7 +90,7 @@ struct TokenErrorBody {
 
 /// Classifies a token/refresh endpoint response. Pure over `(status, body)` so
 /// the whole decision tree is unit-tested without a transport.
-pub fn classify_token_response(
+pub(super) fn classify_token_response(
     status: u16,
     body: &[u8],
 ) -> Result<GoogleTokenResponse, TokenEndpointError> {

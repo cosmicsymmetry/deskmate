@@ -17,10 +17,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use app_core::secure_file;
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
+use crate::credential::{DigestDecodeError, decode_digest as decode_credential_digest};
+use crate::credential::{random_token, token_digest};
 use crate::registry::constant_time_eq;
 
 pub(crate) const STORE_FILE: &str = "producer-credentials.json";
@@ -245,36 +245,13 @@ fn save(root: &Path, credentials: &[Credential]) -> Result<(), ProducerCredentia
     })
 }
 
-fn token_digest(token: &str) -> [u8; 32] {
-    Sha256::digest(token.as_bytes()).into()
-}
-
-/// A random 32-byte credential, rendered as 64 lowercase hex characters --
-/// the same shape and entropy as an image-source token.
-fn random_token() -> String {
-    let mut bytes = [0u8; 32];
-    rand::rng().fill_bytes(&mut bytes);
-    protocol::digest_hex(&bytes)
-}
-
 fn decode_digest(encoded: &str) -> Result<[u8; 32], ProducerCredentialError> {
-    if encoded.len() != 64 || !encoded.is_ascii() {
-        return Err(ProducerCredentialError::Malformed {
+    match decode_credential_digest(encoded) {
+        Ok(digest) => Ok(digest),
+        Err(DigestDecodeError::Length) => Err(ProducerCredentialError::Malformed {
             message: String::from("token digest is not 64 lowercase hexadecimal bytes"),
-        });
-    }
-    let mut digest = [0u8; 32];
-    for (output, pair) in digest.iter_mut().zip(encoded.as_bytes().as_chunks::<2>().0) {
-        *output = (decode_hex_digit(pair[0])? << 4) | decode_hex_digit(pair[1])?;
-    }
-    Ok(digest)
-}
-
-fn decode_hex_digit(byte: u8) -> Result<u8, ProducerCredentialError> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        _ => Err(ProducerCredentialError::Malformed {
+        }),
+        Err(DigestDecodeError::Character) => Err(ProducerCredentialError::Malformed {
             message: String::from("token digest is not lowercase hexadecimal"),
         }),
     }

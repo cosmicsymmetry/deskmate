@@ -16,13 +16,8 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::ServerState;
-// The operator gate, not the raw admin-bearer one. These are the routes the
-// browser companion calls to list, mint and configure image sources, and a
-// browser carries a session cookie rather than a bearer -- gating them on the
-// bearer alone made every one of them answer 401 from the window while every
-// test that used a bearer passed. `OperatorAuthenticated` still accepts the
-// admin bearer, so scripts are unaffected; it is the same privilege reached by
-// a second carrier, not a wider one.
+// These operator routes accept either the browser's session cookie or the raw
+// admin bearer used by scripts. Both carriers represent the same privilege.
 //
 // The producer push route below is deliberately NOT covered by this: it
 // authenticates a per-source producer credential, which is a different and much

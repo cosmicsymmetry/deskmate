@@ -1,6 +1,6 @@
-//! OAuth consent, callback, and revoke routes plus the operator login route
-//! (spec §3). Route handlers stay thin; the `state`/PKCE stash and the auth-URL
-//! construction live on `IntegrationRuntime` so they are unit-testable.
+//! OAuth consent, callback, revoke, and operator-login routes. Handlers stay
+//! thin; the `state`/PKCE stash and auth-URL construction live on
+//! `IntegrationRuntime` so they are unit-testable.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -36,9 +36,9 @@ const MAX_INTEGRATION_ID_LEN: usize = 64;
 const MAX_PENDING_AUTHS: usize = 32;
 
 pub struct PendingAuth {
-    pub integration_id: String,
-    pub code_verifier: String,
-    pub sid: String,
+    pub(crate) integration_id: String,
+    pub(crate) code_verifier: String,
+    pub(crate) sid: String,
 }
 
 struct StashedAuth {
@@ -69,12 +69,12 @@ impl IntegrationRuntime {
     }
 
     #[must_use]
-    pub fn token_manager(&self) -> &Arc<TokenManager> {
+    pub(crate) fn token_manager(&self) -> &Arc<TokenManager> {
         &self.token_manager
     }
 
     #[must_use]
-    pub fn sessions(&self) -> &SessionSigner {
+    pub(crate) fn sessions(&self) -> &SessionSigner {
         &self.sessions
     }
 
@@ -284,9 +284,8 @@ async fn revoke_producer(
 
 /// Hands a producer the provider's own access token.
 ///
-/// Takes no body and no query on purpose (spec §5): the integration record is
-/// the only source of host and scope, so there is nothing a caller can supply
-/// that would redirect the credential-bearing call.
+/// Takes no body and no query: the integration record is the only source of
+/// host and scope, so a caller cannot redirect the credential-bearing call.
 async fn vend_token(
     State(state): State<ServerState>,
     ProducerAuthenticated(authenticated_id): ProducerAuthenticated,

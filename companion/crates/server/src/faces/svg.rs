@@ -349,9 +349,8 @@ fn finish_lines(
 /// adds the spacing to each character's advance, so a 27-character place name
 /// tracked at 1.4 is ~38px wider than its measured width.
 ///
-/// A live weather response is what found this: "DUBAI, UNITED ARAB EMIRATES"
-/// measured as fitting and drew straight through the high/low beside it. Use
-/// this, not the raw measurement, wherever a run is tracked.
+/// Use this rather than the raw measurement wherever a run is tracked, or a
+/// long label can draw through adjacent content despite measuring as fitted.
 pub(crate) fn tracked_width(text: &str, size: f64, weight: u16, tracking: f64) -> f64 {
     if text.is_empty() {
         return 0.0;

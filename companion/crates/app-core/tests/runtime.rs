@@ -669,7 +669,7 @@ fn status(uptime_ms: u64) -> StatusResponse {
         protocol_version: PROTOCOL_VERSION,
         max_protocol_version: protocol::MAX_PROTOCOL_VERSION,
         capabilities: protocol::CURRENT_CAPABILITIES,
-        firmware_version: "mock-m3".into(),
+        firmware_version: "mock-firmware".into(),
         uptime_ms,
         free_heap: 100_000,
         display_width: 368,
@@ -2005,7 +2005,7 @@ fn pomodoro_completion_without_an_alert_does_not_schedule_an_interrupt() {
 }
 
 #[test]
-fn app_restart_seeds_interrupt_tokens_from_the_still_powered_device() {
+fn runtime_restart_seeds_interrupt_tokens_from_the_still_powered_device() {
     let control = MockDeviceControl::default();
     control.set_latest_interrupt_token(40);
     let mut config = full_config();
@@ -2146,11 +2146,8 @@ fn pause_defers_timer_pushes_until_resume() {
     runtime.shutdown().unwrap();
 }
 
-/// Final-review finding: a push the device refused aborted the dirty-card pass
-/// WITHOUT clearing the card from `dirty_cards`, so the runtime re-attempted the
-/// identical payload every cycle, sat in `RuntimeState::Error` with raw protocol text
-/// forever, and starved every card queued behind it in the same cycle. A refusal is
-/// terminal for that payload: drop it, record it against its card, keep going.
+/// A refusal is terminal for that payload: drop it, record it against its
+/// card, and continue so other dirty cards are not starved.
 ///
 /// Both cards here are pomodoros because protocol v2 pushes one thing per card
 /// -- the timer its `timer.*` bindings resolve against -- and only a pomodoro
@@ -2385,7 +2382,7 @@ fn persistence_recovery_is_projected_and_cleared_after_a_good_save() {
 }
 
 #[test]
-fn app_restart_intentionally_resets_transient_timer_state_to_idle() {
+fn runtime_restart_intentionally_resets_transient_timer_state_to_idle() {
     let config = full_config();
     let first_control = MockDeviceControl::default();
     let first = start_runtime(config.clone(), &first_control, Duration::ZERO);
@@ -2738,10 +2735,8 @@ fn card_data_carries_live_fields_for_every_card_in_the_loop() {
 /// The interrupt token counter must follow the device's *interrupt* counter and
 /// nothing else. `latest_revision` and `config_revision` are the data-push and
 /// config counters; they climb with ordinary traffic and have no relationship to
-/// interrupts. Coupling them made a delivered interrupt arrive with a token 25
-/// higher than its predecessor during the 2026-08-20 hardware gate, which read as
-/// lost interrupts and cost a session's worth of doubt on a path that has already
-/// produced two real defects.
+/// interrupts. Coupling them would create token gaps that look like lost
+/// interrupts whenever ordinary data revisions advance.
 #[test]
 fn interrupt_tokens_do_not_follow_the_unrelated_revision_counters() {
     let control = MockDeviceControl::default();
@@ -2794,12 +2789,10 @@ fn interrupt_tokens_do_not_follow_the_unrelated_revision_counters() {
     runtime.shutdown().unwrap();
 }
 
-/// The other half of the same rule. `latest_interrupt_token` is additive in M3 and
-/// decodes to 0 when a pre-M3 image omits key 21, and 0 is also what a current image
-/// reports before it has accepted any interrupt. In both cases there is no interrupt
-/// counter to follow, so the revisions stay as the monotonic floor — starting above a
-/// counter the device has already issued is always accepted, starting below it is
-/// rejected as stale forever.
+/// The other half of the same rule. `latest_interrupt_token` decodes to zero
+/// when the field is absent, and zero is also what a device reports before it
+/// has accepted any interrupt. In both cases there is no interrupt counter to
+/// follow, so revisions stay as the monotonic floor.
 #[test]
 fn an_absent_interrupt_counter_still_takes_the_revision_floor() {
     let control = MockDeviceControl::default();
@@ -2853,9 +2846,8 @@ fn an_absent_interrupt_counter_still_takes_the_revision_floor() {
 /// A dismissal whose token the arbiter no longer tracks is deliberately not
 /// applied — but it must not be *invisible*. The common cause is benign (a
 /// bounded hold expired host-side and freed the slot before the user tapped the
-/// overlay the device was still showing), yet during the 2026-08-15 hardware
-/// session a tap that the host silently declined was indistinguishable from an
-/// event that never arrived, and the difference is the whole diagnosis.
+/// overlay the device was still showing). Counting the event distinguishes a
+/// deliberately ignored dismissal from an event that never arrived.
 #[test]
 fn a_dismissal_for_an_untracked_token_is_counted_rather_than_silently_dropped() {
     let control = MockDeviceControl::default();
@@ -2886,16 +2878,11 @@ fn a_dismissal_for_an_untracked_token_is_counted_rather_than_silently_dropped() 
 }
 
 /// A tap on an already-Completed pomodoro is a deliberate host no-op
-/// (`engine::pomodoro::toggle` on `Completed` only refreshes), but the firmware
+/// (`Pomodoro::toggle` on `Completed` only refreshes), but the firmware
 /// applies optimistic local feedback on every `START_PAUSE` tap regardless of
-/// state -- `progress_ring_local_action` flips `progress_running` and repaints
-/// the arc and status text in the running hue. Only an authoritative push of
-/// `running: false` puts that back, because `progress_ring.c`'s patch path calls
-/// `set_running_color` unconditionally.
-///
-/// So the host must still push after a no-op tap. The 2026-08-15 hardware
-/// session recorded the red "done" sticking until the next tap and attributed it
-/// to the host pushing nothing back; this pins what the host actually does.
+/// state, repainting the arc and status as running. Only an authoritative push
+/// of `running: false` restores the completed state, so the host must still
+/// push after a no-op tap.
 #[test]
 fn a_tap_on_a_completed_pomodoro_still_pushes_authoritative_state() {
     let control = MockDeviceControl::default();

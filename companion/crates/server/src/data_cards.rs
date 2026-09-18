@@ -181,46 +181,31 @@ pub struct FaceFieldOption {
 /// offer "Weather" without the app knowing what a weather face is. Adding a
 /// fourth face here is what makes it appear in the window -- no app change.
 pub fn creatable_faces() -> Vec<FaceDescriptor> {
-    [
-        FaceSpec::Weather {
-            location: String::new(),
-            units: Units::Metric,
-        },
-        FaceSpec::Rss {
-            url: String::new(),
-            title: String::new(),
-        },
-        FaceSpec::Token {
-            coin_id: String::new(),
-            currency: default_currency(),
-            api_key: None,
-        },
-    ]
-    .iter()
-    .map(face_descriptor)
-    .collect()
+    ["weather", "rss", "token"]
+        .into_iter()
+        .filter_map(blank_face)
+        .map(|face| face_descriptor(&face))
+        .collect()
 }
 
 /// A blank face of `kind`, or `None` if this server cannot draw that kind.
 fn blank_face(kind: &str) -> Option<FaceSpec> {
-    creatable_faces()
-        .into_iter()
-        .find(|descriptor| descriptor.kind == kind)
-        .map(|_| match kind {
-            "weather" => FaceSpec::Weather {
-                location: String::new(),
-                units: Units::Metric,
-            },
-            "rss" => FaceSpec::Rss {
-                url: String::new(),
-                title: String::new(),
-            },
-            _ => FaceSpec::Token {
-                coin_id: String::new(),
-                currency: default_currency(),
-                api_key: None,
-            },
-        })
+    match kind {
+        "weather" => Some(FaceSpec::Weather {
+            location: String::new(),
+            units: Units::Metric,
+        }),
+        "rss" => Some(FaceSpec::Rss {
+            url: String::new(),
+            title: String::new(),
+        }),
+        "token" => Some(FaceSpec::Token {
+            coin_id: String::new(),
+            currency: default_currency(),
+            api_key: None,
+        }),
+        _ => None,
+    }
 }
 
 /// Whether a face has everything it needs to be fetched.
@@ -391,9 +376,9 @@ pub fn load_specs(path: &Path) -> Result<Vec<DataCardSpec>, String> {
 fn render_face(provider: &mut FaceProvider) -> Result<(String, Option<String>), String> {
     let now = Utc::now();
     match provider {
-        FaceProvider::Weather { provider, units } => {
+        FaceProvider::Weather { provider } => {
             let snapshot = provider.refresh(now);
-            let face = adapt::weather_face(&snapshot.value, *units, HOURLY_COLUMNS);
+            let face = adapt::weather_face(&snapshot.value, HOURLY_COLUMNS);
             // A refresh that failed with no previous reading has nothing to
             // draw: the location is empty and the temperature is zero, which
             // would render a confident "0°" for a card that has never worked.
@@ -425,7 +410,6 @@ fn render_face(provider: &mut FaceProvider) -> Result<(String, Option<String>), 
 enum FaceProvider {
     Weather {
         provider: Box<WeatherProvider<EgressHttpClient>>,
-        units: WeatherUnits,
     },
     Rss {
         provider: Box<RssProvider<EgressHttpClient>>,
@@ -450,10 +434,8 @@ impl FaceProvider {
                         location: location.clone(),
                         units: (*units).into(),
                         refresh_interval: refresh,
-                        title: String::new(),
                     },
                 )),
-                units: (*units).into(),
             },
             FaceSpec::Rss { url, title } => Self::Rss {
                 provider: Box::new(RssProvider::new(
@@ -465,7 +447,6 @@ impl FaceProvider {
                         // draws.
                         maximum_items: 4,
                         refresh_interval: refresh,
-                        title: String::new(),
                     },
                 )),
                 title: title.clone(),

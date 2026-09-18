@@ -59,7 +59,7 @@ impl UnknownAuthWarningLimiter {
 /// real token", and the server never logs the token value that was tried.
 #[derive(Debug, thiserror::Error)]
 #[error("missing, malformed, or unrecognized bearer token")]
-pub struct AuthError;
+pub(crate) struct AuthError;
 
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
@@ -70,7 +70,7 @@ impl IntoResponse for AuthError {
 /// A request whose `Authorization: Bearer <token>` header named a device the
 /// registry minted a token for.
 #[derive(Debug, Clone)]
-pub struct AuthenticatedDevice {
+pub(crate) struct AuthenticatedDevice {
     pub device_id: DeviceId,
 }
 

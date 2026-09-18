@@ -311,8 +311,8 @@ fn drop_retired_cards_from_json(text: &str) -> Result<AppConfig, StoreError> {
 /// appended after the ones it did, in their original order, which is what a
 /// v4-v9 document's "card library outside the loop" becomes. What IS lost, on
 /// purpose, is the grouping: playlist names and every inactive playlist. The
-/// product has had no way to create a second playlist since the one-loop
-/// change, so nothing reachable through the window is losing a feature.
+/// current product exposes one ordered loop, so the discarded groupings are
+/// not representable in the current configuration model.
 fn fold_playlists_into_the_card_order(value: &mut serde_json::Value) {
     let Some(object) = value.as_object_mut() else {
         return;

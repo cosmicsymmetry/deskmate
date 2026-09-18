@@ -7,14 +7,8 @@
 //! The error cluster is here rather than beside the worker loop because every
 //! one of its decisions is about a `DeviceError` -- whether the link is gone,
 //! whether the owner was refused, what the snapshot should then say.
-//!
-//! Split out of `runtime.rs` unchanged on 2026-09-11. `use super::*` keeps
-//! name resolution identical to when this was one file.
-
-// The glob is what makes this file a MOVE rather than a rewrite: name
-// resolution inside it is identical to when all of this lived in one
-// `runtime.rs`. Enumerating thirty parent imports would make the split a
-// diff nobody can read against the original.
+// These runtime internals intentionally share the parent module's worker
+// types and helpers; a glob keeps that internal seam in one place.
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
@@ -357,12 +351,10 @@ pub(super) fn update_device_status(
     // accepted interrupts alone. `latest_revision` and `config_revision` are the
     // data-push and config counters, which climb with ordinary traffic.
     //
-    // The dedicated field is additive in M3 and decodes to 0 when absent, so revisions
-    // stay as the floor for exactly that case — an older image, or one that has accepted
-    // no interrupt yet, where there is nothing better to start from. Applying them
-    // unconditionally instead coupled the token counter to unrelated traffic: on the
-    // 2026-08-20 hardware gate a delivered interrupt arrived as token 85 rather than 61,
-    // the gap being the device's data revision, which read as 24 lost interrupts.
+    // The dedicated field decodes to 0 when absent, so revisions remain the
+    // floor only for that case — a device with no interrupt counter to report.
+    // Applying them unconditionally would couple tokens to unrelated traffic
+    // and make ordinary data revisions look like lost interrupts.
     let observed = if status.latest_interrupt_token == 0 {
         status.latest_revision.max(status.config_revision)
     } else {

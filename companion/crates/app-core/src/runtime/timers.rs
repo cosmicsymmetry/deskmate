@@ -1,12 +1,6 @@
 //! Pomodoro state, the alerts it raises, and the interrupts they become.
-//!
-//! Split out of `runtime.rs` unchanged on 2026-09-11. `use super::*` keeps
-//! name resolution identical to when this was one file.
-
-// The glob is what makes this file a MOVE rather than a rewrite: name
-// resolution inside it is identical to when all of this lived in one
-// `runtime.rs`. Enumerating thirty parent imports would make the split a
-// diff nobody can read against the original.
+// These runtime internals intentionally share the parent module's worker
+// types and helpers; a glob keeps that internal seam in one place.
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
@@ -72,10 +66,10 @@ pub(super) fn control_pomodoro(
 /// seeded host state and went to the device as `PushData`. Protocol v2's
 /// device receives `PushTimer` instead and models nothing else, so the bag is
 /// host-only and is assembled here, where the host's own `CardField` type
-/// lives, rather than in `engine`.
+/// lives, keeping timer mechanics independent of presentation fields.
 pub(super) fn pomodoro_fields(
     label: &str,
-    update: &engine::pomodoro::PomodoroUpdate,
+    update: &crate::engine::pomodoro::PomodoroUpdate,
 ) -> Vec<CardField> {
     vec![
         CardField {
@@ -118,7 +112,7 @@ pub(super) fn pomodoro_fields(
 pub(super) fn record_pomodoro_update(
     state: &mut WorkerState,
     card_id: &str,
-    update: &engine::pomodoro::PomodoroUpdate,
+    update: &crate::engine::pomodoro::PomodoroUpdate,
     fields: Vec<CardField>,
 ) -> bool {
     let completion_interrupt =
@@ -156,19 +150,15 @@ pub(super) fn card_wants_completion_interrupt(config: &AppConfig, card_id: &str)
 /// `token` actually is the arbiter's *active* interrupt. Delivery of a Pending
 /// interrupt does not run a deadline of its own; one is armed for it only once
 /// it is promoted to Active (see `sync_alert_hold_to_active_interrupt`). This
-/// guard, and keying the hold to
-/// a specific token in the first place, is what fixes Task 6 review
-/// Critical-1: a single unkeyed, unconditionally-armed hold let scheduling
-/// *any* interrupt (including one that landed Pending) clobber the deadline
-/// belonging to a *different*, already-Active interrupt — auto-dismissing an
-/// `UntilDismissed` alert early, or silently losing a bounded alert's
-/// deadline entirely.
+/// guard, together with keying the hold to a specific token, prevents a
+/// Pending interrupt from clobbering the deadline of a different Active
+/// interrupt.
 ///
 /// `AlertHold::Seconds` arms an absolute deadline from successful delivery;
 /// `AlertHold::UntilDismissed` (or no hold at all) disarms it.
 ///
-/// BY DESIGN (decided 2026-08-06, design spec §3.2): expiring this deadline
-/// only frees the host's arbiter slot for the next alert and re-syncs the
+/// Expiring this deadline only frees the host's arbiter slot for the next
+/// alert and re-syncs the
 /// saved carousel screen id host-side (see the `alert_hold_due` handling in
 /// `run_scheduled_work`). It does not clear the panel. Per
 /// `docs/protocol/v1.md`'s `ActivateCard` section and firmware's
@@ -180,9 +170,8 @@ pub(super) fn card_wants_completion_interrupt(config: &AppConfig, card_id: &str)
 /// still shows the overlay leaves host and device interrupt state diverged
 /// (the device still expects a tap; a further host-triggered alert can be
 /// rejected `Busy` even though the host arbiter believes its slot is free)
-/// until the next tap or a full resync. Do not "fix" this by adding a wire
-/// dismissal message — that was considered and rejected for v1, because an
-/// alert worth interrupting the user is worth acknowledging.
+/// until the next tap or a full resync. The protocol intentionally has no
+/// host-to-device dismissal message: the user must acknowledge the overlay.
 pub(super) fn arm_alert_hold(
     scheduler: &mut Scheduler,
     token: u32,

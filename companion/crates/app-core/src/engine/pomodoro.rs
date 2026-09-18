@@ -1,10 +1,8 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 
+use crate::config::{MAX_POMODORO_SECONDS, MIN_POMODORO_SECONDS};
 use protocol::truncate_utf8_to_bytes;
-
-pub const MIN_POMODORO_SECONDS: u32 = 1;
-pub const MAX_POMODORO_SECONDS: u32 = 86_400;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PomodoroState {
@@ -65,10 +63,6 @@ impl Pomodoro {
             running_since: None,
             completion_emitted: false,
         })
-    }
-
-    pub fn state(&self) -> PomodoroState {
-        self.state
     }
 
     /// The truncated label this timer was created with. A host builds the

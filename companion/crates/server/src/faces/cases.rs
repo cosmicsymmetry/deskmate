@@ -12,9 +12,8 @@
 //! ```
 //!
 //! That writes one PNG per case. The PNGs are deliberately **not** committed:
-//! this repository has been burned by golden images that outlived the thing
-//! they described, and a face is reviewed by eye on a real panel, not by
-//! diffing anti-aliased type. What *is* asserted in CI is that every case
+//! anti-aliased pixel diffs are brittle, and a face is reviewed by eye on a
+//! real panel. What *is* asserted in CI is that every case
 //! renders, that its text stays inside the canvas, and that the layout facts
 //! each case was added for still hold.
 

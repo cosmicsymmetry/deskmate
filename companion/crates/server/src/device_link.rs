@@ -15,13 +15,12 @@ use crate::registry::DeviceId;
 use crate::runtime_device::WebSocketRuntimeDevice;
 use crate::{LinkLease, ServerState};
 
-/// Caps concurrent device links. V2 is single-tenant and realistically has
-/// one device, but this endpoint sits on a public tunnel, so a caller with a
+/// Caps concurrent device links. A deployment normally has very few devices,
+/// but this endpoint sits on a public tunnel, so a caller with a
 /// compromised token must not be able to pin unbounded socket tasks and
 /// runtimes.
 ///
-/// Provisional: sized by judgment for a single-device V2 deployment, not
-/// derived from measurements. Revisit against actual traffic in V3. It is
+/// Sized conservatively rather than from production measurements. It is
 /// `<= MAX_CONCURRENT_REQUESTS` (`lib.rs`) by construction. The link permit
 /// is acquired with `try_acquire_owned` while the request permit is held, so
 /// that step never waits; the 101 then releases the request permit before the
@@ -34,7 +33,7 @@ pub(crate) const MAX_CONCURRENT_LINKS: usize = 32;
 /// remains bounded by this protocol-native ceiling.
 const MAX_WS_MESSAGE_SIZE: usize = protocol::MAX_WIRE_FRAME;
 
-pub async fn handler(
+pub(crate) async fn handler(
     State(state): State<ServerState>,
     AuthenticatedDevice { device_id }: AuthenticatedDevice,
     ws: WebSocketUpgrade,

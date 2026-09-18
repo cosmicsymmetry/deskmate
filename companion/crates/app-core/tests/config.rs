@@ -36,7 +36,7 @@ fn default_fixture_is_the_canonical_default() {
 }
 
 #[test]
-fn full_fixture_compiles_deterministically_to_m2_contract() {
+fn full_fixture_compiles_deterministically_to_the_current_wire_contract() {
     let config = current_config(FULL_JSON);
     let first = config.compile(42).unwrap();
     let second = config.compile(42).unwrap();
@@ -45,8 +45,7 @@ fn full_fixture_compiles_deterministically_to_m2_contract() {
     assert_eq!(first.layout.revision, 42);
     assert_eq!(first.layout.rotation, 270);
     // The whole wire model of a card in protocol v2: its id and what a tap
-    // means. Template, size class and interrupt policy all described a device
-    // that rendered the face, and it has not done that since stage 3a.
+    // means. Face layout and alert policy remain host-owned.
     assert_eq!(first.layout.cards.len(), 3);
     assert_eq!(first.layout.cards[0].card_id, "clock");
     assert_eq!(first.layout.cards[0].tap_action, TapAction::None);
@@ -88,12 +87,9 @@ fn invalid_fixture_reports_all_domain_boundaries_before_compile() {
         ("preferences.timezone", ValidationCode::InvalidTimezone),
         // Two cards share id "duplicate"; the second occurrence is flagged.
         ("cards[2].id", ValidationCode::DuplicateId),
-        // A card's own dwell_seconds: 4 is below MIN_DWELL_SECONDS (5). Since
-        // schema v10 dwell is a card field, so the four playlist-shaped rules
-        // this table used to check -- an entry's dwell, an entry naming a card
-        // that does not exist, the same card twice in one playlist, two
-        // playlists sharing a name -- are all unrepresentable rather than
-        // merely unchecked.
+        // A card's own dwell_seconds: 4 is below MIN_DWELL_SECONDS (5).
+        // Playlist-shaped rules are unrepresentable in schema v10 because
+        // dwell belongs directly to the card in the single ordered loop.
         ("cards[1].dwell_seconds", ValidationCode::OutOfRange),
         // on-timer-finish hold.value: 4 is below MIN_ALERT_HOLD_SECONDS (5).
         ("cards[3].alert.hold.value", ValidationCode::OutOfRange),
@@ -250,9 +246,8 @@ fn card_settings_rejects_an_unknown_field_nested_inside_refresh() {
 fn display_template_rejects_unknown_fields_on_every_unit_variant() {
     // `DisplayTemplate` is internally tagged, and a plain `#[serde(deny_unknown_fields)]`
     // derive is a no-op on such an enum's unit variants -- they slipped unknown fields
-    // through entirely. Probe every variant explicitly, plus valid round-trips.
-    // (The struct variant this test also used to probe, `icon-badge-text`, was retired
-    // with the three orphan templates on 2026-09-11.)
+    // through entirely. Probe every current variant explicitly, plus valid
+    // round-trips.
     for kind in ["digital-clock", "analog-clock", "progress-ring"] {
         let with_bogus = format!(r#"{{"kind":"{kind}","bogus":1}}"#);
         assert!(
@@ -586,12 +581,8 @@ fn compilation_lowers_cards_to_the_frozen_wire_shape() {
     assert_eq!(compiled.initial_timers[0].total_ms, 1_500_000);
 }
 
-/// Final-review finding: `wire_config()` lowering every template removed the only
-/// backstop that had been keeping host-valid-but-device-invalid compositions from
-/// being saved. A card kind may use a template only when it populates the
-/// fields that template declares — otherwise the card renders its placeholders
-/// forever and every field it does send inflates the device's `unknown_field_count`
-/// on every refresh, degrading the drift diagnostic Task 2 deliberately preserved.
+/// A card kind may use a template only when it can populate that template's
+/// bindings; otherwise the card would render permanent placeholders.
 #[test]
 fn compositions_the_card_cannot_populate_are_rejected() {
     let rejected = [
@@ -650,16 +641,9 @@ fn compositions_the_card_cannot_populate_are_rejected() {
     }
 }
 
-/// Final-review finding: `widget_model.c` refuses any widget whose template is not
-/// `PROGRESS_RING` while carrying a non-`NONE` tap action, and `validate_config` is
-/// all-or-nothing — so one such card made the device reject the ENTIRE `ApplyConfig`
-/// and nothing on the display updated at all.
-///
-/// The fixture below is now rejected on its template as well, since pomodoro no longer
-/// allows `big-number-label` at all. This still pins the tap-action rule specifically:
-/// the assertion demands an issue on the `tap_action` path, which the template rule
-/// does not raise. Keeping it independent matters because the guard mirrors a firmware
-/// rule about templates in general, not about which templates pomodoro may use.
+/// Timer tap actions require the progress-ring composition. This assertion
+/// stays specific to the `tap_action` path even though the fixture is also an
+/// invalid card/template combination.
 #[test]
 fn timer_tap_actions_require_the_progress_ring_template() {
     for tap_action in [WidgetTapAction::StartPause, WidgetTapAction::Reset] {

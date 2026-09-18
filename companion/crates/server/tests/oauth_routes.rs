@@ -173,7 +173,7 @@ async fn start_consent_redirects_to_google_for_an_admin_caller() {
     assert!(location.starts_with("https://accounts.google.com/o/oauth2/v2/auth"));
 }
 
-// --- Token vending (revision spec §5) -------------------------------------
+// --- Token vending --------------------------------------------------------
 
 use std::sync::Mutex;
 

@@ -49,13 +49,12 @@
 //! # Allowlist, not a remembered deny list
 //!
 //! [`deny_reason_v4`]/[`deny_reason_v6`] implement "permit only
-//! globally-routable unicast, deny everything else" (spec §5 calls this an
+//! globally-routable unicast, deny everything else" (an
 //! *allowlist*): permission is what is left over once every named
 //! exclusion has been checked, not a list of ranges someone remembered to
-//! write down. This module's first version was a genuine deny list and
-//! missed `100.64.0.0/10` (RFC 6598, carrier-grade NAT) -- which is
-//! Tailscale's entire address range, and this deployment's own render host
-//! reaches its neighbours over Tailscale.
+//! write down. A deny list can easily omit `100.64.0.0/10` (RFC 6598,
+//! carrier-grade NAT), which is Tailscale's entire address range and how this
+//! deployment's render host reaches its neighbours.
 //!
 //! **The two families are not equally exhaustive, and that asymmetry is
 //! deliberate rather than an oversight left unstated.** `deny_reason_v4`
@@ -261,9 +260,9 @@ impl fmt::Display for DenyReason {
 /// finding that `ip` falls inside a specific IANA special-purpose range.
 ///
 /// The predicate this implements is **"permit only globally-routable
-/// unicast, deny everything else"** (spec §5 names it an *allowlist*, and a
-/// deny list is a list of what someone remembered -- CGNAT was the range
-/// this module's first version forgot); permission is what is left over
+/// unicast, deny everything else"** (an *allowlist*, and a
+/// deny list is a list of what someone remembered and can omit CGNAT);
+/// permission is what is left over
 /// once every named exclusion has been checked, not a remembered blocklist
 /// of "the bad ones". `Ipv4Addr::is_global()` and friends would express the
 /// same predicate, but they are unstable (nightly-only); this reimplements
@@ -825,8 +824,8 @@ fn deny_scheme_downgrade(current: &Url, next: &Url) -> Result<(), EgressError> {
 pub const IDENTITY_HOST: &str = "oauth2.googleapis.com";
 
 /// POSTs `form` as `application/x-www-form-urlencoded` to `url` under the full
-/// egress guard. Used for OAuth token exchange, refresh, and revoke (spec §6:
-/// credential-bearing calls keep resolve-then-pin). Single-hop by design: a
+/// egress guard. OAuth token exchange, refresh, and revoke keep
+/// credential-bearing calls resolve-then-pin. Single-hop by design: a
 /// token endpoint answering a POST with a redirect is not a flow to follow, so a
 /// 3xx is returned to the caller as-is (and treated as an error there) rather
 /// than re-issued as a POST or silently downgraded to GET.

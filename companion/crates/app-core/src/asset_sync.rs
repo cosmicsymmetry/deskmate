@@ -12,7 +12,7 @@
 //! desired asset; when the device's `Ack` reports `already_present`, no
 //! chunks are sent for that digest at all. Because `AssetBegin` always opens
 //! a fresh reservation -- the device aborts any transfer already in flight
-//! for that digest first (protocol v1 §4/Task 9) -- there is no wire-level
+//! for that digest first (protocol v1 §4) -- there is no wire-level
 //! way to resume a partially-uploaded asset from a remembered byte offset.
 //! A dropped connection, or a retry after a local failure, restarts that
 //! asset's chunks from zero; only whole committed assets are ever skipped.
@@ -24,8 +24,8 @@ use crate::RuntimeDevice;
 use device::DeviceError;
 use protocol::{
     ASSET_DIGEST_LEN, ASSET_ENCODING_RAW, ASSET_ENCODING_RLE565, AssetBegin, AssetChunk,
-    AssetCommit, AssetKind, AssetRelease, CAPABILITY_DURABLE_ASSET_ENCODING,
-    CAPABILITY_VOLATILE_ASSETS, MAX_ASSET_CHUNK_BYTES, MAX_ASSET_DIGESTS, encode_rle565,
+    AssetCommit, AssetKind, AssetRelease, CAPABILITY_DURABLE_ASSET_ENCODING, MAX_ASSET_CHUNK_BYTES,
+    MAX_ASSET_DIGESTS, encode_rle565,
 };
 
 /// One asset resolved to bytes and ready to stream: the digest both sides
@@ -52,18 +52,13 @@ pub struct DesiredAsset {
 /// whole pass later (on reconnect, or on the next config apply); a retried
 /// asset restarts from its first chunk, per this module's doc comment.
 #[derive(Debug, thiserror::Error)]
-pub enum AssetSyncError {
+pub(crate) enum AssetSyncError {
     #[error("{desired} desired assets exceeds the device's {maximum}-digest AssetRelease limit")]
     TooManyDesiredAssets { desired: usize, maximum: usize },
     #[error("asset {digest:02x?} is {length} bytes, over the protocol's u32 length limit")]
     AssetTooLarge {
         digest: [u8; ASSET_DIGEST_LEN],
         length: usize,
-    },
-    #[error("volatile asset {digest:02x?} must be an image, got {kind:?}")]
-    VolatileKind {
-        digest: [u8; ASSET_DIGEST_LEN],
-        kind: AssetKind,
     },
     #[error("required scene asset {digest:02x?} is not available from this host")]
     MissingRequiredAsset { digest: [u8; ASSET_DIGEST_LEN] },
@@ -94,10 +89,9 @@ pub enum AssetSyncError {
 }
 
 /// Compose the one device-wide `AssetRelease` keep-set without sending it.
-/// Runtime/executor ordering is Task 5; this pure helper pins the ownership
-/// rule now: every desired durable digest followed by the active volatile
+/// Every desired durable digest is followed by the active volatile
 /// raster digest, deduplicated and bounded by the wire ceiling.
-pub fn compose_asset_keep_set(
+fn compose_asset_keep_set(
     durable: &[[u8; ASSET_DIGEST_LEN]],
     active_volatile: Option<[u8; ASSET_DIGEST_LEN]>,
 ) -> Result<Vec<[u8; ASSET_DIGEST_LEN]>, AssetSyncError> {
@@ -116,7 +110,7 @@ pub fn compose_asset_keep_set(
     Ok(keep)
 }
 
-pub struct AssetSync;
+pub(crate) struct AssetSync;
 
 struct SelectedAssetEncoding<'a> {
     wire: Cow<'a, [u8]>,
@@ -219,48 +213,11 @@ impl AssetSync {
         Ok(())
     }
 
-    /// Upload one volatile raster without changing device inventory. RLE is
-    /// considered only when `capabilities` advertises bit 9 and is used only
-    /// when it is strictly smaller than raw. Task 5 owns the later
-    /// `PushScene` + composed keep-set ordering.
-    pub fn transfer_volatile(
-        device: &mut dyn RuntimeDevice,
-        asset: &DesiredAsset,
-        capabilities: u64,
-    ) -> Result<(), AssetSyncError> {
-        Self::transfer_volatile_yielding(device, asset, capabilities, &mut || {})
-    }
-
-    pub fn transfer_volatile_yielding(
-        device: &mut dyn RuntimeDevice,
-        asset: &DesiredAsset,
-        capabilities: u64,
-        on_chunk_sent: &mut dyn FnMut(),
-    ) -> Result<(), AssetSyncError> {
-        if asset.kind != AssetKind::Image {
-            return Err(AssetSyncError::VolatileKind {
-                digest: asset.digest,
-                kind: asset.kind,
-            });
-        }
-        let selected =
-            Self::select_image_encoding(asset, capabilities & CAPABILITY_VOLATILE_ASSETS != 0)?;
-        Self::transfer_one(
-            device,
-            asset,
-            true,
-            &selected.wire,
-            selected.encoding,
-            selected.decoded_length,
-            on_chunk_sent,
-        )
-    }
-
     /// Reconciles durable assets while retaining the volatile digest read by
     /// the currently displayed scene, and returns the exact keep-set sent to
     /// the device. This is the only safe full-sync shape before its
     /// replacement `PushScene` succeeds.
-    pub fn reconcile_with_active_volatile(
+    pub(crate) fn reconcile_with_active_volatile(
         device: &mut dyn RuntimeDevice,
         desired: &[DesiredAsset],
         active_volatile: Option<[u8; ASSET_DIGEST_LEN]>,
@@ -293,7 +250,7 @@ impl AssetSync {
     /// outstanding-request slot again. The non-yielding wrapper passes a
     /// no-op hook, which is correct for a caller that owns the device
     /// exclusively for the duration of the pass.
-    pub fn reconcile_with_active_volatile_yielding(
+    fn reconcile_with_active_volatile_yielding(
         device: &mut dyn RuntimeDevice,
         desired: &[DesiredAsset],
         active_volatile: Option<[u8; ASSET_DIGEST_LEN]>,
@@ -357,8 +314,8 @@ mod tests {
     use crate::{DeviceConnection, RuntimeDevice};
     use device::{ReceivedEvent, SessionDiagnostics};
     use protocol::{
-        Ack, CardConfig, NetworkConfig, PushScene, StatusResponse, TYPE_ASSET_BEGIN, TimeSync,
-        TriggerInterrupt,
+        Ack, CAPABILITY_VOLATILE_ASSETS, CardConfig, NetworkConfig, PushScene, StatusResponse,
+        TYPE_ASSET_BEGIN, TimeSync, TriggerInterrupt,
     };
 
     use super::*;
@@ -579,16 +536,11 @@ mod tests {
         assert_eq!(device.last_release(), Some(keep_set));
     }
 
-    /// The brief this module was built from sketched a test asserting that a
-    /// retried reconcile resumes from a remembered byte offset. That is not
-    /// how the wire protocol works: `AssetBegin` always opens a fresh
-    /// reservation and the device aborts whatever was in flight for that
-    /// digest first (Task 9's protocol wiring), and `Ack` carries no offset
-    /// for `reconcile` to learn one from. This test instead pins the actual,
-    /// intentional behavior -- a retry restarts the asset's chunks from
-    /// zero -- and genuinely exercises a mid-transfer failure followed by a
-    /// successful pass, which is what the brief actually asked this test to
-    /// prove.
+    /// `AssetBegin` always opens a fresh reservation, aborting any transfer
+    /// already in flight for that digest, and `Ack` carries no resumable
+    /// offset. A retry therefore restarts the asset's chunks from zero. This
+    /// test exercises that contract across a mid-transfer failure followed by
+    /// a successful pass.
     #[test]
     fn reconcile_restarts_an_asset_after_a_mid_transfer_failure() {
         let mut device = FakeDevice::new().failing_after_chunks(2);
@@ -651,95 +603,6 @@ mod tests {
 
         assert!(matches!(error, AssetSyncError::TooManyDesiredAssets { .. }));
         assert!(device.last_release().is_none());
-    }
-
-    #[test]
-    fn transfer_volatile_uses_rle_when_it_is_smaller() {
-        let mut device = FakeDevice::new();
-        let frame = raster_frame([0xf1; ASSET_DIGEST_LEN], false);
-
-        AssetSync::transfer_volatile(&mut device, &frame, CAPABILITY_VOLATILE_ASSETS)
-            .expect("volatile transfer");
-
-        assert_eq!(device.begins().len(), 1);
-        let begin = device.begins()[0];
-        assert!(begin.volatile);
-        assert_eq!(begin.encoding, ASSET_ENCODING_RLE565);
-        assert_eq!(
-            begin.decoded_length,
-            Some(protocol::VOLATILE_IMAGE_DECODED_LENGTH)
-        );
-        assert_eq!(begin.total_length, 24);
-        let wire = device.wire_bytes(&frame.digest);
-        assert_eq!(&wire[..12], &frame.bytes[..12]);
-        assert_eq!(
-            protocol::decode_rle565(&wire[12..], frame.bytes.len() - 12).unwrap(),
-            &frame.bytes[12..]
-        );
-        assert!(device.committed.contains(&frame.digest));
-        assert!(device.last_release().is_none());
-    }
-
-    #[test]
-    fn transfer_volatile_uses_raw_when_rle_expands() {
-        let mut device = FakeDevice::new();
-        let frame = raster_frame([0xf2; ASSET_DIGEST_LEN], true);
-
-        AssetSync::transfer_volatile(&mut device, &frame, CAPABILITY_VOLATILE_ASSETS)
-            .expect("volatile transfer");
-
-        let begin = device.begins()[0];
-        assert_eq!(begin.encoding, ASSET_ENCODING_RAW);
-        assert_eq!(begin.decoded_length, None);
-        assert_eq!(begin.total_length, protocol::VOLATILE_IMAGE_DECODED_LENGTH);
-        assert_eq!(device.wire_bytes(&frame.digest), frame.bytes.as_ref());
-    }
-
-    #[test]
-    fn transfer_volatile_without_bit_9_keeps_raw_encoding() {
-        let mut device = FakeDevice::new();
-        let frame = raster_frame([0xf3; ASSET_DIGEST_LEN], false);
-
-        AssetSync::transfer_volatile(&mut device, &frame, 0).expect("volatile transfer");
-
-        assert_eq!(device.begins()[0].encoding, ASSET_ENCODING_RAW);
-    }
-
-    #[test]
-    fn transfer_volatile_honors_already_present_for_raw_and_rle() {
-        let digest = [0xf2; ASSET_DIGEST_LEN];
-        for (frame, capabilities, encoding) in [
-            (
-                raster_frame(digest, false),
-                CAPABILITY_VOLATILE_ASSETS,
-                ASSET_ENCODING_RLE565,
-            ),
-            (
-                raster_frame(digest, true),
-                CAPABILITY_VOLATILE_ASSETS,
-                ASSET_ENCODING_RAW,
-            ),
-        ] {
-            let mut device = FakeDevice::new().with_already_present(digest);
-            AssetSync::transfer_volatile(&mut device, &frame, capabilities)
-                .expect("already-present volatile transfer");
-
-            assert_eq!(device.begins()[0].encoding, encoding);
-            assert_eq!(device.chunks_sent_for(&digest), 0);
-            assert!(device.last_release().is_none());
-        }
-    }
-
-    #[test]
-    fn transfer_volatile_refuses_a_non_image_asset_before_io() {
-        let mut device = FakeDevice::new();
-        let font = asset_blob([0xf3; ASSET_DIGEST_LEN], 4096);
-
-        assert!(matches!(
-            AssetSync::transfer_volatile(&mut device, &font, CAPABILITY_VOLATILE_ASSETS),
-            Err(AssetSyncError::VolatileKind { .. })
-        ));
-        assert!(device.begins().is_empty());
     }
 
     #[test]
@@ -842,23 +705,37 @@ mod tests {
     }
 
     #[test]
-    fn compose_asset_keep_set_covers_empty_durable_raster_and_union_cases() {
-        let durable_a = [0xa1; ASSET_DIGEST_LEN];
-        let durable_b = [0xa2; ASSET_DIGEST_LEN];
-        let raster = [0xb1; ASSET_DIGEST_LEN];
-
+    fn compose_asset_keep_set_preserves_an_empty_keep_set() {
         assert_eq!(
             compose_asset_keep_set(&[], None).unwrap(),
             Vec::<[u8; ASSET_DIGEST_LEN]>::new()
         );
+    }
+
+    #[test]
+    fn compose_asset_keep_set_preserves_durable_order() {
+        let durable_a = [0xa1; ASSET_DIGEST_LEN];
+        let durable_b = [0xa2; ASSET_DIGEST_LEN];
         assert_eq!(
             compose_asset_keep_set(&[durable_a, durable_b], None).unwrap(),
             vec![durable_a, durable_b]
         );
+    }
+
+    #[test]
+    fn compose_asset_keep_set_keeps_an_active_volatile_digest() {
+        let raster = [0xb1; ASSET_DIGEST_LEN];
         assert_eq!(
             compose_asset_keep_set(&[], Some(raster)).unwrap(),
             vec![raster]
         );
+    }
+
+    #[test]
+    fn compose_asset_keep_set_appends_active_volatile_after_durable_assets() {
+        let durable_a = [0xa1; ASSET_DIGEST_LEN];
+        let durable_b = [0xa2; ASSET_DIGEST_LEN];
+        let raster = [0xb1; ASSET_DIGEST_LEN];
         assert_eq!(
             compose_asset_keep_set(&[durable_a, durable_b], Some(raster)).unwrap(),
             vec![durable_a, durable_b, raster]
@@ -866,13 +743,16 @@ mod tests {
     }
 
     #[test]
-    fn compose_asset_keep_set_deduplicates_and_enforces_the_wire_ceiling() {
+    fn compose_asset_keep_set_deduplicates_the_active_volatile_digest() {
         let same = [0xc1; ASSET_DIGEST_LEN];
         assert_eq!(
             compose_asset_keep_set(&[same], Some(same)).unwrap(),
             vec![same]
         );
+    }
 
+    #[test]
+    fn compose_asset_keep_set_enforces_the_wire_ceiling() {
         let durable: Vec<[u8; ASSET_DIGEST_LEN]> = (0..MAX_ASSET_DIGESTS)
             .map(|index| {
                 let mut digest = [0u8; ASSET_DIGEST_LEN];
@@ -884,5 +764,23 @@ mod tests {
             compose_asset_keep_set(&durable, Some([0xff; ASSET_DIGEST_LEN])),
             Err(AssetSyncError::TooManyDesiredAssets { .. })
         ));
+    }
+
+    #[test]
+    fn reconcile_releases_the_union_of_durable_and_active_volatile_digests() {
+        let durable = asset_blob([0xd5; ASSET_DIGEST_LEN], 16);
+        let active_volatile = [0xe5; ASSET_DIGEST_LEN];
+        let mut device = FakeDevice::new();
+
+        let keep_set = AssetSync::reconcile_with_active_volatile(
+            &mut device,
+            std::slice::from_ref(&durable),
+            Some(active_volatile),
+            0,
+        )
+        .expect("reconcile");
+
+        assert_eq!(keep_set, vec![durable.digest, active_volatile]);
+        assert_eq!(device.last_release(), Some(keep_set));
     }
 }

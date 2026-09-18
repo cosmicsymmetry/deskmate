@@ -43,7 +43,6 @@ pub struct RssOptions {
     pub url: String,
     pub maximum_items: usize,
     pub refresh_interval: Duration,
-    pub title: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

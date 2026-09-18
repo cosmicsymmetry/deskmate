@@ -77,8 +77,8 @@ fn revoking_stops_the_credential_and_reports_whether_one_existed() {
 
 #[test]
 fn revoking_one_integration_leaves_another_alone() {
-    // Revocation coupling (Task 5) revokes by integration id; if that reached
-    // wider, disconnecting one integration would silently break every producer.
+    // Revocation is scoped by integration id; a wider deletion would make
+    // disconnecting one integration silently break every producer.
     let (_dir, store) = store();
     let google = store.mint("google").expect("mint google");
     let other = store.mint("dropbox").expect("mint dropbox");

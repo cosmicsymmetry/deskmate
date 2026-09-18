@@ -79,16 +79,15 @@ fn response_wait_timeout(message: &protocol::Message) -> Duration {
 /// frames. A peer that stops reading would otherwise park the socket actor and
 /// prevent both response deadlines and idle checks from making progress.
 ///
-/// Provisional: like [`PING_INTERVAL`], this is a V2 judgment call to revisit
-/// with real traffic in V3. `SEND_TIMEOUT < PING_INTERVAL < IDLE_TIMEOUT` must
-/// continue to hold.
+/// Chosen conservatively rather than from production latency measurements.
+/// `SEND_TIMEOUT < PING_INTERVAL < IDLE_TIMEOUT` must continue to hold.
 const SEND_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How often an otherwise-live link gets a WebSocket ping. It is intentionally
 /// below [`IDLE_TIMEOUT`] so dead NAT/WiFi peers are detected before bare TCP's
 /// much coarser retransmission timeout.
 ///
-/// Provisional: sized by judgment for V2, not measurements. Revisit in V3.
+/// Chosen conservatively rather than from production measurements.
 const PING_INTERVAL: Duration = Duration::from_secs(3);
 
 /// The device's own link timeout for the NETWORK transport, mirrored from
@@ -113,35 +112,20 @@ const IDLE_TIMEOUT_MARGIN_SECS: u64 = 15;
 
 /// Maximum silence from the peer, including absence of a pong.
 ///
-/// This must sit strictly BETWEEN a healthy link's silence and
+/// This must sit strictly between a healthy link's silence and
 /// [`DEVICE_NETWORK_LINK_TIMEOUT`], and both bounds are load-bearing:
 ///
 /// - Reap too early and the server kills links the device still believes are
-///   up. This previously read `protocol::LINK_TIMEOUT_MS` (10 s), which is
-///   right for USB — where both ends use `PROTOCOL_LINK_TIMEOUT_MS` — but the
-///   networked device waits 45 s, so the two ends did not agree despite the
-///   old comment here claiming they did. Observed on hardware 2026-08-29: the
-///   server logged `device link idle timeout, closing` while the device still
-///   reported `online: true` with `malformed_frames`/`crc_errors` at 0, and the
-///   pair flapped on a ~10 s period (reaped at 10 s, reconnecting in ~2 s).
+///   up. The network transport waits 45 seconds, unlike USB's 10-second link
+///   timeout, so the server must use the network value for this relationship.
 /// - Reap too late and it is worse, not better: `device_link::handler` refuses
 ///   a reconnect with 409 while the previous lease is held (`claim_link`), so a
 ///   value past 45 s would have the device give up, re-dial, and bounce off the
 ///   server's own stale lease.
 ///
-/// 30 s costs ten consecutive missed pongs before a reap, against the three the
-/// old value allowed, and still frees the lease 15 s before the device stops
-/// believing in the link. `SEND_TIMEOUT < PING_INTERVAL < IDLE_TIMEOUT <
-/// DEVICE_NETWORK_LINK_TIMEOUT` is pinned by a test.
-///
-/// This does NOT address why replies go missing in the first place: the device
-/// gives `esp_websocket_client_send_bin` `PROTOCOL_WRITE_TIMEOUT_MS` (200 ms)
-/// to deliver a reply the host waits 2000 ms for, and that budget is what drove
-/// `dropped_responses` 1 -> 15 in the same session. Fixing that is a firmware
-/// change and buys an OTA re-verification; this constant only stops the server
-/// from amplifying it into a link flap.
-/// Derived from the device's own timeout rather than written as a bare number,
-/// so the ordering this doc argues for is structural and cannot drift back.
+/// Thirty seconds tolerates ten consecutive missed pongs and still frees the
+/// lease 15 seconds before the device abandons the link. Deriving it from the
+/// device timeout makes that margin structural; a test pins the full ordering.
 const IDLE_TIMEOUT: Duration =
     Duration::from_secs(DEVICE_NETWORK_LINK_TIMEOUT_SECS - IDLE_TIMEOUT_MARGIN_SECS);
 
@@ -371,7 +355,7 @@ impl SocketConnector {
 }
 
 /// The synchronous half handed to [`app_core::RuntimeHandle`].
-pub struct WebSocketRuntimeDevice {
+pub(crate) struct WebSocketRuntimeDevice {
     device_id: String,
     transport: Arc<TransportSlot>,
     events: Receiver<ReceivedEvent>,
@@ -1225,8 +1209,8 @@ mod tests {
         );
     }
 
-    /// The old value reaped a link after three missed pongs, which is what
-    /// flapped against a device dropping replies under a 200 ms write budget.
+    /// A short burst of dropped replies must not make the server release the
+    /// device's ownership lease.
     #[test]
     fn a_reap_costs_many_consecutive_missed_pongs_not_a_few() {
         let missed = super::IDLE_TIMEOUT.as_secs_f64() / super::PING_INTERVAL.as_secs_f64();
@@ -1314,9 +1298,9 @@ mod tests {
     #[test]
     fn websocket_firmware_without_scene_render_refuses_before_wire_mutation() {
         let (mut device, connector) = super::WebSocketRuntimeDevice::channel("dev-1".into());
-        let mut legacy = sample_status();
-        legacy.capabilities &= !protocol::CAPABILITY_SCENE_RENDER;
-        let actor = spawn_test_actor_with_status(connector.attach(), legacy.clone());
+        let mut without_scene_render = sample_status();
+        without_scene_render.capabilities &= !protocol::CAPABILITY_SCENE_RENDER;
+        let actor = spawn_test_actor_with_status(connector.attach(), without_scene_render.clone());
         device.connect().expect("connect");
 
         assert_eq!(
@@ -1331,7 +1315,7 @@ mod tests {
             }),
             Err(DeviceError::MissingCapabilities {
                 required: protocol::CAPABILITY_SCENE_RENDER,
-                available: legacy.capabilities,
+                available: without_scene_render.capabilities,
             })
         );
         connector.detach();
@@ -1348,11 +1332,12 @@ mod tests {
     #[test]
     fn scene_capability_is_refreshed_from_each_websocket_attachment() {
         let (mut device, connector) = super::WebSocketRuntimeDevice::channel("dev-1".into());
-        let mut legacy = sample_status();
-        legacy.capabilities &= !protocol::CAPABILITY_SCENE_RENDER;
+        let mut without_scene_render = sample_status();
+        without_scene_render.capabilities &= !protocol::CAPABILITY_SCENE_RENDER;
 
-        let first_actor = spawn_test_actor_with_status(connector.attach(), legacy.clone());
-        device.connect().expect("legacy connect");
+        let first_actor =
+            spawn_test_actor_with_status(connector.attach(), without_scene_render.clone());
+        device.connect().expect("scene-incapable connect");
         let push = protocol::PushScene {
             card_id: "clock".into(),
             revision: 7,
@@ -1373,8 +1358,8 @@ mod tests {
             .push_scene(push.clone())
             .expect("fresh bit 8 enables scenes");
 
-        let third_actor = spawn_test_actor_with_status(connector.attach(), legacy);
-        device.connect().expect("legacy reconnect");
+        let third_actor = spawn_test_actor_with_status(connector.attach(), without_scene_render);
+        device.connect().expect("scene-incapable reconnect");
         assert!(matches!(
             device.push_scene(push.clone()),
             Err(DeviceError::MissingCapabilities { .. })

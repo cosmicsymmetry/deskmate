@@ -1,13 +1,7 @@
 //! Publishing what the runtime knows: diagnostics counters, subscriptions,
-//! and the snapshot the window renders from.
-//!
-//! Split out of `runtime.rs` unchanged on 2026-09-11. `use super::*` keeps
-//! name resolution identical to when this was one file.
-
-// The glob is what makes this file a MOVE rather than a rewrite: name
-// resolution inside it is identical to when all of this lived in one
-// `runtime.rs`. Enumerating thirty parent imports would make the split a
-// diff nobody can read against the original.
+//! and the snapshot exposed to companion clients.
+// These runtime internals intentionally share the parent module's worker
+// types and helpers; a glob keeps that internal seam in one place.
 #[allow(clippy::wildcard_imports)]
 use super::*;
 

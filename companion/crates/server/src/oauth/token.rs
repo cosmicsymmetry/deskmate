@@ -1,5 +1,5 @@
 //! `TokenManager`: OAuth code exchange, skew-window refresh, revoke, and typed
-//! integration health (spec §3, §5, §6).
+//! integration health.
 //!
 //! Access tokens are cached in memory only. The durable `IntegrationStore` holds
 //! just the refresh token and client secret, written at authorize and revoke --
@@ -61,14 +61,14 @@ impl Default for GoogleOAuthConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IntegrationHealth {
+pub(crate) enum IntegrationHealth {
     Connected,
     NeedsReconnect,
     Error(String),
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum TokenError {
+pub(crate) enum TokenError {
     #[error("authorization was revoked or expired; reconnect required")]
     NeedsReconnect,
     #[error("token transport failed: {0}")]
@@ -124,7 +124,7 @@ impl TokenManager {
         Self::with_clock(store, transport, oauth, Arc::new(Utc::now))
     }
 
-    pub fn with_clock(
+    fn with_clock(
         store: Arc<IntegrationStore>,
         transport: Arc<dyn OAuthTransport>,
         oauth: GoogleOAuthConfig,
@@ -141,7 +141,7 @@ impl TokenManager {
         }
     }
 
-    pub async fn exchange_code(
+    pub(crate) async fn exchange_code(
         &self,
         integration_id: &str,
         code: &str,
@@ -183,11 +183,12 @@ impl TokenManager {
         Ok(())
     }
 
-    /// The live access token alone. The wrapper the existing callers use.
+    /// Test convenience wrapper for callers that do not inspect expiry.
     ///
     /// # Errors
     /// See [`TokenManager::access_token_with_expiry`].
-    pub async fn access_token(&self, integration_id: &str) -> Result<String, TokenError> {
+    #[cfg(test)]
+    async fn access_token(&self, integration_id: &str) -> Result<String, TokenError> {
         self.access_token_with_expiry(integration_id)
             .await
             .map(|(token, _)| token)
@@ -195,16 +196,15 @@ impl TokenManager {
 
     /// The live access token and the expiry the provider gave it.
     ///
-    /// The vend route (revision spec §5) needs both: what it hands a producer
-    /// is the provider's own credential with the provider's own expiry, not
-    /// anything this server mints, so the producer can cache until that instant
-    /// and the provider can revoke it out from under both of us.
+    /// The vend route needs both because it hands a producer the provider's own
+    /// credential and expiry, not anything this server mints. The producer can
+    /// cache until that instant, while the provider can still revoke it.
     ///
     /// # Errors
     /// [`TokenError::NotFound`] when no credentials are stored,
     /// [`TokenError::NeedsReconnect`] when the grant was revoked or expired,
     /// and the transport/provider variants otherwise.
-    pub async fn access_token_with_expiry(
+    pub(crate) async fn access_token_with_expiry(
         &self,
         integration_id: &str,
     ) -> Result<(String, DateTime<Utc>), TokenError> {
@@ -265,7 +265,7 @@ impl TokenManager {
         Ok((tokens.access_token, expires_at))
     }
 
-    pub async fn revoke(&self, integration_id: &str) -> Result<(), TokenError> {
+    pub(crate) async fn revoke(&self, integration_id: &str) -> Result<(), TokenError> {
         let secret = self.store_get(integration_id.to_string()).await?;
         if let Some(secret) = &secret {
             // Best-effort remote revoke; local removal proceeds regardless, because
@@ -292,14 +292,14 @@ impl TokenManager {
         }
     }
 
-    /// The integrations that have stored credentials. Ids only -- spec §6:
-    /// presence, never token values.
+    /// The integrations that have stored credentials. Ids only: presence,
+    /// never token values.
     #[must_use]
-    pub fn integration_ids(&self) -> Vec<String> {
+    pub(crate) fn integration_ids(&self) -> Vec<String> {
         self.store.integration_ids()
     }
 
-    pub fn health(&self, integration_id: &str) -> Option<IntegrationHealth> {
+    pub(crate) fn health(&self, integration_id: &str) -> Option<IntegrationHealth> {
         self.health
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

@@ -1,10 +1,10 @@
-//! Hardware re-verification harness for the unpowered-alert fix (2026-08-15).
+//! Hardware harness for alert delivery across an unpowered interval.
 //!
 //! Flow (the harness sequences the user, so timing cannot be missed):
 //! 1. Connects and shows the pomodoro card, then asks the user to UNPLUG.
 //! 2. Only once the link drops does it start a short pomodoro host-side.
 //! 3. The timer completes and more than the bounded hold elapses, all while
-//!    the link is down — the exact pre-fix loss scenario.
+//!    the link is down.
 //! 4. It then asks the user to REPLUG; the alert must take over the panel,
 //!    delivered by the runtime's reconnect flush.
 //!

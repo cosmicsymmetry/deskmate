@@ -1,5 +1,5 @@
-//! Encrypted-at-rest storage for per-integration OAuth secrets (spec §1.1, §6).
-//! Server-crate only; never depended on by `app-core`.
+//! Encrypted-at-rest storage for per-integration OAuth secrets. Server-crate
+//! only; never depended on by `app-core`.
 
 use app_core::secure_file;
 use base64::prelude::{BASE64_STANDARD, Engine as _};
@@ -15,7 +15,7 @@ use zeroize::ZeroizeOnDrop;
 pub const ENV_KEY_FILE: &str = "DESKMATE_SECRETS_KEY_FILE";
 /// Fallback environment variable carrying the base64 master key inline. Documented
 /// as second-choice: env values are visible in `ps`/`/proc`/`systemctl show` in a
-/// way a keyfile is not (spec §1.1).
+/// way a keyfile is not.
 pub const ENV_KEY: &str = "DESKMATE_SECRETS_KEY";
 
 const MAX_KEYFILE_BYTES: usize = 1_024;
@@ -31,7 +31,7 @@ const NONCE_LEN: usize = 24;
 const MAX_SECRETS_FILE_BYTES: usize = 262_144;
 
 /// The at-rest secrets file, kept next to `device-identities.json` in the config
-/// directory (spec §2). The key that decrypts it lives elsewhere (Task 3).
+/// directory. The key that decrypts it lives outside the encrypted store.
 pub const SECRETS_STORE_FILE: &str = "secrets.enc";
 
 /// A 32-byte master key, held in memory only, wiped on drop. No `Clone`: the key
@@ -165,8 +165,8 @@ impl IntegrationStore {
         Ok(existed)
     }
 
-    /// The integration ids present, sorted. Carries no secret values (spec §6:
-    /// presence, never token values).
+    /// The integration ids present, sorted. Carries presence only, never secret
+    /// values.
     pub fn integration_ids(&self) -> Vec<String> {
         self.lock().keys().cloned().collect()
     }
@@ -380,7 +380,7 @@ pub enum StartupError {
 }
 
 /// Opens the integration store from an injected key result, applying the
-/// fail-closed startup rule (spec §1.1). A missing key when a `secrets.enc`
+/// fail-closed startup rule. A missing key when a `secrets.enc`
 /// already exists is the emphatic refusal; a missing key with no file yet is
 /// still an error, because integrations cannot function without one and a
 /// "works until you connect an account" failure is worse.
@@ -403,8 +403,8 @@ pub fn open_integration_store_with(
     IntegrationStore::open(secrets_path, key).map_err(StartupError::Store)
 }
 
-/// Production entry point: reads the key from the environment (Task 3), then
-/// applies [`open_integration_store_with`].
+/// Production entry point: reads the key from the environment, then applies
+/// [`open_integration_store_with`].
 pub fn open_integration_store(config_dir: &Path) -> Result<IntegrationStore, StartupError> {
     open_integration_store_with(config_dir, acquire_key_from_env(config_dir))
 }

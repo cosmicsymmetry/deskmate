@@ -185,7 +185,7 @@ pub(crate) fn render(face: &WeatherFace) -> String {
     canvas.rect(0.0, 0.0, CANVAS_WIDTH, CANVAS_HEIGHT, GROUND);
 
     draw_hero(&mut canvas, face, &palette);
-    draw_strip(&mut canvas, face, &palette);
+    draw_strip(&mut canvas, face);
     canvas.finish()
 }
 
@@ -206,10 +206,9 @@ fn draw_hero(canvas: &mut Canvas, face: &WeatherFace, palette: &Palette) {
 
     // The high/low sits on the eyebrow's line, hard right.
     //
-    // It started as a chip under the summary and collided with it whenever the
-    // reading was set at the largest step -- the hero simply has no room for a
-    // third stacked row. Up here it shares a line that was half empty, and it
-    // reads as what it is: context for the reading, not a state.
+    // The hero has no room for a third stacked row at the largest reading size.
+    // Sharing the eyebrow line keeps the range visible and reads as context for
+    // the reading rather than as a state.
     let range = format!("H {}\u{b0}   L {}\u{b0}", face.high, face.low);
     let range_width = crate::face_render::text_width(&range, SIZE_CAPTION, WEIGHT_SEMIBOLD);
     let eyebrow_baseline = baseline_from_cap_top(HERO_TOP + 2.5 * GRID, SIZE_EYEBROW);
@@ -228,9 +227,8 @@ fn draw_hero(canvas: &mut Canvas, face: &WeatherFace, palette: &Palette) {
 
     let place_room = CONTENT_WIDTH - 5.0 * GRID - range_width - 2.0 * GRID;
     let place = super::svg::normalize_whitespace(&face.place).to_uppercase();
-    // Tracked, so measured with tracking. Without this a long place name
-    // draws straight through the high/low beside it -- which is exactly what
-    // "DUBAI, UNITED ARAB EMIRATES" did against the live API.
+    // Tracked, so measured with tracking. Otherwise a long place name can
+    // measure as fitted while drawing straight through the high/low beside it.
     let place = super::svg::fit_tracked(
         &place,
         SIZE_EYEBROW,
@@ -290,7 +288,7 @@ fn draw_hero(canvas: &mut Canvas, face: &WeatherFace, palette: &Palette) {
     );
 }
 
-fn draw_strip(canvas: &mut Canvas, face: &WeatherFace, palette: &Palette) {
+fn draw_strip(canvas: &mut Canvas, face: &WeatherFace) {
     canvas.rounded_rect(
         MARGIN,
         STRIP_TOP,
@@ -353,7 +351,6 @@ fn draw_strip(canvas: &mut Canvas, face: &WeatherFace, palette: &Palette) {
             .anchor(Anchor::Middle),
         );
     }
-    let _ = palette;
 }
 
 /// Draws one condition's illustration centred on `(cx, cy)`.

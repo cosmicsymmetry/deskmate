@@ -70,12 +70,13 @@ default. This section states only what is true now.
   `build_card_scene` would push, so preview and panel agree by construction. **Do not
   add a second renderer to "check" the first** -- that is what the retired parity gate
   was, and it kept three dead templates alive to have something to compare against.
-- **THE COMPANION IS A WEB APP, and `apps/deskmate/src-tauri` is deleted.** Every
-  surface the Mac app presented for a networked device is served by the server it
-  configures, at `https://deskmate.rodi.one/`. The Tauri command set became
-  `crates/server/src/app_api/`, gated by the operator session cookie the window trades
-  the admin token for. The React source under `apps/deskmate/src/` did not change shape:
-  `src/lib/backend.ts` is a one-line barrel over `./backendClient`, and
+- **THE COMPANION IS A WEB APP, and there is no desktop app.** Every surface for a
+  networked device is served by the server it configures, at
+  `https://deskmate.rodi.one/`. The browser API is `crates/server/src/app_api/`, gated by
+  the operator session cookie the page trades the admin token for. The old Tauri app and
+  every trace of it in code were removed on 2026-09-19; a future desktop app is to be
+  written from scratch, so do not look for (or resurrect) scaffolding for one. The React
+  source lives under `apps/deskmate/src/`: `src/lib/backend.ts` is a one-line barrel over `./backendClient`, and
   `vite.config.ts` aliases that single specifier to `src/dev/backendClient.ts` under
   `VITE_DESKMATE_MOCK=1` -- so there is exactly one seam and three implementations of it
   (HTTP, mock, and whatever comes next). Design:
@@ -174,12 +175,11 @@ Each of these cost this project real time at least once.
 - **A harness must not offer what the shipped app does not have.** When the cable
   operations were removed, they were removed from `src/dev/backendClient.ts` too. A mock
   that still answers `provision_device` lets the UI be built against an affordance nobody
-  can reach -- the same shape of blindness as the retired WKWebView/Chrome split, where the
-  harness ran a different engine from the product.
+  can reach -- the harness would then be exercising a product that does not exist.
 - **No caller may wait unboundedly on a thread that can block in an OS read.**
   `SerialTransport::read` can block forever once the USB device behind its fd is gone.
-  That wedged the whole host process back when the host was the Mac app; the server still
-  links `device`, and `deskmate-cli` still opens serial ports. A stalled session reports
+  That can wedge the whole host process: the server links `device`, and `deskmate-cli`
+  opens serial ports. A stalled session reports
   `Transport(Disconnected)`, never `Timeout`, because `is_disconnect` is what makes the
   runtime reconnect.
 - **Green tests say nothing about whether OTA still works**, and `make -C
@@ -270,8 +270,8 @@ These are decisions, not defaults. Changing one needs the owner, not a judgement
     Tests needing two tellable-apart cards use pomodoros, whose timer label survives.
 - **`DESIGN.md` is the visual language** (The Modular Face); product truth is
   `PRODUCT.md`. `docs/design/companion-visual-language.md` is superseded. A label above a
-  heading and a card inside a card are both out. `ui-rounded` is the numeral face because
-  it is free under the Tauri CSP that blocks every font host.
+  heading and a card inside a card are both out. `ui-rounded` is the numeral face: a system
+  face, so the page fetches no fonts.
 - **The 2026-08-21 subtraction is permanent.** The four-complication status header, the
   pause-syncing control, the data sources panel, and the preview's label/resolution/
   caption were removed, not moved. Do not reintroduce any of them. Device ownership,
@@ -394,9 +394,8 @@ targets but removes doctests, so neither invocation alone covers the workspace.
 Keep them as separate lines so a failure names the missing coverage directly; do
 not simplify them back to one command. The workspace currently has no bench targets.
 
-`bun run build` is in the list because the companion is now a deployed artifact
-rather than something bundled by `tauri build` in CI: if it does not build, there
-is nothing to ship. `format:check` is there because it was silently red for a
+`bun run build` is in the list because the companion is a deployed artifact: if it
+does not build, there is nothing to ship. `format:check` is there because it was silently red for a
 while, which is what an unenforced gate does.
 
 **For a change to the window itself, none of the above is the real check.** Build

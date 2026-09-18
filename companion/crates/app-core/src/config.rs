@@ -269,8 +269,8 @@ pub const MAX_TOTAL_ASSET_BYTES: u32 = 1_048_576;
 pub const MAX_ICON_GLYPHS: usize = 256;
 pub const MAX_ICON_GLYPH_NAME_LEN: usize = 64;
 pub const MAX_HOST_ACTION_TARGET_LEN: usize = 2_048;
-pub const MIN_POMODORO_SECONDS: u32 = 1;
-pub const MAX_POMODORO_SECONDS: u32 = 86_400;
+pub(crate) const MIN_POMODORO_SECONDS: u32 = 1;
+pub(crate) const MAX_POMODORO_SECONDS: u32 = 86_400;
 pub const MIN_CARD_REFRESH_MINUTES: u16 = 1;
 pub const MAX_CARD_REFRESH_MINUTES: u16 = 1_440;
 pub const MAX_CONFIG_CARDS: usize = 8;
@@ -281,7 +281,7 @@ pub const MAX_PLAYLIST_NAME_LEN: usize = 48;
 /// device's durable digest budget. Raising it needs the flash budget re-checked,
 /// not just this number.
 pub const MAX_IMAGE_SOURCES: usize = 8;
-pub const MAX_IMAGE_SOURCE_NAME_LEN: usize = 48;
+const MAX_IMAGE_SOURCE_NAME_LEN: usize = 48;
 // Every compiled card can lower to one wire widget, so the card cap must never exceed
 // what the protocol's `ApplyConfig` encoder accepts.
 const _: () = assert!(MAX_CONFIG_CARDS <= protocol::MAX_CONFIG_CARDS);
@@ -305,8 +305,7 @@ pub struct AppConfig {
     pub assets: Vec<AssetSettings>,
     /// How the loop advances. `cards` IS the loop, in order, so this is one
     /// setting for the whole document rather than a property of a named
-    /// grouping -- schema v10 removed `playlists`, which the product never
-    /// let anyone create more than one of.
+    /// grouping. The v10 schema has one ordered card loop.
     pub advance: CarouselAdvance,
     pub updater: UpdaterSettings,
 }
@@ -1075,10 +1074,9 @@ impl CardSettings {
 
     /// This card as protocol v2's `CardConfig`.
     ///
-    /// v2 carries only what the device decides for itself. The template, the
-    /// size class and the interrupt policy all described a device that
-    /// rendered the face; it has drawn only host-pushed scenes since stage 3a,
-    /// and the host decides which cards can alert.
+    /// v2 carries only what the device decides for itself: card identity and
+    /// tap behavior. Faces arrive as host-built scenes, and alert policy stays
+    /// on the host.
     fn wire_config(&self) -> Option<CardConfig> {
         let tap_action = match self.tap_action() {
             WidgetTapAction::None => TapAction::None,
@@ -1404,22 +1402,12 @@ fn validate_composition(
         // degrading the diagnostic that exists to catch real host/firmware schema
         // drift.
         let template_supported = match behavior {
-            // Clock sends only title/show_seconds; `big-number-label`'s `value` would
-            // never be written and the card would show a permanent "--".
+            // Clock scenes can render either clock face.
             CardBehavior::Clock => matches!(
                 template,
                 DisplayTemplate::DigitalClock | DisplayTemplate::AnalogClock
             ),
-            // Pomodoro sends `label`, `duration_seconds`, `remaining_seconds` and
-            // `running`; `big-number-label` declares only `label` out of those, so its
-            // hero `value` stayed "--" forever while the other three counted as
-            // unknown on EVERY tick — a continuous diagnostic drip. This strands no
-            // saved configuration:
-            // v0/v1 migration hard-codes pomodoro to `ProgressRing`, and while v2
-            // migration copies `template` verbatim, no v2 file could hold
-            // `big-number-label` on a pomodoro card because `save_and_apply` compiled
-            // before persisting and `wire_config()` refused to lower that template at
-            // the time.
+            // Pomodoro bindings are defined by the progress-ring scene.
             CardBehavior::Pomodoro => matches!(template, DisplayTemplate::ProgressRing),
             // Picture cards never pass `Some(template)` — see the comment
             // above. This arm is unreachable by construction today, but the function
@@ -1435,11 +1423,9 @@ fn validate_composition(
             ));
         }
 
-        // `widget_model.c` refuses any widget whose template is not `PROGRESS_RING`
-        // while carrying a non-`NONE` tap action, and `validate_config` is
-        // all-or-nothing: one such widget makes the device reject the entire
-        // `ApplyConfig`, so no card updates at all. Mirror that rule host-side
-        // instead of letting a saveable configuration take the whole layout down.
+        // Timer actions require the timer bindings supplied by the
+        // progress-ring scene. Reject the composition before applying the
+        // all-or-nothing device layout.
         if matches!(
             tap_action,
             WidgetTapAction::StartPause | WidgetTapAction::Reset

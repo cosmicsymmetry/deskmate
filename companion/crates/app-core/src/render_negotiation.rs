@@ -1,10 +1,9 @@
 //! The native-scene gate for one freshly built face and one connected device.
 //!
-//! Manifest rasterization used to make this a three-way policy decision. With
-//! picture cards already represented as native image nodes, only one question
-//! remains: can this exact device draw the scene after installing any frame the
-//! image-source host owns? The answer is recomputed for every push; there is no
-//! cross-device or cross-revision cache where a confirmed digest could leak.
+//! The gate answers one question: can this exact device draw the scene after
+//! installing any frame the image-source host owns? The answer is recomputed
+//! for every push; there is no cross-device or cross-revision cache where a
+//! confirmed digest could leak.
 
 use std::collections::BTreeSet;
 

@@ -5,11 +5,11 @@ use std::sync::{Arc, Condvar, Mutex, RwLock, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use crate::engine::interrupts::InterruptArbiter;
+use crate::engine::pomodoro::{Pomodoro, PomodoroState as EnginePomodoroState};
 use chrono::Utc;
 use chrono_tz::Tz;
 use device::{ConnectedSession, DeviceError, ReceivedEvent, SessionDiagnostics, connect_session};
-use engine::interrupts::InterruptArbiter;
-use engine::pomodoro::{Pomodoro, PomodoroState as EnginePomodoroState};
 use protocol::{
     Ack, ActivateCard, AssetBegin, AssetChunk, AssetCommit, AssetRelease, CardConfig, EventAction,
     EventKind, Message, NetworkConfig, PushScene, StatusResponse, TimeSync, TriggerInterrupt,
@@ -48,8 +48,8 @@ use timers::{
     sync_alert_hold_to_active_interrupt, update_pomodoros,
 };
 
-pub const DEFAULT_RUNTIME_COMMAND_CAPACITY: usize = 16;
-pub const DEFAULT_MAX_SUBSCRIBERS: usize = 8;
+const DEFAULT_RUNTIME_COMMAND_CAPACITY: usize = 16;
+const DEFAULT_MAX_SUBSCRIBERS: usize = 8;
 
 #[derive(Debug, Clone, Copy)]
 pub struct RuntimeOptions {
@@ -310,9 +310,9 @@ impl RuntimeHandle {
 /// How much longer than the ordinary command budget a synchronizing command
 /// gets.
 ///
-/// A command is normally a message or two, and the default budget exists mostly
-/// to notice a wedged worker quickly -- the serial-read hang of 2026-09-09 is
-/// why it is short. But `ApplyConfig` and `ImageSourceUpdated` drive a full
+/// A command is normally a message or two, and the default budget is short so
+/// callers notice a wedged worker quickly. But `ApplyConfig` and
+/// `ImageSourceUpdated` drive a full
 /// device synchronize, which contains an asset reconcile, which now contains
 /// `AssetRelease`'s own twenty-second budget. Five seconds cannot contain
 /// twenty, so those two commands reported a timeout for work that was still
@@ -1053,7 +1053,7 @@ fn run_scheduled_work(
     // device push (if connected) happens through the normal sync path below via
     // `active_card_dirty` and `flush_interrupts`.
     //
-    // BY DESIGN (decided 2026-08-06): this only frees the host's arbiter slot
+    // This only frees the host's arbiter slot
     // and re-sends the saved screen id (see `send_screen` below); the device
     // does not clear the interrupt overlay itself until the user taps it, so
     // host and device interrupt state can diverge until the next tap or a
@@ -1285,7 +1285,7 @@ mod tests {
         assert_eq!(state.runtime, RuntimeState::Running);
     }
 
-    // -- Rotation (Task 5) ---------------------------------------------------
+    // -- Rotation ------------------------------------------------------------
     //
     // These are the pure/instant counterparts of the single real-time rotation test
     // in `tests/runtime.rs`. They call `current_dwell`, `rotation_card_ids`,
@@ -1421,8 +1421,8 @@ mod tests {
         )
     }
 
-    /// A `RuntimeDevice` stub for unit tests that never connect: every call other than
-    /// Most device methods are unreachable in these tests because they keep
+    /// A `RuntimeDevice` stub for unit tests that never connect. Most device
+    /// methods are unreachable because these tests keep
     /// `state.connected == false`. `trigger_interrupt` accepts direct
     /// `flush_interrupts` calls used to pin delivery-time alert-hold behavior,
     /// and `try_recv_event` optionally yields one queued event before returning
@@ -1749,10 +1749,9 @@ mod tests {
         }
     }
 
-    // F1: under `CarouselAdvance::Manual`, no rotation deadline is ever armed. This
-    // isolates the exact regression the reviewer flagged: if `current_dwell` stopped
-    // propagating `CarouselAdvance::default_dwell_seconds()`'s `None` (e.g. a `?` was
-    // dropped and a dwell hardcoded instead), this fails immediately.
+    // Under `CarouselAdvance::Manual`, no rotation deadline is ever armed.
+    // This pins `current_dwell` propagating
+    // `CarouselAdvance::default_dwell_seconds()`'s `None`.
     #[test]
     fn current_dwell_is_none_under_manual_advance() {
         let config = AppConfig::default();
@@ -1776,11 +1775,8 @@ mod tests {
         assert!(current_dwell(&config, 0).is_none());
     }
 
-    // F2: dwell is resolved per-card against the carousel default, not the other way
-    // around. Uses the brief's own example: an explicit dwell wins over the default,
-    // and an absent one falls back to it. If `current_dwell` ever ignored the card's own
-    // `dwell_seconds` (always returning the carousel default) or ignored the carousel
-    // default (returning `None` when the card leaves it unset), this fails.
+    // Dwell is resolved per-card against the carousel default: an explicit
+    // dwell wins and an absent one falls back to the default.
     #[test]
     fn current_dwell_resolves_each_cards_own_value_before_falling_back_to_the_default() {
         let config = rotation_config(
@@ -1801,10 +1797,7 @@ mod tests {
     //
     // Since schema v10 it walks EVERY card: `cards` is the loop, so there is no
     // longer such a thing as a card that raises alerts without ever being shown.
-    // That state was only ever expressible because a card could sit in the
-    // library outside the playlist, and nothing in the window could put one
-    // there. Also exercises re-arming with each card's own dwell as the index
-    // moves.
+    // Also exercises re-arming with each card's own dwell as the index moves.
     #[test]
     fn advance_rotation_walks_every_card_in_order_and_wraps() {
         let now = Instant::now();
@@ -1837,9 +1830,8 @@ mod tests {
         }
     }
 
-    // F2 (continued): with fewer than two in-rotation cards there is nothing to
-    // rotate to, so `advance_rotation` disarms the deadline instead of activating
-    // anything.
+    // With fewer than two cards there is nothing to rotate to, so
+    // `advance_rotation` disarms the deadline instead of activating anything.
     #[test]
     fn advance_rotation_disarms_with_fewer_than_two_in_rotation_cards() {
         let now = Instant::now();
@@ -1862,12 +1854,8 @@ mod tests {
         assert!(!scheduler.rotation_due(now + Duration::from_hours(1)));
     }
 
-    // F3a: a local swipe resolves the reported screen's index within
-    // `rotation_card_ids` (the in-rotation-only order), not its position among all
-    // cards, and re-arms the dwell from the card it landed on. The alert-only card "b"
-    // sits between "a" and "c" in the card list, so "c" is at list position 2 but
-    // rotation index 1 — the exact case that distinguishes correct index resolution
-    // from a regression that walks `config.cards` directly.
+    // A local swipe resolves the reported screen's index within
+    // `rotation_card_ids` and re-arms the dwell from the card it landed on.
     #[test]
     fn local_swipe_resolves_the_index_within_rotation_ids_and_rearms_the_dwell() {
         let now = Instant::now();
@@ -1897,9 +1885,8 @@ mod tests {
         assert!(scheduler.rotation_due(now + Duration::from_secs(5)));
     }
 
-    // F3b: the same index-resolution and re-arm behavior applies to an explicit
-    // `RuntimeCommand::ActivateCard` request, which is a manual override just like
-    // a swipe.
+    // An explicit `RuntimeCommand::ActivateCard` request uses the same index
+    // resolution and dwell re-arm behavior as a swipe.
     #[test]
     fn explicit_activate_command_resolves_the_index_within_rotation_ids_and_rearms_the_dwell() {
         let now = Instant::now();
@@ -1938,11 +1925,8 @@ mod tests {
         assert!(scheduler.rotation_due(before + Duration::from_millis(5_500)));
     }
 
-    // F5: pins the deliberate decision (see the comment on the `rotation_due` check in
-    // `run_scheduled_work`) that rotation advances locally while paused, mirroring how
-    // pomodoro ticks are never gated by pause. This is not new behavior introduced by
-    // Task 5's rotation feature; it documents and locks in the existing pattern so a
-    // future refactor cannot silently move rotation's guard without a test noticing.
+    // Rotation advances locally while paused, mirroring how pomodoro ticks are
+    // never gated by pause. This keeps local state current for the next sync.
     #[test]
     fn rotation_advances_locally_while_paused_mirroring_pomodoro_ticks() {
         let now = Instant::now();
@@ -1976,12 +1960,12 @@ mod tests {
         );
     }
 
-    // -- Alert triggers and hold (Task 6) ------------------------------------
+    // -- Alert triggers and hold ---------------------------------------------
     //
     // Instant unit tests for the trigger-kind narrowing, the bounded hold
-    // deadline, including the token-keyed active/pending scoping fixed by the
-    // Task 6 code review's Critical-1. Each calls private helpers directly with
-    // synthetic `Instant`s, so none of them sleep. The one wall-clock proof
+    // deadline, including token-keyed active/pending scoping. Each calls
+    // private helpers directly with synthetic `Instant`s, so none of them
+    // sleep. The one wall-clock proof
     // that the hold deadline reaches a real device via the full `run_runtime`
     // loop lives in `tests/runtime.rs`.
 
@@ -2132,7 +2116,7 @@ mod tests {
         );
     }
 
-    // Shared setup for the two Critical-1 tests below: a sticky
+    // Shared setup for the two active/pending hold-isolation tests: a sticky
     // (`UntilDismissed`) pomodoro alert Active, and a bounded (60s) pomodoro
     // alert queued Pending behind it (the arbiter's Active slot is occupied).
     fn sticky_active_and_bounded_pending_alert(now: Instant) -> (WorkerState, Scheduler) {
@@ -2188,15 +2172,9 @@ mod tests {
         (StubDevice::default(), RuntimeOptions::default())
     }
 
-    // Task 6 review Critical-1's reproduction: before the fix, a single
-    // unkeyed scheduler deadline was armed unconditionally by whichever
-    // interrupt was scheduled *last* — here, the Pending timer alert's
-    // 60s — so `run_scheduled_work` auto-dismissed the sticky pomodoro's
-    // *Active* interrupt 60s later, in direct violation of "UntilDismissed
-    // never auto-dismisses". This proves the fix: an hour later, both the
-    // sticky Active interrupt and the timer's Pending one are unharmed —
-    // the hold only ever runs against whichever interrupt is actually
-    // Active.
+    // A Pending alert's deadline must not affect the Active alert. An hour
+    // later, both the sticky Active interrupt and the bounded Pending one
+    // remain intact because hold deadlines only apply to the Active token.
     #[test]
     fn a_pending_alerts_hold_does_not_cross_talk_with_the_active_interrupt() {
         let now = Instant::now();
@@ -2228,11 +2206,8 @@ mod tests {
         );
     }
 
-    // The other half of Critical-1's fix: once the sticky interrupt is
-    // dismissed (an on-device tap) and the timer alert is promoted to
-    // Active, its own 60s hold must start fresh from that moment — before
-    // the fix, the Pending alert never got a deadline of its own at all, so
-    // this promoted interrupt would have run `UntilDismissed`-like forever.
+    // Once the sticky interrupt is dismissed and the Pending timer alert is
+    // promoted to Active, its own 60-second hold starts at promotion time.
     #[test]
     fn a_promoted_alert_gets_a_fresh_hold_from_its_own_card() {
         let now = Instant::now();

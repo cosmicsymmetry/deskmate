@@ -1017,8 +1017,8 @@ async fn admin_can_mint_a_device_identity_once() {
 
 #[tokio::test]
 async fn invalid_config_is_typed_and_does_not_replace_last_good() {
-    // Catches the V1 regression where a validation failure was mislabeled as
-    // last-good and allowed to displace the genuinely working config.
+    // A validation failure must not be labeled last-good or displace the
+    // genuinely working config.
     let (host, identity, admin_token) = spawn().await;
     let client = reqwest::Client::new();
     let valid = std::fs::read_to_string(concat!(

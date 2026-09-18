@@ -158,7 +158,7 @@ impl InterruptArbiter {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use crate::pomodoro::Pomodoro;
+    use super::super::pomodoro::Pomodoro;
 
     use super::*;
 

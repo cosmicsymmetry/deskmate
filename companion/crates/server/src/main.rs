@@ -1,6 +1,6 @@
-//! The Deskmate V2 server binary: reads its configuration from the
-//! environment and serves the device-facing router until it receives
-//! `SIGINT`/`SIGTERM`, per the deployment contract in `deploy/README.md`.
+//! The Deskmate server binary reads its configuration from the environment and
+//! serves the device and companion routes until it receives `SIGINT`/`SIGTERM`,
+//! following the deployment contract in `deploy/README.md`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -227,10 +227,9 @@ fn set_optional_google_url(
 /// Every one of these four variables is on the credential path: the redirect URI
 /// receives an authorization code, and the token and revoke endpoints receive the
 /// client secret and the refresh token as a form body. `http` is therefore refused
-/// outright rather than merely discouraged -- the egress guard permits `http` for
-/// good reason (plugin feeds), so it will not catch a typo here, and nothing else
-/// would. Spec section 6 requires https for the redirect URI; the same reasoning
-/// covers the two endpoint overrides, which carry strictly more secret material.
+/// outright rather than merely discouraged. The egress guard permits `http` for
+/// server-configured data sources, so it will not catch a typo here; all four
+/// OAuth URLs need this stricter credential-path rule.
 fn validate_google_url(value: &str, variable: &'static str) -> Result<(), GoogleOAuthConfigError> {
     let parsed =
         url::Url::parse(value).map_err(|_| GoogleOAuthConfigError::InvalidUrl { variable })?;
@@ -492,8 +491,8 @@ mod tests {
 
     /// `http` on any of the four credential-path URLs would post the client secret
     /// and refresh token as a plaintext form body over port 80. The egress guard
-    /// allows `http` (plugin feeds need it), so this is the only check between a
-    /// typo and cleartext credentials.
+    /// allows `http` for server-configured data sources, so this is the only
+    /// check between a typo and cleartext credentials.
     #[test]
     fn a_plaintext_http_url_is_refused_on_every_credential_path_variable() {
         for (variable, apply) in [

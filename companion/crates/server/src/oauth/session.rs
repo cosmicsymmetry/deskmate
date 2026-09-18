@@ -1,6 +1,6 @@
-//! Operator session cookie: an HMAC-SHA256 token over `sid:exp`, keyed by the
-//! existing `DESKMATE_ADMIN_TOKEN` (spec §1.2, §6). The stand-in for V3-deferred
-//! accounts; it carries no privilege the admin token does not already carry.
+//! Operator session cookie: an HMAC-SHA256 token over `sid:exp`, keyed by
+//! `DESKMATE_ADMIN_TOKEN`. It lets the browser carry the same privilege without
+//! exposing the admin token to client-side code.
 
 use axum::extract::FromRequestParts;
 use axum::http::StatusCode;
@@ -24,15 +24,14 @@ type HmacSha256 = Hmac<Sha256>;
 /// cookie of the same name. Without the prefix such a cookie would be sent
 /// alongside the real one, and `session_cookie_value`'s first-match scan of the
 /// `Cookie` header would happily pick whichever came first.
-pub const SESSION_COOKIE: &str = "__Host-deskmate_session";
+const SESSION_COOKIE: &str = "__Host-deskmate_session";
 
 pub struct SessionSigner {
     key: Vec<u8>,
 }
 
-pub struct SessionClaims {
-    pub sid: String,
-    pub exp: i64,
+pub(crate) struct SessionClaims {
+    pub(crate) sid: String,
 }
 
 impl SessionSigner {
@@ -46,7 +45,7 @@ impl SessionSigner {
     /// Signs `sid:exp`, where `exp` is `now + ttl` in unix seconds. Value shape:
     /// `base64url(payload).base64url(hmac)`.
     #[must_use]
-    pub fn mint(&self, sid: &str, now: DateTime<Utc>, ttl: Duration) -> String {
+    pub(crate) fn mint(&self, sid: &str, now: DateTime<Utc>, ttl: Duration) -> String {
         let exp = (now + ttl).timestamp();
         let payload = format!("{sid}:{exp}");
         let tag = self.tag(payload.as_bytes());
@@ -59,7 +58,7 @@ impl SessionSigner {
 
     /// Verifies the signature (constant-time) and the expiry, returning the claims.
     #[must_use]
-    pub fn verify(&self, value: &str, now: DateTime<Utc>) -> Option<SessionClaims> {
+    pub(crate) fn verify(&self, value: &str, now: DateTime<Utc>) -> Option<SessionClaims> {
         let (payload_b64, tag_b64) = value.split_once('.')?;
         let payload = BASE64_URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
         let presented_tag = BASE64_URL_SAFE_NO_PAD.decode(tag_b64).ok()?;
@@ -75,14 +74,13 @@ impl SessionSigner {
         }
         Some(SessionClaims {
             sid: sid.to_string(),
-            exp,
         })
     }
 
     /// A random session id embedded in the cookie so a `state` stash can be bound
-    /// to the operator session that started it (spec §3).
+    /// to the operator session that started it.
     #[must_use]
-    pub fn new_sid() -> String {
+    pub(crate) fn new_sid() -> String {
         use rand::RngCore as _;
 
         let mut bytes = [0u8; 16];
@@ -101,7 +99,7 @@ impl SessionSigner {
 /// it), `Secure` (HTTPS only -- the server is always behind the tunnel), and
 /// `SameSite=Lax` (so the top-level OAuth callback redirect still carries it).
 #[must_use]
-pub fn set_cookie_header(value: &str, ttl: Duration) -> String {
+pub(crate) fn set_cookie_header(value: &str, ttl: Duration) -> String {
     format!(
         "{SESSION_COOKIE}={value}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age={}",
         ttl.num_seconds()
@@ -123,7 +121,7 @@ fn session_cookie_value(parts: &Parts) -> Option<String> {
 
 /// Bare 401, matching `auth.rs`: no body, no logged credential.
 #[derive(Debug)]
-pub struct OperatorAuthError;
+pub(crate) struct OperatorAuthError;
 
 impl IntoResponse for OperatorAuthError {
     fn into_response(self) -> Response {
@@ -133,8 +131,8 @@ impl IntoResponse for OperatorAuthError {
 
 /// An operator request: authenticated either by the admin bearer token (the
 /// `sid` is then the fixed `"bearer-admin"`) or by a valid session cookie.
-pub struct OperatorAuthenticated {
-    pub sid: String,
+pub(crate) struct OperatorAuthenticated {
+    pub(crate) sid: String,
 }
 
 impl FromRequestParts<ServerState> for OperatorAuthenticated {

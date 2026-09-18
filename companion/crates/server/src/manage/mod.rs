@@ -39,8 +39,8 @@ pub(crate) fn routes() -> Router<ServerState> {
         )
 }
 
-/// Builds the page's model. Reports presence and health only -- never a stored
-/// credential, per spec §8 and V2's no-readback rule.
+/// Builds the page's model. Reports presence and health only; stored credential
+/// values never leave their owning stores.
 async fn dashboard(
     State(state): State<ServerState>,
     _operator: OperatorAuthenticated,

@@ -201,7 +201,7 @@ async fn the_session_cookie_from_the_form_opens_the_dashboard() {
 
 #[tokio::test]
 async fn the_dashboard_never_renders_a_stored_credential() {
-    // Spec §8 and V2's no-readback rule: presence and health, never values.
+    // The dashboard reports presence and health, never credential values.
     let (_, body) = get(&state_with_stored_grant(), "/v1/manage", Some(ADMIN)).await;
     assert!(!body.contains(STORED_REFRESH_TOKEN));
     assert!(!body.contains(STORED_CLIENT_SECRET));

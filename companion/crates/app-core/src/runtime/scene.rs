@@ -3,14 +3,8 @@
 //! The pushed-field accessors, scene construction, render negotiation, the
 //! native and raster push executors, and the durable asset reconciliation a
 //! scene's digests require.
-//!
-//! Split out of `runtime.rs` unchanged on 2026-09-11. `use super::*` keeps
-//! name resolution identical to when this was one file.
-
-// The glob is what makes this file a MOVE rather than a rewrite: name
-// resolution inside it is identical to when all of this lived in one
-// `runtime.rs`. Enumerating thirty parent imports would make the split a
-// diff nobody can read against the original.
+// These runtime internals intentionally share the parent module's worker
+// types and helpers; a glob keeps that internal seam in one place.
 #[allow(clippy::wildcard_imports)]
 use super::*;
 use crate::state::{CardField, CardFieldValue};
@@ -496,7 +490,6 @@ pub(super) fn handle_automatic_asset_error(
         }
         AssetSyncError::TooManyDesiredAssets { .. }
         | AssetSyncError::AssetTooLarge { .. }
-        | AssetSyncError::VolatileKind { .. }
         | AssetSyncError::MissingRequiredAsset { .. } => {
             record_scene_refusal(state, card_id, error.to_string());
         }

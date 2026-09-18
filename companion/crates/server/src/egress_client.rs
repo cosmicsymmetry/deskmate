@@ -2,16 +2,16 @@
 //!
 //! # Why this adapter exists at all
 //!
-//! `providers::http::SystemHttpClient` validates a URL's scheme and refuses
-//! embedded credentials, and that is all. It performs no address checks, so it
-//! will happily fetch `http://192.168.1.1/` or the cloud metadata endpoint.
-//! Server-side providers run beside unrelated services, so every fetch also
-//! needs address-level SSRF protection.
+//! Provider URL validation checks syntax, scheme, and embedded credentials; it
+//! does not resolve hosts or decide whether their addresses are safe. Server-side
+//! providers run beside unrelated services, so URL validation alone is not
+//! address-level SSRF protection.
 //!
-//! [`crate::egress`] already implements the whole guard -- deny-list,
+//! [`crate::egress`] implements the whole guard -- deny-list,
 //! resolve-then-pin against DNS rebinding, per-hop re-validation across
 //! redirects, body cap, wall-clock budget. This type is the seam that puts the
-//! providers behind it, by implementing the trait they already depend on.
+//! providers behind it by routing every request through that guard while
+//! implementing the trait they depend on.
 //! **No server-side card may be constructed with any other client**, which is
 //! what keeps the SSRF surface to one function.
 //!

@@ -21,7 +21,7 @@ use crate::ServerState;
 use crate::auth::AuthenticatedDevice;
 
 /// What's on disk and what version it represents. Config, not a database:
-/// V2 has exactly one image live at a time.
+/// The catalog exposes exactly one live image at a time.
 pub struct FirmwareCatalog {
     directory: PathBuf,
     current_version: String,
@@ -161,7 +161,7 @@ fn loggable(value: &str) -> String {
 /// `GET /v1/device/firmware?current=<version>` -- `204` when the device is
 /// already current, otherwise `200` with the newer version and its download
 /// url.
-pub async fn check(
+pub(crate) async fn check(
     State(state): State<ServerState>,
     AuthenticatedDevice { device_id }: AuthenticatedDevice,
     Query(query): Query<FirmwareQuery>,
@@ -194,7 +194,7 @@ pub async fn check(
 /// a `Vec<u8>`, so an anonymous caller can never make this handler hold a
 /// whole multi-megabyte image in memory -- load-bearing once this route
 /// sits behind a public tunnel with arbitrarily many concurrent callers.
-pub async fn download(
+pub(crate) async fn download(
     State(state): State<ServerState>,
     PathParam(filename): PathParam<String>,
 ) -> Response {

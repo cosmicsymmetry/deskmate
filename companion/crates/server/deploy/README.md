@@ -40,8 +40,7 @@ sudo $EDITOR /etc/deskmate/server.env   # set token and published firmware versi
 downgrade. The supplied systemd unit and launchd job already source this environment
 file, so no second unit-local value should be added.
 
-**`DESKMATE_ADMIN_TOKEN` is the whole V2 auth story for the Mac-facing
-surface** -- the explicit stand-in for V3's accounts (spec §5.2). Generate it
+**`DESKMATE_ADMIN_TOKEN` controls the browser-facing operator surface.** Generate it
 with `openssl rand -hex 32` and paste it straight into the file; never type it
 on a command line where it lands in shell history, and never commit
 `/etc/deskmate/server.env` (it is deliberately outside this repo). The 0600
@@ -55,8 +54,8 @@ and the unknown-token warnings. The startup line you still see comes from a
 `println!`, so logging *looks* alive while reporting nothing. The launchd plist
 sets `RUST_LOG` in its own `EnvironmentVariables`; the systemd unit reads this
 file only, so a Linux deployment that omits it runs blind. A live server was
-found in exactly that state on 2026-08-19, which made V2's "the server logs an
-accepted connection" acceptance criterion impossible to satisfy. Keep `info`
+found in exactly that state on 2026-08-19, which made accepted connections
+impossible to observe. Keep `info`
 unless you have a reason not to; `info,server=debug` additionally logs each
 device's firmware check, which is useful while diagnosing updates.
 
@@ -64,7 +63,7 @@ device's firmware check, which is useful while diagnosing updates.
 
 Provisioned identities survive normal process and host restarts. The registry
 lives at `$DESKMATE_CONFIG_DIR/device-identities.json`, alongside the per-device
-config files (currently [schema v9](../../../../docs/config/v9.md); legacy v4-v8 files
+config files (currently [schema v10](../../../../docs/config/v10.md); v4-v9 files
 are migrated on load). It is a versioned JSON document containing each
 `dev-NNNN` id and the lowercase SHA-256 digest of that device's bearer token.
 Its historical schema-v1 field `next_sequence` stores the **last issued**
@@ -135,7 +134,7 @@ sudo install -m 0644 data-cards.json.example \
 sudo $EDITOR /var/lib/deskmate/configs/data-cards.json
 ```
 
-Then add one `picture` card per source in the companion window, naming the same
+Then add one `picture` card per source in the browser companion, naming the same
 `source_id`, and restart the server.
 
 Two consequences worth stating before you enable this:

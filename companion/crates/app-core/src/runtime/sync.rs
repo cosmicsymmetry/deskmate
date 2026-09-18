@@ -1,13 +1,7 @@
 //! Getting the device's state to match the host's: the full and incremental
 //! synchronize passes, field pushes, screen activation and time sync.
-//!
-//! Split out of `runtime.rs` unchanged on 2026-09-11. `use super::*` keeps
-//! name resolution identical to when this was one file.
-
-// The glob is what makes this file a MOVE rather than a rewrite: name
-// resolution inside it is identical to when all of this lived in one
-// `runtime.rs`. Enumerating thirty parent imports would make the split a
-// diff nobody can read against the original.
+// These runtime internals intentionally share the parent module's worker
+// types and helpers; a glob keeps that internal seam in one place.
 #[allow(clippy::wildcard_imports)]
 use super::*;
 

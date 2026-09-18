@@ -25,8 +25,8 @@ tower = { version = "0.5", features = ["limit", "load-shed", "timeout", "util"] 
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 rand = "0.9"
 sha2 = "0.10"
-# HMAC-SHA256 for signing the short-lived operator session cookie (spec §1.2, §6),
-# keyed by DESKMATE_ADMIN_TOKEN. Pairs with the existing sha2 0.10; pinned exactly.
+# HMAC-SHA256 for signing the short-lived operator session cookie, keyed by
+# DESKMATE_ADMIN_TOKEN. Pairs with the existing sha2 0.10; pinned exactly.
 hmac = "=0.12.1"
 # Header-first PNG decoding for the image-ingest route. `Pixmap::decode_png` would
 # need no new line here but decodes in one shot; `png::Decoder::read_header_info`
@@ -53,7 +53,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Shared by production egress and the HTTP-facing tests. `rustls` covers both
 # the OAuth token call and the outbound data fetches behind the server-rendered
 # cards; `form` is the OAuth token POST, whose one-host allowlist lives in
-# `egress::fetch_post_form` (revision spec 1 and 8).
+# `egress::fetch_post_form`.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "form"] }
 url = "2"
 # Backs `FirmwareCatalog::in_memory()`, which is normal library API (used by

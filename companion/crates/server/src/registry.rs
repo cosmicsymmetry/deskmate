@@ -11,14 +11,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use atomic_write_file::AtomicWriteFile;
 #[cfg(unix)]
 use atomic_write_file::unix::OpenOptionsExt as AtomicOpenOptionsExt;
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+
+use crate::credential::{DigestDecodeError, decode_digest as decode_credential_digest};
+use crate::credential::{random_token, token_digest};
 
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt as UnixOpenOptionsExt, PermissionsExt};
 
-pub const DEVICE_IDENTITY_STORE_FILE: &str = "device-identities.json";
+pub(crate) const DEVICE_IDENTITY_STORE_FILE: &str = "device-identities.json";
 
 const REGISTRY_SCHEMA_VERSION: u32 = 1;
 const MAX_REGISTRY_FILE_BYTES: usize = 64 * 1_024;
@@ -33,7 +34,7 @@ pub type DeviceId = String;
 /// stray `tracing::info!(?identity)` can't leak a live bearer secret.
 #[derive(Clone, PartialEq, Eq)]
 pub struct DeviceIdentity {
-    pub device_id: DeviceId,
+    pub device_id: String,
     pub token: String,
 }
 
@@ -85,8 +86,8 @@ struct TokenRecord {
 #[serde(deny_unknown_fields)]
 struct PersistedRegistry {
     schema_version: u32,
-    /// Historical schema-v1 name: this is the last issued sequence. Minting
-    /// adds one. Keep the field name for on-disk compatibility.
+    /// Despite its name, this stores the last issued sequence; minting adds
+    /// one. The persisted field name is fixed by the on-disk format.
     next_sequence: u64,
     devices: Vec<PersistedDevice>,
 }
@@ -106,7 +107,7 @@ impl Default for Registry {
 
 impl Registry {
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             path: None,
             state: Mutex::new(RegistryState::empty()),
@@ -118,7 +119,7 @@ impl Registry {
     /// unreadable or invalid state is diagnosed and also becomes empty so the
     /// server remains available for re-minting.
     #[must_use]
-    pub fn load(path: impl Into<PathBuf>) -> Self {
+    pub(crate) fn load(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
         let (state, store_load_failed) = match load_store(&path) {
             Ok(Some(state)) => (state, false),
@@ -199,8 +200,8 @@ impl Registry {
     /// wrong token is compared against the entire table with
     /// [`constant_time_eq`] rather than `==`, so how many of its leading
     /// bytes happen to match some real token never shows up as a timing
-    /// difference. At the device counts V2's single-tenant registry ever
-    /// holds, scanning the whole table on a miss is cheap.
+    /// difference. At the small device counts this registry is designed for,
+    /// scanning the whole table on a miss is cheap.
     pub fn authenticate(&self, token: &str) -> Option<DeviceId> {
         let presented_digest = token_digest(token);
         // A panic while some other request held the lock must not turn every
@@ -220,13 +221,10 @@ impl Registry {
             .map(|candidate| candidate.device_id.clone())
     }
 
-    /// Whether `device_id` belongs to a loaded or newly minted identity.
-    /// Admin paths use this check before deriving a per-device config path,
-    /// so an arbitrary URL segment never reaches the filesystem.
     /// Every minted device id, sorted. Ids only -- a digest never leaves this
     /// type, and the management surface reports presence, never credentials.
     #[must_use]
-    pub fn device_ids(&self) -> Vec<String> {
+    pub(crate) fn device_ids(&self) -> Vec<String> {
         let state = self
             .state
             .lock()
@@ -240,6 +238,9 @@ impl Registry {
         ids
     }
 
+    /// Whether `device_id` belongs to a loaded or newly minted identity.
+    /// Admin paths use this check before deriving a per-device config path,
+    /// so an arbitrary URL segment never reaches the filesystem.
     pub fn contains_device(&self, device_id: &str) -> bool {
         self.state
             .lock()
@@ -504,28 +505,15 @@ fn parse_device_sequence(device_id: &str) -> Result<u64, RegistryError> {
     Ok(sequence)
 }
 
-fn token_digest(token: &str) -> [u8; 32] {
-    Sha256::digest(token.as_bytes()).into()
-}
-
 fn decode_digest(hex: &str) -> Result<[u8; 32], RegistryError> {
-    if hex.len() != 64 || !hex.is_ascii() {
-        return Err(invalid_store("token digest is not 64 lowercase hex bytes"));
-    }
-    let mut digest = [0u8; 32];
-    for (output, pair) in digest.iter_mut().zip(hex.as_bytes().as_chunks::<2>().0) {
-        let high = decode_hex_digit(pair[0])?;
-        let low = decode_hex_digit(pair[1])?;
-        *output = (high << 4) | low;
-    }
-    Ok(digest)
-}
-
-fn decode_hex_digit(byte: u8) -> Result<u8, RegistryError> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        _ => Err(invalid_store("token digest is not lowercase hex")),
+    match decode_credential_digest(hex) {
+        Ok(digest) => Ok(digest),
+        Err(DigestDecodeError::Length) => {
+            Err(invalid_store("token digest is not 64 lowercase hex bytes"))
+        }
+        Err(DigestDecodeError::Character) => {
+            Err(invalid_store("token digest is not lowercase hex"))
+        }
     }
 }
 
@@ -570,13 +558,6 @@ fn invalid_store(message: impl Into<String>) -> RegistryError {
     RegistryError::InvalidStore {
         message: message.into(),
     }
-}
-
-/// Generates a random 32-byte token, rendered as 64 lowercase hex characters.
-fn random_token() -> String {
-    let mut bytes = [0u8; 32];
-    rand::rng().fill_bytes(&mut bytes);
-    protocol::digest_hex(&bytes)
 }
 
 /// Compares two byte strings without short-circuiting on the first mismatch,

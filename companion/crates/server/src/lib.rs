@@ -1,11 +1,11 @@
-//! The Deskmate V2 server: a single-tenant stub that owns networked-tier
-//! devices over a persistent WebSocket link and answers firmware-update
-//! checks for both tiers.
+//! The Deskmate server owns networked devices over persistent WebSocket links
+//! and answers firmware-update checks for both connection tiers.
 //!
 //! This crate's device-facing surface -- `/v1/device/link`,
 //! `/v1/device/firmware`, and `/v1/firmware/{version}.bin` -- is the whole
-//! contract the firmware ever sees. V3 replaces everything behind it
-//! (accounts, storage, multi-tenancy) without touching that surface.
+//! contract the firmware sees. Its route and payload shapes are frozen by the
+//! device protocol, while server-internal storage and account concerns remain
+//! behind that boundary.
 //!
 //! Production exposes this behind a public Cloudflare tunnel, so `app()` treats
 //! every caller as internet-facing and anonymous by default: a single
@@ -23,6 +23,7 @@ mod app_api;
 pub use app_api::change_key as app_api_change_key;
 pub use app_core::asset_sync;
 mod auth;
+mod credential;
 // Server-rendered data cards: the server pushing frames to its own image
 // sources, so a weather/RSS/token face reaches the device through the same
 // picture-card path an external producer's PNG does.
@@ -39,7 +40,7 @@ mod face_render;
 mod faces;
 pub mod firmware;
 mod image_ingest;
-pub mod image_sources;
+mod image_sources;
 mod image_staleness;
 mod images;
 mod manage;
@@ -48,7 +49,7 @@ pub mod oauth;
 mod preview;
 pub mod producer_credentials;
 pub mod registry;
-pub mod runtime_device;
+mod runtime_device;
 pub mod secrets;
 mod store;
 // Serves the companion's built assets from DESKMATE_WEB_DIR.
@@ -86,8 +87,8 @@ use runtime_device::SocketConnector;
 /// the download route's own streaming (which is what actually bounds its
 /// memory use) and the device link's own connection cap.
 ///
-/// Provisional: sized by judgment for a single-device V2 deployment, not
-/// derived from real numbers. Revisit against actual traffic in V3.
+/// Sized conservatively for the expected small deployment rather than derived
+/// from production traffic; keep it under review as traffic data accumulates.
 /// `device_link::MAX_CONCURRENT_LINKS` (32) is `<=` this value by
 /// construction, and an upgrade request releases its permit here at the
 /// 101 response -- before the long-lived socket loop begins -- so the two
@@ -464,8 +465,8 @@ impl Drop for LinkLease {
     }
 }
 
-/// Builds both the device-facing surface and the admin-token-protected
-/// Mac-facing routes over `state`.
+/// Builds the device-facing surface and the authenticated browser-companion
+/// routes over `state`.
 ///
 /// Middleware order matters and is easy to get backwards: `poll_ready`
 /// cascades down through the *whole* nested stack before `call` ever runs

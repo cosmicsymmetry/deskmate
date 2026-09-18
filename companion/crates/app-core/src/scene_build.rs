@@ -1,12 +1,8 @@
 //! Host-side scene builders for Deskmate's card faces: `DigitalClock`,
 //! `AnalogClock` and `ProgressRing`.
 //!
-//! Every numeric and coordinate constant here originated in a hand-written C
-//! template that the device used to compile in. Those templates stopped
-//! shipping at stage 3a and their reference copies were deleted on 2026-09-11
-//! with the parity gate that compared against them; what pins these builders
-//! now is `crates/lvgl-sim/tests/golden/`, which renders the same faces
-//! through the real firmware scene interpreter.
+//! Layout is pinned by `crates/lvgl-sim/tests/golden/`, which renders these
+//! scenes through the real firmware scene interpreter.
 //!
 //! # What the host decides, and what the device still decides
 //!
@@ -17,15 +13,11 @@
 //!
 //! # `DigitalClock`'s three coordinate systems
 //!
-//! The `DigitalClock` oracle's `digital_clock.c` nests its objects: the hero and
-//! the modules sit on a full-canvas, style-stripped root; the date label sits
-//! inside the date module; the dial sits inside the dial module; and **the two
-//! hands are children of the `lv_scale`**, which positions them from its own
-//! box centre.
-//! A scene has no nesting — every node is a sibling under one full-canvas
-//! container at the canvas origin — so this module resolves each chain to
-//! absolute canvas coordinates. `hand_line()` is where that matters most; see
-//! its comment.
+//! The digital face combines canvas coordinates, module-relative geometry,
+//! and scale-local hand pivots. A scene has no nesting — every node is a
+//! sibling under one full-canvas container — so this module resolves each
+//! chain to absolute canvas coordinates. `hand_line()` is where that matters
+//! most.
 
 use chrono::{NaiveDateTime, Timelike};
 use protocol::{
@@ -35,118 +27,69 @@ use protocol::{
 };
 
 // ---------------------------------------------------------------------------
-// The design-system constants, from template_internal.h.
+// Shared design-system constants.
 // ---------------------------------------------------------------------------
 
-/// `DESKMATE_GRID`.
 const GRID: i32 = 8;
-/// `DESKMATE_MARGIN`.
 const MARGIN: i32 = 3 * GRID;
-/// `DESKMATE_RADIUS_MODULE`.
 const RADIUS_MODULE: i32 = 3 * GRID;
 
-/// `DESKMATE_COLOR_CANVAS`.
 const COLOR_CANVAS: u32 = 0x0000_0000;
-/// `DESKMATE_COLOR_PRIMARY`.
 const COLOR_PRIMARY: u32 = 0x00f5_f5f7;
-/// `DESKMATE_COLOR_TERTIARY`.
 const COLOR_TERTIARY: u32 = 0x005c_5c66;
-/// `DESKMATE_COLOR_SURFACE`.
 const COLOR_SURFACE: u32 = 0x001a_1a1f;
-/// The surface colour behind built-in icon artwork in the shipped theme.
-pub const SHIPPED_SCENE_SURFACE_COLOR: u32 = COLOR_SURFACE;
-/// `DESKMATE_COLOR_STALE`, reserved for the shared state footer.
+/// Reserved for the shared state footer.
 const COLOR_STALE: u32 = 0x00f2_c94c;
-/// `DESKMATE_COLOR_ERROR`, reserved for the shared state footer.
+/// Reserved for the shared state footer.
 const COLOR_ERROR: u32 = 0x00ff_6b6b;
 /// LVGL's `LV_OPA_20` constant.
 const OPACITY_20_PERCENT: u8 = 51;
-/// `deskmate_palette(PROTOCOL_TEMPLATE_DIGITAL_CLOCK).hue`. Both clock faces
-/// share one identity, so this is also the analog clock's hue.
+/// Both clock faces share this accent hue.
 const CLOCK_HUE: u32 = 0x00ff_8f2e;
-/// `deskmate_palette(PROTOCOL_TEMPLATE_PROGRESS_RING).hue`.
 const PROGRESS_RING_HUE: u32 = 0x00ff_5a3d;
-/// `deskmate_palette(PROTOCOL_TEMPLATE_PROGRESS_RING).tint`.
 const PROGRESS_RING_TINT: u32 = 0x00ff_9a85;
-/// `DESKMATE_COLOR_SECONDARY`.
 const COLOR_SECONDARY: u32 = 0x009a_9aa5;
 
 // ---------------------------------------------------------------------------
-// analog_clock.c's own geometry. Ported, not re-derived.
+// Analog-clock geometry.
 // ---------------------------------------------------------------------------
 
-/// `FACE_DIAMETER`.
 const ANALOG_FACE_DIAMETER: i32 = SCENE_CANVAS_HEIGHT - 2 * MARGIN;
-/// `FACE_RADIUS`.
 const ANALOG_FACE_RADIUS: i32 = ANALOG_FACE_DIAMETER / 2;
-/// `CHAPTER_RING_WIDTH`.
 const ANALOG_CHAPTER_RING_WIDTH: i32 = 4 * GRID;
-/// `TICK_MAJOR_LEN`.
 const ANALOG_TICK_MAJOR_LENGTH: i32 = 2 * GRID;
-/// `TICK_MINOR_LEN`.
 const ANALOG_TICK_MINOR_LENGTH: i32 = GRID;
-/// `TICK_MAJOR_WIDTH`.
 const ANALOG_TICK_MAJOR_WIDTH: i32 = 4;
-/// `TICK_MINOR_WIDTH`.
 const ANALOG_TICK_MINOR_WIDTH: i32 = 3;
-/// `HAND_HOUR_LEN`.
 const ANALOG_HOUR_LENGTH: i32 = 13 * GRID;
-/// `HAND_MINUTE_LEN`.
 const ANALOG_MINUTE_LENGTH: i32 = 18 * GRID;
-/// `HAND_SECOND_LEN`.
 const ANALOG_SECOND_LENGTH: i32 = 19 * GRID;
-/// `HAND_HOUR_WIDTH`.
 const ANALOG_HOUR_WIDTH: i32 = 6;
-/// `HAND_MINUTE_WIDTH`.
 const ANALOG_MINUTE_WIDTH: i32 = 4;
-/// `HAND_SECOND_WIDTH`.
 const ANALOG_SECOND_WIDTH: i32 = 2;
-/// `HUB_DIAMETER`.
 const ANALOG_HUB_DIAMETER: i32 = 2 * GRID;
 
 // ---------------------------------------------------------------------------
-// progress_ring.c's own geometry. Ported, not re-derived.
+// Progress-ring geometry.
 // ---------------------------------------------------------------------------
 
-/// `RING_DIAMETER`.
 const PROGRESS_RING_DIAMETER: i32 = 30 * GRID;
-/// `RING_X`.
 const PROGRESS_RING_X: i32 = 2 * GRID;
-/// `RING_Y`.
 const PROGRESS_RING_Y: i32 = 8 * GRID;
-/// `RING_CENTER_X`.
 const PROGRESS_RING_CENTER_X: i32 = PROGRESS_RING_X + PROGRESS_RING_DIAMETER / 2;
-/// `RING_CENTER_Y`.
 const PROGRESS_RING_CENTER_Y: i32 = PROGRESS_RING_Y + PROGRESS_RING_DIAMETER / 2;
-/// `RING_WIDTH`.
 const PROGRESS_RING_WIDTH: i32 = 26;
-/// `CHIP_X`.
 const PROGRESS_CHIP_X: i32 = 34 * GRID;
-/// `CHIP_W`.
 const PROGRESS_CHIP_W: i32 = 19 * GRID;
-/// `CHIP_H`.
 const PROGRESS_CHIP_H: i32 = 10 * GRID;
-/// `CHIP_GAP`.
 const PROGRESS_CHIP_GAP: i32 = 2 * GRID;
-/// `CHIP_FIRST_Y`.
 const PROGRESS_CHIP_FIRST_Y: i32 = 6 * GRID;
-/// `CHIP_PAD`.
 const PROGRESS_CHIP_PAD: i32 = 2 * GRID;
-/// `RING_TEXT_W`.
 const PROGRESS_RING_TEXT_W: i32 = 25 * GRID;
-/// `RING_TEXT_X`.
 const PROGRESS_RING_TEXT_X: i32 = PROGRESS_RING_CENTER_X - PROGRESS_RING_TEXT_W / 2;
 
 // ---------------------------------------------------------------------------
-// row_list.c's own geometry. Ported, not re-derived.
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// icon_badge_text.c's own geometry. Ported, not re-derived.
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// digital_clock.c's own geometry. Ported, not re-derived.
+// Digital-clock geometry.
 // ---------------------------------------------------------------------------
 
 /// `TIME_Y`.
@@ -167,16 +110,13 @@ const DIAL_BOX: i32 = 14 * GRID;
 const HAND_HOUR_LEN: i32 = 28;
 /// `HAND_MINUTE_LEN`.
 const HAND_MINUTE_LEN: i32 = 42;
-/// `lv_obj_set_style_line_width(OBJ_HAND_HOUR, 6, 0)`, `digital_clock.c:135`.
 const HAND_HOUR_WIDTH: i32 = 6;
-/// `lv_obj_set_style_line_width(OBJ_HAND_MINUTE, 4, 0)`, `digital_clock.c:141`.
 const HAND_MINUTE_WIDTH: i32 = 4;
-/// `lv_scale_set_total_tick_count(OBJ_DIAL, 13)` — one tick per hour, with the
-/// thirteenth landing back on twelve.
+/// One tick per hour, with the thirteenth landing back on twelve.
 const DIAL_TOTAL_TICKS: u32 = 13;
-/// `lv_scale_set_major_tick_every(OBJ_DIAL, 3)`.
+/// Every third tick is major.
 const DIAL_MAJOR_TICK_EVERY: u32 = 3;
-/// The gap `digital_clock.c:203` puts between the hero and the seconds.
+/// Gap between the hero reading and its seconds suffix.
 const SECONDS_GAP: i32 = 2 * GRID;
 
 /// The reading, evaluated on the device so it ticks between pushes.
@@ -199,12 +139,12 @@ const MINUTE_ANGLE_BINDING: &str = "time:angle:minute";
 /// choice. `the_baked_font_metrics_match_the_shipped_font_sources` reads the
 /// shipped sources and fails if that ever stops being true.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NumericAdvances {
-    pub digit: i32,
-    pub colon: i32,
-    pub hyphen: i32,
-    pub percent: i32,
-    pub degree: i32,
+struct NumericAdvances {
+    digit: i32,
+    colon: i32,
+    hyphen: i32,
+    percent: i32,
+    degree: i32,
 }
 
 impl NumericAdvances {
@@ -222,19 +162,18 @@ impl NumericAdvances {
 
 /// One baked tier's metrics, as the device reads them out of the `lv_font_t`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TierMetrics {
+pub(crate) struct TierMetrics {
     /// `lv_font_get_line_height(font)`.
-    pub line_height: i32,
+    pub(crate) line_height: i32,
     /// `font->base_line`, measured up from the bottom of the line box.
-    pub base_line: i32,
+    pub(crate) base_line: i32,
     /// `None` for a full-range tier, whose advances this table deliberately
-    /// does not reproduce: `deskmate_number_font()` never measures one, and a
-    /// partial table that looked complete would be worse than no table.
-    pub numeric: Option<NumericAdvances>,
+    /// does not reproduce. A partial table that looked complete would be
+    /// worse than no table.
+    numeric: Option<NumericAdvances>,
 }
 
-/// The four faces `tools/genfonts.sh` bakes, addressed by the role the C
-/// templates address them by.
+/// The four faces `tools/genfonts.sh` bakes, addressed by scene font tier.
 ///
 /// The numbers are transcribed from `firmware/main/ui/fonts/deskmate_font_*.c`
 /// — the same bytes the device links — and a test re-reads those files and
@@ -243,10 +182,10 @@ pub struct TierMetrics {
 /// would surface only as a failed pixel diff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BakedFontMetrics {
-    pub caption: TierMetrics,
-    pub body: TierMetrics,
-    pub display: TierMetrics,
-    pub hero: TierMetrics,
+    caption: TierMetrics,
+    body: TierMetrics,
+    display: TierMetrics,
+    hero: TierMetrics,
 }
 
 impl BakedFontMetrics {
@@ -291,7 +230,7 @@ impl BakedFontMetrics {
         },
     };
 
-    pub fn tier(&self, tier: SceneFontTier) -> TierMetrics {
+    pub(crate) fn tier(&self, tier: SceneFontTier) -> TierMetrics {
         match tier {
             SceneFontTier::Caption => self.caption,
             SceneFontTier::Body => self.body,
@@ -300,12 +239,11 @@ impl BakedFontMetrics {
         }
     }
 
-    /// `digital_clock.c:44`'s `baseline_offset()`: the distance from a label
-    /// box's top edge to the baseline of the type in it.
+    /// Distance from a label box's top edge to the baseline of the type in it.
     ///
     /// `scene_view.c`'s `baseline_box_top()` is the exact inverse, so a text
     /// node's `baseline_y` must be `box_top + baseline_offset(tier)`.
-    pub fn baseline_offset(&self, tier: SceneFontTier) -> i32 {
+    pub(crate) fn baseline_offset(&self, tier: SceneFontTier) -> i32 {
         let metrics = self.tier(tier);
         metrics.line_height - metrics.base_line
     }
@@ -316,7 +254,7 @@ impl BakedFontMetrics {
     /// Returns `None` when the tier carries no numeric table, or when `text`
     /// steps outside the subset — the two cases where this side must not
     /// pretend to know what the device would measure.
-    pub fn measure(&self, tier: SceneFontTier, text: &str) -> Option<i32> {
+    fn measure(&self, tier: SceneFontTier, text: &str) -> Option<i32> {
         let numeric = self.tier(tier).numeric?;
         // lv_text_get_width sums the advances and trims one trailing
         // letter_space; at letter_space 0 that is a plain sum.
@@ -327,63 +265,16 @@ impl BakedFontMetrics {
 }
 
 // ---------------------------------------------------------------------------
-// Tier selection — a port of template_internal.h.
-// ---------------------------------------------------------------------------
-
-/// `deskmate_text_is_numeric()` (`template_internal.h:109`).
-///
-/// True when every character is covered by the digits-only `DISPLAY`/`HERO`
-/// subsets. The C walks bytes and special-cases U+00B0's two-byte UTF-8
-/// sequence; walking `char`s is the same predicate over valid UTF-8, which a
-/// Rust `&str` always is. An empty string is not numeric — callers substitute
-/// their own placeholder first.
-pub fn text_is_numeric(text: &str) -> bool {
-    !text.is_empty()
-        && text
-            .chars()
-            .all(|c| matches!(c, '0'..='9' | ':' | '-' | '%' | '\u{b0}'))
-}
-
-/// `deskmate_number_font()` (`template_internal.h:136`): the largest tier that
-/// both covers `text`'s glyphs and fits `max_width` on one line, walking
-/// `HERO` → `DISPLAY` → `BODY`.
-///
-/// `BODY` is the floor for the C's two reasons: it is the only tier with
-/// letters, and the only one that can ellipsize, since its range includes the
-/// `.` `LV_LABEL_LONG_DOT` appends.
-///
-/// `digital_clock.c` does **not** call this — it pins `DESKMATE_FONT_HERO` for
-/// the reading — so neither does [`build_digital_clock_scene`]. It is ported
-/// here for the faces that do, and because pinning a tier is only safe if the
-/// rule would have agreed; `the_ported_tier_rule_agrees_with_the_heros_pin`
-/// asserts it does.
-pub fn number_font_tier(text: &str, max_width: i32, metrics: &BakedFontMetrics) -> SceneFontTier {
-    if !text_is_numeric(text) {
-        return SceneFontTier::Body;
-    }
-    for tier in [SceneFontTier::Hero, SceneFontTier::Display] {
-        if metrics
-            .measure(tier, text)
-            .is_some_and(|width| width <= max_width)
-        {
-            return tier;
-        }
-    }
-    SceneFontTier::Body
-}
-
-// ---------------------------------------------------------------------------
 // The builder.
 // ---------------------------------------------------------------------------
 
-/// The card-level inputs `digital_clock.c` draws from.
+/// Inputs needed to build a digital-clock scene.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClockCard {
     /// Echoed as the scene's own revision.
     pub revision: u32,
-    /// `digital_clock_patch()`'s `show_seconds` field. False hides the seconds
-    /// in the C and drops the node here; both draw the same pixels, and
-    /// neither moves anything else, because the hero is left-anchored.
+    /// False drops the seconds node without moving anything else because the
+    /// hero is left-anchored.
     pub show_seconds: bool,
     /// The local wall-clock instant used only to measure the fixed-width hero
     /// reading while constructing the scene. Every visible time/date value is
@@ -391,13 +282,12 @@ pub struct ClockCard {
     pub local_now: NaiveDateTime,
 }
 
-/// The card-level inputs `analog_clock.c` draws from.
+/// Inputs needed to build an analog-clock scene.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnalogClockCard {
     /// Echoed as the scene's own revision.
     pub revision: u32,
-    /// `analog_clock_patch()`'s `show_seconds` field. False hides the second
-    /// hand without moving any other part of the face.
+    /// False drops the second hand without moving any other part of the face.
     pub show_seconds: bool,
 }
 
@@ -409,20 +299,18 @@ pub struct AnalogClockCard {
 pub struct ProgressRingCard<'a> {
     /// Echoed as the scene's own revision.
     pub revision: u32,
-    /// `progress_ring_patch()`'s `label` field.
     pub label: &'a str,
-    /// Selects the C template's duration-zero initial state. For a positive
-    /// duration, TOTAL, ELAPSED, STATUS, and the countdown are live bindings;
-    /// for a non-positive duration the C patch leaves their constructed text.
+    /// Selects the duration-zero initial state. For a positive duration,
+    /// TOTAL, ELAPSED, STATUS, and the countdown are live bindings; for a
+    /// non-positive duration they retain their constructed text.
     pub duration_seconds: i64,
 }
 
 /// The host-owned data state shared by all six scene builders.
 ///
 /// This deliberately is not a scene binding. The host learns that upstream data
-/// state changed, rebuilds the scene, and pushes it with the new facts. A non-empty
-/// error wins over stale exactly as it does in
-/// `template_view.c::update_data_state()`.
+/// state changed, rebuilds the scene, and pushes it with the new facts. A
+/// non-empty error wins over stale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SceneDataState<'a> {
     /// Whether the last-good value has aged past its freshness bound.
@@ -431,7 +319,7 @@ pub struct SceneDataState<'a> {
     pub error: Option<&'a str>,
 }
 
-/// Applies the shared C-template data-state footer to a freshly built scene.
+/// Applies the shared data-state footer to a freshly built scene.
 ///
 /// The six builders emit the OK state directly, with no footer node. A host
 /// that owns a stale/error fact passes the builder result through this
@@ -458,7 +346,7 @@ pub fn with_scene_data_state(
     scene
 }
 
-/// `template_view.c::update_data_state()`, ported once for every builder.
+/// Shared footer construction for every built-in face.
 fn push_state_footer(
     nodes: &mut Vec<SceneNode>,
     state: SceneDataState<'_>,
@@ -471,15 +359,14 @@ fn push_state_footer(
     };
     let caption = metrics.tier(SceneFontTier::Caption);
     nodes.push(SceneNode::Text(SceneText {
-        // A content-sized C label aligned with BOTTOM_MID computes
-        // `parent_w / 2 - label_w / 2`; a full-width text box computes
+        // A content-sized bottom-centred label computes `parent_w / 2 -
+        // label_w / 2`; a full-width text box computes
         // `(parent_w - text_w) / 2`. Those differ by one pixel when the text
         // width is odd, so use the 1..448 box that preserves LVGL's separate
         // integer halves.
         x: 1,
-        // The C label is aligned BOTTOM_MID at y=-2*GRID. Its line box is
-        // content-height, so the baseline is canvas_bottom - offset -
-        // font.base_line; the line height cancels out.
+        // The footer sits 2*GRID above the bottom. Its line box is
+        // content-height, so line height cancels out of the baseline.
         baseline_y: SCENE_CANVAS_HEIGHT - 2 * GRID - caption.base_line,
         w: SCENE_CANVAS_WIDTH - 1,
         align: SceneAlign::Center,
@@ -505,18 +392,15 @@ fn time_text(now: NaiveDateTime) -> String {
     format!("{:02}:{:02}", now.hour(), now.minute())
 }
 
-/// One live clock hand in absolute canvas coordinates, plus the stroke
-/// `digital_clock.c` gives it.
+/// One live clock hand in absolute canvas coordinates.
 ///
 /// The pivot is translated out of the scale's local frame here. The endpoint
 /// is deliberately not: the device recomputes it with LVGL's own trig table on
 /// every binding refresh.
 ///
-/// This helper reproduces a needle that the C face parents under its 112px
-/// `lv_scale`. LVGL clamps that needle's length to half the scale box and the
-/// parent clips its stroke; a scene line has neither behaviour. Byte parity
-/// therefore requires `length + width / 2 < DIAL_BOX / 2`. Keep that
-/// precondition if another scale-owned C needle is moved to this binding form.
+/// LVGL clamps a scale needle's length to half the scale box and clips its
+/// stroke; a scene line has neither behavior. Pixel parity therefore requires
+/// `length + width / 2 < DIAL_BOX / 2`.
 fn hand_line(
     pivot: (i32, i32),
     length: i32,
@@ -539,37 +423,15 @@ fn hand_line(
 
 /// Builds the whole `DigitalClock` face as a scene.
 ///
-/// The node order is `digital_clock.c`'s creation order, which is its z-order:
-/// the reading, the seconds, the date module and its label, the dial module,
-/// the dial, then the two hands over it.
-///
-/// # `OBJ_STATE` in the OK state, and what that demands of a parity fixture
-///
-/// `OBJ_STATE` (`digital_clock.c:144-147`) is the shared state footer. In the
-/// OK state `template_view.c:99` sets it to the empty string, which draws
-/// nothing, so this compatibility entry point omits it. Stale/error callers
-/// pass the result through [`with_scene_data_state`], which appends the shared
-/// footer node without duplicating the six face builders.
-///
-/// **A fixture comparing this scene against the C face must drive the C side
-/// through the state-update path** — `template_view.c`'s `update_data_state()`,
-/// i.e. the full `template_view_show`/`template_view_patch` push — and not
-/// merely leave `stale` and `error` unset. `digital_clock.c` creates that label
-/// and *never* sets its text; `lv_label.c:764` assigns `LV_LABEL_DEFAULT_TEXT`
-/// in the constructor, and `firmware/lv_conf.h`'s
-/// `LV_WIDGETS_HAS_DEFAULT_VALUE 1` makes that default the literal string
-/// `"Text"` (the simulator compiles the same `lv_conf.h`). So a harness that
-/// calls `digital_clock_create()` and `digital_clock_tick()` directly renders
-/// the word "Text" bottom-centre, in a region neither implementation looks
-/// like it draws — a very expensive pixel-diff hunt for a fixture mistake.
+/// Node order is z-order: reading, seconds, date module and label, dial module,
+/// dial, then the two hands. The OK state has no footer node; stale/error
+/// callers append one through [`with_scene_data_state`].
 pub fn build_digital_clock_scene(card: &ClockCard, metrics: &BakedFontMetrics) -> Scene {
     let mut nodes = Vec::with_capacity(8);
 
-    // --- the reading. digital_clock.c:69-74.
-    //
-    // The tier is HERO because the C pins HERO; see number_font_tier's doc.
-    // The width is deliberately generous: the C label is content-sized while a
-    // scene text node is a fixed box, and a box measured exactly risks a
+    // The width is deliberately generous: the visible reading is
+    // content-sized while a scene text node is a fixed box, and an exactly
+    // measured box risks a
     // one-pixel clip if the device's measurement differs. LEFT alignment
     // starts at the box edge and LONG_MODE_CLIP suppresses wrapping, so extra
     // width costs nothing.
@@ -586,10 +448,8 @@ pub fn build_digital_clock_scene(card: &ClockCard, metrics: &BakedFontMetrics) -
         ellipsize: false,
     }));
 
-    // --- the seconds. digital_clock.c:80-84, positioned by :202-205.
-    //
-    // The C re-anchors this after every tick, because the hero is
-    // content-sized: OUT_RIGHT_TOP of the hero, one 2*GRID gap along, with a y
+    // The hero is content-sized, so seconds sit one 2*GRID gap to its right,
+    // with a y
     // offset of baseline_offset(HERO) - baseline_offset(DISPLAY). That offset
     // exists to put the two on one baseline, so in a baseline-addressed scene
     // it collapses to "the same baseline_y". The x has to be computed, and it
@@ -614,7 +474,7 @@ pub fn build_digital_clock_scene(card: &ClockCard, metrics: &BakedFontMetrics) -
         }));
     }
 
-    // --- the date module and its one label. digital_clock.c:89-98.
+    // The date module and its one label.
     nodes.push(SceneNode::Rect(SceneRect {
         x: MARGIN,
         y: MODULE_Y,
@@ -630,23 +490,23 @@ pub fn build_digital_clock_scene(card: &ClockCard, metrics: &BakedFontMetrics) -
     let value_line = metrics.tier(SceneFontTier::Body).line_height;
     let stack_top = (MODULE_H - value_line) / 2;
     nodes.push(SceneNode::Text(SceneText {
-        // deskmate_label_box() is called with x = DESKMATE_MARGIN *inside* the
-        // module, whose own origin is DESKMATE_MARGIN on the canvas.
+        // The label has one margin inside a module that itself starts at the
+        // canvas margin.
         x: MARGIN + MARGIN,
         baseline_y: MODULE_Y + stack_top + metrics.baseline_offset(SceneFontTier::Body),
-        // Exactly deskmate_label_box()'s width, not a generous one: this box is
-        // fixed on both sides, and a wider one would ellipsize differently.
+        // This box is fixed on both sides; a wider one would ellipsize
+        // differently.
         w: DATE_W - 2 * MARGIN,
         align: SceneAlign::Left,
         font: SceneFont::Baked(SceneFontTier::Body),
         color: COLOR_PRIMARY,
         running_color: None,
         value: SceneValue::Binding(DATE_BINDING.to_string()),
-        // deskmate_label_box() uses LV_LABEL_LONG_DOT.
+        // The bounded label ellipsizes overflowing dates.
         ellipsize: true,
     }));
 
-    // --- the dial module and the dial. digital_clock.c:100-127.
+    // The dial module and dial.
     nodes.push(SceneNode::Rect(SceneRect {
         x: DIAL_X,
         y: MODULE_Y,
@@ -668,12 +528,11 @@ pub fn build_digital_clock_scene(card: &ClockCard, metrics: &BakedFontMetrics) -
         total_tick_count: DIAL_TOTAL_TICKS,
         major_tick_every: DIAL_MAJOR_TICK_EVERY,
         // Only the major ticks carry the face's hue; the minor ticks are the
-        // fixed DESKMATE_COLOR_TERTIARY grey, which scene_view.c owns.
+        // fixed tertiary grey, which scene_view.c owns.
         major_tick_color: CLOCK_HUE,
     }));
 
-    // --- the two hands. digital_clock.c:132-142, driven by :207-213.
-    //
+    // The two hands use live angle bindings.
     let dial_pivot = (dial_origin.0 + DIAL_BOX / 2, dial_origin.1 + DIAL_BOX / 2);
     nodes.push(SceneNode::Line(hand_line(
         dial_pivot,
@@ -693,7 +552,7 @@ pub fn build_digital_clock_scene(card: &ClockCard, metrics: &BakedFontMetrics) -
     finish_scene(card.revision, nodes)
 }
 
-/// Converts the centre of a child in `OBJ_FACE`'s local coordinate frame to
+/// Converts the centre of a child in the clock face's local coordinate frame to
 /// that child's absolute scene origin. LVGL centres each axis as
 /// `parent / 2 - object / 2`; keeping those divisions independent matters for
 /// odd-width children such as the 3px minor ticks.
@@ -753,8 +612,8 @@ fn analog_tick(index: i32) -> SceneNode {
         pivot_y: ANALOG_FACE_RADIUS,
         rotation: index * 300,
         rotation_binding: String::new(),
-        // The C ticks are children of OBJ_FACE, so all twelve inherit its
-        // clipping box. A scene display list is flat; carry that parent clip
+        // The twelve ticks share the face's clipping box. A scene display
+        // list is flat, so carry that parent clip
         // explicitly so the four cardinal rotations cannot expose a pixel
         // just outside the 320px face.
         clip: Some(SceneClipRect {
@@ -821,20 +680,18 @@ pub fn build_analog_clock_scene(card: &AnalogClockCard) -> Scene {
         y: hub_y,
         w: ANALOG_HUB_DIAMETER,
         h: ANALOG_HUB_DIAMETER,
-        // The C requests LV_RADIUS_CIRCLE; LVGL clamps it to half the 16px
-        // square before drawing, which is the value represented here.
+        // A circular radius clamps to half the 16px square.
         radius: ANALOG_HUB_DIAMETER / 2,
         fill: CLOCK_HUE,
         opacity: u8::MAX,
         clip: None,
     }));
 
-    // `OBJ_STATE` is empty in the OK-state parity fixtures, so it has no
-    // visible scene node.
+    // The OK state has no visible footer node.
     finish_scene(card.revision, nodes)
 }
 
-/// Adds one of `progress_ring.c`'s three fixed module stacks. The caption is
+/// Adds one of the progress ring's three fixed module stacks. The caption is
 /// static; the value may be a live timer binding.
 fn push_progress_module(
     nodes: &mut Vec<SceneNode>,
@@ -902,8 +759,8 @@ fn progress_timer_value(timer_active: bool, binding: &str, inactive: &str) -> Sc
 /// Builds the whole `ProgressRing` face as a scene.
 ///
 /// The track and indicator are two scene arcs because one `SceneArc` is one
-/// stroke while the C `lv_arc` draws both parts. The track carries the palette
-/// hue at `LV_OPA_20`, preserving LVGL's opacity-before-mask blend, while the
+/// stroke, so track and indicator are separate nodes. The track carries the
+/// palette hue at `LV_OPA_20`, preserving LVGL's opacity-before-mask blend, while the
 /// indicator and countdown remain live through `timer.permille` and
 /// `timer.remaining:mm:ss`.
 pub fn build_progress_ring_scene(card: &ProgressRingCard<'_>, metrics: &BakedFontMetrics) -> Scene {
@@ -1228,11 +1085,10 @@ mod tests {
     // ------------------------------------------------------ the scene itself
 
     #[test]
-    fn the_digital_clock_scene_has_the_nodes_the_c_template_creates() {
+    fn the_digital_clock_scene_has_the_expected_z_order() {
         let scene = scene_at(10, 9, true);
-        // digital_clock.c creates, in order: OBJ_TIME, OBJ_SECONDS, the date
-        // module, OBJ_DATE, the dial module, OBJ_DIAL, OBJ_HAND_HOUR,
-        // OBJ_HAND_MINUTE. OBJ_STATE draws nothing in the OK state.
+        // Reading, seconds, date module and label, dial module and scale, then
+        // hour and minute hands. The OK state draws no footer.
         assert_eq!(8, scene.nodes.len());
         assert!(matches!(scene.nodes[0], SceneNode::Text(_)));
         assert!(matches!(scene.nodes[1], SceneNode::Text(_)));
@@ -1243,7 +1099,6 @@ mod tests {
         assert!(matches!(scene.nodes[6], SceneNode::Line(_)));
         assert!(matches!(scene.nodes[7], SceneNode::Line(_)));
         assert_eq!(7, scene.revision);
-        // DESKMATE_COLOR_CANVAS.
         assert_eq!(0x0000_0000, scene.background);
     }
 
@@ -1286,23 +1141,21 @@ mod tests {
     }
 
     #[test]
-    fn the_hero_reading_sits_on_the_c_templates_baseline() {
+    fn the_hero_reading_uses_the_shipped_baseline() {
         let scene = scene_at(10, 9, true);
         let hero = text(&scene, 0);
-        // digital_clock.c:74 -- lv_obj_set_pos(OBJ_TIME, DESKMATE_MARGIN, TIME_Y)
-        // with DESKMATE_MARGIN = 3 * 8 = 24 and TIME_Y = 8 * 8 = 64, plus
+        // MARGIN = 3 * 8 = 24 and TIME_Y = 8 * 8 = 64, plus
         // baseline_offset(HERO) = line_height 72 - base_line 1 = 71.
         assert_eq!(24, hero.x);
         assert_eq!(64 + 71, hero.baseline_y);
         assert_eq!(SceneFont::Baked(SceneFontTier::Hero), hero.font);
         assert_eq!(SceneAlign::Left, hero.align);
-        // DESKMATE_COLOR_PRIMARY.
         assert_eq!(0x00f5_f5f7, hero.color);
         assert_eq!(SceneValue::Binding("time:HH:mm".to_string()), hero.value);
         assert!(!hero.ellipsize);
-        // Generous by design: the C hero is content-sized at 279px, a scene
-        // text node is a fixed box, and an exactly measured box risks a 1px
-        // clip. 424 runs to the right canvas edge.
+        // Generous by design: the reading is 279px while the scene text node
+        // is a fixed box. 424 runs to the right canvas edge and avoids a
+        // one-pixel clip if measurement changes.
         assert_eq!(424, hero.w);
     }
 
@@ -1311,14 +1164,13 @@ mod tests {
         let scene = scene_at(10, 9, true);
         let hero = text(&scene, 0);
         let seconds = text(&scene, 1);
-        // digital_clock.c:202 aligns OBJ_SECONDS OUT_RIGHT_TOP of the
-        // content-sized hero with a 2 * DESKMATE_GRID gap and a y offset of
+        // Seconds follow the content-sized hero with a 2 * GRID gap and a y offset of
         // baseline_offset(HERO) - baseline_offset(DISPLAY), which puts both on
         // one baseline. "00:00" in HERO is 4 * 62 + 31 = 279px.
         assert_eq!(24 + 279 + 16, seconds.x);
         assert_eq!(hero.baseline_y, seconds.baseline_y);
         assert_eq!(SceneFont::Baked(SceneFontTier::Display), seconds.font);
-        // The face's palette hue, digital_clock.c:83.
+        // The face's accent hue.
         assert_eq!(0x00ff_8f2e, seconds.color);
         assert_eq!(SceneValue::Binding("time:ss".to_string()), seconds.value);
         assert!(!seconds.ellipsize);
@@ -1326,22 +1178,20 @@ mod tests {
     }
 
     #[test]
-    fn the_two_modules_land_on_the_c_templates_grid() {
+    fn the_two_modules_land_on_the_design_grid() {
         let scene = scene_at(10, 9, true);
-        // deskmate_module(root, DESKMATE_MARGIN, MODULE_Y, DATE_W, MODULE_H)
-        // with MODULE_Y = 22 * 8, DATE_W = 28 * 8, MODULE_H = 17 * 8, and
-        // DESKMATE_RADIUS_MODULE = 3 * 8.
+        // MODULE_Y = 22 * 8, DATE_W = 28 * 8, MODULE_H = 17 * 8, and
+        // RADIUS_MODULE = 3 * 8.
         let date_module = rect(&scene, 2);
         assert_eq!(24, date_module.x);
         assert_eq!(176, date_module.y);
         assert_eq!(224, date_module.w);
         assert_eq!(136, date_module.h);
         assert_eq!(24, date_module.radius);
-        // DESKMATE_COLOR_SURFACE at LV_OPA_COVER.
+        // Opaque surface color.
         assert_eq!(0x001a_1a1f, date_module.fill);
         assert_eq!(255, date_module.opacity);
 
-        // deskmate_module(root, DIAL_X, MODULE_Y, DIAL_W, MODULE_H) with
         // DIAL_X = 33 * 8 and DIAL_W = 20 * 8.
         let dial_module = rect(&scene, 4);
         assert_eq!(264, dial_module.x);
@@ -1353,12 +1203,10 @@ mod tests {
     }
 
     #[test]
-    fn the_date_box_reproduces_deskmate_label_box() {
+    fn the_date_box_is_centered_inside_its_module() {
         let scene = scene_at(10, 9, true);
         let date = text(&scene, 3);
-        // deskmate_label_box(date_module, DESKMATE_MARGIN, stack_top,
-        //                    DATE_W - 2 * DESKMATE_MARGIN, LEFT, PRIMARY, BODY)
-        // where stack_top = (MODULE_H - line_height(BODY)) / 2 = (136 - 36) / 2
+        // stack_top = (MODULE_H - line_height(BODY)) / 2 = (136 - 36) / 2
         // = 50, so the box top is 176 + 50 = 226 and the baseline is that plus
         // baseline_offset(BODY) = 36 - 7 = 29.
         assert_eq!(24 + 24, date.x);
@@ -1367,7 +1215,7 @@ mod tests {
         assert_eq!(SceneFont::Baked(SceneFontTier::Body), date.font);
         assert_eq!(SceneAlign::Left, date.align);
         assert_eq!(0x00f5_f5f7, date.color);
-        // deskmate_label_box uses LV_LABEL_LONG_DOT.
+        // Long dates are ellipsized within the module.
         assert!(date.ellipsize);
         assert_eq!(SceneValue::Binding("date".to_string()), date.value);
     }
@@ -1376,9 +1224,8 @@ mod tests {
     fn the_dial_is_a_scale_node_at_the_module_centre() {
         let scene = scene_at(10, 9, true);
         let dial = scale(&scene, 5);
-        // digital_clock.c:104-106 -- DIAL_BOX = 14 * 8 = 112, positioned at
-        // ((DIAL_W - DIAL_BOX) / 2, (MODULE_H - DIAL_BOX) / 2) inside a module
-        // whose own origin is (DIAL_X, MODULE_Y).
+        // DIAL_BOX = 14 * 8 = 112, centered inside the dial module whose
+        // origin is (DIAL_X, MODULE_Y).
         assert_eq!(264 + 24, dial.x);
         assert_eq!(176 + 12, dial.y);
         assert_eq!(112, dial.box_size);
@@ -1429,8 +1276,7 @@ mod tests {
         let with = scene_at(10, 9, true);
         let without = scene_at(10, 9, false);
         assert_eq!(7, without.nodes.len());
-        // The hero is left-anchored, so hiding the seconds moves nothing --
-        // digital_clock.c:79 says exactly this.
+        // The hero is left-anchored, so hiding the seconds moves nothing.
         assert_eq!(with.nodes[0], without.nodes[0]);
         assert_eq!(with.nodes[2..], without.nodes[1..]);
         assert!(
@@ -1444,8 +1290,7 @@ mod tests {
 
     #[test]
     fn every_digit_shares_one_advance_so_the_seconds_never_move() {
-        // The C re-anchors the seconds after every tick because the hero is
-        // content-sized; the scene pins one x at build time. That is only
+        // The scene pins the seconds x at build time. That is only
         // sound because every digit in the HERO subset has the same advance,
         // so "HH:mm" measures 279px whatever the time.
         let reference = text(&scene_at(0, 0, true), 1).x;
@@ -1460,42 +1305,31 @@ mod tests {
         }
     }
 
-    // --------------------------------------------------- the ported subroutines
+    // ------------------------------------------------------- shipped metrics
 
     #[test]
-    fn the_numeric_test_accepts_exactly_the_subsets_range() {
-        assert!(text_is_numeric("00:00"));
-        assert!(text_is_numeric("-12%"));
-        assert!(text_is_numeric("21\u{b0}"));
-        assert!(!text_is_numeric(""));
-        assert!(!text_is_numeric("12.5"));
-        assert!(!text_is_numeric("Mon"));
-    }
-
-    #[test]
-    fn the_tier_rule_walks_hero_then_display_then_body() {
+    fn numeric_metrics_cover_the_baked_subset() {
         let metrics = &BakedFontMetrics::SHIPPED;
-        // "00:00" is 279px in HERO and 162px in DISPLAY.
-        assert_eq!(SceneFontTier::Hero, number_font_tier("00:00", 279, metrics));
-        assert_eq!(
-            SceneFontTier::Display,
-            number_font_tier("00:00", 278, metrics)
-        );
-        assert_eq!(SceneFontTier::Body, number_font_tier("00:00", 161, metrics));
-        // A non-numeric string never reaches a subset tier at all.
-        assert_eq!(SceneFontTier::Body, number_font_tier("Mon", 448, metrics));
+        assert!(metrics.measure(SceneFontTier::Hero, "00:00").is_some());
+        assert!(metrics.measure(SceneFontTier::Hero, "-12%").is_some());
+        assert!(metrics.measure(SceneFontTier::Hero, "21\u{b0}").is_some());
+        assert!(metrics.measure(SceneFontTier::Hero, "12.5").is_none());
+        assert!(metrics.measure(SceneFontTier::Hero, "Mon").is_none());
     }
 
     #[test]
-    fn the_ported_tier_rule_agrees_with_the_heros_pin() {
-        // digital_clock.c:70 pins DESKMATE_FONT_HERO rather than calling
-        // deskmate_number_font, so the builder pins it too. This asserts the
-        // ported rule would not have disagreed at the width available to the
-        // reading, which is what makes the pin safe.
-        assert_eq!(
-            SceneFontTier::Hero,
-            number_font_tier("00:00", 448 - 2 * 24, &BakedFontMetrics::SHIPPED)
-        );
+    fn hero_and_display_metrics_preserve_expected_widths() {
+        let metrics = &BakedFontMetrics::SHIPPED;
+        assert_eq!(Some(279), metrics.measure(SceneFontTier::Hero, "00:00"));
+        assert_eq!(Some(162), metrics.measure(SceneFontTier::Display, "00:00"));
+    }
+
+    #[test]
+    fn the_hero_reading_fits_its_available_width() {
+        let width = BakedFontMetrics::SHIPPED
+            .measure(SceneFontTier::Hero, "00:00")
+            .unwrap();
+        assert!(width <= SCENE_CANVAS_WIDTH - 2 * MARGIN);
     }
 
     #[test]

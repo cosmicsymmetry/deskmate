@@ -16,10 +16,9 @@ use app_core::{
 
 #[test]
 fn a_pre_v4_document_is_refused_as_an_unsupported_version() {
-    // v0-v3 predate M4 (2026-08-05) and no document at those versions exists in
-    // the fleet, on the Mac, or on the server. Refusing one is a typed, legible
-    // outcome -- NOT a validation failure, which would be presented to the owner
-    // as their settings being broken.
+    // No supported companion version writes v0-v3 documents. Refusing one is
+    // a typed, legible outcome -- not a validation failure, which would be
+    // presented to the owner as broken settings.
     let directory = test_directory("pre-v4-refused");
     let path = directory.path().join("config.json");
     fs::write(

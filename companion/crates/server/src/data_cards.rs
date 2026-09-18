@@ -502,6 +502,39 @@ impl FaceProvider {
 /// token price, and retaining the handles lets a settings update replace only
 /// the source it changed.
 pub fn spawn_refreshers(state: &ServerState, spec_path: PathBuf, specs: Vec<DataCardSpec>) {
+    // Drop specs whose image source no longer exists, before anything is
+    // spawned for them. Until `revoke_source` learned to remove a face, every
+    // revoke left its spec behind and its refresher fetching on schedule: the
+    // live server was found with eight specs for five sources, four of them
+    // fetching weather every fifteen minutes for sources gone for days, each
+    // failing with "unknown or revoked image source". A spec with no source can
+    // do nothing but fail, so this is self-healing rather than a migration --
+    // and it is cheap, running once at startup.
+    let live: std::collections::BTreeSet<String> = state
+        .image_sources()
+        .summaries(chrono::Utc::now())
+        .into_iter()
+        .map(|source| source.id)
+        .collect();
+    let (specs, orphaned): (Vec<DataCardSpec>, Vec<DataCardSpec>) = specs
+        .into_iter()
+        .partition(|spec| live.contains(&spec.source_id));
+    for spec in &orphaned {
+        tracing::warn!(
+            source_id = %spec.source_id,
+            "dropping a server-rendered card whose image source no longer exists"
+        );
+    }
+    if !orphaned.is_empty()
+        && let Ok(bytes) = serde_json::to_vec_pretty(&specs)
+        && let Err(error) = app_core::secure_file::write_and_replace(&spec_path, &bytes)
+    {
+        let (operation, message) = error.into_strings("data-card spec");
+        // Not fatal: the in-memory set below is already correct, so this start
+        // is healthy either way and the next one tries again.
+        tracing::warn!(%operation, %message, "could not persist the pruned data-card specs");
+    }
+
     let mut data_cards = state
         .inner
         .data_cards

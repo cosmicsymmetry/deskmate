@@ -385,12 +385,33 @@ it, point `DESKMATE_WEB_DIR` at the `dist/`, and drive it in Chrome -- the
 mock harness is blind to everything that needs the server, and the product is a
 web page now, so this costs a minute. See the trap about the harness above.
 
-Budget for this: a cold full run is about 35 minutes on the owner's machine -- 13 for
-clippy, most of the rest for `--all-targets`, whose `server/tests/ownership.rs` does
-real loopback binds. **This is the local gate suite and has nothing to do with the
-deploy**, which is now 3.8 s for a no-op and 23 s for a real change
-(`companion/crates/server/deploy/deploy.sh`); the two were conflated once and the
-wrong one was optimised first. `cargo` is not on the Bash tool's PATH (`export
+Budget for this, measured 2026-09-18: **the warm suite is about 28 seconds**, nearly
+all of it `cargo test --all-targets` (23-25 s, of which 24 s is test execution). The
+35-minute figure this section used to quote is a *cold* run, and it is compilation,
+not tests -- quoting it as the everyday cost sent one session at the wrong target.
+
+**This is the local gate suite and has nothing to do with the deploy**, which is 3.8 s
+for a no-op and 23 s for a real change (`companion/crates/server/deploy/deploy.sh`).
+
+Where the test time actually goes, so the next person does not have to find out again:
+
+| target | seconds | tests |
+|---|---|---|
+| `app-core/tests/runtime.rs` | 16.1 | 59 |
+| `server/tests/ownership.rs` | 3.2 | 31 |
+| `server/tests/store.rs` | 2.0 | 28 |
+| everything else | < 2 each | |
+
+`runtime.rs` dominates because each of its 59 tests starts, drives and stops a real
+threaded runtime; that is the thing being tested, not waste. `ownership.rs` is named
+here because this section used to blame it for the whole cost -- it is 8% of it.
+
+**A test that waits on production pacing is the failure mode to watch for.**
+`server/tests/hostile_device.rs` was 14 seconds -- a third of the entire suite -- for
+two tests, because each of its four reconnects paid a real `reconnect_interval` plus
+`status_interval`. It is 0.18 s now: `ServerState::in_memory_with_runtime_options`
+lets a test pace the device runtime, the way `app-core`'s own tests always could.
+Reach for it only when the wait is incidental to what is being tested. `cargo` is not on the Bash tool's PATH (`export
 PATH="$HOME/.cargo/bin:$PATH"`), and piping a cargo invocation into `tail` reports
 `tail`'s exit status in zsh, hiding a failure as a pass -- redirect to a file and check
 `$?`.

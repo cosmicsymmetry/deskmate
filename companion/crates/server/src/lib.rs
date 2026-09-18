@@ -127,6 +127,16 @@ struct StateInner {
     data_cards: Mutex<data_cards::DataCardState>,
     producer_credentials: Arc<producer_credentials::ProducerCredentialStore>,
     admin_token: String,
+    /// How the per-device `app-core` runtime is paced.
+    ///
+    /// A field rather than `RuntimeOptions::default()` at the construction site,
+    /// because the defaults are production pacing and a test that is not about
+    /// pacing should not pay for it. `app-core`'s own tests already inject
+    /// 10-millisecond intervals; the server had no way to, so every reconnect in
+    /// `tests/hostile_device.rs` cost a real 3 seconds -- one second of
+    /// `reconnect_interval` plus a two-second `status_interval` -- and four
+    /// reconnects made one test 14 seconds, a third of the whole suite.
+    runtime_options: app_core::RuntimeOptions,
     /// Signs and verifies the operator session cookie. Keyed by the admin token,
     /// exactly as `IntegrationRuntime`'s own signer is -- but held here, so a
     /// deployment with no OAuth integrations configured still has sessions. The
@@ -156,7 +166,14 @@ impl ServerState {
     #[must_use]
     pub fn new(admin_token: String, firmware: FirmwareCatalog, config_directory: PathBuf) -> Self {
         let registry = Registry::load(config_directory.join(DEVICE_IDENTITY_STORE_FILE));
-        Self::with_config_temp_dir(admin_token, firmware, config_directory, registry, None)
+        Self::with_config_temp_dir(
+            admin_token,
+            firmware,
+            config_directory,
+            registry,
+            None,
+            app_core::RuntimeOptions::default(),
+        )
     }
 
     fn with_config_temp_dir(
@@ -165,6 +182,7 @@ impl ServerState {
         config_directory: PathBuf,
         registry: Registry,
         config_temp_dir: Option<tempfile::TempDir>,
+        runtime_options: app_core::RuntimeOptions,
     ) -> Self {
         let data_card_spec_path = config_directory.join("data-cards.json");
         let image_sources = image_sources::ImageSourceStore::new(config_directory.clone())
@@ -180,6 +198,7 @@ impl ServerState {
                 producer_credentials: Arc::new(producer_credentials),
                 sessions: oauth::session::SessionSigner::from_admin_token(&admin_token),
                 admin_token,
+                runtime_options,
                 firmware,
                 configs: store::DeviceConfigStores::new(config_directory),
                 integrations: OnceLock::new(),
@@ -197,6 +216,17 @@ impl ServerState {
     /// temp roots for firmware and device configuration.
     #[must_use]
     pub fn in_memory() -> Self {
+        Self::in_memory_with_runtime_options(app_core::RuntimeOptions::default())
+    }
+
+    /// [`Self::in_memory`] with the device runtime paced for a test.
+    ///
+    /// Opt-in rather than the default for `in_memory`, because most tests want
+    /// production pacing and shortening it under them would change what they
+    /// exercise. Reach for this only when the wait is incidental to the thing
+    /// being tested.
+    #[must_use]
+    pub fn in_memory_with_runtime_options(runtime_options: app_core::RuntimeOptions) -> Self {
         let firmware = FirmwareCatalog::in_memory();
         let config_temp_dir = tempfile::tempdir()
             .expect("failed to create a dedicated temp config directory for server state");
@@ -207,7 +237,13 @@ impl ServerState {
             config_directory,
             Registry::new(),
             Some(config_temp_dir),
+            runtime_options,
         )
+    }
+
+    /// The pacing a newly linked device's runtime is started with.
+    pub(crate) fn runtime_options(&self) -> app_core::RuntimeOptions {
+        self.inner.runtime_options
     }
 
     #[must_use]

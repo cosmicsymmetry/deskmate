@@ -21,7 +21,17 @@ struct ConnectionSequence {
 }
 
 async fn spawn() -> (String, server::registry::DeviceIdentity, String) {
-    let state = ServerState::in_memory();
+    // Paced for a test. This file is about hostile frames closing the link and
+    // the ownership slot being released afterwards -- not about how long a
+    // reconnect waits. With production pacing each of the four reconnects cost a
+    // real 3 seconds (one of `reconnect_interval`, two of `status_interval`) and
+    // this one test was 14 seconds, a third of the entire workspace suite.
+    let state = ServerState::in_memory_with_runtime_options(app_core::RuntimeOptions {
+        reconnect_interval: Duration::from_millis(10),
+        status_interval: Duration::from_millis(10),
+        pomodoro_interval: Duration::from_millis(10),
+        ..app_core::RuntimeOptions::default()
+    });
     let identity = state.registry().mint().expect("mint identity");
     let admin_token = support::IN_MEMORY_ADMIN_TOKEN.to_string();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

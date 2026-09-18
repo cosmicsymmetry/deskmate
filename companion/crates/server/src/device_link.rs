@@ -7,7 +7,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use tokio::sync::OwnedSemaphorePermit;
 
-use app_core::{ConfigOrigin, LoadOutcome, RuntimeHandle, RuntimeOptions};
+use app_core::{ConfigOrigin, LoadOutcome, RuntimeHandle};
 
 use crate::auth::AuthenticatedDevice;
 use crate::image_sources::ServerImageSourceHost;
@@ -77,11 +77,12 @@ async fn run(
         let (device, connector) = WebSocketRuntimeDevice::channel(device_id.clone());
         let peer = connector.attach();
         let image_sources = std::sync::Arc::clone(state.image_sources());
+        let options = state.runtime_options();
         let runtime = tokio::task::spawn_blocking(move || {
             RuntimeHandle::start_with_image_source_host(
                 config,
                 Box::new(device),
-                RuntimeOptions::default(),
+                options,
                 Some(Box::new(ServerImageSourceHost::new(image_sources))),
             )
         })

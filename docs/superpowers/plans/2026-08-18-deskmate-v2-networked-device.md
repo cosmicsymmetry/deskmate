@@ -1,5 +1,8 @@
 # V2 Networked Device Implementation Plan
 
+> **STATUS — HISTORICAL IMPLEMENTATION RECORD.** This plan describes the system and
+> paths at the time of its dated work; it is not current architecture or build guidance.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 > **STATUS (recorded 2026-09-09): V2 is EXITED and tagged `v2`. Its 16 remaining open

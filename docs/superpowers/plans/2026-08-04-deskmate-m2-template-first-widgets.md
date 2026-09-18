@@ -1,5 +1,8 @@
 # Deskmate M2 - Template Engine and First Widgets Implementation Plan
 
+> **STATUS — HISTORICAL IMPLEMENTATION RECORD.** This plan describes the system and
+> paths at the time of its dated work; it is not current architecture or build guidance.
+
 **Status:** Complete on 2026-08-04; no `m2` tag has been created. All software, physical,
 stress, render, interaction, and soak gates pass except that the user explicitly waived
 nine repetitions of the ten-cycle reconnect check after one corrected full-power-cycle

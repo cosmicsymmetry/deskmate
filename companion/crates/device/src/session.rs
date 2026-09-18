@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 
 use protocol::{
     Ack, ActivateCard, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, AssetRelease, CardConfig,
-    Deframer, DeviceEvent, EventAction, EventKind, HeartbeatAck, Message, NetworkConfig, PushScene,
-    PushTimer, RequestIdAllocator, StatusResponse, TYPE_ACTIVATE_CARD, TYPE_APPLY_CONFIG,
-    TYPE_ASSET_BEGIN, TYPE_ASSET_CHUNK, TYPE_ASSET_COMMIT, TYPE_ASSET_RELEASE, TYPE_FACTORY_RESET,
+    Deframer, DeviceEvent, EventAction, EventKind, Message, NetworkConfig, PushScene, PushTimer,
+    RequestIdAllocator, StatusResponse, TYPE_ACTIVATE_CARD, TYPE_APPLY_CONFIG, TYPE_ASSET_BEGIN,
+    TYPE_ASSET_CHUNK, TYPE_ASSET_COMMIT, TYPE_ASSET_RELEASE, TYPE_FACTORY_RESET,
     TYPE_NETWORK_CONFIG, TYPE_PUSH_SCENE, TYPE_PUSH_TIMER, TYPE_TIME_SYNC, TYPE_TRIGGER_INTERRUPT,
     TimeSync, TriggerInterrupt, decode_message, encode_message, expected_response_type,
 };
@@ -18,7 +18,7 @@ use crate::{
     message_error,
 };
 
-pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(3);
+const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(3);
 pub const DEFAULT_EVENT_QUEUE_CAPACITY: usize = 32;
 const COMMAND_QUEUE_CAPACITY: usize = 8;
 const IDLE_READ_PAUSE: Duration = Duration::from_millis(1);
@@ -36,10 +36,10 @@ const IDLE_READ_PAUSE: Duration = Duration::from_millis(1);
 const REPLY_TIMEOUT_FACTOR: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SessionOptions {
-    pub request_timeout: Duration,
-    pub keepalive_interval: Duration,
-    pub event_queue_capacity: usize,
+struct SessionOptions {
+    request_timeout: Duration,
+    keepalive_interval: Duration,
+    event_queue_capacity: usize,
 }
 
 impl Default for SessionOptions {
@@ -139,11 +139,11 @@ pub struct DeviceSession<T: Transport + Send + 'static> {
 }
 
 impl<T: Transport + Send + 'static> DeviceSession<T> {
-    pub fn new(transport: T, initial_status: &StatusResponse) -> Self {
+    fn new(transport: T, initial_status: &StatusResponse) -> Self {
         Self::with_options(transport, initial_status, SessionOptions::default())
     }
 
-    pub fn with_options(
+    fn with_options(
         transport: T,
         initial_status: &StatusResponse,
         options: SessionOptions,
@@ -238,15 +238,17 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         }
     }
 
-    pub fn latest_data_revision(&self) -> u32 {
+    #[cfg(test)]
+    fn latest_data_revision(&self) -> u32 {
         self.latest_data_revision.load(Ordering::Acquire)
     }
 
-    pub fn latest_config_revision(&self) -> u32 {
+    #[cfg(test)]
+    fn latest_config_revision(&self) -> u32 {
         self.latest_config_revision.load(Ordering::Acquire)
     }
 
-    pub fn capabilities(&self) -> u64 {
+    fn capabilities(&self) -> u64 {
         self.capabilities.load(Ordering::Acquire)
     }
 
@@ -272,7 +274,7 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         }
     }
 
-    pub fn push_timer(&self, push: PushTimer) -> Result<Ack, DeviceError> {
+    fn push_timer(&self, push: PushTimer) -> Result<Ack, DeviceError> {
         let revision = push.revision;
         match self.request(Message::PushTimer(push))? {
             Message::Ack(ack)
@@ -303,7 +305,7 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         })
     }
 
-    pub fn apply_config(&self, config: ApplyConfig) -> Result<Ack, DeviceError> {
+    fn apply_config(&self, config: ApplyConfig) -> Result<Ack, DeviceError> {
         // Protocol v2 has no capability a card list can require. The v1 bits
         // that gated this -- "core widgets" and a separate one for a
         // 270-degree rotation -- both described a device that rendered
@@ -401,9 +403,9 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
     /// Reserve (or re-attach to) storage for one asset. Unlike `provision` and
     /// `factory_reset`, asset transfer is not cable-only -- the same seam
     /// drives both the serial and networked transports, so this is a plain
-    /// request/reply like `push_fields`. The `Ack`'s `already_present` tells
+    /// request/reply like `push_scene`. The `Ack`'s `already_present` tells
     /// the caller whether to skip chunking entirely (content addressing is
-    /// the inventory protocol; see `server::asset_sync`).
+    /// the inventory protocol; see `app_core::asset_sync`).
     pub fn asset_begin(&self, begin: AssetBegin) -> Result<Ack, DeviceError> {
         match self.request(Message::AssetBegin(begin))? {
             Message::Ack(ack)
@@ -454,21 +456,12 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         }
     }
 
-    pub fn heartbeat(&self) -> Result<HeartbeatAck, DeviceError> {
-        match self.request(Message::Heartbeat)? {
-            Message::HeartbeatAck(ack) => Ok(ack),
-            _ => Err(DeviceError::UnexpectedMessage),
-        }
-    }
-
     pub fn try_recv_event(&self) -> Option<ReceivedEvent> {
         self.event_receiver.try_recv().ok()
     }
 
-    pub fn recv_event_timeout(
-        &self,
-        timeout: Duration,
-    ) -> Result<Option<ReceivedEvent>, DeviceError> {
+    #[cfg(test)]
+    fn recv_event_timeout(&self, timeout: Duration) -> Result<Option<ReceivedEvent>, DeviceError> {
         match self.event_receiver.recv_timeout(timeout) {
             Ok(event) => Ok(Some(event)),
             Err(RecvTimeoutError::Timeout) => Ok(None),
@@ -489,11 +482,7 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         self.stalled.load(Ordering::Acquire)
     }
 
-    pub fn reconnect(
-        &self,
-        transport: T,
-        initial_status: StatusResponse,
-    ) -> Result<(), DeviceError> {
+    fn reconnect(&self, transport: T, initial_status: StatusResponse) -> Result<(), DeviceError> {
         if self.stalled.load(Ordering::Acquire) {
             return Err(DeviceError::Transport(TransportError::Disconnected));
         }
@@ -1044,7 +1033,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    use protocol::{EventAction, PROTOCOL_VERSION, TapAction, decode_wire_frame};
+    use protocol::{EventAction, HeartbeatAck, PROTOCOL_VERSION, TapAction, decode_wire_frame};
 
     use super::*;
 

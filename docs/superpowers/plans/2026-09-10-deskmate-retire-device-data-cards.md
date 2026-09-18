@@ -1,5 +1,8 @@
 # Retire the device-rendered data cards, and stop offering to swap a plugin card's plugin
 
+> **STATUS — HISTORICAL IMPLEMENTATION RECORD.** This plan records completed subtraction
+> against an earlier architecture; it is not current architecture or build guidance.
+
 Branch: `refactor/retire-device-data-cards`, cut from `feat/picture-cards` at `3f42a49`.
 Owner direction, 2026-09-10, verbatim in two parts:
 

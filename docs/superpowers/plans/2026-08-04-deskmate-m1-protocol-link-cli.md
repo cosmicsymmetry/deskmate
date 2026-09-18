@@ -1,5 +1,8 @@
 # Deskmate M1 - Protocol, USB Link, and CLI Harness Implementation Plan
 
+> **STATUS — HISTORICAL IMPLEMENTATION RECORD.** This plan describes the system and
+> paths at the time of its dated work; it is not current architecture or build guidance.
+
 **Status:** Complete and tagged `m1`. Software, adversarial-link, soak, visual, and
 ten-cycle physical unplug/replug verification pass. Because M2 work began in the same
 shared worktree before the final physical carryover closed, the tagged checkpoint also

@@ -1,5 +1,8 @@
 # Deskmate — Google Calendar sync
 
+> **STATUS — HISTORICAL, UNIMPLEMENTED PROPOSAL.** This records a rejected-era design and
+> is not a description of the current companion or its OAuth architecture.
+
 **Date:** 2026-08-06
 **Status:** Proposal for Rodion. Nothing here is implemented or decided.
 **Scope note:** the M4 plan lists "cloud accounts/sync" as explicitly **out of scope for v1**.

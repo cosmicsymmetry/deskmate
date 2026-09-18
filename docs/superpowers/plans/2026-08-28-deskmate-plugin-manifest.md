@@ -1,5 +1,8 @@
 # Stage 3b — Plugin manifest and curated plugins
 
+> **STATUS — HISTORICAL IMPLEMENTATION RECORD.** The manifest-plugin system described
+> here was retired; this plan is not current architecture or build guidance.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
 > (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps
 > use checkbox (`- [ ]`) syntax for tracking.

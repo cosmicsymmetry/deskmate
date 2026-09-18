@@ -1,5 +1,8 @@
 # Scene Renderer Implementation Plan (Plugins, Stage 2a)
 
+> **STATUS — HISTORICAL IMPLEMENTATION RECORD.** This plan describes the system and
+> paths at the time of its dated work; it is not current architecture or build guidance.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** The device renders a declarative display list pushed from the host, and

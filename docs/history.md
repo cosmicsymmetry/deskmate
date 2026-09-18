@@ -1,5 +1,8 @@
 # Deskmate history
 
+**Status: HISTORICAL NARRATIVE.** Dated entries preserve the system described at their
+time; the current context below identifies the active companion architecture.
+
 **This file is narrative, not normative.** Nothing here is a rule; it is the record of
 how the project reached its current shape, moved out of `CLAUDE.md` on 2026-09-11
 because that file is loaded into every session and had grown to 113 KB, most of it

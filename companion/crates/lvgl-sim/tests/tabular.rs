@@ -20,8 +20,8 @@
 //!    shifts the trailing `0` and changes the span.
 
 // Only the two pinned instants are used here; the case table itself belongs
-// to `golden.rs`. `cases` now lives in `lvgl-sim`'s `src/` (Task 10) so both
-// this test and `framebuffer_diff.rs` (a different crate) can reach it.
+// to `golden.rs`. It lives in `lvgl-sim`'s public `cases` module so this test
+// and `framebuffer_diff.rs` (a different crate) can share it.
 use app_core::{
     AppConfig, CardAlert, CardSettings, DisplayTemplate, RefreshPolicy, WidgetTapAction,
 };

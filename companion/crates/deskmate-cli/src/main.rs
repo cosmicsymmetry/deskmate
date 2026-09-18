@@ -30,7 +30,7 @@ operations. Provisioned settings take effect on the device's next boot, not
 live.";
 
 #[derive(Debug)]
-pub(crate) enum AppError {
+enum AppError {
     Usage(String),
     Device(DeviceError),
     Host(String),

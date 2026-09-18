@@ -1,5 +1,5 @@
-//! Task 8 (stage 2a): pins `lvgl_sim::cases::scene_cases()` — one scene per
-//! `scene_node_kind_t` — to committed landscape PNGs under
+//! Pins `lvgl_sim::cases::scene_cases()` — one scene per `scene_node_kind_t`
+//! — to committed landscape PNGs under
 //! `tests/golden/scene/`.
 //!
 //! A separate test and golden subdirectory from `tests/golden.rs`, for the same

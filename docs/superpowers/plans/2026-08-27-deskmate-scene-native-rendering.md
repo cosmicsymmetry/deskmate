@@ -1,5 +1,8 @@
 # Scene-Native Rendering (stage 3a) Implementation Plan
 
+> **STATUS — HISTORICAL IMPLEMENTATION RECORD.** This plan describes the system and
+> paths at the time of its dated work; it is not current architecture or build guidance.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make every one of the six card faces correct *without a re-push*, so the

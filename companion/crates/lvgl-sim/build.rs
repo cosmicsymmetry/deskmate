@@ -11,12 +11,12 @@ fn main() {
     for core in [
         "timefmt.c",
         "clock_source.c",
-        // Task 12: the runtime asset store, compiled unmodified so the
+        // The runtime asset store is compiled unmodified so the
         // simulator's digest -> bytes lookup uses the identical format and
         // logic the device's link/asset_flash.c backs with real flash
         // I/O -- see csrc/sim_shim.c's RAM-backed asset_flash_io_t.
         "asset_store.c",
-        // Task 8 (stage 2a): the scene model, its CBOR decoder and its
+        // The scene model, its CBOR decoder and its
         // binding evaluator, compiled unmodified for the same reason
         // ui/scene_view.c below is -- the stage-2 parity gate compares a
         // device framebuffer against a simulator framebuffer, and that is
@@ -30,11 +30,11 @@ fn main() {
     ] {
         sources.push(firmware.join("main/core").join(core));
     }
-    // Task 12: free of ESP-IDF includes by design (see its own header
-    // comment) specifically so it can compile into this host binary.
+    // Free of ESP-IDF includes by design (see its own header comment) so it
+    // can compile into this host binary.
     sources.push(firmware.join("main/ui/font_registry.c"));
-    // Task 8: the scene interpreter. Its header states the no-ESP-IDF rule
-    // and names this simulator as the reason for it.
+    // The scene interpreter's header states the no-ESP-IDF rule and names
+    // this simulator as the reason for it.
     sources.push(firmware.join("main/ui/scene_view.c"));
     for font in [
         "deskmate_font_18.c",

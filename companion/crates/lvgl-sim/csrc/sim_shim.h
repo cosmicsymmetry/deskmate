@@ -6,9 +6,7 @@
 /* One-time process init: lv_init + headless display. Returns false on failure. */
 bool sim_init(void);
 
-/* ---------------------------------------------------------------------
- * Task 8 (stage 2a): scene rendering.
- * ------------------------------------------------------------------ */
+/* Scene rendering. */
 
 /* Registers an asset blob under `digest` in the RAM-backed asset store,
  * idempotently per digest (a second registration of the same digest is a
@@ -24,8 +22,8 @@ bool sim_asset_register(const uint8_t *digest, const uint8_t *bytes,
 
 /* Why sim_render_scene returns a status rather than a bool.
  *
- * Two very different things can go wrong, and Task 9's parity gate is the
- * caller most likely to hit one of them:
+ * Two very different things can go wrong, and framebuffer comparisons need
+ * to distinguish them:
  *
  *   - THE DECODER REFUSED THE BYTES. This is the failure mode the
  *     encode/decode design introduces: protocol::encode_scene_payload and

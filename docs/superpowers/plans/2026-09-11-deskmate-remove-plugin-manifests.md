@@ -1,5 +1,8 @@
 # Remove manifest-based plugins entirely
 
+> **STATUS — HISTORICAL IMPLEMENTATION RECORD.** This plan records completed subtraction
+> against an earlier architecture; it is not current architecture or build guidance.
+
 Branch: `refactor/remove-plugin-manifests`, cut from `refactor/retire-device-data-cards` at
 `bca8df8`. Owner direction, 2026-09-11, verbatim:
 

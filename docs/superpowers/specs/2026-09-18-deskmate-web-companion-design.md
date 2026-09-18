@@ -2,25 +2,15 @@
 
 Status: delivered on 2026-09-18 after owner approval (direct direction, `/goal`). The
 migration language below records the change; the web companion is now the current system.
-Supersedes the Tauri desktop app as the companion surface.
 
 ## 1. Why
 
-The owner's stated problem is iteration speed: every change to a face, a setting or a
-card shape costs a server redeploy *and* a Mac app rebuild, and the two must be ordered.
-The app half of that cost is removable, and most of it has already been removed --
+The owner's stated problem was iteration speed: the companion surface had been a second
+distribution boundary, so every UI change required rebuilding, signing and relaunching a
+native bundle. The browser SPA removes that boundary and can be exercised by the same
+browser automation used during development. It is served by the Rust server it talks to;
 `d51e554` made an image source describe its own settings and `3616af0` made the add menu
-build itself from `/v1/faces`, so a new face already needs no app change.
-
-What remains is the app as a *distribution* problem: a binary that must be rebuilt,
-signed and relaunched to see any UI change, and which cannot be driven by a browser
-automation tool. This design moves the companion into the browser, served by the
-server it already talks to.
-
-It also removes a class of defect the desktop app uniquely had: the dev harness runs in
-Chrome and the app runs in WKWebView, and the two disagree (see the `mousedown` focus
-trap in `CLAUDE.md`). When the browser *is* the product, the harness and the target are
-the same engine.
+build itself from `/v1/faces`, so a new face needs no SPA change.
 
 **This design does not claim to fix deploy speed.** Serving the UI from the server makes
 a CSS change cost a file copy, not a Rust build -- but only because §5 deliberately
@@ -29,14 +19,13 @@ serves the SPA from a directory rather than embedding it in the binary. Rust-sid
 
 ## 2. Scope
 
-**In:** every surface the Mac app presents for a *networked* device -- the card loop, the
+**In:** every companion surface for a *networked* device -- the card loop, the
 card editor, the preview, image sources and their face settings, preferences, and the
 settings sheet's device/link/update disclosure.
 
 **Out, and deliberately:**
 
-- **Local tier.** The Mac app as the device's owner over USB, running `app-core`'s
-  scheduler and push loop. A browser tab is not a daemon: it dies when closed, is
+- **Direct USB ownership.** A browser tab is not a daemon: it dies when closed, is
   throttled in the background, and has no autostart. This is not a Web Serial
   limitation -- it is a process-lifetime one.
 - **Cable operations** (`provision_device`, `factory_reset_device`). `CLAUDE.md` already
@@ -103,44 +92,42 @@ scenario the mock harness has had all along.
 
 ## 4. Server: the `app_api` module
 
-New `crates/server/src/app_api.rs`, mounted under `/v1/app`, every route behind
+`crates/server/src/app_api/`, mounted under `/v1/app`, keeps every route behind
 `OperatorAuthenticated`.
 
-| Route | Replaces Tauri command | Notes |
+| Route | SPA operation | Notes |
 |---|---|---|
-| `GET /v1/app/devices` | — | ids + link state; the SPA picks one |
-| `GET /v1/app/{id}/snapshot` | `get_app_snapshot` | §3.2 |
-| `GET /v1/app/{id}/events` | `listen("app-state")` | SSE, snapshot per event |
-| `POST /v1/app/{id}/config/validate` | `validate_config_draft` | `AppConfig::compile` |
-| `PUT /v1/app/{id}/config` | `save_apply_config` / `save_server_config` | shares `put_config`'s body |
-| `POST /v1/app/{id}/preview` | `render_card_preview` | `lvgl-sim`, §4.1 |
-| `POST /v1/app/{id}/pomodoro` | `control_pomodoro` | live runtime only |
+| `GET /v1/app/devices` | List devices | ids + link state; the SPA picks one |
+| `GET /v1/app/{id}/snapshot` | Read current state | §3.2 |
+| `GET /v1/app/{id}/events` | Subscribe to state | SSE, snapshot per event |
+| `POST /v1/app/{id}/config/validate` | Validate draft | `AppConfig::compile` |
+| `PUT /v1/app/{id}/config` | Save and apply config | shares `put_config`'s body |
+| `POST /v1/app/{id}/preview` | Render preview | `lvgl-sim`, §4.1 |
+| `POST /v1/app/{id}/pomodoro` | Control pomodoro | live runtime only |
 
 Image sources and faces are **not** duplicated here: `/v1/images` and `/v1/faces` already
 exist and already carry the shapes the app wants. They keep admin/producer bearer auth;
 the SPA calls them with the admin token it holds after login.
 
-Deleted with `src-tauri`: `set_server_endpoint`, `provision_device`,
-`factory_reset_device`, `use_local_ownership`, `get_autostart_status`,
-`set_autostart_enabled`. `resume_pushing` survives as a config write (`paused: false`),
-because `CLAUDE.md` requires the one-off "Resume sending" escape hatch to keep working.
+Provisioning and factory reset remain cable operations handled by `crates/deskmate-cli`;
+the SPA has no local-ownership or autostart controls. Resuming delivery is a config write
+(`paused: false`), preserving the one-off "Resume sending" escape hatch.
 
 ### 4.1 Preview
 
-`lvgl-sim` joins the server's dependencies and `POST /v1/app/{id}/preview` returns the
-same `PreviewFrame` the Tauri command returned. This is a `cc` build of LVGL, which
-already compiles on Linux in CI, and the server is already built in a Linux container.
+`POST /v1/app/{id}/preview` returns the `PreviewFrame` consumed by the SPA. The server's
+`lvgl-sim` dependency is a `cc` build of LVGL, which compiles on Linux in CI alongside
+the server.
 
 `crates/lvgl-sim/tests/preview_path.rs` stays the honest check, and
 `CLAUDE.md`'s rule holds unchanged: **one renderer**. Nothing here adds a second.
 
 ### 4.2 The type contract must not be lost
 
-The TS↔Rust fixture generator lives at
-`apps/deskmate/src-tauri/src/commands/mod.rs:1856` and writes `src/lib/types.contract.ts`.
-Deleting `src-tauri` would silently delete the only thing pinning the JSON shape the
-frontend parses. It **moves into `crates/server/tests/`** and keeps writing the same
-file, asserted the same way.
+The TS↔Rust fixture generator lives beside the Rust API DTOs in
+`crates/server/src/app_api/contract.rs`. Its test writes
+`apps/deskmate/src/lib/types.contract.ts` and asserts the checked file matches byte for
+byte, so drift between the JSON shape and the frontend contract fails the server test.
 
 ## 5. Serving the SPA
 
@@ -155,15 +142,10 @@ a UI change becomes `bun run build` + rsync + nothing, with no Rust compile and 
 
 ## 6. Frontend
 
-`src/lib/tauri.ts` is replaced by `src/lib/backend.ts` **exporting the same function
-names and the same types**. Every component keeps its import shape; only the module
-specifier changes. `invoke(cmd, args)` becomes `fetch`, and `listen("app-state")`
-becomes an `EventSource`.
-
-This is why the migration is cheap: `vite.config.ts` already aliases the IPC bridge to
-`src/dev/mockBackend.ts` under `VITE_DESKMATE_MOCK=1`, so the boundary was already a
-seam with two implementations. This adds a third. **The mock harness keeps working
-unchanged** and stays the offline development path.
+`src/lib/backend.ts` is the component-facing boundary and exports the HTTP client in
+`src/lib/backendClient.ts`. Requests use `fetch`, while state updates arrive through an
+`EventSource`. Under `VITE_DESKMATE_MOCK=1`, `vite.config.ts` aliases that client to
+`src/dev/backendClient.ts`, keeping the mock harness as the offline development path.
 
 Removed from the UI, following §2: the provisioning form, factory reset, the local-tier
 ownership choice, and the autostart toggle. `SettingsSheet` remains the product's only
@@ -185,8 +167,7 @@ milestone.
 - `crates/lvgl-sim/tests/preview_path.rs` keeps proving the preview path.
 - The frontend's `bun test` suite survives the module swap; `src/dev/mockBackend.ts`
   keeps every scenario renderable without a server.
-- End-to-end: the real SPA driven in Chrome against the deployed server -- which is now
-  possible at all, and is the check the desktop app could never have.
+- End-to-end: the real SPA driven in Chrome against the deployed server.
 
 ## 9. Deploy
 

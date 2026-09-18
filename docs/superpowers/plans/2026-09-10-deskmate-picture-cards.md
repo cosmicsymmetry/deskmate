@@ -1,5 +1,8 @@
 # Picture Cards Implementation Plan
 
+> **STATUS — HISTORICAL IMPLEMENTATION RECORD.** Picture cards remain live, but this plan
+> records their original delivery paths and is not current architecture or build guidance.
+
 > **STATUS (2026-09-10): ALL ELEVEN TASKS ARE IMPLEMENTED AND MERGED on
 > `feat/picture-cards`. The checkboxes below were NOT ticked during execution —
 > do not read an unticked `- [ ]` here as outstanding work.** All four workspace

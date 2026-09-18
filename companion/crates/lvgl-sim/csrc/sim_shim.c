@@ -100,10 +100,9 @@ bool sim_init(void)
 }
 
 /* ---------------------------------------------------------------------
- * Task 12: RAM-backed asset store shim.
+ * RAM-backed asset store shim.
  *
- * The spec's parity obligation (see the module doc in cases.rs and the
- * task-12 brief) is that the simulator resolves the same digest to the
+ * The simulator must resolve the same digest to the
  * same bytes the device would. On device that path is
  * link/asset_flash.c's esp_partition-backed asset_flash_io_t feeding
  * core/asset_store.c, with link/protocol_task.c's protocol_asset_resolver
@@ -287,12 +286,12 @@ static bool ensure_font_registry(void)
 }
 
 /* ---------------------------------------------------------------------
- * Task 8 (stage 2a): scene rendering.
+ * Scene rendering.
  *
  * The whole of the simulator's scene support. It adds no rendering logic
  * of its own -- ui/scene_view.c does all of it, compiled from the
  * firmware tree by build.rs -- only the three things the host has no
- * equivalent of: somewhere to put a decoded scene_t, a `field.` lookup,
+ * equivalent of: somewhere to put a decoded scene_t, a binding context,
  * and the LVGL binary image wrapper an `image` node reads.
  * --------------------------------------------------------------------- */
 

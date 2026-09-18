@@ -10,7 +10,7 @@ use crate::{LastGood, Provider, ProviderError, ProviderSnapshot, RefreshPolicy};
 pub const MIN_WEATHER_REFRESH_INTERVAL: Duration = Duration::from_mins(10);
 const GEOCODING_ENDPOINT: &str = "https://geocoding-api.open-meteo.com/v1/search";
 const FORECAST_ENDPOINT: &str = "https://api.open-meteo.com/v1/forecast";
-/// Keeps implausible temperatures outside the face renderer's layout range.
+/// Rejects implausible provider data before it enters the application state.
 const MIN_TEMPERATURE_DEGREES: f64 = -200.0;
 const MAX_TEMPERATURE_DEGREES: f64 = 200.0;
 /// How many hours the strip can show. The face draws six columns; asking
@@ -192,8 +192,7 @@ fn parse_forecast(body: &str, location: &str) -> Result<WeatherReading, Provider
     })
 }
 
-/// The temperature window this provider admits so a nonsensical reading cannot
-/// produce an unrenderable face.
+/// Applies a broad semantic sanity bound to temperatures returned by the provider.
 fn bounded_temperature(value: f64) -> Result<f64, ProviderError> {
     if (MIN_TEMPERATURE_DEGREES..=MAX_TEMPERATURE_DEGREES).contains(&value) {
         Ok(value)
@@ -420,9 +419,9 @@ mod tests {
         }
     }
 
-    /// Temperatures outside the provider's layout-safe window are rejected.
+    /// Temperatures outside the provider's semantic sanity bounds are rejected.
     #[test]
-    fn temperature_window_rejects_values_the_face_cannot_render() {
+    fn temperature_window_rejects_implausible_values() {
         let forecast = |celsius: f64| {
             format!(
                 r#"{{"current":{{"temperature_2m":{celsius},"apparent_temperature":{celsius},"weather_code":3,"is_day":1}}}}"#
@@ -435,7 +434,7 @@ mod tests {
         for outside in [200.1, -200.1, 240.0] {
             assert!(
                 parse_forecast(&forecast(outside), "Nowhere").is_err(),
-                "{outside} is outside the renderable range and must be rejected"
+                "{outside} is implausible provider data and must be rejected"
             );
         }
     }

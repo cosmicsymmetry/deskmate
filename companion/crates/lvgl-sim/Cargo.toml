@@ -9,14 +9,14 @@ rust-version.workspace = true
 app-core = { path = "../app-core" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 png = "0.17"
-# Task 8: the scene model and its CBOR encoder. `render_scene` hands the
+# The scene model and its CBOR encoder. `render_scene` hands the
 # firmware's own scene_decode() the bytes protocol::encode_scene_payload
 # writes, so the simulator and the device build their scene_t from the same
 # payload with the same decoder.
 protocol = { path = "../protocol" }
 
 [dev-dependencies]
-# Task 12: verifies assets::INTER_SUBSET_SHA256 still matches the committed
+# Verifies assets::INTER_SUBSET_SHA256 still matches the committed
 # assets/Inter-subset.ttf. Not used by the non-test render path itself,
 # which registers assets under the written-down digest constant, never a
 # hash computed at render time.

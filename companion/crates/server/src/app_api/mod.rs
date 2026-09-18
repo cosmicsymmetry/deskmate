@@ -4,9 +4,9 @@
 //! against `src/lib/types.ts` through the generated `types.contract.ts` fixture,
 //! so the Rust HTTP API and TypeScript client share one vocabulary.
 //!
-//! Errors use the frontend's `IpcError` discriminated union, carried in the body
-//! with a matching HTTP status. The client switches on the same category that
-//! non-browser callers can infer from the status.
+//! HTTP errors carry a discriminated JSON body matching the frontend's
+//! `IpcError` union, plus the corresponding status. The web client switches on
+//! the same category that non-browser callers can infer from the status.
 //!
 //! Every route is behind [`OperatorAuthenticated`]. That is the real gate. The
 //! Caddy `basic_auth` in front of these paths is the edge gate the owner asked
@@ -39,7 +39,7 @@ use crate::oauth::session::{OperatorAuthenticated, SessionSigner, set_cookie_hea
 
 /// How long a companion session lasts. Longer than the OAuth-console session
 /// (`oauth::routes::SESSION_TTL`, 12 h) on purpose: that one fronts a consent
-/// flow an operator visits occasionally, this one fronts the window the owner
+/// flow an operator visits occasionally, this one fronts the page the owner
 /// keeps open, and a daily re-login to read a clock face is friction with no
 /// security to show for it. The admin token is exchanged, not stored by the
 /// browser.
@@ -62,7 +62,7 @@ const EVENT_POLL: Duration = Duration::from_secs(1);
 /// The longest the stream will go without sending, once connected.
 ///
 /// The change test below ignores telemetry, so without this floor the numbers it
-/// ignores would never reach the window at all. Half a minute is far finer than
+/// ignores would never reach the web client at all. Half a minute is far finer than
 /// anyone reads a signal strength and far coarser than a re-render costs.
 const EVENT_HEARTBEAT: Duration = Duration::from_secs(30);
 
@@ -82,8 +82,9 @@ pub(crate) fn routes() -> Router<ServerState> {
 // Errors
 // ---------------------------------------------------------------------------
 
-/// The frontend's `IpcError` response. `category` is what the app switches on;
-/// the HTTP status carries the same decision for any other client.
+/// An HTTP error response matching the frontend's `IpcError` union. `category`
+/// is what the web app switches on; the status carries the same decision for
+/// any other client.
 #[derive(Debug, Serialize)]
 #[serde(tag = "category", rename_all = "kebab-case")]
 pub(crate) enum AppApiError {
@@ -210,7 +211,7 @@ struct DeviceRow {
     connected: bool,
     /// Whether this identity has ever been configured.
     ///
-    /// Reported because the window has to open on *a* display and the registry's
+    /// Reported because the companion page has to select *a* display and the registry's
     /// order is mint order, not usefulness: a server that has minted spare
     /// identities over time lists several that were never configured, and
     /// opening on the first of those shows an empty loop for a display that is
@@ -353,7 +354,7 @@ fn known_device(state: &ServerState, device_id: &str) -> Result<(), AppApiError>
 // Events
 // ---------------------------------------------------------------------------
 
-/// An SSE snapshot stream using the frontend's `app-state` event name.
+/// An SSE snapshot stream using the `app-state` event consumed by the web companion.
 ///
 /// Sends only on change: an idle panel produces SSE keep-alive comments and no
 /// payloads, so an open tab costs nothing to hold.
@@ -391,18 +392,18 @@ async fn events(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
-/// The part of a snapshot worth waking the window for.
+/// The part of a snapshot worth notifying the web client about.
 ///
 /// A linked board reports its uptime, its signal strength and its frame counters
 /// continuously, so a byte-for-byte comparison finds the snapshot different every
-/// couple of seconds and re-renders the entire window for numbers nothing acts
+/// couple of seconds and re-renders the entire page for numbers nothing acts
 /// on. Measured on the live server: six frames in twelve seconds, differing only
 /// in `uptime_ms`, `wifi_rssi` and `counters.valid_frames`. The symptom was not
-/// subtle -- the window never held still long enough for a browser to consider a
+/// subtle -- the page never held still long enough for a browser to consider a
 /// button clickable.
 ///
 /// Telemetry is blanked rather than dropped, so a field appearing or disappearing
-/// is still a change. The values themselves still reach the window, on
+/// is still a change. The values themselves still reach the web client on
 /// [`EVENT_HEARTBEAT`].
 pub fn change_key(value: &serde_json::Value) -> String {
     let mut value = value.clone();
@@ -413,7 +414,7 @@ pub fn change_key(value: &serde_json::Value) -> String {
             }
         }
     }
-    // Pure host-side tallies; the window renders none of them.
+    // Pure host-side tallies; the web companion renders none of them.
     if let Some(diagnostics) = value.get_mut("diagnostics") {
         *diagnostics = serde_json::Value::Null;
     }
@@ -508,7 +509,7 @@ fn missing_capability_issues(
     }]
 }
 
-/// Names capabilities the way the person reading the settings window needs them.
+/// Names capabilities the way the person reading the settings page needs them.
 /// A raw bitmask would name nothing the operator could act on.
 fn describe_capabilities(bits: u64) -> String {
     let mut names: Vec<&'static str> = app_core::DeviceCapability::from_bits(bits)
@@ -789,7 +790,7 @@ async fn preview(
 /// mount, and the simulator reproduces it by reversing the finished frame exactly
 /// as the firmware's `LV_DISPLAY_ROTATION_270` does. On the panel that flip is
 /// cancelled by the physical mounting, so a person always sees an upright face;
-/// rendered into a window that is not itself upside down, it is just upside down.
+/// rendered in a browser that is not itself upside down, it is just upside down.
 /// The preview's job is to show what the person will see.
 fn preview_orientation(configured: DisplayOrientation) -> lvgl_sim::SimOrientation {
     match configured {

@@ -1,5 +1,9 @@
 # Deskmate M3 - Daily-Use Companion App Implementation Plan
 
+> **STATUS — HISTORICAL IMPLEMENTATION RECORD.** This plan describes the deleted native
+> companion and its paths at the time of delivery; it is not current architecture or build
+> guidance.
+
 **Status:** Complete on 2026-08-05. Software, macOS app, physical-board UI/replay,
 sleep/wake, and tray-resident soak checks pass. The user accepted the completed morning
 soak and explicitly waived repeating it after the later orientation/clean-canvas change,

@@ -1,5 +1,8 @@
 # V3 Sub-Project 4 — Management Surface Implementation Plan
 
+> **STATUS — HISTORICAL IMPLEMENTATION RECORD.** This executed plan preserves the paths
+> and checks used at the time; it is not current architecture or build guidance.
+
 > **STATUS: EXECUTED 2026-09-13, all five tasks complete.** Boxes are ticked as
 > verified. Commits: `5749461` (one `AdminAuthenticated`), `78987b3` (the two
 > listings), `64ed968` (the surface itself). Full gate green: fmt, clippy, 643

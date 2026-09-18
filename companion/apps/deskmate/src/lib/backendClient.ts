@@ -274,8 +274,9 @@ export const saveServerConfig = saveApplyConfig;
  * What this window is talking to.
  *
  * The server URL is this page's own origin by construction -- the app is served
- * by the server it configures -- and the tier is always networked, because a
- * browser cannot be a device's local owner.
+ * by the server it configures -- and the tier is always networked because this
+ * web companion only uses server-owned routes. `deskmate-cli` handles cable
+ * ownership.
  */
 export function getNetworkSettings(): Promise<NetworkSettings> {
   return deviceId()
@@ -318,9 +319,9 @@ export async function setServerEndpoint(
 
 // Provisioning, factory reset and the local-ownership switch are not here.
 // They write the display's own Wi-Fi and server settings over the cable, which a
-// browser does not have, and `deskmate-cli` already performs all of them. An
-// exported stub that always threw would have put the same absence behind a
-// button that looks like it works.
+// web companion does not implement. `deskmate-cli` is the supported path for
+// all of them. An exported stub that always threw would have put the same absence
+// behind a button that looks like it works.
 
 /**
  * Clears `preferences.paused`, which is what "Resume sending" means.

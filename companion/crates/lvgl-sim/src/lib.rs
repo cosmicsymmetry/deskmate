@@ -10,13 +10,13 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-/// The reference-template golden cases and the scene cases used by the
-/// physical framebuffer harness. See `cases.rs` for their distinct roles.
+/// Shared render cases used by golden tests and the physical framebuffer
+/// harness.
 pub mod cases;
 
 /// The runtime font asset used by the 72px asset-backed SceneText golden.
 /// See its module doc for why the vendored TTF is patched before being subset.
-pub mod assets;
+mod assets;
 
 /// Rendering a declarative scene through the firmware's own decoder and
 /// `ui/scene_view.c` interpreter. See its module doc for why it goes through the wire format
@@ -49,25 +49,25 @@ pub enum SimError {
     InitFailed,
     /// PNG encoding of a successfully rendered frame failed.
     EncodeFailed,
-    /// Task 8: the scene failed `protocol::validate_scene`, the host mirror of
+    /// The scene failed `protocol::validate_scene`, the host mirror of
     /// the device's `scene_model_validate()`. Caught before encoding, so the
     /// reason survives; the device would have refused the same scene with no
     /// reason attached.
     SceneInvalid(protocol::MessageError),
-    /// Task 8: an asset a scene names could not be put in the simulator's
+    /// An asset a scene names could not be put in the simulator's
     /// asset store — a full store, or a malformed image.
     AssetRegistrationFailed,
-    /// Task 8: `sim_render_scene`'s own `sim_init`, asset store, or font
+    /// `sim_render_scene`'s own `sim_init`, asset store, or font
     /// registry setup failed. Nothing about this scene's bytes or content —
     /// see `SceneDecodeFailed` and `SceneRenderRefused` for those.
     SceneSetupFailed,
-    /// Task 8: `firmware/main/core/scene_decode.c`'s `scene_decode()` refused
+    /// `firmware/main/core/scene_decode.c`'s `scene_decode()` refused
     /// the encoded payload. This is the failure mode the encode/decode design
     /// introduces — the encoder and decoder disagreeing about the wire shape
     /// — and it must stay distinguishable from `SceneRenderRefused` (a
     /// drawing-time failure) without a debugger.
     SceneDecodeFailed(scene::SceneDecodeReason),
-    /// Task 8: `firmware/main/ui/scene_view.c`'s `scene_view_show()` refused
+    /// `firmware/main/ui/scene_view.c`'s `scene_view_show()` refused
     /// the decoded scene — an asset it could not acquire, or an allocation
     /// failure. The payload decoded fine; drawing it did not work.
     SceneRenderRefused,

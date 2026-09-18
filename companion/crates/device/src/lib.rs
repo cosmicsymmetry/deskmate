@@ -12,12 +12,12 @@ pub mod framebuffer_capture;
 mod session;
 
 pub use session::{
-    ConnectedSession, DEFAULT_EVENT_QUEUE_CAPACITY, DEFAULT_KEEPALIVE_INTERVAL, DeviceSession,
-    ReceivedEvent, SessionDiagnostics, SessionOptions, connect_session,
+    ConnectedSession, DEFAULT_EVENT_QUEUE_CAPACITY, DeviceSession, ReceivedEvent,
+    SessionDiagnostics, connect_session,
 };
 
-pub const ESPRESSIF_USB_VID: u16 = 0x303a;
-pub const ESP32_S3_SERIAL_JTAG_PID: u16 = 0x1001;
+const ESPRESSIF_USB_VID: u16 = 0x303a;
+const ESP32_S3_SERIAL_JTAG_PID: u16 = 0x1001;
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const SERIAL_READ_TIMEOUT: Duration = Duration::from_millis(100);
 
@@ -120,7 +120,8 @@ impl<T: Transport> DeviceClient<T> {
         }
     }
 
-    pub fn with_timeout(transport: T, timeout: Duration) -> Self {
+    #[cfg(test)]
+    fn with_timeout(transport: T, timeout: Duration) -> Self {
         Self {
             timeout,
             ..Self::new(transport)
@@ -219,7 +220,7 @@ pub struct SerialTransport {
 }
 
 impl SerialTransport {
-    pub fn open(path: &str) -> Result<Self, DeviceError> {
+    fn open(path: &str) -> Result<Self, DeviceError> {
         let port = serialport::new(path, 115_200)
             .timeout(SERIAL_READ_TIMEOUT)
             .open()

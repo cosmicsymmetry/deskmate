@@ -1,5 +1,9 @@
 # Waveshare ESP32-S3-Touch-AMOLED-1.8 (v2) — board notes
 
+**Status: HISTORICAL LAB RECORD.** Dated entries preserve the exact software and hardware
+used for each observation; names of retired host software are evidence, not current setup
+instructions.
+
 Board under bring-up: **Waveshare ESP32-S3-Touch-AMOLED-1.8, v2 hardware revision**
 (panel controller **CO5300**; the v1 revision uses **SH8601** and is a different chip —
 see the "v1 vs v2" section below for every place this matters).

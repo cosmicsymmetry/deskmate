@@ -1,5 +1,8 @@
 # Deskmate — Card Model Design
 
+> **STATUS — HISTORICAL DESIGN.** This records the original card-model architecture and
+> companion transport; it is not a description of the current web companion.
+
 **Date:** 2026-08-06
 **Status:** Approved by Rodion (pending written-spec review)
 **Amends:** `docs/superpowers/specs/2026-08-03-deskmate-design.md` sections 4 and 5

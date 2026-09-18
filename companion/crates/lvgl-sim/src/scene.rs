@@ -23,7 +23,7 @@
 //! resolves a digest by itself. [`SceneAsset`] entries are registered into
 //! `csrc/sim_shim.c`'s RAM-backed asset store (the same
 //! `firmware/main/core/asset_store.c` the device uses, over a heap buffer
-//! instead of flash — see that file's Task 12 section) before the scene is
+//! instead of flash) before the scene is
 //! decoded, and `sim_render_scene` wires that store to `scene_view.c` through
 //! `scene_view_set_asset_resolver`. Without that call an `image` node refuses
 //! the whole scene; the shim makes it unconditionally rather than only when a

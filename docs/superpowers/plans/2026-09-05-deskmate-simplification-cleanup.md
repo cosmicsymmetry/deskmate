@@ -1,5 +1,8 @@
 # Deskmate simplification cleanup — 2026-09-05
 
+> **STATUS — HISTORICAL IMPLEMENTATION RECORD.** This plan describes the system and
+> paths at the time of its dated work; it is not current architecture or build guidance.
+
 Source: the whole-repository simplification review of 2026-09-03/04 (207 findings from
 23 review areas, 164 confirmed by independent verifiers, 26 contested and adjudicated,
 17 refuted and kept). The review was static: nobody built, flashed, or pushed anything.

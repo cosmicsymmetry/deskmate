@@ -23,8 +23,8 @@ device-rendered data cards were deleted:
 `e137294` (2026-09-11) removed manifest-based plugins and stated two consequences. One of
 them is now false and one is still true.
 
-- **False:** "The server now makes no outbound HTTP at all." It does again, for these
-  three cards, through the SSRF guard restored whole.
+- **False:** "The server now makes no outbound HTTP at all." It does for these three
+  cards, with every provider request routed through the shared SSRF guard.
 - **Still true:** "a server-side card can no longer change between pushes." These faces
   are frozen frames. Clock and pomodoro remain the only faces that tick.
 
@@ -67,7 +67,7 @@ one *scene* renderer; a picture card already delivers its face as a durable RGB5
 behind a one-`Image`-node scene (`frame_face_scene`), and these cards use that.
 
 **2. Not new card kinds.** Schema stays v10. Each card is a `picture` card plus an entry
-in a server-side file. Native kinds would put these in the companion window with their own
+in a server-side file. Native kinds would put these in the companion SPA with their own
 editors, and that is worth doing — but it is a schema bump plus TS contract plus editors
 plus migration, and it changes none of the fetch, the faces, the frames or the delivery.
 Putting fields in the config document that no window can author and no migration can
@@ -104,13 +104,12 @@ network and no golden image.
 
 ## Security
 
-Every outbound request goes through `crates/server/src/egress.rs`, restored unchanged:
-scheme checks, the RFC1918/loopback/link-local/`169.254.169.254` deny list,
-resolve-then-pin against DNS rebinding, per-hop re-validation across redirects, a body cap
-and a wall-clock budget. `EgressHttpClient` implements the providers' own `HttpClient`
-trait, which is the seam that makes "no server-side card may use another client" true
-rather than intended — `providers::http::SystemHttpClient` checks only the scheme and
-would happily fetch `http://192.168.1.1/`.
+Provider URL validation rejects invalid syntax, non-HTTP(S) schemes, missing hosts and
+embedded credentials. The server constructs the weather, RSS and token providers with
+`EgressHttpClient`, which implements their `HttpClient` trait and routes every GET through
+`crates/server/src/egress.rs`. That guard adds address-level SSRF denial, including the
+RFC1918/loopback/link-local/`169.254.169.254` deny list, resolve-then-pin against DNS
+rebinding, per-hop re-validation across redirects, a body cap and a wall-clock budget.
 
 Feed and ticker text reaches an SVG document, so `faces::svg::escape` handles all five
 predefined entities and drops the control characters XML 1.0 cannot carry. A hostile
@@ -148,6 +147,6 @@ CoinGecko fetch failed while `curl` to the same URL worked.
   Owed once the board is flashed with `v2.1.0-proto2`: one weather, one token and one RSS
   face on `dev-0005`, at both mountings, plus the RLE565 transfer size for each so the
   flat-fill argument above is measured rather than asserted.
-- **Native card kinds (schema v11).** Editors in the companion window for the location,
+- **Native card kinds (a prospective schema v11).** Editors in the companion SPA for the location,
   the feed URL and the coin id, replacing the spec file. Strictly additive on top of this.
 - The spec file is the honest interim: it says where the authority currently sits.

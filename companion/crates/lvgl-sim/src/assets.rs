@@ -24,9 +24,9 @@
 //! document and fix for the four baked `deskmate_font_*` faces
 //! (`lv_font_conv` has the identical raw-cmap limitation). This golden
 //! renders `12:34`, where digit advance width and colon alignment are
-//! precisely what would regress if that patch were skipped. The original source
-//! and patch helper were removed with the server rasterizer; this derived test
-//! asset remains independently licensed and content-addressed.
+//! precisely what would regress if that patch were skipped. The renderer only
+//! needs this derived, independently licensed, content-addressed test asset at
+//! build and runtime.
 //!
 //! [`INTER_SUBSET_TTF`] was produced by first repointing digit codepoints
 //! U+0030-U+0039 at Inter's tabular glyph outlines, then running:
@@ -52,7 +52,7 @@
 
 /// The patched + subset Inter TTF described in this module's doc comment.
 /// Committed at `assets/Inter-subset.ttf`.
-pub const INTER_SUBSET_TTF: &[u8] = include_bytes!("../assets/Inter-subset.ttf");
+pub(crate) const INTER_SUBSET_TTF: &[u8] = include_bytes!("../assets/Inter-subset.ttf");
 
 /// SHA-256 of [`INTER_SUBSET_TTF`], written down rather than computed at
 /// test time — the digest is this asset's identity in the store, so a silent file
@@ -61,7 +61,7 @@ pub const INTER_SUBSET_TTF: &[u8] = include_bytes!("../assets/Inter-subset.ttf")
 /// constant still matches the committed file. Regenerate both together with
 /// `shasum -a 256 assets/Inter-subset.ttf` if the file is intentionally
 /// replaced.
-pub const INTER_SUBSET_SHA256: [u8; 32] = [
+pub(crate) const INTER_SUBSET_SHA256: [u8; 32] = [
     0x40, 0xbb, 0xba, 0xc7, 0x15, 0x46, 0x5a, 0xdf, 0x7b, 0xa5, 0x39, 0xf5, 0x3a, 0x0c, 0xb1, 0x69,
     0x91, 0xa2, 0xc1, 0xf7, 0x3a, 0x4f, 0xb5, 0x7a, 0xf2, 0x09, 0xd3, 0x9e, 0x0c, 0x62, 0xb3, 0x27,
 ];

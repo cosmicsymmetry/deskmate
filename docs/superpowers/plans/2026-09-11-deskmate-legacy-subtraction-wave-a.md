@@ -1,5 +1,8 @@
 # Legacy Subtraction — Wave A Implementation Plan
 
+> **STATUS — HISTORICAL IMPLEMENTATION RECORD.** This delivered plan preserves the paths
+> and checks used at the time; it is not current architecture or build guidance.
+
 > **STATUS: DELIVERED 2026-09-11**, in seven commits on
 > `refactor/wave-a-legacy-subtraction`. The boxes below are NOT back-filled --
 > ticking 69 of them from memory is the thing this repo's own rule warns against --

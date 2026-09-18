@@ -75,9 +75,8 @@ fn parse_port() -> Result<Option<String>, String> {
 
 /// Returns the reason a scene case cannot be pushed by this harness.
 ///
-/// Protocol v2 closed the `field.*` exclusions this function used to carry:
-/// there is no field namespace and therefore no registry to fall outside of.
-/// What is left is the one timing race below, which no wire change can fix.
+/// Every case uses the supported binding vocabulary. The only exclusion is
+/// the timing race below, which no wire change can fix.
 fn exclusion_reason(name: &str, _request: &SceneRenderRequest) -> Option<&'static str> {
     if name.starts_with("progress-ring--running-mid-countdown--") {
         Some(
@@ -253,9 +252,9 @@ fn push_case_assets(
                 digest,
                 kind: asset.kind,
                 total_length,
-                // Stage 1 has no volatile (PSRAM) tier; the device refuses
-                // `volatile: true` outright (see `server::asset_sync`'s
-                // own comment on this).
+                // The comparison harness uses durable raw assets so the same
+                // path works across every asset-transfer-capable device and
+                // the bytes remain available throughout capture.
                 volatile: false,
                 encoding: protocol::ASSET_ENCODING_RAW,
                 decoded_length: None,
@@ -577,7 +576,7 @@ mod tests {
         assert_eq!(
             other_exclusions, 0,
             "the running-timer race is the only reason a row cannot be pushed to \
-             hardware; protocol v2 removed the field namespace the other four named"
+             hardware"
         );
         assert_eq!(excluded, 2);
         assert_eq!(requests.len() - excluded, 42);

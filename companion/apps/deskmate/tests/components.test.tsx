@@ -421,6 +421,22 @@ describe("settings accessibility and states", () => {
     expect(html).not.toContain("stored-admin-secret");
   });
 
+  test("the web companion exposes no cable operations", () => {
+    // Provisioning, ownership changes, and factory reset remain CLI-only. Assert
+    // their visible labels are absent so an unimplemented control cannot quietly
+    // reappear in the web companion.
+    const html = renderNetworkPanel({
+      tier: "networked",
+      wifiState: "connected",
+      ip: "10.0.0.2",
+    });
+    expect(html).not.toContain("Pair with server");
+    expect(html).not.toContain("Return to local ownership");
+    expect(html).not.toContain("Factory-reset");
+    expect(html).not.toContain("WiFi passphrase");
+    expect(html).not.toContain("Device token");
+  });
+
   test("signing in submits the admin token once and then clears it", async () => {
     const attempts: { serverUrl: string; deviceId: string; adminToken: string }[] = [];
     const container = document.createElement("div");
@@ -1085,6 +1101,11 @@ describe("settings accessibility and states", () => {
     // IDs are wire identifiers, not something a person should see or edit.
     expect(html).not.toContain("Widget ID");
     expect(html).not.toContain("internal-uuid-0001");
+  });
+
+  test("the card editor shows no fixed canvas dimension caption", () => {
+    const html = renderCardEditor(clockCard("clock-1"));
+    expect(html).not.toContain("448");
   });
 
   test("pomodoro cards offer their timer-finish alert controls", () => {

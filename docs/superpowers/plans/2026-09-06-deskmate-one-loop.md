@@ -1,5 +1,8 @@
 # One Loop — collapse the card library and playlists into the loop
 
+> **STATUS — HISTORICAL IMPLEMENTATION RECORD.** This plan describes the system and
+> paths at the time of its dated work; it is not current architecture or build guidance.
+
 **Status:** approved by the owner on 2026-09-06 from a rendered mockup; implementing.
 **Branch:** `feat/one-loop` (worktree `.worktrees/one-loop`), off `feat/v2-networked-device`.
 **Scope:** companion app UI only. **Schema v6 is untouched, protocol v1 is untouched,

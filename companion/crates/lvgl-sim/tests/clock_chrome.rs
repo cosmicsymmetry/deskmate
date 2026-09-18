@@ -1,7 +1,7 @@
 //! The clock faces draw no card title.
 //!
-//! `title` remains a schema field — it names the card in the companion's
-//! window — but no clock face renders it. See
+//! `title` remains a schema field — it names the card in configuration and
+//! management surfaces — but no clock face renders it. See
 //! `docs/superpowers/specs/2026-08-17-deskmate-clock-title-removal-design.md`.
 //! Golden PNGs cannot state this: they pin one frame per case, not the
 //! relationship between two frames that differ only in their title. This test

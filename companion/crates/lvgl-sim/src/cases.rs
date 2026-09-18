@@ -8,43 +8,13 @@
 //! `lvgl_sim::cases`.
 //!
 //! Every value a node binds comes from the closed vocabulary in
-//! `firmware/main/core/scene_binding.h` — `time:`, `date` and the `timer.*`
-//! family, and nothing else. Protocol v2 retired the `field.` namespace along
-//! with the device's per-card field bag.
+//! `firmware/main/core/scene_binding.h`: `time:`, `date` and the `timer.*`
+//! family.
 
 use std::sync::{Arc, LazyLock};
 
 use crate::SimOrientation;
 use protocol::AssetKind;
-
-/// One host-owned data state used by the scene/C-template parity gate.
-///
-/// They are intentionally not added to [`golden_cases`]: the 24-row state
-/// matrix is owned by the face-scene rows, while the existing row-list
-/// goldens already pin the footer's standalone appearance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StateFooterFixture {
-    pub slug: &'static str,
-    pub stale: bool,
-    pub error: Option<&'static str>,
-}
-
-/// The two non-OK shared-footer states, in the parity table's stable order.
-pub const STATE_FOOTER_FIXTURES: [StateFooterFixture; 2] = [
-    StateFooterFixture {
-        slug: "stale",
-        stale: true,
-        error: None,
-    },
-    StateFooterFixture {
-        slug: "error",
-        // Deliberately true as well: every error parity row proves that the
-        // C `template_view.c` path and the scene helper both give a non-empty
-        // error precedence over stale.
-        stale: true,
-        error: Some("Sync failed"),
-    },
-];
 
 fn orientations() -> [(&'static str, SimOrientation); 2] {
     [
@@ -64,12 +34,9 @@ pub const TABULAR_0000: i64 = 1_755_043_200;
 /// under `tests/golden/`) and the hardware-facing half of the framebuffer
 /// matrix that `framebuffer_diff` drives.
 ///
-/// It used to be an adapter over a second table of C-template requests, which
-/// the retired reference oracle rendered so a parity gate could compare the
-/// two. There is one renderer now, so the field matrix is expressed directly
-/// as scene-builder inputs. The row NAMES are unchanged on purpose:
-/// `framebuffer_diff`'s exclusions are keyed by them, and renaming a row would
-/// silently make an exclusion branch unreachable.
+/// The field matrix is expressed directly as scene-builder inputs. Row names
+/// are stable because `framebuffer_diff` exclusions are keyed by them; a
+/// rename would silently make an exclusion branch unreachable.
 #[allow(clippy::too_many_lines)] // one explicit row per shipped face case
 pub fn face_scene_cases() -> Vec<(String, SceneRenderRequest)> {
     use app_core::scene_build::{
@@ -246,10 +213,7 @@ pub fn face_scene_cases() -> Vec<(String, SceneRenderRequest)> {
     cases
 }
 
-// ---------------------------------------------------------------------------
-// Task 8 (stage 2a): scene cases — one per `scene_node_kind_t`, at both
-// orientations.
-// ---------------------------------------------------------------------------
+// One scene case per `scene_node_kind_t`, at both orientations.
 
 use protocol::{
     SCENE_CANVAS_WIDTH, Scene, SceneAlign, SceneArc, SceneClipRect, SceneFont, SceneFontTier,
@@ -278,7 +242,7 @@ const SCENE_NOW: i64 = 1_755_000_000;
 const SCENE_OFFSET: i16 = 240;
 
 /// SHA-256 of the canonical 8,204-byte [`SCENE_IMAGE_BYTES`] blob.
-pub const SCENE_IMAGE_DIGEST: [u8; 32] = [
+const SCENE_IMAGE_DIGEST: [u8; 32] = [
     0xdd, 0xb7, 0x3d, 0xdf, 0x7a, 0xad, 0x5e, 0x8f, 0xd6, 0x7a, 0x8a, 0x6c, 0xbe, 0x93, 0x56, 0x61,
     0x22, 0xee, 0x2b, 0x20, 0x36, 0x74, 0x29, 0x4e, 0x06, 0xf8, 0xa9, 0x32, 0x1b, 0x54, 0x96, 0x51,
 ];
@@ -351,10 +315,9 @@ fn image_asset() -> SceneAsset {
     }
 }
 
-/// The runtime font asset, reused from the Task 12 golden rather than
-/// vendored twice. Its subset is digits, colon, space and `A`-`Z` (see
-/// `crate::assets`), which is what the glyph case's codepoints are chosen
-/// from.
+/// The runtime font asset shared by the asset-font and glyph cases. Its subset
+/// is digits, colon, space and `A`-`Z` (see `crate::assets`), which is what the
+/// glyph case's codepoints are chosen from.
 fn font_asset() -> SceneAsset {
     SceneAsset {
         digest: crate::assets::INTER_SUBSET_SHA256,
@@ -364,9 +327,8 @@ fn font_asset() -> SceneAsset {
 }
 
 /// One 72px runtime-font `SceneText` golden, deliberately outside the four
-/// baked sizes. This is the normal asset-backed scene path used by shipping
-/// firmware; the retired raw 0x7D probe and its special host renderer are no
-/// longer needed. The baseline centres Inter's 87px line box vertically.
+/// baked sizes. It exercises the same asset-backed scene path as shipping
+/// firmware. The baseline centres Inter's 87px line box vertically.
 pub fn asset_font_scene_cases() -> Vec<(String, SceneRenderRequest)> {
     vec![(
         "asset-font--72px-digits--landscape".to_string(),

@@ -1,5 +1,8 @@
 # Plugin Card Parity Implementation Plan
 
+> **STATUS — HISTORICAL IMPLEMENTATION RECORD.** The manifest-plugin and native-companion
+> paths described here were retired; this plan is not current architecture or build guidance.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 > **STATUS (recorded 2026-09-09): Tasks 1-5 DELIVERED; Task 6's rollout was EXECUTED on

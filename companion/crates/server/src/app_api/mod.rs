@@ -573,6 +573,8 @@ async fn save_config(
     .await
     .map_err(|_| worker_failed())??;
 
+    reconcile_image_sources(&state, &config).await?;
+
     if let Some(runtime) = live_runtime(&state, &device_id) {
         tokio::task::spawn_blocking(move || runtime.apply_config(config))
             .await
@@ -581,6 +583,68 @@ async fn save_config(
     device_config.record_current();
 
     Ok(Json(ConfigApplyResult { save }))
+}
+
+/// Makes the server's image sources match the configuration that was just saved.
+///
+/// Minting happens when the owner picks a face from the add menu, which is a
+/// *draft* action against a *server* resource -- two different transactions with
+/// nothing joining them. Abandon the draft, close the tab, or remove the card,
+/// and the source stayed on the server forever. The live deployment had
+/// accumulated "Weather 2" and "Weather 3": credentialed sources no card
+/// referenced, offered back in the add menu as things to reuse.
+///
+/// Revoking against the saved configuration closes that, and closes it for
+/// sources minted before this existed, because every save reconciles.
+///
+/// **This is a KEEP-set, and that is the shape that has bitten this project
+/// before** (`AssetRelease.digests`, where an empty desired set meant "wipe
+/// everything"). It is safe here only because `compile()` has already run and
+/// rejects a configuration whose picture card names a source the document does
+/// not declare -- so a config that authorises a deletion is one that provably
+/// still names every source a card uses. Do not move this above the validation.
+async fn reconcile_image_sources(
+    state: &ServerState,
+    config: &AppConfig,
+) -> Result<(), AppApiError> {
+    let declared: std::collections::BTreeSet<&str> = config
+        .image_sources
+        .iter()
+        .map(|source| source.id.as_str())
+        .collect();
+    let undeclared: Vec<String> = state
+        .image_sources()
+        .summaries(Utc::now())
+        .into_iter()
+        .filter(|source| !declared.contains(source.id.as_str()))
+        .map(|source| source.id)
+        .collect();
+    if undeclared.is_empty() {
+        return Ok(());
+    }
+
+    for source_id in undeclared {
+        let revoking = state.clone();
+        let id = source_id.clone();
+        let revoked = tokio::task::spawn_blocking(move || revoking.image_sources().revoke(&id))
+            .await
+            .map_err(|_| worker_failed())?;
+        if let Err(error) = revoked {
+            // One source failing to revoke must not fail the save: the
+            // configuration is already stored and is what the owner asked for.
+            // Say so and carry on -- the next save reconciles again.
+            tracing::warn!(source_id, %error, "could not revoke an undeclared image source");
+            continue;
+        }
+        if let Err(error) = crate::data_cards::remove_face(state, &source_id) {
+            tracing::warn!(source_id, %error, "could not drop the face of a revoked source");
+        }
+        tracing::info!(
+            source_id,
+            "revoked an image source the configuration no longer declares"
+        );
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

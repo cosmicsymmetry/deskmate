@@ -244,10 +244,16 @@ async fn revoke_source(
     _operator: OperatorAuthenticated,
     Path(source_id): Path<String>,
 ) -> Result<StatusCode, ImageRouteError> {
-    tokio::task::spawn_blocking(move || state.image_sources().revoke(&source_id))
+    let revoking = state.clone();
+    let id = source_id.clone();
+    tokio::task::spawn_blocking(move || revoking.image_sources().revoke(&id))
         .await
         .map_err(|_| ImageRouteError::WorkerFailed)?
         .map_err(|error| map_revoke_error(&error))?;
+    // The face goes with the source. Leaving it behind kept a refresher fetching
+    // on schedule for a source that no longer existed; see `remove_face`.
+    crate::data_cards::remove_face(&state, &source_id)
+        .map_err(|error| map_face_update_error(&error))?;
     Ok(StatusCode::NO_CONTENT)
 }
 

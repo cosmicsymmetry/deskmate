@@ -445,7 +445,11 @@ export function CardEditor({
               <FieldIssues issues={fieldIssues("source_id")} />
             </div>
 
-            {pictureAccess?.source_id === card.source_id && (
+            {/* `pictureAccess &&` first, deliberately. Optional chaining alone
+                compared `undefined === undefined` whenever there was no access
+                AND the card had no source, passing a guard whose whole job was
+                to keep a null out of the next line. */}
+            {pictureAccess && pictureAccess.source_id === card.source_id && (
               <div className="field" role="status">
                 <label htmlFor="picture-push-url">Push URL</label>
                 <input id="picture-push-url" readOnly value={pictureAccess.push_url} />

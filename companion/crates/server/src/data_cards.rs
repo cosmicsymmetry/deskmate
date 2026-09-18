@@ -678,6 +678,59 @@ pub(crate) fn create_face(
     Ok(face_descriptor(&spec.face))
 }
 
+/// Forgets a source's face: drops the persisted spec and stops its refresher.
+///
+/// The mirror of [`create_face`], and it did not exist. `revoke_source` removed
+/// the image source and left the spec behind, so the refresher kept fetching on
+/// its schedule and kept failing to store the frame -- observed on the live
+/// server as a weather fetch every fifteen minutes for
+/// `image-b093daec162d9923ab098206`, a source that had not existed for days.
+/// Outbound HTTP for a face nobody could see.
+///
+/// Idempotent: a source with no face is not an error, because most sources are
+/// fed by an external producer and never had one.
+pub(crate) fn remove_face(state: &ServerState, source_id: &str) -> Result<(), FaceUpdateError> {
+    let mut data_cards = state
+        .inner
+        .data_cards
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !data_cards
+        .specs
+        .iter()
+        .any(|spec| spec.source_id == source_id)
+    {
+        // Stop the task anyway: a spec can have been removed by an earlier call
+        // whose task abort did not happen, and leaving a live refresher for a
+        // spec nobody holds is exactly the state this function exists to end.
+        if let Some(task) = data_cards.tasks.remove(source_id) {
+            task.abort();
+        }
+        return Ok(());
+    }
+
+    let updated_specs: Vec<DataCardSpec> = data_cards
+        .specs
+        .iter()
+        .filter(|spec| spec.source_id != source_id)
+        .cloned()
+        .collect();
+    let bytes = serde_json::to_vec_pretty(&updated_specs)
+        .map_err(|error| FaceUpdateError::Encode(error.to_string()))?;
+    app_core::secure_file::write_and_replace(&data_cards.spec_path, &bytes).map_err(|error| {
+        let (operation, message) = error.into_strings("data-card spec");
+        FaceUpdateError::Persist(format!("{operation}: {message}"))
+    })?;
+    // The file is the durable record, so it is replaced before the in-memory
+    // copy and the task are -- a crash between the two leaves a spec that is
+    // gone from disk and a task that dies with the process.
+    data_cards.specs = updated_specs;
+    if let Some(task) = data_cards.tasks.remove(source_id) {
+        task.abort();
+    }
+    Ok(())
+}
+
 fn validate_face_fields(
     descriptor: &FaceDescriptor,
     fields: &BTreeMap<String, String>,

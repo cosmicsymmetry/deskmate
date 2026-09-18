@@ -230,13 +230,23 @@ export function updateWidget(
 }
 
 export function removeCard(config: AppConfig, cardId: string): AppConfig {
-  if (!config.cards.some((card) => card.id === cardId)) {
+  const removed = config.cards.find((card) => card.id === cardId);
+  if (!removed) {
     return config;
   }
-  return {
-    ...config,
-    cards: config.cards.filter((card) => card.id !== cardId),
-  };
+  const cards = config.cards.filter((card) => card.id !== cardId);
+  // A picture card's source goes with it, unless another card still names the
+  // same one. Leaving the entry behind is what accumulated "Weather 2" and
+  // "Weather 3" on the live server: the document kept declaring sources no card
+  // used, so nothing could ever tell they were abandoned, and the add menu
+  // offered them back as things to reuse. The server revokes whatever a saved
+  // configuration stops declaring, so dropping it here is what actually frees it.
+  const image_sources =
+    removed.kind === "picture" &&
+    !cards.some((card) => card.kind === "picture" && card.source_id === removed.source_id)
+      ? config.image_sources.filter((source) => source.id !== removed.source_id)
+      : config.image_sources;
+  return { ...config, cards, image_sources };
 }
 
 export interface LoopEntry {

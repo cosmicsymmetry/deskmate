@@ -374,11 +374,37 @@ export function renderCardPreview(cardId: string): Promise<PreviewFrame> {
   );
 }
 
-export function mintImageSource(name: string, faceKind?: string): Promise<MintedImageSource> {
-  return request<MintedImageSource>("POST", "/v1/images", {
+/**
+ * Mints a picture source and returns it in the window's own vocabulary.
+ *
+ * The route answers `{id, token}`; the window wants `{source_id, token,
+ * push_url}`. The Tauri command used to do this translation, and dropping it in
+ * the move to HTTP was not a cosmetic loss: the card was then built with
+ * `source_id: undefined`, which made `pictureAccess?.source_id ===
+ * card.source_id` compare two undefineds, pass a guard meant to keep a null out,
+ * and crash the whole window on the next line. The source was already minted by
+ * then, so every attempt left one behind -- which is how a server collects
+ * "Weather 2", "Weather 3", "Weather 4".
+ *
+ * `push_url` is this page's own origin, for the same reason `getNetworkSettings`
+ * reports it: the app is served by the server a producer would push to.
+ */
+export async function mintImageSource(name: string, faceKind?: string): Promise<MintedImageSource> {
+  const minted = await request<{ id: string; token: string }>("POST", "/v1/images", {
     name,
     face_kind: faceKind ?? null,
   });
+  if (typeof minted.id !== "string" || typeof minted.token !== "string") {
+    fail({
+      category: "internal",
+      message: "the server returned a picture source this app could not read",
+    });
+  }
+  return {
+    source_id: minted.id,
+    token: minted.token,
+    push_url: `${window.location.origin}/v1/images/${encodeURIComponent(minted.token)}`,
+  };
 }
 
 /** The faces the server can draw. The add menu is built from this, which is why

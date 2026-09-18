@@ -610,3 +610,122 @@ async fn the_event_stream_stays_quiet_while_only_telemetry_moves() {
         "a field disappearing is a change even when its value is ignored"
     );
 }
+
+#[tokio::test]
+async fn saving_a_configuration_revokes_the_sources_it_no_longer_declares() {
+    // The live server had accumulated "Weather 2" and "Weather 3": credentialed
+    // image sources no card referenced, because minting happens when the owner
+    // picks a face from the add menu -- a draft action against a server resource,
+    // with nothing joining the two transactions. Abandoning the draft left the
+    // source behind forever, and the add menu offered it back as reusable.
+    let (server, _state) = spawn().await;
+    let client = Client::new();
+    let device = mint_device(&client, &server).await;
+
+    let kept = mint_source(&client, &server, "Weather").await;
+    let abandoned = mint_source(&client, &server, "Weather 2").await;
+    assert_eq!(listed_source_ids(&client, &server).await.len(), 2);
+
+    // A configuration that declares only the first one, with a card using it.
+    let mut config = snapshot(&client, &server, &device.device_id).await["config"].clone();
+    config["image_sources"] = serde_json::json!([{ "id": kept, "name": "Weather" }]);
+    config["cards"] = serde_json::json!([{
+        "kind": "picture",
+        "id": "weather",
+        "title": "Weather",
+        "source_id": kept,
+        "tap_action": { "kind": "none" },
+        "refresh": { "kind": "manual" },
+        "alert": { "kind": "none" },
+        "dwell_seconds": null,
+    }]);
+    let saved = client
+        .put(format!(
+            "{}/v1/app/{}/config",
+            server.base_url, device.device_id
+        ))
+        .bearer_auth(ADMIN_TOKEN)
+        .header("content-type", "application/json")
+        .body(serde_json::json!({ "json": config.to_string() }).to_string())
+        .send()
+        .await
+        .expect("save config");
+    assert_eq!(saved.status(), StatusCode::OK);
+
+    let remaining = listed_source_ids(&client, &server).await;
+    assert!(remaining.contains(&kept), "a declared source must survive");
+    assert!(
+        !remaining.contains(&abandoned),
+        "a source the configuration stopped declaring must be revoked"
+    );
+}
+
+#[tokio::test]
+async fn a_configuration_that_still_declares_everything_revokes_nothing() {
+    // The guard against the shape that has bitten this project before: a
+    // KEEP-set read as a delete-list. `AssetRelease.digests` once meant "wipe
+    // every asset you hold" when the desired set arrived empty.
+    let (server, _state) = spawn().await;
+    let client = Client::new();
+    let device = mint_device(&client, &server).await;
+
+    let first = mint_source(&client, &server, "Weather").await;
+    let second = mint_source(&client, &server, "Hacker News").await;
+
+    let mut config = snapshot(&client, &server, &device.device_id).await["config"].clone();
+    config["image_sources"] = serde_json::json!([
+        { "id": first, "name": "Weather" },
+        { "id": second, "name": "Hacker News" },
+    ]);
+    let saved = client
+        .put(format!(
+            "{}/v1/app/{}/config",
+            server.base_url, device.device_id
+        ))
+        .bearer_auth(ADMIN_TOKEN)
+        .header("content-type", "application/json")
+        .body(serde_json::json!({ "json": config.to_string() }).to_string())
+        .send()
+        .await
+        .expect("save config");
+    assert_eq!(saved.status(), StatusCode::OK);
+
+    let remaining = listed_source_ids(&client, &server).await;
+    assert!(remaining.contains(&first));
+    assert!(remaining.contains(&second));
+}
+
+async fn mint_source(client: &Client, server: &TestServer, name: &str) -> String {
+    let response = client
+        .post(format!("{}/v1/images", server.base_url))
+        .bearer_auth(ADMIN_TOKEN)
+        .header("content-type", "application/json")
+        .body(serde_json::json!({ "name": name }).to_string())
+        .send()
+        .await
+        .expect("mint image source");
+    assert_eq!(response.status(), StatusCode::OK);
+    // The route answers `id`, not `source_id`. Naming it wrong here is the same
+    // mistake that crashed the window: a stub or helper that believes a shape the
+    // server does not send agrees with the code and disagrees with reality.
+    json_body(response).await["id"]
+        .as_str()
+        .expect("source id")
+        .to_owned()
+}
+
+async fn listed_source_ids(client: &Client, server: &TestServer) -> Vec<String> {
+    let response = client
+        .get(format!("{}/v1/images", server.base_url))
+        .bearer_auth(ADMIN_TOKEN)
+        .send()
+        .await
+        .expect("list image sources");
+    json_body(response)
+        .await
+        .as_array()
+        .expect("source rows")
+        .iter()
+        .map(|row| row["id"].as_str().expect("source id").to_owned())
+        .collect()
+}

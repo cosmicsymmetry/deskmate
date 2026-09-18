@@ -38,11 +38,12 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
   httpCalls.push({ method, path, body });
   if (method === "POST" && path === "/v1/images") {
-    return jsonResponse({
-      source_id: "picture-source",
-      token: "plaintext-once",
-      push_url: "https://desk.example/v1/images/plaintext-once",
-    });
+    // EXACTLY what the route answers -- `{id, token}`, nothing else. This stub
+    // used to return `{source_id, token, push_url}`, which was the shape the
+    // window wants rather than the shape the server sends. Both the stub and the
+    // client held the same wrong belief, so the suite agreed with itself while
+    // the real app crashed on the first picture card.
+    return jsonResponse({ id: "picture-source", token: "plaintext-once" });
   }
   return jsonResponse([]);
 }) as typeof fetch;
@@ -2527,10 +2528,12 @@ describe("settings accessibility and states", () => {
   test("minting a picture source makes a server round trip with the source name", async () => {
     httpCalls.length = 0;
 
+    // The translation is the point: the route says `id`, the window needs
+    // `source_id`, and `push_url` is derived from this page's own origin.
     expect(await realMintImageSource("Picture")).toEqual({
       source_id: "picture-source",
       token: "plaintext-once",
-      push_url: "https://desk.example/v1/images/plaintext-once",
+      push_url: `${window.location.origin}/v1/images/plaintext-once`,
     });
     // faceKind rides along on every mint: null for an external producer, a kind
     // when the owner picked a server-drawn face from the menu.

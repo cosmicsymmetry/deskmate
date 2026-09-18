@@ -586,4 +586,52 @@ describe("automatic card naming", () => {
     const config = initialConfig();
     expect(nextCardName(config, "Desk")).toBe("Desk 2");
   });
+
+  test("removing a picture card frees its source, and keeps one another card shares", () => {
+    // The bug this pins accumulated real credentials on the live server:
+    // "Weather 2" and "Weather 3" were sources no card referenced, still
+    // declared in the document, and offered back in the add menu as things to
+    // reuse. The document is what the server reconciles against, so a source it
+    // keeps declaring is a source that can never be collected.
+    const withFirst = addCard(initialConfig(), {
+      kind: "picture",
+      sourceId: "image-weather",
+      sourceName: "Weather",
+    });
+    const withSecond = addCard(withFirst.config, {
+      kind: "picture",
+      sourceId: "image-news",
+      sourceName: "Hacker News",
+    });
+    const config = withSecond.config;
+    expect(config.image_sources.map((source) => source.id)).toEqual([
+      "image-weather",
+      "image-news",
+    ]);
+
+    const afterRemoval = removeCard(config, withFirst.cardId);
+    expect(afterRemoval.image_sources.map((source) => source.id)).toEqual(["image-news"]);
+
+    // Two cards can legitimately share one source; the last one out frees it.
+    const shared = addCard(config, {
+      kind: "picture",
+      sourceId: "image-news",
+      sourceName: "Hacker News",
+    });
+    const stillShared = removeCard(shared.config, withSecond.cardId);
+    expect(stillShared.image_sources.map((source) => source.id)).toContain("image-news");
+    const nowFree = removeCard(stillShared, shared.cardId);
+    expect(nowFree.image_sources.map((source) => source.id)).not.toContain("image-news");
+  });
+
+  test("removing a built-in card touches no source", () => {
+    const withPicture = addCard(initialConfig(), {
+      kind: "picture",
+      sourceId: "image-weather",
+      sourceName: "Weather",
+    });
+    const withClock = addCard(withPicture.config, "clock");
+    const afterRemoval = removeCard(withClock.config, withClock.cardId);
+    expect(afterRemoval.image_sources.map((source) => source.id)).toEqual(["image-weather"]);
+  });
 });

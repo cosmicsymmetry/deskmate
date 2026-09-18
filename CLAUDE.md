@@ -96,12 +96,20 @@ default. This section states only what is true now.
   compiles the panel's own LVGL for the card preview; `firmware/managed_components/` is
   gitignored and is the one part copied from the working tree, pinned by the tracked
   `firmware/dependencies.lock`. Device URL `wss://deskmate.rodi.one/v1/device/link`.
-  - **Caddy gates the browser paths ONLY** (`/`, `/assets/*`, `/v1/app/*`,
-    `/v1/manage/*`). `/v1/device/*`, `/v1/firmware/*`, `/v1/images/*` and `/v1/devices/*`
-    carry their own credential in `Authorization`, which `basic_auth` would eat -- a
-    host-wide gate breaks the device link outright. The two gates do not contend: Caddy
-    reads `Authorization: Basic`, the app reads a `Cookie`. The app's gate is the real
-    one, because the server binds a LAN address Caddy cannot be in front of.
+  - **No edge auth, on the owner's decision (2026-09-18).** The app is its own gate:
+    `/v1/app/*` and `/v1/manage/*` need the operator session cookie traded for
+    `DESKMATE_ADMIN_TOKEN`, `/v1/device/*` and `/v1/images/*` need their own bearers, and
+    `/v1/firmware/*` is unauthenticated by design. A Caddy `basic_auth` gate stood in
+    front of the browser paths for a few hours and was removed as a second password for
+    the same person. Publicly fetchable as a result: the JS bundle and the login form.
+    That is fine against a 256-bit random admin token and the constant-time comparison,
+    and **would stop being fine the moment that token became human-chosen** -- adding a
+    login rate limit is the prerequisite for any such change, because the server has none.
+  - **If an edge gate is ever restored it MUST be scoped by path.** The board and the
+    picture producers send their own `Authorization` header, which `basic_auth` consumes,
+    so a host-wide gate breaks the device link outright. That is why the removed block
+    gated only `/`, `/assets/*`, `/v1/app/*` and `/v1/manage/*`. Cookie and Basic do not
+    contend, so the two gates can coexist -- they just are not both wanted.
 - **Milestones**: V1 and V2 are exited and tagged (`v1` at `7abd496`, `v2` at `fdf85ba`).
   V3 (server host) is in progress; **sub-projects 1-4 are merged to `main`** (`fb15060`,
   2026-09-13) and V3 is **schema- and wire-neutral** -- it adds no config field, no wire

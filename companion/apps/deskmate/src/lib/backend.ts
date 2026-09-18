@@ -1,5 +1,5 @@
 /**
- * The one seam between the window and its backend.
+ * The one seam between the app and its backend.
  *
  * Everything in `src/` imports the backend from here and only from here, so the
  * implementation behind it can be swapped in exactly one place. `vite.config.ts`

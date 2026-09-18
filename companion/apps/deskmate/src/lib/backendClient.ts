@@ -3,10 +3,10 @@
  *
  * Components depend on task-level functions from this module rather than on
  * routes or response parsing. Requests normalize failures into the shared
- * `IpcError` union, while snapshots arrive through an `EventSource` subscription.
+ * `ApiError` union, while snapshots arrive through an `EventSource` subscription.
  *
  * Authentication is a session cookie, obtained by trading the admin token
- * through `setServerEndpoint`. The cookie is `HttpOnly`, so this file can neither
+ * through `signInAndSelectDevice`. The cookie is `HttpOnly`, so this file can neither
  * read nor forge it; `credentials: "same-origin"` is what attaches it.
  */
 
@@ -17,7 +17,7 @@ import type {
   DraftValidation,
   FaceDescriptor,
   ImageSourceDescriptor,
-  IpcError,
+  ApiError,
   MintedImageSource,
   NetworkSettings,
   PomodoroAction,
@@ -27,7 +27,7 @@ import type {
 const APP_STATE_EVENT = "app-state";
 const MAX_DRAFT_BYTES = 64 * 1024;
 
-const IPC_ERROR_CATEGORIES = new Set<IpcError["category"]>([
+const API_ERROR_CATEGORIES = new Set<ApiError["category"]>([
   "invalid-payload",
   "payload-too-large",
   "validation",
@@ -38,29 +38,29 @@ const IPC_ERROR_CATEGORIES = new Set<IpcError["category"]>([
   "internal",
 ]);
 
-export class DeskmateCommandError extends Error {
-  readonly details: IpcError;
+export class DeskmateApiError extends Error {
+  readonly details: ApiError;
 
-  constructor(details: IpcError) {
+  constructor(details: ApiError) {
     super(details.message);
-    this.name = "DeskmateCommandError";
+    this.name = "DeskmateApiError";
     this.details = details;
   }
 }
 
-export function toIpcError(error: unknown): IpcError {
+export function toApiError(error: unknown): ApiError {
   if (
     typeof error === "object" &&
     error !== null &&
     "category" in error &&
     "message" in error &&
     typeof error.category === "string" &&
-    IPC_ERROR_CATEGORIES.has(error.category as IpcError["category"]) &&
+    API_ERROR_CATEGORIES.has(error.category as ApiError["category"]) &&
     typeof error.message === "string"
   ) {
-    return error as IpcError;
+    return error as ApiError;
   }
-  if (error instanceof DeskmateCommandError) {
+  if (error instanceof DeskmateApiError) {
     return error.details;
   }
   return {
@@ -69,8 +69,8 @@ export function toIpcError(error: unknown): IpcError {
   };
 }
 
-function fail(details: IpcError): never {
-  throw new DeskmateCommandError(details);
+function fail(details: ApiError): never {
+  throw new DeskmateApiError(details);
 }
 
 /**
@@ -85,12 +85,12 @@ export const SESSION_REQUIRED_MESSAGE =
 /**
  * Whether this failure is "no session" rather than anything else.
  *
- * Exported because the window has to tell the two apart: every other failure is
+ * Exported because the page has to tell the two apart: every other failure is
  * answered by retrying, and this one is answered by signing in. Asking the
  * module that constructed the error keeps that knowledge in one place instead of
  * spreading a string comparison through the UI.
  */
-export function isSessionMissing(error: IpcError): boolean {
+export function isSessionMissing(error: ApiError): boolean {
   return error.category === "runtime-unavailable" && error.message === SESSION_REQUIRED_MESSAGE;
 }
 
@@ -100,7 +100,7 @@ export async function signIn(adminToken: string): Promise<void> {
 }
 
 /**
- * The device this window is looking at.
+ * The device selected in this browser.
  *
  * Every route below is device-scoped while the UI speaks about "the display",
  * so one id has to be chosen from an explicit remembered selection or the
@@ -137,7 +137,7 @@ function rememberDeviceId(id: string): void {
 }
 
 /**
- * Picks the display this window should open on.
+ * Picks the display the page should open on.
  *
  * Registry order is mint order, not usefulness: a server that has minted spare
  * identities lists several that were never configured, and opening on the first
@@ -198,11 +198,11 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     } catch {
       parsed = null;
     }
-    const details = toIpcError(parsed);
+    const details = toApiError(parsed);
     if (parsed === null) {
       details.message = `${response.status} ${response.statusText}`.trim();
     }
-    throw new DeskmateCommandError(details);
+    throw new DeskmateApiError(details);
   }
 
   if (response.status === 204) {
@@ -269,7 +269,7 @@ export function saveConfig(config: AppConfig): Promise<ConfigApplyResult> {
 }
 
 /**
- * What this window is talking to.
+ * The server origin and display selected by this browser session.
  *
  * The server URL is this page's own origin by construction -- the app is served
  * by the server it configures -- and the tier is always networked because this
@@ -297,8 +297,7 @@ export function getNetworkSettings(): Promise<NetworkSettings> {
  * for a session cookie, and a non-empty device id selects one display from a
  * multi-display server.
  */
-export async function setServerEndpoint(
-  _serverUrl: string,
+export async function signInAndSelectDevice(
   requestedDeviceId: string,
   adminToken: string,
 ): Promise<NetworkSettings> {
@@ -355,7 +354,7 @@ export function renderCardPreview(cardId: string): Promise<PreviewFrame> {
 }
 
 /**
- * Mints a picture source and returns it in the window's own vocabulary.
+ * Mints a picture source and returns it in the UI contract's vocabulary.
  *
  * The route answers `{id, token}`; the UI contract requires `{source_id, token,
  * push_url}`. Validate and translate that response here so a malformed route
@@ -384,7 +383,7 @@ export async function mintImageSource(name: string, faceKind?: string): Promise<
 }
 
 /** The faces the server can draw. The add menu is built from this, which is why
- *  "Weather" can appear in the window without the app knowing what weather is. */
+ *  "Weather" can appear in the page without the app knowing what weather is. */
 export function listCreatableFaces(): Promise<FaceDescriptor[]> {
   return request<FaceDescriptor[]>("GET", "/v1/faces");
 }

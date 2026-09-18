@@ -19,8 +19,7 @@ use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use protocol::{
     Ack, ActivateCard, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, AssetRelease, CardConfig,
-    ErrorCode, ErrorResponse, Message, NetworkConfig, PushScene, PushTimer, RequestIdAllocator,
-    StatusResponse, TimeSync, TriggerInterrupt,
+    Message, PushScene, PushTimer, RequestIdAllocator, StatusResponse, TimeSync, TriggerInterrupt,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
@@ -616,10 +615,10 @@ impl WebSocketRuntimeDevice {
     }
 }
 
-/// Like the serial implementation, this object retains successfully-issued
-/// replay state across `connect()` calls. A new socket has a new attachment
-/// generation, so ordinary status/data work refuses it until app-core runs
-/// `connect()` and this implementation has replayed the device model.
+/// This object retains successfully-issued replay state across `connect()`
+/// calls because a new socket has a new attachment generation. Ordinary
+/// status/data work refuses that generation until app-core runs `connect()`
+/// and this implementation has replayed the device model.
 impl RuntimeDevice for WebSocketRuntimeDevice {
     fn connect(&mut self) -> Result<DeviceConnection, DeviceError> {
         let response = self.request(Message::StatusRequest);
@@ -665,20 +664,6 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
             }
             _ => Err(DeviceError::UnexpectedMessage),
         }
-    }
-
-    fn provision(&mut self, _config: &NetworkConfig) -> Result<(), DeviceError> {
-        Err(DeviceError::Rejected(ErrorResponse {
-            code: ErrorCode::UnsupportedMessage,
-            diagnostic: "provisioning is unsupported on the WebSocket transport".into(),
-        }))
-    }
-
-    fn factory_reset(&mut self) -> Result<(), DeviceError> {
-        Err(DeviceError::Rejected(ErrorResponse {
-            code: ErrorCode::UnsupportedMessage,
-            diagnostic: "factory reset is unsupported on the WebSocket transport".into(),
-        }))
     }
 
     fn time_sync(&mut self, sync: TimeSync) -> Result<(), DeviceError> {
@@ -764,12 +749,11 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
         Ok(())
     }
 
-    /// Unlike `provision`/`factory_reset`, asset transfer is not cable-only:
-    /// the server owning the device over the tunnel is the entire point of
-    /// networked tier, so this is a plain request/reply exactly like
-    /// `push_timer`. Not part of reconnect replay (`remember_success`) --
-    /// `AssetSync` re-derives its own state from `already_present`
-    /// on every pass rather than trusting a stale replay log.
+    /// Asset transfer is available to server-owned WebSocket devices, so this
+    /// is a plain request/reply exactly like `push_timer`. It is not part of
+    /// reconnect replay (`remember_success`): `AssetSync` re-derives its own
+    /// state from `already_present` on every pass rather than trusting a stale
+    /// replay log.
     fn send_asset_begin(&mut self, begin: AssetBegin) -> Result<Ack, DeviceError> {
         let response = self.connected_request(Message::AssetBegin(begin))?;
         match response {
@@ -1041,40 +1025,9 @@ mod tests {
 
     use app_core::RuntimeDevice;
     use device::DeviceError;
-    use protocol::{
-        Ack, ErrorCode, Message, NetworkConfig, OtaState, StatusResponse, Tier, TimeSync, WifiState,
-    };
+    use protocol::{Ack, Message, OtaState, StatusResponse, Tier, TimeSync, WifiState};
 
     use super::{PendingRequest, SocketPeer};
-
-    fn network_config() -> NetworkConfig {
-        NetworkConfig {
-            ssid: "network".into(),
-            psk: "passphrase".into(),
-            server_url: "wss://deskmate.example/v1/device/link".into(),
-            device_id: "dev-0001".into(),
-            token: "device-token".into(),
-            utc_offset_minutes: 240,
-            tier: Tier::Networked,
-        }
-    }
-
-    #[test]
-    fn cable_only_operations_are_typed_as_unsupported_on_websocket() {
-        let (mut device, _connector) = super::WebSocketRuntimeDevice::channel("dev-1".into());
-
-        for error in [
-            device.provision(&network_config()).unwrap_err(),
-            device.factory_reset().unwrap_err(),
-        ] {
-            assert!(matches!(
-                error,
-                DeviceError::Rejected(ref rejection)
-                    if rejection.code == ErrorCode::UnsupportedMessage
-                        && rejection.diagnostic.contains("WebSocket transport")
-            ));
-        }
-    }
 
     #[test]
     fn remembering_a_later_status_clears_an_older_ota_error() {

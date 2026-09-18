@@ -1,7 +1,7 @@
 /**
  * Dev-only picture-card fixtures. The card has a named reusable source but no
  * credential: the plaintext token is available only in the render immediately
- * after the mock mint command, exactly as it is in the real app.
+ * after the mock mint operation, exactly as it is in the real app.
  */
 import type { AppConfig, CardSettings } from "../lib/types";
 import { mockConfig } from "./fixture";

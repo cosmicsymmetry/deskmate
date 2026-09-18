@@ -8,9 +8,9 @@ use app_core::{
     AlertHold, AppConfig, CardAlert, CardErrorKind, CardField, CardFieldValue, CardSettings,
     CarouselAdvance, ConnectionState, DesiredAsset, DeviceCapability, DeviceConnection,
     DeviceOtaState, DeviceRenderProfile, DeviceTier, DeviceWifiState, DisplayOrientation,
-    DisplayTemplate, NetworkConfig, PersistenceState, PomodoroAction, PomodoroState,
-    ProvisioningTier, RefreshPolicy, RuntimeDevice, RuntimeError, RuntimeHandle, RuntimeOptions,
-    RuntimeState, WidgetTapAction, analyze_scene, validate_native_scene,
+    DisplayTemplate, PomodoroAction, PomodoroState, RefreshPolicy, RuntimeDevice, RuntimeError,
+    RuntimeHandle, RuntimeOptions, RuntimeState, WidgetTapAction, analyze_scene,
+    validate_native_scene,
 };
 use device::{DeviceError, ReceivedEvent, SessionDiagnostics, TransportError};
 use protocol::{
@@ -62,8 +62,6 @@ fn preview_card_scene_builds_the_same_face_the_device_would_receive() {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Operation {
     Connect,
-    Provision,
-    FactoryReset,
     Status,
     TimeSync,
     ApplyLayout(u16),
@@ -101,7 +99,6 @@ enum MockPower {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InjectedDisconnect {
     Status,
-    Provision,
 }
 
 #[derive(Default)]
@@ -109,7 +106,6 @@ struct MockState {
     connected: bool,
     power: MockPower,
     connection_count: u64,
-    provision_attempts: u64,
     injected_disconnect: Option<InjectedDisconnect>,
     reset_on_connect: bool,
     operations: Vec<Operation>,
@@ -212,14 +208,6 @@ impl MockDeviceControl {
 
     fn connection_count(&self) -> u64 {
         self.state.lock().unwrap().connection_count
-    }
-
-    fn provision_attempts(&self) -> u64 {
-        self.state.lock().unwrap().provision_attempts
-    }
-
-    fn disconnect_during_next_provision(&self) {
-        self.state.lock().unwrap().injected_disconnect = Some(InjectedDisconnect::Provision);
     }
 
     fn block_next_push(&self) -> Arc<PushGate> {
@@ -381,25 +369,6 @@ impl RuntimeDevice for MockDevice {
         device_status.uptime_ms = uptime_ms;
         device_status.latest_interrupt_token = state.latest_interrupt_token;
         Ok(device_status)
-    }
-
-    fn provision(&mut self, _config: &NetworkConfig) -> Result<(), DeviceError> {
-        let mut state = self.control.state.lock().unwrap();
-        state.provision_attempts += 1;
-        if state.injected_disconnect == Some(InjectedDisconnect::Provision) {
-            state.injected_disconnect = None;
-            state.connected = false;
-            return Err(DeviceError::Transport(TransportError::Disconnected));
-        }
-        if !state.connected {
-            return Err(DeviceError::Transport(TransportError::Disconnected));
-        }
-        state.operations.push(Operation::Provision);
-        Ok(())
-    }
-
-    fn factory_reset(&mut self) -> Result<(), DeviceError> {
-        self.with_connected(|state| state.operations.push(Operation::FactoryReset))
     }
 
     fn time_sync(&mut self, _sync: TimeSync) -> Result<(), DeviceError> {
@@ -772,6 +741,12 @@ fn start_runtime(
     .unwrap()
 }
 
+fn apply_paused_preference(runtime: &RuntimeHandle, paused: bool) -> Result<(), RuntimeError> {
+    let mut config = runtime.snapshot()?.config;
+    config.preferences.paused = paused;
+    runtime.apply_config(config)
+}
+
 fn wait_for_snapshot(
     runtime: &RuntimeHandle,
     timeout: Duration,
@@ -925,47 +900,6 @@ fn networked_status_without_wrong_tier_keeps_websocket_owner_synchronizing() {
             .iter()
             .any(|operation| matches!(operation, Operation::ApplyLayout(_))),
         "a WebSocket owner must apply layout to a device that reports Networked"
-    );
-    runtime.shutdown().unwrap();
-}
-
-#[test]
-fn provision_and_factory_reset_use_the_runtime_owned_device_without_reconnecting() {
-    let control = MockDeviceControl::default();
-    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
-    let connections_before = control.connection_count();
-
-    runtime
-        .provision(NetworkConfig {
-            ssid: "home-network".into(),
-            psk: "wifi-passphrase".into(),
-            server_url: "wss://deskmate.example/v1/device/link".into(),
-            device_id: "dev-0042".into(),
-            token: "device-token".into(),
-            utc_offset_minutes: 240,
-            tier: ProvisioningTier::Networked,
-        })
-        .unwrap();
-    runtime.factory_reset().unwrap();
-
-    assert_eq!(control.connection_count(), connections_before);
-    let operations = control.operations();
-    assert_eq!(
-        operations
-            .iter()
-            .filter(|operation| **operation == Operation::Provision)
-            .count(),
-        1
-    );
-    assert_eq!(
-        operations
-            .iter()
-            .filter(|operation| **operation == Operation::FactoryReset)
-            .count(),
-        1
     );
     runtime.shutdown().unwrap();
 }
@@ -1491,84 +1425,6 @@ fn scenes_push_on_config_and_navigation_events_but_not_clock_or_pomodoro_ticks()
 }
 
 #[test]
-fn provisioning_while_disconnected_is_a_typed_error_and_never_reaches_the_device() {
-    let control = MockDeviceControl::default();
-    control.power_off();
-    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        matches!(
-            snapshot.device.connection,
-            ConnectionState::Disconnected { .. }
-        )
-    });
-
-    let error = runtime
-        .provision(NetworkConfig {
-            ssid: "home-network".into(),
-            psk: "wifi-passphrase".into(),
-            server_url: "wss://deskmate.example/v1/device/link".into(),
-            device_id: "dev-0042".into(),
-            token: "device-token".into(),
-            utc_offset_minutes: 240,
-            tier: ProvisioningTier::Networked,
-        })
-        .unwrap_err();
-
-    assert_eq!(error, RuntimeError::DeviceDisconnected);
-    assert_eq!(control.provision_attempts(), 0);
-    assert!(!control.operations().contains(&Operation::Provision));
-    runtime.shutdown().unwrap();
-}
-
-#[test]
-fn transport_failure_during_provisioning_marks_disconnected_and_reconnects() {
-    let control = MockDeviceControl::default();
-    let mut reconnecting_options = options();
-    reconnecting_options.reconnect_interval = Duration::from_millis(100);
-    // Exclude the ordinary status-poll disconnect path from this regression. Without
-    // runtime_command_device_error marking the transport disconnected, no poll can
-    // rescue the test before its one-second assertion deadline.
-    reconnecting_options.status_interval = Duration::from_secs(5);
-    let runtime = RuntimeHandle::start(
-        full_config(),
-        Box::new(MockDevice::new(control.clone())),
-        reconnecting_options,
-    )
-    .unwrap();
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
-    let connections_before = control.connection_count();
-    control.disconnect_during_next_provision();
-
-    let error = runtime
-        .provision(NetworkConfig {
-            ssid: "home-network".into(),
-            psk: "wifi-passphrase".into(),
-            server_url: "wss://deskmate.example/v1/device/link".into(),
-            device_id: "dev-0042".into(),
-            token: "device-token".into(),
-            utc_offset_minutes: 240,
-            tier: ProvisioningTier::Networked,
-        })
-        .unwrap_err();
-
-    assert_eq!(error, RuntimeError::DeviceDisconnected);
-    let disconnected = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Standalone
-            && control.connection_count() == connections_before
-    });
-    assert_eq!(disconnected.device.connection, ConnectionState::Standalone);
-
-    let reconnected = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-            && control.connection_count() > connections_before
-    });
-    assert_eq!(reconnected.device.connection, ConnectionState::Online);
-    runtime.shutdown().unwrap();
-}
-
-#[test]
 fn cold_boot_and_two_power_resets_replay_the_complete_owned_state() {
     let control = MockDeviceControl::default();
     let runtime = start_runtime(full_config(), &control, Duration::ZERO);
@@ -2048,8 +1904,8 @@ fn subscribers_are_bounded_and_coalesce_pressure_to_the_latest_snapshot() {
     .unwrap();
     let subscription = runtime.subscribe().unwrap();
     assert!(matches!(runtime.subscribe(), Err(RuntimeError::QueueFull)));
-    runtime.set_paused(true).unwrap();
-    runtime.set_paused(false).unwrap();
+    apply_paused_preference(&runtime, true).unwrap();
+    apply_paused_preference(&runtime, false).unwrap();
     runtime.activate_card("clock").unwrap();
     wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
         snapshot.device.active_card_id.as_deref() == Some("clock")
@@ -2085,11 +1941,11 @@ fn lagging_subscriber_does_not_cause_a_diagnostic_only_second_snapshot() {
         .unwrap()
         .expect("subscription starts with the latest snapshot");
 
-    runtime.set_paused(true).unwrap();
+    apply_paused_preference(&runtime, true).unwrap();
     wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
         snapshot.runtime == RuntimeState::Paused
     });
-    runtime.set_paused(false).unwrap();
+    apply_paused_preference(&runtime, false).unwrap();
     wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
         snapshot.runtime == RuntimeState::Running
     });
@@ -2110,7 +1966,7 @@ fn lagging_subscriber_does_not_cause_a_diagnostic_only_second_snapshot() {
 }
 
 #[test]
-fn pause_defers_timer_pushes_until_resume() {
+fn paused_config_defers_timer_pushes_until_a_resumed_config_is_applied() {
     let control = MockDeviceControl::default();
     let runtime = start_runtime(full_config(), &control, Duration::ZERO);
     let pushes_before = control
@@ -2119,7 +1975,7 @@ fn pause_defers_timer_pushes_until_resume() {
         .filter(|operation| **operation == Operation::Push("pomodoro".into()))
         .count();
 
-    runtime.set_paused(true).unwrap();
+    apply_paused_preference(&runtime, true).unwrap();
     runtime
         .control_pomodoro("pomodoro", PomodoroAction::Start)
         .unwrap();
@@ -2134,7 +1990,7 @@ fn pause_defers_timer_pushes_until_resume() {
     );
     assert_eq!(runtime.snapshot().unwrap().runtime, RuntimeState::Paused);
 
-    runtime.set_paused(false).unwrap();
+    apply_paused_preference(&runtime, false).unwrap();
     wait_for(Duration::from_secs(1), || {
         control
             .operations()
@@ -2253,7 +2109,7 @@ fn command_queue_rejects_pressure_without_growing() {
         thread::spawn(move || first_runtime.control_pomodoro("pomodoro", PomodoroAction::Start));
     gate.wait_until_entered();
     let second_runtime = Arc::clone(&runtime);
-    let second = thread::spawn(move || second_runtime.set_paused(true));
+    let second = thread::spawn(move || apply_paused_preference(&second_runtime, true));
     thread::sleep(Duration::from_millis(20));
     assert_eq!(runtime.activate_card("clock"), Err(RuntimeError::QueueFull));
     gate.open();
@@ -2306,7 +2162,7 @@ fn invalid_commands_do_not_mutate_runtime_state() {
 }
 
 #[test]
-fn unrelated_config_and_preference_edits_preserve_live_timer_and_screen() {
+fn config_and_preference_edits_preserve_live_timer_and_screen() {
     let control = MockDeviceControl::default();
     let runtime = start_runtime(full_config(), &control, Duration::ZERO);
     wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
@@ -2316,7 +2172,6 @@ fn unrelated_config_and_preference_edits_preserve_live_timer_and_screen() {
         .control_pomodoro("pomodoro", PomodoroAction::Start)
         .unwrap();
     runtime.activate_card("pomodoro").unwrap();
-    runtime.set_autostart_preference(false).unwrap();
     let before = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
         snapshot
             .pomodoros
@@ -2335,6 +2190,7 @@ fn unrelated_config_and_preference_edits_preserve_live_timer_and_screen() {
         *title = "Studio".into();
     }
     edited.preferences.orientation = DisplayOrientation::Landscape;
+    edited.preferences.autostart = false;
     runtime.apply_config(edited).unwrap();
 
     let after =
@@ -2351,33 +2207,6 @@ fn unrelated_config_and_preference_edits_preserve_live_timer_and_screen() {
     );
     assert_eq!(after.device.active_card_id.as_deref(), Some("pomodoro"));
     assert!(control.operations().contains(&Operation::ApplyLayout(90)));
-    runtime.shutdown().unwrap();
-}
-
-#[test]
-fn persistence_recovery_is_projected_and_cleared_after_a_good_save() {
-    let control = MockDeviceControl::default();
-    let runtime = start_runtime(AppConfig::default(), &control, Duration::ZERO);
-    runtime
-        .set_persistence_state(PersistenceState::RecoverableError {
-            message: "invalid config JSON".into(),
-        })
-        .unwrap();
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        matches!(
-            snapshot.persistence,
-            PersistenceState::RecoverableError { .. }
-        )
-    });
-    runtime
-        .set_persistence_state(PersistenceState::Saving)
-        .unwrap();
-    runtime
-        .set_persistence_state(PersistenceState::Clean)
-        .unwrap();
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.persistence == PersistenceState::Clean
-    });
     runtime.shutdown().unwrap();
 }
 

@@ -7,7 +7,7 @@ import {
   setCardDwell,
   tapActionDescription,
 } from "../lib/configDraft";
-import { listImageSources, toIpcError, updateImageSourceFace } from "../lib/backend";
+import { listImageSources, toApiError, updateImageSourceFace } from "../lib/backend";
 import type {
   AlertHold,
   AppConfig,
@@ -15,7 +15,7 @@ import type {
   CardError,
   CardSettings,
   FaceDescriptor,
-  IpcError,
+  ApiError,
   MintedImageSource,
   PomodoroSnapshot,
   ValidationIssue,
@@ -103,7 +103,7 @@ function PictureFaceSettings({ sourceId }: { sourceId: string }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<IpcError | null>(null);
+  const [error, setError] = useState<ApiError | null>(null);
 
   useEffect(() => {
     const generation = requestGeneration.current + 1;
@@ -132,7 +132,7 @@ function PictureFaceSettings({ sourceId }: { sourceId: string }) {
       })
       .catch((nextError) => {
         if (requestGeneration.current === generation) {
-          setError(toIpcError(nextError));
+          setError(toApiError(nextError));
         }
       })
       .finally(() => {
@@ -187,7 +187,7 @@ function PictureFaceSettings({ sourceId }: { sourceId: string }) {
       })
       .catch((nextError) => {
         if (requestGeneration.current === generation) {
-          setError(toIpcError(nextError));
+          setError(toApiError(nextError));
         }
       })
       .finally(() => {

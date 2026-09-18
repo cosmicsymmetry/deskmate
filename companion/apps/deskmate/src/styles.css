@@ -455,7 +455,7 @@ h3 {
 }
 
 /*
- * The one emissive object in the window. The bloom is the panel's own light
+ * The one emissive object on the page. The bloom is the panel's own light
  * falling on the desk behind it, which is why nothing else in this design carries
  * a shadow.
  */
@@ -1759,7 +1759,7 @@ fieldset legend {
   border-top: 1px solid var(--hairline);
   background: var(--tile);
 }
-/* The sheet's own save bar sits at the end of its scroll, not pinned to the window. */
+/* The sheet's own save bar sits at the end of its scroll, not pinned to the viewport. */
 .save-bar--sheet {
   position: sticky;
   bottom: -20px;

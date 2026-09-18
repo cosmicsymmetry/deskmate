@@ -16,7 +16,7 @@ import type {
   DeviceCounters,
   NetworkSettings,
 } from "../lib/types";
-import { ipcContractFixtures } from "../lib/types.contract";
+import { apiContractFixtures } from "../lib/types.contract";
 
 export const MOCK_COUNTERS: DeviceCounters = {
   host_reconnects: 0,
@@ -36,7 +36,7 @@ export const MOCK_COUNTERS: DeviceCounters = {
 
 export function mockConfig(): AppConfig {
   return {
-    schema_version: ipcContractFixtures.snapshot.config.schema_version,
+    schema_version: apiContractFixtures.snapshot.config.schema_version,
     preferences: {
       timezone: "Asia/Tbilisi",
       autostart: true,

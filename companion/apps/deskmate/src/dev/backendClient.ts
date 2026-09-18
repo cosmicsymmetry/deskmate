@@ -6,7 +6,7 @@
  * `src/dev/`, so a production build resolves the real HTTP client and never
  * reaches this file.
  *
- * Every function here forwards to `mockBackend`'s command dispatcher. Keeping
+ * Every function here forwards to `mockBackend`'s operation dispatcher. Keeping
  * scenario state and behavior in that one dispatcher prevents the mock client
  * from becoming a second implementation of the harness.
  */
@@ -18,26 +18,26 @@ import type {
   DraftValidation,
   FaceDescriptor,
   ImageSourceDescriptor,
-  IpcError,
+  ApiError,
   MintedImageSource,
   NetworkSettings,
   PomodoroAction,
   PreviewFrame,
 } from "../lib/types";
-import { dispatchMockCommand, mockListen } from "./mockBackend";
+import { dispatchMockOperation, mockListen } from "./mockBackend";
 
-export class DeskmateCommandError extends Error {
-  readonly details: IpcError;
+export class DeskmateApiError extends Error {
+  readonly details: ApiError;
 
-  constructor(details: IpcError) {
+  constructor(details: ApiError) {
     super(details.message);
-    this.name = "DeskmateCommandError";
+    this.name = "DeskmateApiError";
     this.details = details;
   }
 }
 
-export function toIpcError(error: unknown): IpcError {
-  if (error instanceof DeskmateCommandError) {
+export function toApiError(error: unknown): ApiError {
+  if (error instanceof DeskmateApiError) {
     return error.details;
   }
   if (
@@ -48,7 +48,7 @@ export function toIpcError(error: unknown): IpcError {
     typeof error.category === "string" &&
     typeof error.message === "string"
   ) {
-    return error as IpcError;
+    return error as ApiError;
   }
   return {
     category: "internal",
@@ -68,7 +68,7 @@ function signedOutScenario(): boolean {
   return new URLSearchParams(window.location.search).get("scenario") === "signedout";
 }
 
-export function isSessionMissing(error: IpcError): boolean {
+export function isSessionMissing(error: ApiError): boolean {
   return error.category === "runtime-unavailable" && error.message === SESSION_REQUIRED_MESSAGE;
 }
 
@@ -77,7 +77,7 @@ let mockSignedIn = !signedOutScenario();
 export function signIn(adminToken: string): Promise<void> {
   if (adminToken.trim() === "") {
     return Promise.reject(
-      new DeskmateCommandError({
+      new DeskmateApiError({
         category: "runtime-unavailable",
         message: SESSION_REQUIRED_MESSAGE,
       }),
@@ -90,35 +90,36 @@ export function signIn(adminToken: string): Promise<void> {
 export function getAppSnapshot(): Promise<AppSnapshot> {
   if (!mockSignedIn) {
     return Promise.reject(
-      new DeskmateCommandError({
+      new DeskmateApiError({
         category: "runtime-unavailable",
         message: SESSION_REQUIRED_MESSAGE,
       }),
     );
   }
-  return dispatchMockCommand("get_app_snapshot");
+  return dispatchMockOperation("get_app_snapshot");
 }
 
 export function validateConfigDraft(config: AppConfig): Promise<DraftValidation> {
-  return dispatchMockCommand("validate_config_draft", { draft: draftPayload(config) });
+  return dispatchMockOperation("validate_config_draft", { draft: draftPayload(config) });
 }
 
 export function saveConfig(config: AppConfig): Promise<ConfigApplyResult> {
-  return dispatchMockCommand("save_config", { draft: draftPayload(config) });
+  return dispatchMockOperation("save_config", { draft: draftPayload(config) });
 }
 
 export function getNetworkSettings(): Promise<NetworkSettings> {
-  return dispatchMockCommand("get_network_settings");
+  return dispatchMockOperation("get_network_settings");
 }
 
-export function setServerEndpoint(
-  serverUrl: string,
+export function signInAndSelectDevice(
   deviceId: string,
   adminToken: string,
 ): Promise<NetworkSettings> {
-  return dispatchMockCommand("set_server_endpoint", {
-    request: { server_url: serverUrl, device_id: deviceId, admin_token: adminToken },
-  });
+  return signIn(adminToken).then(() =>
+    dispatchMockOperation("sign_in_and_select_device", {
+      request: { device_id: deviceId },
+    }),
+  );
 }
 
 // Deliberately absent, matching `src/lib/backendClient.ts`: provisioning,
@@ -126,34 +127,37 @@ export function setServerEndpoint(
 // expose affordances the shipped web app cannot perform.
 
 export function resumePushing(): Promise<void> {
-  return dispatchMockCommand("resume_pushing");
+  return dispatchMockOperation("resume_pushing");
 }
 
 export function controlPomodoro(cardId: string, action: PomodoroAction): Promise<void> {
-  return dispatchMockCommand("control_pomodoro", { target: { card_id: cardId }, action });
+  return dispatchMockOperation("control_pomodoro", { target: { card_id: cardId }, action });
 }
 
 export function renderCardPreview(cardId: string): Promise<PreviewFrame> {
-  return dispatchMockCommand("render_card_preview", { cardId });
+  return dispatchMockOperation("render_card_preview", { cardId });
 }
 
 export function mintImageSource(name: string, faceKind?: string): Promise<MintedImageSource> {
-  return dispatchMockCommand("mint_image_source", { sourceName: name, faceKind: faceKind ?? null });
+  return dispatchMockOperation("mint_image_source", {
+    sourceName: name,
+    faceKind: faceKind ?? null,
+  });
 }
 
 export function listCreatableFaces(): Promise<FaceDescriptor[]> {
-  return dispatchMockCommand("list_creatable_faces");
+  return dispatchMockOperation("list_creatable_faces");
 }
 
 export function listImageSources(): Promise<ImageSourceDescriptor[]> {
-  return dispatchMockCommand("list_image_sources");
+  return dispatchMockOperation("list_image_sources");
 }
 
 export function updateImageSourceFace(
   sourceId: string,
   fields: Record<string, string>,
 ): Promise<FaceDescriptor> {
-  return dispatchMockCommand("update_image_source_face", {
+  return dispatchMockOperation("update_image_source_face", {
     request: { source_id: sourceId, fields },
   });
 }

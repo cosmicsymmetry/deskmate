@@ -186,9 +186,9 @@ Each of these cost this project real time at least once.
   out-of-bounds *writes* that `scene_model_validate()` then reports with the same error
   code the test asserts, so the plain suite passes against a decoder with both deleted.
 - **Provisioning is a cable operation by design.** In networked tier the cable is the
-  configurator and the server is the owner; `WebSocketRuntimeDevice::provision` returns a
-  typed unsupported-on-this-transport error. Do not add provisioning over the tunnel
-  without specifying it first.
+  configurator and the server is the owner. The runtime has no provision or factory-reset
+  path at all; `deskmate-cli` drives them through `device::session` over USB. Do not add
+  provisioning over the tunnel without specifying it first.
 - **The device gives `esp_websocket_client_send_bin` 200 ms to deliver a reply the host
   waits 2000 ms for.** A transient stall destroys a reply the host would still accept.
   Deliberately unfixed -- no evidence it bites at realistic cadence -- but know it exists.

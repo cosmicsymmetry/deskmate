@@ -1,21 +1,21 @@
-import type { DeviceTier, DraftValidation, IpcError } from "../lib/types";
+import type { ApiError, DeviceTier, DraftValidation } from "../lib/types";
 import { Icon } from "./Icon";
 
 export type ValidationState =
   | { kind: "idle"; result: DraftValidation }
   | { kind: "checking"; result: DraftValidation }
   | { kind: "ready"; result: DraftValidation }
-  | { kind: "error"; result: DraftValidation; error: IpcError };
+  | { kind: "error"; result: DraftValidation; error: ApiError };
 
 export type SaveState =
   | { kind: "idle" }
   | { kind: "saving" }
   | { kind: "saved"; message: string }
-  | { kind: "error"; error: IpcError };
+  | { kind: "error"; error: ApiError };
 
 const MAX_RENDERED_SAVE_ISSUES = 5;
 
-function SaveError({ error }: { error: IpcError }) {
+function SaveError({ error }: { error: ApiError }) {
   const issues = error.category === "validation" ? error.issues : [];
   const visibleIssues = issues.slice(0, MAX_RENDERED_SAVE_ISSUES);
   const hiddenIssueCount = issues.length - visibleIssues.length;
@@ -43,11 +43,11 @@ interface SaveBarProps {
   saveState: SaveState;
   ownershipTier: DeviceTier | null;
   dirty: boolean;
-  /** The sheet is modal, so the window's own save bar is unreachable while it is
+  /** The sheet is modal, so the page's primary save bar is unreachable while it is
    *  open. Rather than let a preference edit strand itself behind a dialog, the
    *  sheet renders this same bar — one implementation, so the two can never
    *  disagree about whether the draft is saveable. */
-  variant?: "window" | "sheet";
+  variant?: "page" | "sheet";
   onSave: () => void;
 }
 
@@ -56,7 +56,7 @@ export function SaveBar({
   saveState,
   ownershipTier,
   dirty,
-  variant = "window",
+  variant = "page",
   onSave,
 }: SaveBarProps) {
   const serverOwned = ownershipTier === "networked";

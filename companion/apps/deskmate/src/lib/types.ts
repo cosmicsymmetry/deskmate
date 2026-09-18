@@ -229,7 +229,7 @@ export type DeviceWifiState = "down" | "connecting" | "connected" | "failed";
 
 export type DeviceOtaState = "idle" | "checking" | "downloading" | "pending-verify" | "failed";
 
-/** What this window is talking to: its own origin, and the display it configures. */
+/** The server origin and display selected by this browser session. */
 export interface NetworkSettings {
   server_url: string;
   device_id: string;
@@ -341,13 +341,13 @@ type MessageError<Category extends string> = {
 };
 
 /**
- * Every failure the server can hand this window, and nothing else.
+ * Every structured failure the HTTP API can return, and nothing else.
  *
  * This union contains only categories emitted by the HTTP API. Listing a category
- * the server cannot produce would make `toIpcError` accept a shape nothing sends
+ * the server cannot produce would make `toApiError` accept a shape nothing sends
  * and invite a branch that can never run.
  */
-export type IpcError =
+export type ApiError =
   | MessageError<"invalid-payload">
   | (MessageError<"payload-too-large"> & { maximum_bytes: number })
   | (MessageError<"validation"> & { issues: ValidationIssue[] })
@@ -359,7 +359,7 @@ export type IpcError =
 
 // This fixture shape is generated from Rust serialization in a server test, then
 // compiled against these declarations. Either side changing makes CI fail.
-export interface IpcContractFixtures {
+export interface ApiContractFixtures {
   snapshot: AppSnapshot;
   configs: AppConfig[];
   card_settings: CardSettings[];
@@ -382,7 +382,7 @@ export interface IpcContractFixtures {
   persistence_states: PersistenceState[];
   validation_codes: ValidationCode[];
   pomodoro_actions: PomodoroAction[];
-  errors: IpcError[];
+  errors: ApiError[];
   draft_validation: DraftValidation;
   config_apply_result: ConfigApplyResult;
   preview_frame: PreviewFrame;

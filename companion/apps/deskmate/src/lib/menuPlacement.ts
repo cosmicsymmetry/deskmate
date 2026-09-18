@@ -64,8 +64,8 @@ export function placeAddMenu(
   // Neither side of the trigger can hold the menu. Anchoring to it anyway is
   // what produced the defect this module exists for: the menu keeps its tidy
   // relationship to the button and hides most of itself behind its own scroll
-  // fold. A window shorter than the menu is common — the app's own window is —
-  // so the menu is clamped into the viewport instead and stays whole, giving up
+  // fold. A viewport shorter than the menu is common, so the menu is clamped
+  // into the viewport instead and stays whole, giving up
   // only its exact alignment with the button.
   const usable = viewport.height - MENU_MARGIN * 2;
   const height = Math.min(contentHeight, usable);

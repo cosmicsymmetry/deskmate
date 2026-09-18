@@ -1,20 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
-  DeskmateCommandError,
+  DeskmateApiError,
   getAppSnapshot,
   getNetworkSettings,
   listenToAppState,
   saveConfig as saveConfigRequest,
-  setServerEndpoint,
-  toIpcError,
+  signInAndSelectDevice,
+  toApiError,
 } from "./backend";
 import type {
   AppConfig,
   AppSnapshot,
   ConfigApplyResult,
   DeviceTier,
-  IpcError,
+  ApiError,
   NetworkSettings,
 } from "./types";
 
@@ -31,7 +31,7 @@ export interface AppStateSubscriptionOptions {
   fetchSnapshot: () => Promise<AppSnapshot>;
   listen: (onSnapshot: (snapshot: AppSnapshot) => void) => Promise<() => void>;
   onSnapshot: (snapshot: AppSnapshot) => void;
-  onError: (error: IpcError) => void;
+  onError: (error: ApiError) => void;
   focusTarget?: EventTargetLike;
   visibilityTarget?: VisibilityTargetLike;
 }
@@ -52,7 +52,7 @@ export function startAppStateSubscription(options: AppStateSubscriptionOptions):
   };
   const publishError = (error: unknown) => {
     if (active) {
-      options.onError(toIpcError(error));
+      options.onError(toApiError(error));
     }
   };
   const refresh = () => {
@@ -96,7 +96,7 @@ export function startAppStateSubscription(options: AppStateSubscriptionOptions):
 export interface AppStateValue {
   snapshot: AppSnapshot | null;
   loading: boolean;
-  error: IpcError | null;
+  error: ApiError | null;
   refresh: () => Promise<void>;
   /**
    * Bumped whenever a new snapshot's `card_data` differs from the previous one (a
@@ -112,13 +112,13 @@ export interface AppStateValue {
   networkSettings: NetworkSettings;
   ownershipTier: DeviceTier | null;
   saveConfig: (config: AppConfig) => Promise<ConfigApplyResult>;
-  saveServerAccess: (serverUrl: string, deviceId: string, adminToken: string) => Promise<void>;
+  signInAndSelectDevice: (deviceId: string, adminToken: string) => Promise<void>;
 }
 
 export function useAppState(): AppStateValue {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<IpcError | null>(null);
+  const [error, setError] = useState<ApiError | null>(null);
   const [dataGeneration, setDataGeneration] = useState(0);
   const [networkSettings, setNetworkSettings] = useState<NetworkSettings>({
     server_url: "",
@@ -132,7 +132,7 @@ export function useAppState(): AppStateValue {
     networkSettingsRef.current = next;
     setNetworkSettings(next);
   }, []);
-  const acceptError = useCallback((next: IpcError) => {
+  const acceptError = useCallback((next: ApiError) => {
     setLoading(false);
     setError(next);
   }, []);
@@ -156,13 +156,13 @@ export function useAppState(): AppStateValue {
       // empty Device ID for the whole session after signing in.
       acceptNetworkSettings(await getNetworkSettings());
     } catch (next) {
-      acceptError(toIpcError(next));
+      acceptError(toApiError(next));
     }
   }, [acceptError, acceptNetworkSettings, acceptSnapshot]);
 
-  const saveServerAccess = useCallback(
-    async (serverUrl: string, deviceId: string, adminToken: string) => {
-      const settings = await setServerEndpoint(serverUrl, deviceId, adminToken);
+  const selectDevice = useCallback(
+    async (deviceId: string, adminToken: string) => {
+      const settings = await signInAndSelectDevice(deviceId, adminToken);
       acceptNetworkSettings(settings);
     },
     [acceptNetworkSettings],
@@ -170,10 +170,10 @@ export function useAppState(): AppStateValue {
 
   const saveConfig = useCallback(async (config: AppConfig) => {
     const settings = networkSettingsRef.current;
-    if (!settings.server_url || !settings.device_id) {
-      throw new DeskmateCommandError({
+    if (!settings.device_id) {
+      throw new DeskmateApiError({
         category: "invalid-payload",
-        message: "Enter the server URL and device ID in Network setup before saving.",
+        message: "Select a device in Settings before saving.",
       });
     }
     return saveConfigRequest(config);
@@ -202,7 +202,7 @@ export function useAppState(): AppStateValue {
       })
       .catch((next) => {
         if (active) {
-          acceptError(toIpcError(next));
+          acceptError(toApiError(next));
         }
       });
     return () => {
@@ -222,6 +222,6 @@ export function useAppState(): AppStateValue {
     networkSettings,
     ownershipTier,
     saveConfig,
-    saveServerAccess,
+    signInAndSelectDevice: selectDevice,
   };
 }

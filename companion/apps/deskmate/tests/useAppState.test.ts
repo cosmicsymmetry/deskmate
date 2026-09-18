@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { AppSnapshot } from "../src/lib/types";
-import { ipcContractFixtures } from "../src/lib/types.contract";
+import { apiContractFixtures } from "../src/lib/types.contract";
 import {
   type AppStateSubscriptionOptions,
   startAppStateSubscription,
@@ -31,7 +31,7 @@ class FakeEventTarget {
   }
 }
 
-const snapshot: AppSnapshot = ipcContractFixtures.snapshot;
+const snapshot: AppSnapshot = apiContractFixtures.snapshot;
 
 async function flushPromises() {
   await Promise.resolve();

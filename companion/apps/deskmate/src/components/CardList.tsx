@@ -184,7 +184,7 @@ export function CardList({
   }, [menuOpen, positionMenu]);
 
   // A fixed menu keeps the coordinates it was given, so it would drift away from
-  // its trigger when the column scrolls or the window resizes underneath it.
+  // its trigger when the column scrolls or the viewport changes size underneath it.
   // It is repositioned rather than closed: closing looks right until you notice
   // that opening the menu focuses its first item, which scrolls that item into
   // view — a scroll the menu itself caused, which would then close it again the

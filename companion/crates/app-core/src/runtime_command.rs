@@ -4,7 +4,7 @@ use std::sync::mpsc::SyncSender;
 use protocol::PushScene;
 use serde::{Deserialize, Serialize};
 
-use crate::{AppConfig, NetworkConfig, PersistenceState, ValidationIssue};
+use crate::{AppConfig, ValidationIssue};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -56,18 +56,6 @@ pub(crate) enum RuntimeCommand {
         config: AppConfig,
         reply: CommandReply,
     },
-    SetPaused {
-        paused: bool,
-        reply: CommandReply,
-    },
-    SetAutostartPreference {
-        enabled: bool,
-        reply: CommandReply,
-    },
-    SetPersistenceState {
-        persistence: PersistenceState,
-        reply: CommandReply,
-    },
     Pomodoro {
         card_id: String,
         action: PomodoroAction,
@@ -86,13 +74,6 @@ pub(crate) enum RuntimeCommand {
     },
     PushScene {
         push: PushScene,
-        reply: CommandReply,
-    },
-    Provision {
-        config: NetworkConfig,
-        reply: CommandReply,
-    },
-    FactoryReset {
         reply: CommandReply,
     },
     Shutdown {

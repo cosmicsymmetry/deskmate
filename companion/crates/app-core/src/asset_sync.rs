@@ -1,11 +1,9 @@
 //! Server-side asset transfer driver over the `RuntimeDevice` seam.
 //!
-//! Unlike `RuntimeDevice::provision`/`factory_reset` -- which return a typed
-//! unsupported-on-this-transport error because provisioning is a cable
-//! operation by design -- asset transfer must work on *both* transports. The
-//! server owning the device over the tunnel is the entire point of networked
-//! tier, so [`AssetSync::reconcile_with_active_volatile`] drives the same `send_asset_*` methods
-//! regardless of whether `device` is backed by USB or the WebSocket link.
+//! Server-owned WebSocket devices support asset transfer through the same
+//! `RuntimeDevice` methods as other runtime devices, so
+//! [`AssetSync::reconcile_with_active_volatile`] can reconcile the complete
+//! desired set without transport-specific branching.
 //!
 //! Content addressing is the whole inventory protocol: there is no separate
 //! "what do you have?" query. Reconciliation sends `AssetBegin` for every
@@ -314,8 +312,8 @@ mod tests {
     use crate::{DeviceConnection, RuntimeDevice};
     use device::{ReceivedEvent, SessionDiagnostics};
     use protocol::{
-        Ack, CAPABILITY_VOLATILE_ASSETS, CardConfig, NetworkConfig, PushScene, StatusResponse,
-        TYPE_ASSET_BEGIN, TimeSync, TriggerInterrupt,
+        Ack, CAPABILITY_VOLATILE_ASSETS, CardConfig, PushScene, StatusResponse, TYPE_ASSET_BEGIN,
+        TimeSync, TriggerInterrupt,
     };
 
     use super::*;
@@ -429,12 +427,6 @@ mod tests {
             unreachable!("FakeDevice only exercises asset transfer in these tests")
         }
         fn status(&mut self) -> Result<StatusResponse, DeviceError> {
-            unreachable!("FakeDevice only exercises asset transfer in these tests")
-        }
-        fn provision(&mut self, _config: &NetworkConfig) -> Result<(), DeviceError> {
-            unreachable!("FakeDevice only exercises asset transfer in these tests")
-        }
-        fn factory_reset(&mut self) -> Result<(), DeviceError> {
             unreachable!("FakeDevice only exercises asset transfer in these tests")
         }
         fn time_sync(&mut self, _sync: TimeSync) -> Result<(), DeviceError> {

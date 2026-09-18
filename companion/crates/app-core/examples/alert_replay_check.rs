@@ -19,8 +19,8 @@ use app_core::{
 };
 use device::{ConnectedSession, DeviceError, ReceivedEvent, SessionDiagnostics, connect_session};
 use protocol::{
-    Ack, ActivateCard, AssetBegin, AssetChunk, AssetCommit, AssetRelease, CardConfig,
-    NetworkConfig, PushScene, StatusResponse, TimeSync, TriggerInterrupt,
+    Ack, ActivateCard, AssetBegin, AssetChunk, AssetCommit, AssetRelease, CardConfig, PushScene,
+    StatusResponse, TimeSync, TriggerInterrupt,
 };
 
 const POMODORO_SECONDS: u32 = 15;
@@ -69,14 +69,6 @@ impl RuntimeDevice for HarnessSerialDevice {
 
     fn status(&mut self) -> Result<StatusResponse, DeviceError> {
         self.connected()?.session.status()
-    }
-
-    fn provision(&mut self, config: &NetworkConfig) -> Result<(), DeviceError> {
-        self.connected()?.session.provision(config).map(|_| ())
-    }
-
-    fn factory_reset(&mut self) -> Result<(), DeviceError> {
-        self.connected()?.session.factory_reset().map(|_| ())
     }
 
     fn time_sync(&mut self, sync: TimeSync) -> Result<(), DeviceError> {

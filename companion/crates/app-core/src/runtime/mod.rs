@@ -12,8 +12,7 @@ use chrono_tz::Tz;
 use device::{DeviceError, ReceivedEvent, SessionDiagnostics};
 use protocol::{
     Ack, AssetBegin, AssetChunk, AssetCommit, AssetRelease, CardConfig, EventAction, EventKind,
-    Message, NetworkConfig, PushScene, StatusResponse, TimeSync, TriggerInterrupt,
-    validate_message,
+    Message, PushScene, StatusResponse, TimeSync, TriggerInterrupt, validate_message,
 };
 
 use crate::asset_sync::{AssetSync, AssetSyncError};
@@ -167,18 +166,6 @@ impl RuntimeHandle {
         self.request(|reply| RuntimeCommand::ApplyConfig { config, reply })
     }
 
-    pub fn set_paused(&self, paused: bool) -> Result<(), RuntimeError> {
-        self.request(|reply| RuntimeCommand::SetPaused { paused, reply })
-    }
-
-    pub fn set_autostart_preference(&self, enabled: bool) -> Result<(), RuntimeError> {
-        self.request(|reply| RuntimeCommand::SetAutostartPreference { enabled, reply })
-    }
-
-    pub fn set_persistence_state(&self, persistence: PersistenceState) -> Result<(), RuntimeError> {
-        self.request(|reply| RuntimeCommand::SetPersistenceState { persistence, reply })
-    }
-
     pub fn control_pomodoro(
         &self,
         card_id: impl Into<String>,
@@ -214,17 +201,6 @@ impl RuntimeHandle {
             digest,
             reply,
         })
-    }
-
-    /// Provision through the device already owned by the runtime worker. A disconnected
-    /// runtime fails before issuing any device request.
-    pub fn provision(&self, config: NetworkConfig) -> Result<(), RuntimeError> {
-        self.request(|reply| RuntimeCommand::Provision { config, reply })
-    }
-
-    /// Factory-reset through the runtime's existing connected session.
-    pub fn factory_reset(&self) -> Result<(), RuntimeError> {
-        self.request(|reply| RuntimeCommand::FactoryReset { reply })
     }
 
     pub fn shutdown(&self) -> Result<(), RuntimeError> {
@@ -775,33 +751,6 @@ fn process_command(
             };
             let _ = reply.send(result);
         }
-        RuntimeCommand::SetPaused { paused, reply } => {
-            let was_paused = state.config.preferences.paused;
-            state.config.preferences.paused = paused;
-            state.runtime = if paused {
-                RuntimeState::Paused
-            } else {
-                RuntimeState::Running
-            };
-            if was_paused && !paused {
-                let now = Instant::now();
-                scheduler.schedule_time_sync_now(now);
-            }
-            let result = if !paused && state.connected {
-                synchronize_pending(state, scheduler, device, Instant::now())
-            } else {
-                Ok(())
-            };
-            let _ = reply.send(result);
-        }
-        RuntimeCommand::SetAutostartPreference { enabled, reply } => {
-            state.config.preferences.autostart = enabled;
-            let _ = reply.send(Ok(()));
-        }
-        RuntimeCommand::SetPersistenceState { persistence, reply } => {
-            state.persistence = persistence;
-            let _ = reply.send(Ok(()));
-        }
         RuntimeCommand::Pomodoro {
             card_id,
             action,
@@ -833,16 +782,6 @@ fn process_command(
         RuntimeCommand::PushScene { push, reply } => {
             reply_to_runtime_device_command(&reply, state, reconnect_interval, || {
                 device.push_scene(push)
-            });
-        }
-        RuntimeCommand::Provision { config, reply } => {
-            reply_to_runtime_device_command(&reply, state, reconnect_interval, || {
-                device.provision(&config)
-            });
-        }
-        RuntimeCommand::FactoryReset { reply } => {
-            reply_to_runtime_device_command(&reply, state, reconnect_interval, || {
-                device.factory_reset()
             });
         }
         RuntimeCommand::Shutdown { reply } => {
@@ -1225,11 +1164,16 @@ mod tests {
                 reply: reply.clone(),
             }
         ));
-        // A status poll is a message or two; giving it 25 s would slow down
-        // noticing a wedged worker, which is what the short budget is for.
+        // An explicit scene push is a single request; giving it 25 s would
+        // slow down noticing a wedged worker, which is what the short budget
+        // is for.
         assert!(!super::command_drives_a_full_sync(
-            &RuntimeCommand::SetPaused {
-                paused: true,
+            &RuntimeCommand::PushScene {
+                push: PushScene {
+                    revision: 1,
+                    card_id: "clock".into(),
+                    scene: protocol::Scene::default(),
+                },
                 reply,
             }
         ));
@@ -1428,12 +1372,6 @@ mod tests {
         fn status(&mut self) -> Result<StatusResponse, DeviceError> {
             unreachable!("stub device is never connected in these unit tests")
         }
-        fn provision(&mut self, _config: &NetworkConfig) -> Result<(), DeviceError> {
-            unreachable!("stub device is never connected in these unit tests")
-        }
-        fn factory_reset(&mut self) -> Result<(), DeviceError> {
-            unreachable!("stub device is never connected in these unit tests")
-        }
         fn time_sync(&mut self, _sync: TimeSync) -> Result<(), DeviceError> {
             unreachable!("stub device is never connected in these unit tests")
         }
@@ -1509,14 +1447,6 @@ mod tests {
         fn status(&mut self) -> Result<StatusResponse, DeviceError> {
             self.status_calls += 1;
             Ok(scheduled_work_status())
-        }
-
-        fn provision(&mut self, _config: &NetworkConfig) -> Result<(), DeviceError> {
-            Ok(())
-        }
-
-        fn factory_reset(&mut self) -> Result<(), DeviceError> {
-            Ok(())
         }
 
         fn time_sync(&mut self, _sync: TimeSync) -> Result<(), DeviceError> {

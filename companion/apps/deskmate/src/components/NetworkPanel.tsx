@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import type { DeviceOtaState, DeviceTier, DeviceWifiState } from "../lib/types";
 
 interface NetworkDeviceView {
-  /** The link to the display, in a word. Kept here rather than in the window
+  /** The link to the display, in a word. Kept here rather than in the page
    *  chrome: it is a pairing-and-troubleshooting fact, and it belongs beside the
    *  rest of them. */
   link: string;
@@ -23,7 +23,7 @@ interface NetworkPanelProps {
   device: NetworkDeviceView;
   settings: NetworkPanelSettings;
   /** Signs this browser in: the admin token is traded for a session. */
-  onSaveServerAccess: (serverUrl: string, deviceId: string, adminToken: string) => Promise<void>;
+  onSignIn: (deviceId: string, adminToken: string) => Promise<void>;
 }
 
 /** Exported so the sheet can print it in its own head instead of this panel
@@ -43,21 +43,19 @@ function readableState(value: string | null): string {
 }
 
 /**
- * Device facts, and the one credential this window needs.
+ * Device facts, device selection, and the one credential this browser needs.
  *
  * Cable operations are intentionally absent: provisioning, unpairing and factory
  * reset write the display's own settings over USB, and the web companion does not
  * implement cable access. `deskmate-cli` is the supported path for those operations.
  */
-export function NetworkPanel({ device, settings, onSaveServerAccess }: NetworkPanelProps) {
-  const [serverUrl, setServerUrl] = useState(settings.serverUrl);
+export function NetworkPanel({ device, settings, onSignIn }: NetworkPanelProps) {
   const [deviceId, setDeviceId] = useState(settings.deviceId);
   const [adminToken, setAdminToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [announcement, setAnnouncement] = useState("");
   const [error, setError] = useState("");
 
-  useEffect(() => setServerUrl(settings.serverUrl), [settings.serverUrl]);
   useEffect(() => setDeviceId(settings.deviceId), [settings.deviceId]);
 
   const signIn = async () => {
@@ -65,7 +63,7 @@ export function NetworkPanel({ device, settings, onSaveServerAccess }: NetworkPa
     setError("");
     setAnnouncement("");
     try {
-      await onSaveServerAccess(serverUrl, deviceId, adminToken);
+      await onSignIn(deviceId, adminToken);
       setAdminToken("");
       setAnnouncement("This browser is signed in.");
     } catch (next) {
@@ -120,7 +118,7 @@ export function NetworkPanel({ device, settings, onSaveServerAccess }: NetworkPa
         <div className="network-fields">
           <label className="field network-field--wide">
             <span>Server base URL</span>
-            <input type="url" value={serverUrl} maxLength={128} readOnly />
+            <input type="url" value={settings.serverUrl} maxLength={128} readOnly />
             <small>
               This page is served by the server it configures, so this is its own address.
             </small>

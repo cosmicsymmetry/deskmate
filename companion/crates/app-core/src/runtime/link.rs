@@ -23,8 +23,6 @@ pub struct DeviceConnection {
 pub trait RuntimeDevice: Send + 'static {
     fn connect(&mut self) -> Result<DeviceConnection, DeviceError>;
     fn status(&mut self) -> Result<StatusResponse, DeviceError>;
-    fn provision(&mut self, config: &NetworkConfig) -> Result<(), DeviceError>;
-    fn factory_reset(&mut self) -> Result<(), DeviceError>;
     fn time_sync(&mut self, sync: TimeSync) -> Result<(), DeviceError>;
     fn apply_layout(&mut self, rotation: u16, cards: Vec<CardConfig>) -> Result<(), DeviceError>;
     /// The timer a card's `timer.*` scene bindings resolve against. Protocol
@@ -39,10 +37,9 @@ pub trait RuntimeDevice: Send + 'static {
     fn push_scene(&mut self, push: PushScene) -> Result<(), DeviceError>;
     fn activate_card(&mut self, card_id: String) -> Result<(), DeviceError>;
     fn trigger_interrupt(&mut self, interrupt: TriggerInterrupt) -> Result<(), DeviceError>;
-    /// Reserve (or re-attach to) storage for one asset. Unlike `provision`/
-    /// `factory_reset`, this must work on every transport: the server owning
-    /// the device over the tunnel is the entire point of networked tier, so
-    /// there is no typed unsupported-on-this-transport refusal here. The
+    /// Reserve (or re-attach to) storage for one asset. Asset transfer is part
+    /// of the runtime seam because server-owned WebSocket devices receive the
+    /// same desired asset set as any other runtime device. The
     /// `already_present` flag on the returned `Ack` is the whole inventory
     /// protocol -- a caller that sees `true` sends no chunks.
     fn send_asset_begin(&mut self, begin: AssetBegin) -> Result<Ack, DeviceError>;

@@ -58,9 +58,9 @@ import type {
   PreviewFrame,
   ValidationIssue,
 } from "../src/lib/types";
-import { ipcContractFixtures } from "../src/lib/types.contract";
+import { apiContractFixtures } from "../src/lib/types.contract";
 
-const snapshot = ipcContractFixtures.snapshot;
+const snapshot = apiContractFixtures.snapshot;
 const cards = snapshot.config.cards;
 
 // `DevicePreview` calls `renderCardPreview` directly, so its behavior tests mock
@@ -81,12 +81,11 @@ let networkSettingsImpl: () => Promise<NetworkSettings> = async () => ({
   device_id: "desk-1",
   tier: "networked",
 });
-const setServerEndpointImpl: (
-  serverUrl: string,
+const signInAndSelectDeviceImpl: (
   deviceId: string,
   adminToken: string,
-) => Promise<NetworkSettings> = async (serverUrl, deviceId) => ({
-  server_url: serverUrl,
+) => Promise<NetworkSettings> = async (deviceId) => ({
+  server_url: "https://desk.example",
   device_id: deviceId,
   tier: "networked",
 });
@@ -106,8 +105,8 @@ mock.module("../src/lib/backend", () => ({
   validateConfigDraft: (config: AppConfig) => validateImpl(config),
   saveConfig: (config: AppConfig) => saveConfigImpl(config),
   getNetworkSettings: () => networkSettingsImpl(),
-  setServerEndpoint: (serverUrl: string, deviceId: string, adminToken: string) =>
-    setServerEndpointImpl(serverUrl, deviceId, adminToken),
+  signInAndSelectDevice: (deviceId: string, adminToken: string) =>
+    signInAndSelectDeviceImpl(deviceId, adminToken),
   listImageSources: () => imageSourcesImpl(),
   updateImageSourceFace: (sourceId: string, fields: Record<string, string>) =>
     updateImageSourceFaceImpl(sourceId, fields),
@@ -224,9 +223,8 @@ describe("settings accessibility and states", () => {
   test("renders a non-blocking loading state before the first backend snapshot", () => {
     const html = renderToStaticMarkup(<App />);
     expect(html).toContain("Waking the display");
-    // The reassurance is about the server now, not a Mac agent: closing this tab
-    // does not stop the display being updated.
-    expect(html).toContain("whether or not this window is open");
+    // The server owns display updates, so closing the page does not interrupt them.
+    expect(html).toContain("whether or not this page is open");
   });
 
   test("a missing session offers the way in, not just a retry", async () => {
@@ -235,7 +233,7 @@ describe("settings accessibility and states", () => {
     // which needs the snapshot that had just failed to load. A retry button
     // cannot fix a missing credential, so the screen has to carry the field.
     snapshotImpl = async () => {
-      throw new backendModule.DeskmateCommandError({
+      throw new backendModule.DeskmateApiError({
         category: "runtime-unavailable",
         message: backendModule.SESSION_REQUIRED_MESSAGE,
       });
@@ -271,7 +269,7 @@ describe("settings accessibility and states", () => {
     });
     snapshotImpl = async () => {
       if (!signedIn) {
-        throw new backendModule.DeskmateCommandError({
+        throw new backendModule.DeskmateApiError({
           category: "runtime-unavailable",
           message: backendModule.SESSION_REQUIRED_MESSAGE,
         });
@@ -367,7 +365,7 @@ describe("settings accessibility and states", () => {
           otaState: "idle",
         }}
         settings={publicSettingsWithStoredSecrets}
-        onSaveServerAccess={async () => {}}
+        onSignIn={async () => {}}
       />,
     );
   }
@@ -409,8 +407,8 @@ describe("settings accessibility and states", () => {
     expect(html).not.toContain("Device token");
   });
 
-  test("signing in submits the admin token once and then clears it", async () => {
-    const attempts: { serverUrl: string; deviceId: string; adminToken: string }[] = [];
+  test("signing in submits the device selection and token, then clears the token", async () => {
+    const attempts: { deviceId: string; adminToken: string }[] = [];
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -427,15 +425,18 @@ describe("settings accessibility and states", () => {
               otaState: "idle",
             }}
             settings={{ serverUrl: "https://desk.example", deviceId: "desk-1" }}
-            onSaveServerAccess={async (serverUrl, deviceId, adminToken) => {
-              attempts.push({ serverUrl, deviceId, adminToken });
+            onSignIn={async (deviceId, adminToken) => {
+              attempts.push({ deviceId, adminToken });
             }}
           />,
         ),
       );
 
       const token = container.querySelector<HTMLInputElement>('input[type="password"]');
+      const serverUrl = container.querySelector<HTMLInputElement>('input[type="url"]');
       expect(token).not.toBeNull();
+      expect(serverUrl?.readOnly).toBe(true);
+      expect(serverUrl?.value).toBe("https://desk.example");
       await act(async () => {
         Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(
           token,
@@ -446,7 +447,9 @@ describe("settings accessibility and states", () => {
       await act(async () => buttonWithText(container, "Sign in")?.click());
 
       await waitFor(() => expect(attempts).toHaveLength(1));
+      expect(attempts[0]?.deviceId).toBe("desk-1");
       expect(attempts[0]?.adminToken).toBe("admin-secret");
+      expect(serverUrl?.value).toBe("https://desk.example");
       // Cleared after use: the token buys a session and is not kept in the DOM
       // where a later screenshot or a stray autofill could resurface it.
       await waitFor(() => expect(token?.value).toBe(""));
@@ -944,7 +947,7 @@ describe("settings accessibility and states", () => {
     }
   });
 
-  test("the window mints and adds a picture while keeping the token ephemeral", async () => {
+  test("the page mints and adds a picture while keeping the token ephemeral", async () => {
     const clock = clockCard("clock", "Desk");
     snapshotImpl = async () => ({
       ...snapshot,
@@ -1855,7 +1858,7 @@ describe("settings accessibility and states", () => {
       tier: "networked",
     });
     saveConfigImpl = async () => {
-      throw new backendModule.DeskmateCommandError({
+      throw new backendModule.DeskmateApiError({
         category: "validation",
         message: "the server rejected this configuration with 7 validation issue(s)",
         issues: Array.from({ length: 7 }, (_, index) => ({
@@ -1957,7 +1960,7 @@ describe("settings accessibility and states", () => {
     const root = createRoot(container);
     try {
       await act(async () => root.render(<App />));
-      // Wait for the window proper, then assert by absence. The save button's
+      // Wait for the main page, then assert by absence. The save button's
       // label depends on ownership, so it is the wrong thing to wait on here.
       await waitFor(() =>
         expect(
@@ -2232,7 +2235,7 @@ describe("settings accessibility and states", () => {
   // 1 Hz interval is the one in-component path that issues a second request before
   // the first has settled, so this test drives that interval deterministically
   // instead of waiting on a real 1 s timer: it captures the handler `DevicePreview`
-  // passes to `window.setInterval` and invokes it itself.
+  // passes to `window.setInterval` and calls it directly.
   test("an older superseded rejection landing after a newer success does not flip the panel to unavailable", async () => {
     let capturedTick: (() => void) | undefined;
     const originalSetInterval = window.setInterval;
@@ -2541,7 +2544,7 @@ describe("settings accessibility and states", () => {
     expect(new Set(union)).toEqual(new Set(issues));
   });
 
-  test("includes narrow-window and reduced-motion fallbacks", async () => {
+  test("includes narrow-viewport and reduced-motion fallbacks", async () => {
     const css = await Bun.file(new URL("../src/styles.css", import.meta.url)).text();
     expect(css).toContain("@media (max-width: 430px)");
     expect(css).toContain("@media (prefers-reduced-motion: reduce)");
@@ -2551,7 +2554,7 @@ describe("settings accessibility and states", () => {
   test("minting a picture source makes a server round trip with the source name", async () => {
     httpCalls.length = 0;
 
-    // The translation is the point: the route says `id`, the window needs
+    // The translation is the point: the route says `id`, the UI contract needs
     // `source_id`, and `push_url` is derived from this page's own origin.
     expect(await realMintImageSource("Picture")).toEqual({
       source_id: "picture-source",

@@ -5,7 +5,7 @@
 //! so the Rust HTTP API and TypeScript client share one vocabulary.
 //!
 //! HTTP errors carry a discriminated JSON body matching the frontend's
-//! `IpcError` union, plus the corresponding status. The web client switches on
+//! `ApiError` union, plus the corresponding status. The web client switches on
 //! the same category that non-browser callers can infer from the status.
 //!
 //! Every route is behind [`OperatorAuthenticated`]. That is the real gate. The
@@ -82,7 +82,7 @@ pub(crate) fn routes() -> Router<ServerState> {
 // Errors
 // ---------------------------------------------------------------------------
 
-/// An HTTP error response matching the frontend's `IpcError` union. `category`
+/// An HTTP error response matching the frontend's `ApiError` union. `category`
 /// is what the web app switches on; the status carries the same decision for
 /// any other client.
 #[derive(Debug, Serialize)]

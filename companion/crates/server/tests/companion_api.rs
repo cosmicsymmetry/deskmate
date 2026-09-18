@@ -144,7 +144,7 @@ async fn the_admin_token_buys_a_session_cookie_and_a_wrong_one_buys_nothing() {
 #[tokio::test]
 async fn an_unlinked_device_reports_its_stored_configuration_and_says_it_is_disconnected() {
     // The board is normally powered off, so this is the ordinary path, not an
-    // edge case: the window must render fully with nothing plugged in.
+    // edge case: the page must render fully with nothing plugged in.
     let (server, _state) = spawn().await;
     let client = Client::new();
     let device = mint_device(&client, &server).await;
@@ -206,7 +206,7 @@ async fn saving_a_configuration_persists_it_and_the_next_snapshot_shows_it() {
 
     let after = snapshot(&client, &server, &device.device_id).await;
     assert_eq!(after["config"]["preferences"]["timezone"], "Europe/Berlin");
-    // The save is what makes a document exist on disk, and the window uses this
+    // The save is what makes a document exist on disk, and the page uses this
     // to tell a first run from an edited one.
     assert_eq!(after["has_saved_config"], true);
 }
@@ -435,10 +435,10 @@ async fn spawn_with_plain() -> TestServer {
 
 #[tokio::test]
 async fn the_image_and_face_routes_answer_a_browser_session_not_only_a_bearer() {
-    // The window reaches these with a cookie, because a browser cannot put a
+    // The browser reaches these with a cookie because it cannot put a
     // bearer on every request without keeping the admin token where script can
     // read it. Gating them on the bearer alone made the add menu, the source
-    // list and the face settings all fail from the window while every
+    // list and the face settings all fail from the page while every
     // bearer-carrying test passed -- so this test carries a cookie on purpose.
     let (server, _state) = spawn().await;
     let client = Client::new();
@@ -469,7 +469,7 @@ async fn the_image_and_face_routes_answer_a_browser_session_not_only_a_bearer() 
         .body(serde_json::json!({ "name": "Weather", "face_kind": null }).to_string())
         .send()
         .await
-        .expect("mint from the window");
+        .expect("mint from the browser session");
     assert_eq!(minted.status(), StatusCode::OK);
 }
 
@@ -498,9 +498,9 @@ async fn session_cookie(client: &Client, server: &TestServer) -> String {
 
 #[tokio::test]
 async fn the_device_list_says_which_identities_have_ever_been_configured() {
-    // The window opens on one display, and registry order is mint order. A
+    // The page opens on one display, and registry order is mint order. A
     // server that has minted spare identities over time lists several that were
-    // never configured; without this flag the window would open on the first of
+    // never configured; without this flag the page would open on the first of
     // those and show an empty loop for a display nobody owns. Observed on the
     // live server, which lists dev-0001 first and keeps the real panel at
     // dev-0005.
@@ -542,7 +542,7 @@ async fn the_device_list_says_which_identities_have_ever_been_configured() {
     assert_eq!(row(&second.device_id)["has_saved_config"], true);
     // The recency stamp is the tie-breaker `has_saved_config` cannot provide:
     // the live server has three configured identities and one panel, so the
-    // window has to prefer the one most recently written to.
+    // page has to prefer the one most recently written to.
     assert!(row(&first.device_id)["configured_at"].is_null());
     assert!(
         row(&second.device_id)["configured_at"].as_i64().is_some(),
@@ -554,7 +554,7 @@ async fn the_device_list_says_which_identities_have_ever_been_configured() {
 async fn the_event_stream_stays_quiet_while_only_telemetry_moves() {
     // A linked board reports uptime, signal strength and frame counters
     // continuously. Comparing whole snapshots made the stream fire every couple
-    // of seconds and re-render the window for numbers nothing acts on -- measured
+    // of seconds and re-render the page for numbers nothing acts on -- measured
     // on the live server as six frames in twelve seconds, differing only in
     // `uptime_ms`, `wifi_rssi` and `counters.valid_frames`.
     //
@@ -579,7 +579,7 @@ async fn the_event_stream_stays_quiet_while_only_telemetry_moves() {
     assert_eq!(
         server::app_api_change_key(&base),
         server::app_api_change_key(&ticked),
-        "telemetry moving is not a reason to wake the window"
+        "telemetry moving is not a reason to update the page"
     );
 
     let mut meaningful = base.clone();
@@ -587,7 +587,7 @@ async fn the_event_stream_stays_quiet_while_only_telemetry_moves() {
     assert_ne!(
         server::app_api_change_key(&base),
         server::app_api_change_key(&meaningful),
-        "a configuration change must still reach the window"
+        "a configuration change must still reach the page"
     );
 
     let mut went_offline = base.clone();
@@ -706,7 +706,7 @@ async fn mint_source(client: &Client, server: &TestServer, name: &str) -> String
         .expect("mint image source");
     assert_eq!(response.status(), StatusCode::OK);
     // The route answers `id`, not `source_id`. Naming it wrong here is the same
-    // mistake that crashed the window: a stub or helper that believes a shape the
+    // mistake that crashed the page: a stub or helper that believes a shape the
     // server does not send agrees with the code and disagrees with reality.
     json_body(response).await["id"]
         .as_str()

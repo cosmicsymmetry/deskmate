@@ -29,11 +29,11 @@ import {
   unclaimedIssues,
 } from "../src/lib/configDraft";
 import type { AppConfig, CardSettings, ValidationIssue } from "../src/lib/types";
-import { ipcContractFixtures } from "../src/lib/types.contract";
+import { apiContractFixtures } from "../src/lib/types.contract";
 
 function initialConfig(): AppConfig {
   return {
-    schema_version: ipcContractFixtures.snapshot.config.schema_version,
+    schema_version: apiContractFixtures.snapshot.config.schema_version,
     preferences: {
       timezone: "UTC",
       autostart: false,
@@ -464,7 +464,7 @@ describe("configuration draft helpers", () => {
   });
 
   test("contract fixtures expose cards, not widgets or screens", () => {
-    const config = ipcContractFixtures.snapshot.config;
+    const config = apiContractFixtures.snapshot.config;
     expect(config.schema_version).toBe(10);
     expect(Array.isArray(config.cards)).toBe(true);
     expect("playlists" in config).toBe(false);
@@ -477,20 +477,20 @@ describe("configuration draft helpers", () => {
   });
 
   test("every alert and playlist advance variant is represented in the contract", () => {
-    const alertKinds = ipcContractFixtures.card_alerts.map((a) => a.kind).sort();
+    const alertKinds = apiContractFixtures.card_alerts.map((a) => a.kind).sort();
     expect(alertKinds).toEqual(["none", "on-timer-finish"]);
 
-    const advanceKinds = ipcContractFixtures.carousel_advances.map((a) => a.kind).sort();
+    const advanceKinds = apiContractFixtures.carousel_advances.map((a) => a.kind).sort();
     expect(advanceKinds).toEqual(["manual", "timed"]);
   });
 
   test("the contract represents every supported card and known device capability", () => {
-    expect(ipcContractFixtures.card_settings.map((card) => card.kind).sort()).toEqual([
+    expect(apiContractFixtures.card_settings.map((card) => card.kind).sort()).toEqual([
       "clock",
       "picture",
       "pomodoro",
     ]);
-    expect(ipcContractFixtures.device_capabilities).toContain("volatile-assets");
+    expect(apiContractFixtures.device_capabilities).toContain("volatile-assets");
   });
 });
 

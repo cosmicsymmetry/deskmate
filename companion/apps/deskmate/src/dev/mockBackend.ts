@@ -91,7 +91,7 @@ function applyScenario() {
     case "unowned":
       snapshot.device.tier = null;
       snapshot.device.connection = { kind: "connecting" };
-      network = { server_url: "", device_id: "", tier: null };
+      network = { ...network, device_id: "", tier: null };
       break;
     case "invalid":
       config.preferences.timezone = "Mars/Olympus";
@@ -217,7 +217,7 @@ window.setInterval(() => {
 }, 1000);
 
 /**
- * The mock's argument bag. Every command that reads arguments is always called with
+ * The mock's argument bag. Every operation that reads arguments is always called with
  * them by `src/dev/backendClient.ts`, so a missing bag is a harness bug — surfaced as the
  * same structured error shape the real backend would return, not a TypeError.
  */
@@ -231,11 +231,11 @@ function requireArgs(args: Record<string, unknown> | undefined): Record<string, 
 const delay = <T>(value: T, ms = 90): Promise<T> =>
   new Promise((resolve) => window.setTimeout(() => resolve(value), ms));
 
-export async function dispatchMockCommand<T>(
-  command: string,
+export async function dispatchMockOperation<T>(
+  operation: string,
   args?: Record<string, unknown>,
 ): Promise<T> {
-  switch (command) {
+  switch (operation) {
     case "get_app_snapshot":
       return delay(snapshot) as Promise<T>;
     case "get_network_settings":
@@ -318,18 +318,17 @@ export async function dispatchMockCommand<T>(
         state: null,
       } as T;
     }
-    case "set_server_endpoint": {
-      const request = requireArgs(args).request as { server_url: string; device_id: string };
+    case "sign_in_and_select_device": {
+      const request = requireArgs(args).request as { device_id: string };
       network = {
         ...network,
-        server_url: request.server_url,
-        // Blank means "leave the stored id alone", matching set_server_endpoint.
+        // A blank selection keeps the harness's automatically selected display.
         device_id: request.device_id.trim() === "" ? network.device_id : request.device_id,
       };
       return delay(network) as Promise<T>;
     }
     default:
-      throw { category: "not-found", message: `mock backend has no command \`${command}\`` };
+      throw { category: "not-found", message: `mock backend has no operation \`${operation}\`` };
   }
 }
 

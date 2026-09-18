@@ -27,7 +27,7 @@ import {
   listCreatableFaces,
   mintImageSource,
   resumePushing,
-  toIpcError,
+  toApiError,
   validateConfigDraft,
   isSessionMissing,
   signIn,
@@ -39,7 +39,7 @@ import type {
   DisplayOrientation,
   DraftValidation,
   FaceDescriptor,
-  IpcError,
+  ApiError,
   ImageSource,
   MintedImageSource,
   PomodoroAction,
@@ -72,7 +72,7 @@ export function App() {
     networkSettings,
     ownershipTier,
     saveConfig,
-    saveServerAccess,
+    signInAndSelectDevice,
   } = useAppState();
   const [draft, setDraft] = useState<AppConfig | null>(null);
   const draftRef = useRef<AppConfig | null>(draft);
@@ -84,7 +84,7 @@ export function App() {
     result: validDraft,
   });
   const [saveState, setSaveState] = useState<SaveState>({ kind: "idle" });
-  const [commandError, setCommandError] = useState<IpcError | null>(null);
+  const [actionError, setActionError] = useState<ApiError | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [signInToken, setSignInToken] = useState("");
@@ -98,7 +98,7 @@ export function App() {
   const [creatableFaces, setCreatableFaces] = useState<FaceDescriptor[]>([]);
 
   // Asked once: the list only changes when the server is redeployed, and a
-  // failure here must not block the window -- the menu simply offers the
+  // failure here must not block the page -- the menu simply offers the
   // built-in kinds, exactly as it did before the server could draw anything.
   useEffect(() => {
     let cancelled = false;
@@ -151,7 +151,7 @@ export function App() {
             setValidation({
               kind: "error",
               result: { valid: false, issues: [] },
-              error: toIpcError(nextError),
+              error: toApiError(nextError),
             });
           }
         });
@@ -167,7 +167,7 @@ export function App() {
       <main className="startup" aria-busy="true">
         <span className="startup__ring" aria-hidden="true" />
         <h1>Waking the display…</h1>
-        <p>The server keeps the display updated whether or not this window is open.</p>
+        <p>The server keeps the display updated whether or not this page is open.</p>
       </main>
     );
   }
@@ -175,7 +175,7 @@ export function App() {
   if (!snapshot || !draft) {
     // A missing session is the one failure with a specific answer, so it gets a
     // specific screen. Everything else is "retry", and offering only that when
-    // the real problem is "sign in" made the window a dead end: it named the
+    // the real problem is "sign in" made the page a dead end: it named the
     // admin token and then gave nowhere to type it.
     if (stateError && isSessionMissing(stateError)) {
       return (
@@ -194,7 +194,7 @@ export function App() {
                   setSignInToken("");
                   return refresh();
                 })
-                .catch((next) => setSignInError(toIpcError(next).message))
+                .catch((next) => setSignInError(toApiError(next).message))
                 .finally(() => setSigningIn(false));
             }}
           >
@@ -316,7 +316,7 @@ export function App() {
     }
     const sourceName = nextCardName(currentDraft, "Picture");
     setBusyAction("picture-source");
-    setCommandError(null);
+    setActionError(null);
     void mintImageSource(sourceName)
       .then((access) => {
         const cardId = handleAdd({
@@ -328,7 +328,7 @@ export function App() {
           setMintedPicture({ cardId, access });
         }
       })
-      .catch((nextError) => setCommandError(toIpcError(nextError)))
+      .catch((nextError) => setActionError(toApiError(nextError)))
       .finally(() => setBusyAction(null));
   };
 
@@ -342,12 +342,12 @@ export function App() {
     }
     const name = nextCardName(currentDraft, label);
     setBusyAction("picture-source");
-    setCommandError(null);
+    setActionError(null);
     void mintImageSource(name, kind)
       .then((access) => {
         handleAdd({ kind: "picture", sourceId: access.source_id, sourceName: name });
       })
-      .catch((nextError) => setCommandError(toIpcError(nextError)))
+      .catch((nextError) => setActionError(toApiError(nextError)))
       .finally(() => setBusyAction(null));
   };
 
@@ -378,12 +378,12 @@ export function App() {
   };
   const runAction = async (name: string, operation: () => Promise<void>) => {
     setBusyAction(name);
-    setCommandError(null);
+    setActionError(null);
     try {
       await operation();
       await refresh();
     } catch (nextError) {
-      setCommandError(toIpcError(nextError));
+      setActionError(toApiError(nextError));
     } finally {
       setBusyAction(null);
     }
@@ -393,7 +393,7 @@ export function App() {
       return;
     }
     setSaveState({ kind: "saving" });
-    setCommandError(null);
+    setActionError(null);
     try {
       const result = await saveConfig(draft);
       setDirty(false);
@@ -405,7 +405,7 @@ export function App() {
       });
       await refresh();
     } catch (nextError) {
-      setSaveState({ kind: "error", error: toIpcError(nextError) });
+      setSaveState({ kind: "error", error: toApiError(nextError) });
     }
   };
   const handleTimerAction = (action: "start" | "pause" | "reset") => {
@@ -447,10 +447,7 @@ export function App() {
         <main className="face__work">
           {/* Consequential failures stay in the working column where they remain
               visible without turning nominal state into permanent chrome. */}
-          {(protocolMismatch ||
-            snapshot.runtime.kind === "error" ||
-            commandError ||
-            stateError) && (
+          {(protocolMismatch || snapshot.runtime.kind === "error" || actionError || stateError) && (
             <aside className="notice notice--bad" role="alert">
               <div>
                 <strong>
@@ -458,7 +455,7 @@ export function App() {
                     ? `This display speaks protocol ${snapshot.device.protocol_version}; this server speaks protocol ${snapshot.host_protocol_version}.`
                     : snapshot.runtime.kind === "error"
                       ? snapshot.runtime.message
-                      : (commandError ?? stateError)?.message}
+                      : (actionError ?? stateError)?.message}
                 </strong>
               </div>
             </aside>
@@ -694,14 +691,14 @@ export function App() {
               serverUrl: networkSettings.server_url,
               deviceId: networkSettings.device_id,
             }}
-            onSaveServerAccess={async (serverUrl, deviceId, adminToken) => {
-              await saveServerAccess(serverUrl, deviceId, adminToken);
+            onSignIn={async (deviceId, adminToken) => {
+              await signInAndSelectDevice(deviceId, adminToken);
               await refresh();
             }}
           />
         </section>
 
-        {/* Preferences are draft state, so the sheet needs the same Save the window
+        {/* Preferences are draft state, so the sheet needs the same Save the page
             has — a modal that can strand an edit behind itself is a trap. */}
         <SaveBar
           validation={validation}

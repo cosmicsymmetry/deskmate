@@ -26,7 +26,6 @@ pub use config::{
 };
 pub use protocol::{
     MAX_DEVICE_ID_LEN, MAX_DEVICE_TOKEN_LEN, MAX_PSK_LEN, MAX_SERVER_URL_LEN, MAX_SSID_LEN,
-    NetworkConfig, Tier as ProvisioningTier,
 };
 pub use render_negotiation::{
     DeviceRenderProfile, RenderRequirements, SceneNodeKind, analyze_scene, validate_native_scene,

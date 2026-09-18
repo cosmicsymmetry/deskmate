@@ -262,6 +262,15 @@ companion/crates/server/deploy/deploy.sh --ui-only    # just the companion
 companion/crates/server/deploy/deploy.sh --dry-run    # build, do not install
 ```
 
+Measured on the live deployment, 2026-09-18:
+
+| | |
+|---|---|
+| UI-only change | **1.3 s** — no Rust build, no restart |
+| No-op deploy | **3.8 s** — build finishes in 0.12 s, restart skipped |
+| Real server change | **23 s** — 17 s of that is the container build |
+| The same no-op, before this | **96 s** |
+
 ### Why it is fast, and what breaks if you hand-roll it
 
 The prose recipe below was correct and still took **96 seconds to produce a

@@ -387,7 +387,10 @@ web page now, so this costs a minute. See the trap about the harness above.
 
 Budget for this: a cold full run is about 35 minutes on the owner's machine -- 13 for
 clippy, most of the rest for `--all-targets`, whose `server/tests/ownership.rs` does
-real loopback binds. `cargo` is not on the Bash tool's PATH (`export
+real loopback binds. **This is the local gate suite and has nothing to do with the
+deploy**, which is now 3.8 s for a no-op and 23 s for a real change
+(`companion/crates/server/deploy/deploy.sh`); the two were conflated once and the
+wrong one was optimised first. `cargo` is not on the Bash tool's PATH (`export
 PATH="$HOME/.cargo/bin:$PATH"`), and piping a cargo invocation into `tail` reports
 `tail`'s exit status in zsh, hiding a failure as a pass -- redirect to a file and check
 `$?`.

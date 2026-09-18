@@ -73,10 +73,9 @@ default. This section states only what is true now.
 - **THE COMPANION IS A WEB APP, and there is no desktop app.** Every surface for a
   networked device is served by the server it configures, at
   `https://deskmate.rodi.one/`. The browser API is `crates/server/src/app_api/`, gated by
-  the operator session cookie the page trades the admin token for. The old Tauri app and
-  every trace of it in code were removed on 2026-09-19; a future desktop app is to be
-  written from scratch, so do not look for (or resurrect) scaffolding for one. The React
-  source lives under `apps/deskmate/src/`: `src/lib/backend.ts` is a one-line barrel over `./backendClient`, and
+  the operator session cookie the page trades the admin token for. Nothing in the tree is
+  scaffolding for a desktop app: if one is wanted it is written from scratch, and it
+  talks to the server like the page does. The React source lives under `apps/deskmate/src/`: `src/lib/backend.ts` is a one-line barrel over `./backendClient`, and
   `vite.config.ts` aliases that single specifier to `src/dev/backendClient.ts` under
   `VITE_DESKMATE_MOCK=1` -- so there is exactly one seam and three implementations of it
   (HTTP, mock, and whatever comes next). Design:

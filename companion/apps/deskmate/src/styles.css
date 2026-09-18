@@ -1450,8 +1450,7 @@ fieldset legend {
   font-weight: 620;
 }
 
-.ownership-badge--networked,
-.ownership-badge--local {
+.ownership-badge--networked {
   background: color-mix(in srgb, var(--good) 15%, transparent);
   color: var(--good);
 }

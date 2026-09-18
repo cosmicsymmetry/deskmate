@@ -262,13 +262,11 @@ export function validateConfigDraft(config: AppConfig): Promise<DraftValidation>
   );
 }
 
-/** Both save entry points use the server-owned configuration route. */
-export function saveApplyConfig(config: AppConfig): Promise<ConfigApplyResult> {
+/** Saves through the server, which applies the configuration if the display is linked. */
+export function saveConfig(config: AppConfig): Promise<ConfigApplyResult> {
   const draft = draftPayload(config);
   return devicePath("/config").then((path) => request<ConfigApplyResult>("PUT", path, draft));
 }
-
-export const saveServerConfig = saveApplyConfig;
 
 /**
  * What this window is talking to.
@@ -334,7 +332,7 @@ export async function resumePushing(): Promise<void> {
   if (!snapshot.config.preferences.paused) {
     return;
   }
-  await saveApplyConfig({
+  await saveConfig({
     ...snapshot.config,
     preferences: { ...snapshot.config.preferences, paused: false },
   });

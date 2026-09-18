@@ -1,5 +1,5 @@
-//! The device seam: what the runtime may ask of a display, the serial
-//! implementation of it, and how a failed request is classified.
+//! The device seam: what the runtime may ask of a display and how a failed
+//! request is classified.
 //!
 //! Named `link` rather than `device` because `device` is a CRATE this module
 //! imports; a second `device` in one scope is a trap.
@@ -81,143 +81,6 @@ pub trait ImageSourceHost: Send + 'static {
     fn image_source_frame(&mut self, source_id: &str) -> Option<ImageSourceFrame>;
 }
 
-pub struct SerialRuntimeDevice {
-    explicit_port: Option<String>,
-    connected: Option<ConnectedSession>,
-}
-
-impl SerialRuntimeDevice {
-    pub fn new(explicit_port: Option<String>) -> Self {
-        Self {
-            explicit_port,
-            connected: None,
-        }
-    }
-
-    pub(super) fn connected(&self) -> Result<&ConnectedSession, DeviceError> {
-        self.connected.as_ref().ok_or(DeviceError::NoDevice)
-    }
-}
-
-impl RuntimeDevice for SerialRuntimeDevice {
-    fn connect(&mut self) -> Result<DeviceConnection, DeviceError> {
-        if let Some(connected) = self.connected.as_mut() {
-            match connected.reconnect(self.explicit_port.as_deref()) {
-                Ok(()) => {
-                    return Ok(DeviceConnection {
-                        port_name: connected.port_name.clone(),
-                        status: connected.initial_status.clone(),
-                    });
-                }
-                Err(error) => {
-                    // A stalled session's worker is blocked inside a transport
-                    // read the operating system will not interrupt, and
-                    // `reconnect` hands the new transport to that same worker, so
-                    // this session can never come back. Discard it and open a
-                    // fresh one below; keeping it would leave the display
-                    // unreachable for the rest of the run after a single cable
-                    // pull. Every other failure keeps the session, as before.
-                    if !connected.session.is_stalled() {
-                        return Err(error);
-                    }
-                    self.connected = None;
-                }
-            }
-        }
-        let connected = connect_session(self.explicit_port.as_deref())?;
-        let result = DeviceConnection {
-            port_name: connected.port_name.clone(),
-            status: connected.initial_status.clone(),
-        };
-        self.connected = Some(connected);
-        Ok(result)
-    }
-
-    fn status(&mut self) -> Result<StatusResponse, DeviceError> {
-        self.connected()?.session.status()
-    }
-
-    fn provision(&mut self, config: &NetworkConfig) -> Result<(), DeviceError> {
-        self.connected()?.session.provision(config).map(|_| ())
-    }
-
-    fn factory_reset(&mut self) -> Result<(), DeviceError> {
-        self.connected()?.session.factory_reset().map(|_| ())
-    }
-
-    fn time_sync(&mut self, sync: TimeSync) -> Result<(), DeviceError> {
-        self.connected()?.session.time_sync(sync).map(|_| ())
-    }
-
-    fn apply_layout(&mut self, rotation: u16, cards: Vec<CardConfig>) -> Result<(), DeviceError> {
-        self.connected()?
-            .session
-            .apply_next_config(rotation, cards)
-            .map(|_| ())
-    }
-
-    fn push_timer(
-        &mut self,
-        card_id: String,
-        total_ms: u32,
-        remaining_ms: u32,
-        running: bool,
-    ) -> Result<(), DeviceError> {
-        self.connected()?
-            .session
-            .push_next_timer(card_id, total_ms, remaining_ms, running)
-            .map(|_| ())
-    }
-
-    fn push_scene(&mut self, push: PushScene) -> Result<(), DeviceError> {
-        self.connected()?.session.push_scene(push).map(|_| ())
-    }
-
-    fn activate_card(&mut self, card_id: String) -> Result<(), DeviceError> {
-        self.connected()?
-            .session
-            .activate_card(ActivateCard { card_id })
-            .map(|_| ())
-    }
-
-    fn trigger_interrupt(&mut self, interrupt: TriggerInterrupt) -> Result<(), DeviceError> {
-        self.connected()?
-            .session
-            .trigger_interrupt(interrupt)
-            .map(|_| ())
-    }
-
-    fn send_asset_begin(&mut self, begin: AssetBegin) -> Result<Ack, DeviceError> {
-        self.connected()?.session.asset_begin(begin)
-    }
-
-    fn send_asset_chunk(&mut self, chunk: AssetChunk) -> Result<(), DeviceError> {
-        self.connected()?.session.asset_chunk(chunk).map(|_| ())
-    }
-
-    fn send_asset_commit(&mut self, commit: AssetCommit) -> Result<(), DeviceError> {
-        self.connected()?.session.asset_commit(commit).map(|_| ())
-    }
-
-    fn send_asset_release(&mut self, release: AssetRelease) -> Result<(), DeviceError> {
-        self.connected()?.session.asset_release(release).map(|_| ())
-    }
-
-    fn try_recv_event(&mut self) -> Option<ReceivedEvent> {
-        self.connected
-            .as_ref()
-            .and_then(|connected| connected.session.try_recv_event())
-    }
-
-    fn diagnostics(&self) -> SessionDiagnostics {
-        self.connected
-            .as_ref()
-            .map_or_else(SessionDiagnostics::default, |connected| {
-                connected.session.diagnostics()
-            })
-    }
-}
-
 pub(super) fn ownership_was_refused(state: &WorkerState) -> bool {
     state.ownership_refused
 }
@@ -230,7 +93,7 @@ pub(super) fn is_wrong_tier(error: &DeviceError) -> bool {
 }
 
 /// A `WrongTier` refusal is a fresh ownership observation, not a failed sync. Keep all
-/// pending host state for a later return to Local and stop issuing USB mutations now.
+/// pending host state for a later status-confirmed retry and stop issuing device mutations.
 pub(super) fn sync_device_result(
     state: &mut WorkerState,
     result: Result<(), DeviceError>,

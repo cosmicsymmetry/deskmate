@@ -26,7 +26,6 @@ import type {
   AddableCardKind,
   AppConfig,
   CardSettings,
-  DeviceTier,
   FaceDescriptor,
   ImageSource,
   PomodoroSnapshot,
@@ -39,7 +38,6 @@ interface CardListProps {
   config: AppConfig;
   issues: ValidationIssue[];
   pomodoros: PomodoroSnapshot[];
-  ownershipTier: DeviceTier | null;
   selectedCardId: string | null;
   onSelect: (cardId: string) => void;
   onAdd: (kind: AddableCardKind) => void;
@@ -100,7 +98,6 @@ export function CardList({
   config,
   issues,
   pomodoros,
-  ownershipTier,
   selectedCardId,
   onSelect,
   onAdd,
@@ -331,8 +328,6 @@ export function CardList({
     const hasAlert = card.alert.kind !== "none";
     const pomodoro = pomodoros.find((candidate) => candidate.card_id === card.id);
     const label = controlLabel(card, config.image_sources);
-    const pictureFlag =
-      card.kind === "picture" && ownershipTier === "local" ? "needs the server" : null;
     const value = tileValue(card, pomodoro, config.image_sources);
     return (
       <li
@@ -372,7 +367,6 @@ export function CardList({
           )}
         </button>
         <span className="card-tile__flags">
-          {pictureFlag && <span className="flag">{pictureFlag}</span>}
           {hasAlert && <span className="flag flag--alert">alerts</span>}
         </span>
         <button

@@ -1,4 +1,4 @@
-//! Hardware harness for alert delivery across an unpowered interval.
+//! Hardware harness for alert delivery across a USB link interruption.
 //!
 //! Flow (the harness sequences the user, so timing cannot be missed):
 //! 1. Connects and shows the pomodoro card, then asks the user to UNPLUG.
@@ -13,12 +13,144 @@
 use std::time::{Duration, Instant};
 
 use app_core::{
-    AlertHold, AppConfig, CardAlert, CardSettings, ConnectionState, DisplayTemplate,
-    PomodoroAction, PomodoroState, RefreshPolicy, RuntimeHandle, WidgetTapAction,
+    AlertHold, AppConfig, CardAlert, CardSettings, ConnectionState, DeviceConnection,
+    DisplayTemplate, PomodoroAction, PomodoroState, RefreshPolicy, RuntimeDevice, RuntimeHandle,
+    RuntimeOptions, WidgetTapAction,
+};
+use device::{ConnectedSession, DeviceError, ReceivedEvent, SessionDiagnostics, connect_session};
+use protocol::{
+    Ack, ActivateCard, AssetBegin, AssetChunk, AssetCommit, AssetRelease, CardConfig,
+    NetworkConfig, PushScene, StatusResponse, TimeSync, TriggerInterrupt,
 };
 
 const POMODORO_SECONDS: u32 = 15;
 const HOLD_SECONDS: u16 = 5;
+
+/// Serial adapter kept with this hardware-only harness so the reusable runtime
+/// remains transport-neutral.
+struct HarnessSerialDevice {
+    connected: Option<ConnectedSession>,
+}
+
+impl HarnessSerialDevice {
+    fn connected(&self) -> Result<&ConnectedSession, DeviceError> {
+        self.connected.as_ref().ok_or(DeviceError::NoDevice)
+    }
+}
+
+impl RuntimeDevice for HarnessSerialDevice {
+    fn connect(&mut self) -> Result<DeviceConnection, DeviceError> {
+        if let Some(connected) = self.connected.as_mut() {
+            match connected.reconnect(None) {
+                Ok(()) => {
+                    return Ok(DeviceConnection {
+                        port_name: connected.port_name.clone(),
+                        status: connected.initial_status.clone(),
+                    });
+                }
+                Err(error) => {
+                    // A stalled worker cannot accept the replacement transport.
+                    // Discard that session so the next attempt starts a new one.
+                    if !connected.session.is_stalled() {
+                        return Err(error);
+                    }
+                    self.connected = None;
+                }
+            }
+        }
+        let connected = connect_session(None)?;
+        let result = DeviceConnection {
+            port_name: connected.port_name.clone(),
+            status: connected.initial_status.clone(),
+        };
+        self.connected = Some(connected);
+        Ok(result)
+    }
+
+    fn status(&mut self) -> Result<StatusResponse, DeviceError> {
+        self.connected()?.session.status()
+    }
+
+    fn provision(&mut self, config: &NetworkConfig) -> Result<(), DeviceError> {
+        self.connected()?.session.provision(config).map(|_| ())
+    }
+
+    fn factory_reset(&mut self) -> Result<(), DeviceError> {
+        self.connected()?.session.factory_reset().map(|_| ())
+    }
+
+    fn time_sync(&mut self, sync: TimeSync) -> Result<(), DeviceError> {
+        self.connected()?.session.time_sync(sync).map(|_| ())
+    }
+
+    fn apply_layout(&mut self, rotation: u16, cards: Vec<CardConfig>) -> Result<(), DeviceError> {
+        self.connected()?
+            .session
+            .apply_next_config(rotation, cards)
+            .map(|_| ())
+    }
+
+    fn push_timer(
+        &mut self,
+        card_id: String,
+        total_ms: u32,
+        remaining_ms: u32,
+        running: bool,
+    ) -> Result<(), DeviceError> {
+        self.connected()?
+            .session
+            .push_next_timer(card_id, total_ms, remaining_ms, running)
+            .map(|_| ())
+    }
+
+    fn push_scene(&mut self, push: PushScene) -> Result<(), DeviceError> {
+        self.connected()?.session.push_scene(push).map(|_| ())
+    }
+
+    fn activate_card(&mut self, card_id: String) -> Result<(), DeviceError> {
+        self.connected()?
+            .session
+            .activate_card(ActivateCard { card_id })
+            .map(|_| ())
+    }
+
+    fn trigger_interrupt(&mut self, interrupt: TriggerInterrupt) -> Result<(), DeviceError> {
+        self.connected()?
+            .session
+            .trigger_interrupt(interrupt)
+            .map(|_| ())
+    }
+
+    fn send_asset_begin(&mut self, begin: AssetBegin) -> Result<Ack, DeviceError> {
+        self.connected()?.session.asset_begin(begin)
+    }
+
+    fn send_asset_chunk(&mut self, chunk: AssetChunk) -> Result<(), DeviceError> {
+        self.connected()?.session.asset_chunk(chunk).map(|_| ())
+    }
+
+    fn send_asset_commit(&mut self, commit: AssetCommit) -> Result<(), DeviceError> {
+        self.connected()?.session.asset_commit(commit).map(|_| ())
+    }
+
+    fn send_asset_release(&mut self, release: AssetRelease) -> Result<(), DeviceError> {
+        self.connected()?.session.asset_release(release).map(|_| ())
+    }
+
+    fn try_recv_event(&mut self) -> Option<ReceivedEvent> {
+        self.connected
+            .as_ref()
+            .and_then(|connected| connected.session.try_recv_event())
+    }
+
+    fn diagnostics(&self) -> SessionDiagnostics {
+        self.connected
+            .as_ref()
+            .map_or_else(SessionDiagnostics::default, |connected| {
+                connected.session.diagnostics()
+            })
+    }
+}
 
 #[derive(PartialEq)]
 enum Phase {
@@ -48,7 +180,12 @@ fn main() {
     });
     config.validate().expect("harness config must validate");
 
-    let handle = RuntimeHandle::start_serial(config, None).expect("start runtime");
+    let handle = RuntimeHandle::start(
+        config,
+        Box::new(HarnessSerialDevice { connected: None }),
+        RuntimeOptions::default(),
+    )
+    .expect("start runtime");
     let subscription = handle.subscribe().expect("subscribe");
 
     println!(

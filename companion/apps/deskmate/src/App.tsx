@@ -46,10 +46,7 @@ import type {
 } from "./lib/types";
 import { useAppState } from "./lib/useAppState";
 
-/**
- * The USB link in one word, for the pairing and troubleshooting facts in the
- * settings sheet.
- */
+/** The device link in one phrase for the troubleshooting facts in the settings sheet. */
 function linkLabel(snapshot: AppSnapshot): string {
   switch (snapshot.device.connection.kind) {
     case "online":
@@ -269,8 +266,7 @@ export function App() {
   // just blocking Save with no highlighted control anywhere in the UI (see
   // `unclaimedIssues`).
   const leftoverIssues = unclaimedIssues(issues, draft);
-  const networkedTier = ownershipTier === "networked";
-  const localTier = ownershipTier === "local";
+  const serverOwned = ownershipTier === "networked";
   const protocolMismatch =
     snapshot.device.protocol_version !== null &&
     snapshot.device.protocol_version !== snapshot.host_protocol_version;
@@ -278,7 +274,7 @@ export function App() {
   // The settings button is silent while everything is nominal, and carries a dot
   // only for the things whose answers live behind it.
   const needsAttention =
-    ownershipTier === null ||
+    !serverOwned ||
     protocolMismatch ||
     snapshot.device.wifi_state === "failed" ||
     snapshot.device.last_network_error !== null;
@@ -405,25 +401,11 @@ export function App() {
         kind: "saved",
         message: result.save.warning
           ? `Saved. ${result.save.warning.message}`
-          : networkedTier
-            ? "Saved to the server. The server will update your display."
-            : snapshot.device.connection.kind === "online"
-              ? "Saved and applied to your display."
-              : "Saved. It will sync when your display reconnects.",
+          : "Saved to the server. The server will update your display.",
       });
       await refresh();
     } catch (nextError) {
-      const ipcError = toIpcError(nextError);
-      if (localTier && ipcError.category === "device") {
-        setDirty(false);
-        setSaveState({
-          kind: "saved",
-          message: "Saved. The display could not update yet, so this is queued for reconnect.",
-        });
-        await refresh();
-      } else {
-        setSaveState({ kind: "error", error: ipcError });
-      }
+      setSaveState({ kind: "error", error: toIpcError(nextError) });
     }
   };
   const handleTimerAction = (action: "start" | "pause" | "reset") => {
@@ -604,7 +586,6 @@ export function App() {
             config={draft}
             issues={issues}
             pomodoros={snapshot.pomodoros}
-            ownershipTier={ownershipTier}
             selectedCardId={selectedCardId}
             onSelect={handleSelectCard}
             onAdd={handleAdd}
@@ -694,13 +675,14 @@ export function App() {
         <section className="sheet__section" aria-labelledby="device-heading">
           <div className="sheet__section-head">
             <h3 id="device-heading">Device</h3>
-            <strong className={`ownership-badge ownership-badge--${ownershipTier ?? "unknown"}`}>
+            <strong
+              className={`ownership-badge ownership-badge--${serverOwned ? "networked" : "unknown"}`}
+            >
               {ownershipLabel(ownershipTier)}
             </strong>
           </div>
           <NetworkPanel
             device={{
-              tier: ownershipTier,
               link: linkLabel(snapshot),
               wifiState: snapshot.device.wifi_state,
               wifiRssi: snapshot.device.wifi_rssi,

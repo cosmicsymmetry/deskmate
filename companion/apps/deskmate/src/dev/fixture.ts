@@ -104,7 +104,7 @@ export function mockSnapshot(config: AppConfig): AppSnapshot {
     runtime: { kind: "running" },
     device: {
       connection: { kind: "online" },
-      port_name: "/dev/cu.usbmodem2101",
+      port_name: "network:desk-01",
       firmware_version: "1.0.0",
       protocol_version: 2,
       max_protocol_version: 2,

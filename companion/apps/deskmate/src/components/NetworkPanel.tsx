@@ -3,7 +3,6 @@ import { useEffect, useState } from "react";
 import type { DeviceOtaState, DeviceTier, DeviceWifiState } from "../lib/types";
 
 interface NetworkDeviceView {
-  tier: DeviceTier | null;
   /** The link to the display, in a word. Kept here rather than in the window
    *  chrome: it is a pairing-and-troubleshooting fact, and it belongs beside the
    *  rest of them. */
@@ -30,9 +29,6 @@ interface NetworkPanelProps {
 /** Exported so the sheet can print it in its own head instead of this panel
  *  carrying a second heading inside a titled dialog. */
 export function ownershipLabel(tier: DeviceTier | null): string {
-  if (tier === "local") {
-    return "Owned by a cable";
-  }
   return tier === "networked" ? "Owned by the server" : "Ownership unavailable";
 }
 
@@ -79,15 +75,10 @@ export function NetworkPanel({ device, settings, onSaveServerAccess }: NetworkPa
     }
   };
 
-  const destination =
-    device.tier === "local"
-      ? "This display is owned by a cable. Settings saved here reach it only once it is owned by the server."
-      : "Settings are saved to the server. The server sends them to this display.";
-
   return (
     <section className="network-panel" aria-label="Device ownership">
       <p className="settings-destination" role="status">
-        {destination}
+        Settings are saved to the server. The server sends them to this display.
       </p>
 
       <dl className="network-status" aria-label="Device network status">

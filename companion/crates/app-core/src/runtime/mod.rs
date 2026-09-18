@@ -9,10 +9,10 @@ use crate::engine::interrupts::InterruptArbiter;
 use crate::engine::pomodoro::{Pomodoro, PomodoroState as EnginePomodoroState};
 use chrono::Utc;
 use chrono_tz::Tz;
-use device::{ConnectedSession, DeviceError, ReceivedEvent, SessionDiagnostics, connect_session};
+use device::{DeviceError, ReceivedEvent, SessionDiagnostics};
 use protocol::{
-    Ack, ActivateCard, AssetBegin, AssetChunk, AssetCommit, AssetRelease, CardConfig, EventAction,
-    EventKind, Message, NetworkConfig, PushScene, StatusResponse, TimeSync, TriggerInterrupt,
+    Ack, AssetBegin, AssetChunk, AssetCommit, AssetRelease, CardConfig, EventAction, EventKind,
+    Message, NetworkConfig, PushScene, StatusResponse, TimeSync, TriggerInterrupt,
     validate_message,
 };
 
@@ -87,17 +87,6 @@ pub struct RuntimeHandle {
 }
 
 impl RuntimeHandle {
-    pub fn start_serial(
-        config: AppConfig,
-        explicit_port: Option<String>,
-    ) -> Result<Self, RuntimeError> {
-        Self::start(
-            config,
-            Box::new(SerialRuntimeDevice::new(explicit_port)),
-            RuntimeOptions::default(),
-        )
-    }
-
     pub fn start(
         config: AppConfig,
         device: Box<dyn RuntimeDevice>,
@@ -227,8 +216,8 @@ impl RuntimeHandle {
         })
     }
 
-    /// Provision through the session already owned by the runtime worker. This command never
-    /// discovers or opens a serial port; disconnected runtimes fail before touching the device.
+    /// Provision through the device already owned by the runtime worker. A disconnected
+    /// runtime fails before issuing any device request.
     pub fn provision(&self, config: NetworkConfig) -> Result<(), RuntimeError> {
         self.request(|reply| RuntimeCommand::Provision { config, reply })
     }

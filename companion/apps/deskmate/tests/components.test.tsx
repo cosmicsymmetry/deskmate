@@ -59,7 +59,6 @@ import type {
   ValidationIssue,
 } from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
-import { resolveDeviceTier, saveConfigForTier } from "../src/lib/useAppState";
 
 const snapshot = ipcContractFixtures.snapshot;
 const cards = snapshot.config.cards;
@@ -74,16 +73,13 @@ let validateImpl: (config: AppConfig) => Promise<DraftValidation> = async () => 
   valid: true,
   issues: [],
 });
-let saveImpl: (config: AppConfig) => Promise<ConfigApplyResult> = async () => ({
-  save: { generation: 1, warning: null },
-});
-let serverSaveImpl: (config: AppConfig) => Promise<ConfigApplyResult> = async () => ({
+let saveConfigImpl: (config: AppConfig) => Promise<ConfigApplyResult> = async () => ({
   save: { generation: 1, warning: null },
 });
 let networkSettingsImpl: () => Promise<NetworkSettings> = async () => ({
   server_url: "https://desk.example",
   device_id: "desk-1",
-  tier: "local",
+  tier: "networked",
 });
 const setServerEndpointImpl: (
   serverUrl: string,
@@ -108,8 +104,7 @@ mock.module("../src/lib/backend", () => ({
   getAppSnapshot: () => snapshotImpl(),
   listenToAppState: async () => () => {},
   validateConfigDraft: (config: AppConfig) => validateImpl(config),
-  saveApplyConfig: (config: AppConfig) => saveImpl(config),
-  saveServerConfig: (config: AppConfig) => serverSaveImpl(config),
+  saveConfig: (config: AppConfig) => saveConfigImpl(config),
   getNetworkSettings: () => networkSettingsImpl(),
   setServerEndpoint: (serverUrl: string, deviceId: string, adminToken: string) =>
     setServerEndpointImpl(serverUrl, deviceId, adminToken),
@@ -321,7 +316,7 @@ describe("settings accessibility and states", () => {
       networkSettingsImpl = async () => ({
         server_url: "https://desk.example",
         device_id: "desk-1",
-        tier: "local",
+        tier: "networked",
       });
     }
   });
@@ -350,15 +345,7 @@ describe("settings accessibility and states", () => {
     );
   }
 
-  function renderNetworkPanel({
-    tier,
-    wifiState,
-    ip,
-  }: {
-    tier: "local" | "networked";
-    wifiState: "down" | "connected";
-    ip: string;
-  }) {
+  function renderNetworkPanel({ wifiState, ip }: { wifiState: "down" | "connected"; ip: string }) {
     // Deliberately include hostile extra properties at the runtime boundary. The
     // public prop type does not admit them, and the component must continue to ignore
     // them if a stale/malicious caller supplies a wider object anyway.
@@ -372,8 +359,7 @@ describe("settings accessibility and states", () => {
     return renderToStaticMarkup(
       <NetworkPanel
         device={{
-          tier,
-          link: "/dev/cu.usbmodem2101",
+          link: "network:desk-1",
           wifiState,
           wifiRssi: wifiState === "connected" ? -54 : null,
           ip,
@@ -386,20 +372,8 @@ describe("settings accessibility and states", () => {
     );
   }
 
-  test("a cable-owned display is named as such, and still points saves at the server", () => {
-    // Because the page cannot change ownership, it must state where an edit made
-    // here will land. A display owned by a cable is the surprising case.
-    const html = renderNetworkPanel({ tier: "local", wifiState: "down", ip: "" });
-    expect(ownershipLabel("local")).toBe("Owned by a cable");
-    expect(html).toContain("owned by a cable");
-    expect(html).toContain("only once it is owned by the server");
-  });
-
   test("network panel says where settings are written once networked", () => {
-    // The destination changing invisibly is the failure mode worth pinning:
-    // the same edit goes to a different place depending on tier.
     const html = renderNetworkPanel({
-      tier: "networked",
       wifiState: "connected",
       ip: "192.168.1.42",
     });
@@ -410,7 +384,6 @@ describe("settings accessibility and states", () => {
 
   test("network panel renders public settings but never a stored secret", () => {
     const html = renderNetworkPanel({
-      tier: "networked",
       wifiState: "connected",
       ip: "192.168.1.42",
     });
@@ -426,7 +399,6 @@ describe("settings accessibility and states", () => {
     // their visible labels are absent so an unimplemented control cannot quietly
     // reappear in the web companion.
     const html = renderNetworkPanel({
-      tier: "networked",
       wifiState: "connected",
       ip: "10.0.0.2",
     });
@@ -447,7 +419,6 @@ describe("settings accessibility and states", () => {
         root.render(
           <NetworkPanel
             device={{
-              tier: "networked",
               link: "server link",
               wifiState: "connected",
               wifiRssi: -54,
@@ -483,58 +454,6 @@ describe("settings accessibility and states", () => {
       await act(async () => root.unmount());
       container.remove();
     }
-  });
-
-  test("the tier guard selects exactly one configuration destination", async () => {
-    let localWrites = 0;
-    let serverWrites = 0;
-    const destinations = {
-      local: async () => {
-        localWrites += 1;
-        return { save: { generation: 1, warning: null } };
-      },
-      server: async () => {
-        serverWrites += 1;
-        return { save: { generation: 2, warning: null } };
-      },
-    };
-
-    await saveConfigForTier("local", destinations);
-    expect({ localWrites, serverWrites }).toEqual({ localWrites: 1, serverWrites: 0 });
-    await saveConfigForTier("networked", destinations);
-    expect({ localWrites, serverWrites }).toEqual({ localWrites: 1, serverWrites: 1 });
-  });
-
-  test("an unplugged networked display never falls back to the cable", async () => {
-    let localWrites = 0;
-    let serverWrites = 0;
-    const tier = resolveDeviceTier(null, {
-      server_url: "https://desk.example",
-      device_id: "desk-1",
-      tier: "networked",
-    });
-
-    await saveConfigForTier(tier, {
-      local: async () => {
-        localWrites += 1;
-        return { save: { generation: 1, warning: null } };
-      },
-      server: async () => {
-        serverWrites += 1;
-        return { save: { generation: 2, warning: null } };
-      },
-    });
-
-    expect({ localWrites, serverWrites }).toEqual({ localWrites: 0, serverWrites: 1 });
-  });
-
-  test("legacy server settings without a persisted tier still refuse the cable", async () => {
-    const tier = resolveDeviceTier(null, {
-      server_url: "https://desk.example",
-      device_id: "desk-1",
-      tier: null,
-    });
-    expect(tier).toBe("networked");
   });
 
   test("no card offers a Name field, and the pomodoro keeps its timer label", () => {
@@ -629,7 +548,6 @@ describe("settings accessibility and states", () => {
         config={cardListConfig([picture])}
         issues={[]}
         pomodoros={[]}
-        ownershipTier="local"
         selectedCardId={picture.id}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -647,7 +565,6 @@ describe("settings accessibility and states", () => {
     expect(html).not.toContain('class="card-tile__name"');
     expect(html).toContain('aria-label="Move Picture — Claude limits earlier"');
     expect(html).toContain('aria-label="Remove Picture — Claude limits');
-    expect(html).toContain('<span class="flag">needs the server</span>');
   });
 
   test("a picture card states its source instead of offering a menu of them", () => {
@@ -690,7 +607,6 @@ describe("settings accessibility and states", () => {
         config={cardListConfig([named])}
         issues={[]}
         pomodoros={[]}
-        ownershipTier="local"
         selectedCardId={named.id}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -903,7 +819,6 @@ describe("settings accessibility and states", () => {
             config={cardListConfig([])}
             issues={[]}
             pomodoros={[]}
-            ownershipTier="networked"
             selectedCardId={null}
             onSelect={() => {}}
             onAdd={() => {}}
@@ -950,7 +865,6 @@ describe("settings accessibility and states", () => {
             config={cardListConfig([])}
             issues={[]}
             pomodoros={[]}
-            ownershipTier="networked"
             selectedCardId={null}
             onSelect={() => {}}
             onAdd={() => {}}
@@ -1001,7 +915,6 @@ describe("settings accessibility and states", () => {
             config={config}
             issues={[]}
             pomodoros={[]}
-            ownershipTier="networked"
             selectedCardId={null}
             onSelect={() => {}}
             onAdd={() => {}}
@@ -1084,7 +997,7 @@ describe("settings accessibility and states", () => {
       networkSettingsImpl = async () => ({
         server_url: "https://desk.example",
         device_id: "desk-1",
-        tier: "local",
+        tier: "networked",
       });
       previewImpl = () =>
         Promise.reject(new Error("renderCardPreview not configured for this test"));
@@ -1735,7 +1648,7 @@ describe("settings accessibility and states", () => {
     const saved: AppConfig[] = [];
     snapshotImpl = async () => liveSnapshot;
     validateImpl = async () => ({ valid: true, issues: [] });
-    saveImpl = async (config) => {
+    saveConfigImpl = async (config) => {
       saved.push(config);
       liveSnapshot = { ...liveSnapshot, config };
       return { save: { generation: 2, warning: null } };
@@ -1758,10 +1671,10 @@ describe("settings accessibility and states", () => {
       expect(container.textContent).not.toContain("Make the display yours");
       expect(buttonWithText(container, "Manual")?.getAttribute("aria-pressed")).toBe("true");
       await waitFor(() => {
-        const save = buttonWithText(container, "Save & apply");
+        const save = buttonWithText(container, "Save to server");
         expect(save?.disabled).toBe(false);
       });
-      await act(async () => buttonWithText(container, "Save & apply")?.click());
+      await act(async () => buttonWithText(container, "Save to server")?.click());
       await waitFor(() => expect(saved).toHaveLength(1));
       expect(saved[0].advance).toEqual({ kind: "manual" });
     } finally {
@@ -1769,7 +1682,7 @@ describe("settings accessibility and states", () => {
       container.remove();
       snapshotImpl = async () => snapshot;
       validateImpl = async () => ({ valid: true, issues: [] });
-      saveImpl = async () => ({ save: { generation: 1, warning: null } });
+      saveConfigImpl = async () => ({ save: { generation: 1, warning: null } });
     }
   });
 
@@ -1779,7 +1692,7 @@ describe("settings accessibility and states", () => {
       has_saved_config: false,
     };
     snapshotImpl = async () => liveSnapshot;
-    saveImpl = async (config) => {
+    saveConfigImpl = async (config) => {
       liveSnapshot = { ...liveSnapshot, config, has_saved_config: true };
       return { save: { generation: 1, warning: null } };
     };
@@ -1797,9 +1710,9 @@ describe("settings accessibility and states", () => {
       await waitFor(() => expect(container.textContent).toContain("Unsaved changes"));
       expect(container.textContent).toContain("Make the display yours");
       await waitFor(() => {
-        expect(buttonWithText(container, "Save & apply")?.disabled).toBe(false);
+        expect(buttonWithText(container, "Save to server")?.disabled).toBe(false);
       });
-      await act(async () => buttonWithText(container, "Save & apply")?.click());
+      await act(async () => buttonWithText(container, "Save to server")?.click());
       await waitFor(() => expect(container.textContent).not.toContain("Make the display yours"));
 
       await act(async () => buttonWithText(container, "Timed")?.click());
@@ -1809,11 +1722,11 @@ describe("settings accessibility and states", () => {
       await act(async () => root.unmount());
       container.remove();
       snapshotImpl = async () => snapshot;
-      saveImpl = async () => ({ save: { generation: 1, warning: null } });
+      saveConfigImpl = async () => ({ save: { generation: 1, warning: null } });
     }
   });
 
-  test("the mounted app routes an unplugged persisted-networked save only to the server", async () => {
+  test("the mounted app saves an offline display configuration through the server", async () => {
     let liveSnapshot: AppSnapshot = {
       ...(structuredClone(snapshot) as AppSnapshot),
       has_saved_config: true,
@@ -1822,7 +1735,6 @@ describe("settings accessibility and states", () => {
         tier: null,
       },
     };
-    let localWrites = 0;
     let serverWrites = 0;
     snapshotImpl = async () => liveSnapshot;
     networkSettingsImpl = async () => ({
@@ -1830,11 +1742,7 @@ describe("settings accessibility and states", () => {
       device_id: "desk-1",
       tier: "networked",
     });
-    saveImpl = async () => {
-      localWrites += 1;
-      return { save: { generation: 1, warning: null } };
-    };
-    serverSaveImpl = async (config) => {
+    saveConfigImpl = async (config) => {
       serverWrites += 1;
       liveSnapshot = { ...liveSnapshot, config };
       return { save: { generation: 2, warning: null } };
@@ -1853,7 +1761,6 @@ describe("settings accessibility and states", () => {
       );
       await act(async () => buttonWithText(container, "Save to server")?.click());
       await waitFor(() => expect(serverWrites).toBe(1));
-      expect(localWrites).toBe(0);
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -1861,10 +1768,9 @@ describe("settings accessibility and states", () => {
       networkSettingsImpl = async () => ({
         server_url: "https://desk.example",
         device_id: "desk-1",
-        tier: "local",
+        tier: "networked",
       });
-      saveImpl = async () => ({ save: { generation: 1, warning: null } });
-      serverSaveImpl = async () => ({ save: { generation: 1, warning: null } });
+      saveConfigImpl = async () => ({ save: { generation: 1, warning: null } });
     }
   });
 
@@ -1888,7 +1794,7 @@ describe("settings accessibility and states", () => {
       const unavailable = buttonWithText(container, "Ownership unavailable");
       expect(unavailable?.disabled).toBe(true);
       expect(container.textContent).toContain(
-        "Connect over USB to confirm ownership before saving.",
+        "Server ownership is unavailable. Check the device link before saving.",
       );
       expect(buttonWithText(container, "Save & apply")).toBeUndefined();
     } finally {
@@ -1898,8 +1804,38 @@ describe("settings accessibility and states", () => {
       networkSettingsImpl = async () => ({
         server_url: "https://desk.example",
         device_id: "desk-1",
-        tier: "local",
+        tier: "networked",
       });
+    }
+  });
+
+  test("a local tier in the server snapshot renders the neutral ownership fallback", async () => {
+    snapshotImpl = async () => ({
+      ...(structuredClone(snapshot) as AppSnapshot),
+      device: {
+        ...(structuredClone(snapshot.device) as AppSnapshot["device"]),
+        tier: "local",
+      },
+    });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<App />));
+      await waitFor(() => expect(buttonWithText(container, "Ownership unavailable")).toBeDefined());
+      const settingsButton = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent?.includes("Settings"),
+      );
+      await act(async () => settingsButton?.click());
+      const badge = container.querySelector(".ownership-badge");
+      expect(badge?.textContent).toBe("Ownership unavailable");
+      expect(badge?.classList.contains("ownership-badge--unknown")).toBe(true);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      snapshotImpl = async () => snapshot;
     }
   });
 
@@ -1918,7 +1854,7 @@ describe("settings accessibility and states", () => {
       device_id: "desk-1",
       tier: "networked",
     });
-    serverSaveImpl = async () => {
+    saveConfigImpl = async () => {
       throw new backendModule.DeskmateCommandError({
         category: "validation",
         message: "the server rejected this configuration with 7 validation issue(s)",
@@ -1961,9 +1897,9 @@ describe("settings accessibility and states", () => {
       networkSettingsImpl = async () => ({
         server_url: "https://desk.example",
         device_id: "desk-1",
-        tier: "local",
+        tier: "networked",
       });
-      serverSaveImpl = async () => ({ save: { generation: 1, warning: null } });
+      saveConfigImpl = async () => ({ save: { generation: 1, warning: null } });
     }
   });
 
@@ -2128,11 +2064,10 @@ describe("settings accessibility and states", () => {
 
   test("the settings sheet shows the device link and unavailable ownership", () => {
     const html = renderNetworkPanel({
-      tier: "networked",
       wifiState: "connected",
       ip: "192.168.1.42",
     });
-    expect(html).toContain("/dev/cu.usbmodem2101");
+    expect(html).toContain("network:desk-1");
     expect(ownershipLabel(null)).toBe("Ownership unavailable");
   });
 

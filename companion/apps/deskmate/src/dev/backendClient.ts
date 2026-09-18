@@ -103,12 +103,8 @@ export function validateConfigDraft(config: AppConfig): Promise<DraftValidation>
   return dispatchMockCommand("validate_config_draft", { draft: draftPayload(config) });
 }
 
-export function saveApplyConfig(config: AppConfig): Promise<ConfigApplyResult> {
-  return dispatchMockCommand("save_apply_config", { draft: draftPayload(config) });
-}
-
-export function saveServerConfig(config: AppConfig): Promise<ConfigApplyResult> {
-  return dispatchMockCommand("save_server_config", { request: { draft: draftPayload(config) } });
+export function saveConfig(config: AppConfig): Promise<ConfigApplyResult> {
+  return dispatchMockCommand("save_config", { draft: draftPayload(config) });
 }
 
 export function getNetworkSettings(): Promise<NetworkSettings> {

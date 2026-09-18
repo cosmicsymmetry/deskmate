@@ -33,8 +33,7 @@ pub use render_negotiation::{
 };
 pub use runtime::{
     DeviceConnection, ImageSourceFrame, ImageSourceHost, RuntimeDevice, RuntimeHandle,
-    RuntimeOptions, RuntimeSubscription, SerialRuntimeDevice, empty_device, initial_snapshot,
-    preview_card_scene,
+    RuntimeOptions, RuntimeSubscription, empty_device, initial_snapshot, preview_card_scene,
 };
 pub use runtime_command::{PomodoroAction, RuntimeError};
 pub use scene_build::{

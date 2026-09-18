@@ -7,7 +7,7 @@
  * client and never reaches this file.
  *
  * Scenarios let a whole device state be selected from the URL — `?scenario=offline`,
- * `?scenario=local`, `?scenario=invalid`, `?scenario=firstrun`, `?scenario=empty` —
+ * `?scenario=invalid`, `?scenario=firstrun`, `?scenario=empty` —
  * so every state the UI must handle can be opened, reviewed and screenshotted without
  * hardware. `?scenario=list` prints the set to the console.
  */
@@ -29,7 +29,6 @@ export const SCENARIOS = [
   "default",
   "offline",
   "standalone",
-  "local",
   "unowned",
   "invalid",
   "firstrun",
@@ -77,7 +76,10 @@ const listeners = new Set<(next: AppSnapshot) => void>();
 function applyScenario() {
   switch (scenario) {
     case "offline":
-      snapshot.device.connection = { kind: "disconnected", reason: "No USB device found" };
+      snapshot.device.connection = {
+        kind: "disconnected",
+        reason: "The display is not linked to the server",
+      };
       snapshot.device.port_name = null;
       snapshot.device.wifi_state = "down";
       snapshot.device.ip = null;
@@ -85,12 +87,6 @@ function applyScenario() {
       break;
     case "standalone":
       snapshot.device.connection = { kind: "standalone" };
-      break;
-    case "local":
-      snapshot.device.tier = "local";
-      network = { server_url: "", device_id: "", tier: "local" };
-      snapshot.device.wifi_state = null;
-      snapshot.device.ip = null;
       break;
     case "unowned":
       snapshot.device.tier = null;
@@ -276,8 +272,7 @@ export async function dispatchMockCommand<T>(
       const draft = JSON.parse((requireArgs(args).draft as { json: string }).json) as AppConfig;
       return delay(validate(draft), 40) as Promise<T>;
     }
-    case "save_apply_config":
-    case "save_server_config": {
+    case "save_config": {
       const fields = requireArgs(args);
       const raw = (fields.draft ?? (fields.request as { draft: unknown }).draft) as {
         json: string;
@@ -312,13 +307,6 @@ export async function dispatchMockCommand<T>(
       const cardId = args?.cardId as string;
       const card = config.cards.find((candidate) => candidate.id === cardId);
       if (!card) throw { category: "not-found", message: "No such card." };
-      if (card.kind === "picture" && snapshot.device.tier === "local") {
-        return {
-          png_base64: null,
-          sample: false,
-          state: "Picture cards render on the server",
-        } as T;
-      }
       const timer = snapshot.pomodoros.find((candidate) => candidate.card_id === cardId);
       return {
         png_base64: renderMockFrame(

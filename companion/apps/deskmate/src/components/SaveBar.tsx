@@ -59,10 +59,10 @@ export function SaveBar({
   variant = "window",
   onSave,
 }: SaveBarProps) {
-  const networkedTier = ownershipTier === "networked";
+  const serverOwned = ownershipTier === "networked";
   const blocked =
     !dirty ||
-    ownershipTier === null ||
+    !serverOwned ||
     validation.kind !== "ready" ||
     !validation.result.valid ||
     saveState.kind === "saving";
@@ -87,26 +87,22 @@ export function SaveBar({
           </span>
         )}
         {saveState.kind === "error" && <SaveError error={saveState.error} />}
-        {ownershipTier === null && saveState.kind === "idle" && (
-          <span className="save-error">Connect over USB to confirm ownership before saving.</span>
+        {!serverOwned && saveState.kind === "idle" && (
+          <span className="save-error">
+            Server ownership is unavailable. Check the device link before saving.
+          </span>
         )}
         {validation.kind === "ready" &&
           validation.result.valid &&
           saveState.kind === "idle" &&
-          ownershipTier !== null && (
-            <span>{dirty ? "Unsaved changes" : "Everything is up to date"}</span>
-          )}
+          serverOwned && <span>{dirty ? "Unsaved changes" : "Everything is up to date"}</span>}
       </div>
       <button className="button button--primary" type="button" disabled={blocked} onClick={onSave}>
         {saveState.kind === "saving"
-          ? networkedTier
-            ? "Saving to server…"
-            : "Saving & applying…"
-          : ownershipTier === null
-            ? "Ownership unavailable"
-            : networkedTier
-              ? "Save to server"
-              : "Save & apply"}
+          ? "Saving to server…"
+          : serverOwned
+            ? "Save to server"
+            : "Ownership unavailable"}
       </button>
     </footer>
   );

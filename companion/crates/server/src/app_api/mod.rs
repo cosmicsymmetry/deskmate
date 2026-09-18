@@ -56,10 +56,16 @@ const MAX_DRAFT_BYTES: usize = 64 * 1024;
 /// Deliberately a poll rather than a subscription. `RuntimeSubscription::recv_timeout`
 /// is blocking, and threading it into an async SSE handler would need a blocking
 /// thread per open browser tab. A poll costs one cheap read per second for a
-/// single-operator deployment, works identically whether or not a runtime exists
-/// (the offline case is the common one -- the board is normally powered off), and
-/// only sends when something actually changed.
+/// single-operator deployment and works identically whether or not a runtime exists
+/// (the offline case is the common one -- the board is normally powered off).
 const EVENT_POLL: Duration = Duration::from_secs(1);
+
+/// The longest the stream will go without sending, once connected.
+///
+/// The change test below ignores telemetry, so without this floor the numbers it
+/// ignores would never reach the window at all. Half a minute is far finer than
+/// anyone reads a signal strength and far coarser than a re-render costs.
+const EVENT_HEARTBEAT: Duration = Duration::from_secs(30);
 
 pub(crate) fn routes() -> Router<ServerState> {
     Router::new()
@@ -362,26 +368,61 @@ async fn events(
     Path(device_id): Path<String>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, AppApiError> {
     known_device(&state, &device_id)?;
-    let stream = stream::unfold(
-        (state, device_id, None::<String>),
-        |(state, device_id, last)| async move {
-            loop {
-                tokio::time::sleep(EVENT_POLL).await;
-                let Ok(snapshot) = read_snapshot(&state, device_id.clone()).await else {
-                    continue;
-                };
-                let Ok(encoded) = serde_json::to_string(&snapshot) else {
-                    continue;
-                };
-                if last.as_ref() == Some(&encoded) {
-                    continue;
-                }
-                let event = Event::default().event("app-state").data(encoded.clone());
-                return Some((Ok(event), (state, device_id, Some(encoded))));
-            }
-        },
+    let start = (
+        state,
+        device_id,
+        None::<String>,
+        tokio::time::Instant::now(),
     );
+    let stream = stream::unfold(start, |(state, device_id, last, last_sent)| async move {
+        loop {
+            tokio::time::sleep(EVENT_POLL).await;
+            let Ok(snapshot) = read_snapshot(&state, device_id.clone()).await else {
+                continue;
+            };
+            let Ok(value) = serde_json::to_value(&snapshot) else {
+                continue;
+            };
+            let key = change_key(&value);
+            let due = last_sent.elapsed() >= EVENT_HEARTBEAT;
+            if !due && last.as_ref() == Some(&key) {
+                continue;
+            }
+            let event = Event::default().event("app-state").data(value.to_string());
+            let now = tokio::time::Instant::now();
+            return Some((Ok(event), (state, device_id, Some(key), now)));
+        }
+    });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+/// The part of a snapshot worth waking the window for.
+///
+/// A linked board reports its uptime, its signal strength and its frame counters
+/// continuously, so a byte-for-byte comparison finds the snapshot different every
+/// couple of seconds and re-renders the entire window for numbers nothing acts
+/// on. Measured on the live server: six frames in twelve seconds, differing only
+/// in `uptime_ms`, `wifi_rssi` and `counters.valid_frames`. The symptom was not
+/// subtle -- the window never held still long enough for a browser to consider a
+/// button clickable.
+///
+/// Telemetry is blanked rather than dropped, so a field appearing or disappearing
+/// is still a change. The values themselves still reach the window, on
+/// [`EVENT_HEARTBEAT`].
+pub fn change_key(value: &serde_json::Value) -> String {
+    let mut value = value.clone();
+    if let Some(device) = value.get_mut("device").and_then(|d| d.as_object_mut()) {
+        for volatile in ["uptime_ms", "free_heap", "wifi_rssi", "counters"] {
+            if let Some(field) = device.get_mut(volatile) {
+                *field = serde_json::Value::Null;
+            }
+        }
+    }
+    // Pure host-side tallies; the window renders none of them.
+    if let Some(diagnostics) = value.get_mut("diagnostics") {
+        *diagnostics = serde_json::Value::Null;
+    }
+    value.to_string()
 }
 
 // ---------------------------------------------------------------------------

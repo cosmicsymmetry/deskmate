@@ -16,6 +16,11 @@
 mod admin;
 // The browser companion's API: the Tauri command set, re-homed as HTTP.
 mod app_api;
+
+/// The event stream's change predicate, re-exported for the integration test
+/// that pins it. Reproducing a live board's telemetry churn through the HTTP
+/// surface would need hardware, so the predicate is tested directly.
+pub use app_api::change_key as app_api_change_key;
 pub use app_core::asset_sync;
 mod auth;
 // Server-rendered data cards: the server pushing frames to its own image

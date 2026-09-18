@@ -62,21 +62,14 @@ const addableKinds: { kind: AddableCardKind; description: string }[] = [
 function tileValue(
   card: CardSettings,
   pomodoro: PomodoroSnapshot | undefined,
-  now: Date,
-  timezone: string,
   sources: ImageSource[],
 ): string {
   switch (card.kind) {
     case "clock":
-      try {
-        return new Intl.DateTimeFormat("en-GB", {
-          hour: "2-digit",
-          minute: "2-digit",
-          timeZone: timezone,
-        }).format(now);
-      } catch {
-        return "--:--";
-      }
+      // Not the time. A live clock in the grid was a second clock competing with
+      // the panel's own, ticking in the corner of an editing surface, and it
+      // told the owner nothing about the card they were about to edit.
+      return "Clock";
     case "pomodoro": {
       const seconds = pomodoro?.remaining_seconds ?? card.duration_seconds;
       return `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
@@ -115,7 +108,6 @@ export function CardList({
   const atCapacity = config.cards.length >= MAX_CARDS;
   const capacityDescription = atCapacity ? `The limit is ${MAX_CARDS} cards.` : null;
   const containerIssues = cardsContainerIssues(issues);
-  const [now, setNow] = useState(() => new Date());
   const [draggedCardId, setDraggedCardId] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuAlignEnd, setMenuAlignEnd] = useState(false);
@@ -129,7 +121,6 @@ export function CardList({
   const tileBodyRefs = useRef(new Map<string, HTMLButtonElement>());
   const pendingFocusCardIdRef = useRef<string | null>(null);
   const pendingNewCardIdsRef = useRef<Set<string> | null>(null);
-  const hasClock = config.cards.some((card) => card.kind === "clock");
   const referencedSourceIds = new Set(
     config.cards.flatMap((card) => (card.kind === "picture" ? [card.source_id] : [])),
   );
@@ -142,13 +133,10 @@ export function CardList({
     ? (config.cards.find((card) => !pendingNewCardIdsRef.current?.has(card.id))?.id ?? null)
     : null;
 
-  useEffect(() => {
-    if (!hasClock) {
-      return;
-    }
-    const interval = window.setInterval(() => setNow(new Date()), 1000);
-    return () => window.clearInterval(interval);
-  }, [hasClock]);
+  // The per-second ticker that lived here is gone with the live clock it drove.
+  // It re-rendered the whole card list once a second so one tile could show the
+  // time -- the same waste the event stream was carrying, for the same reason:
+  // something that changed constantly and told nobody anything.
 
   useEffect(() => {
     if (!menuOpen) {
@@ -338,7 +326,7 @@ export function CardList({
     const label = controlLabel(card);
     const pictureFlag =
       card.kind === "picture" && ownershipTier === "local" ? "needs the server" : null;
-    const value = tileValue(card, pomodoro, now, config.preferences.timezone, config.image_sources);
+    const value = tileValue(card, pomodoro, config.image_sources);
     return (
       <li
         key={`loop:${index}:${card.id}`}
@@ -367,7 +355,10 @@ export function CardList({
           onClick={() => onSelect(card.id)}
           onKeyDown={(event) => onTileKeyDown(event, card.id)}
         >
-          <span className="tile-label">{cardLabel(card)}</span>
+          {/* No template label. "DIGITAL CLOCK" above a clock and "PICTURE"
+              above five different pictures classified what the owner could
+              already see, and the one line that actually distinguishes two
+              cards -- their name -- was the small grey one underneath. */}
           <strong className="card-tile__value numeral">{value}</strong>
           {/* A picture's value IS its source name, and the owner usually types the
               same words as the title. Printing both would say it twice. */}

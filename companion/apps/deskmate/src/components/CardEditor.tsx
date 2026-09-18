@@ -327,18 +327,13 @@ export function CardEditor({
       )}
 
       <div className="form-grid">
-        {card.kind !== "pomodoro" && (
-          <label className="field">
-            <span>Name</span>
-            <input
-              value={card.title}
-              maxLength={64}
-              onChange={(event) => onChange({ ...card, title: event.currentTarget.value })}
-              aria-invalid={fieldIssues("title").length > 0}
-            />
-            <FieldIssues issues={fieldIssues("title")} />
-          </label>
-        )}
+        {/* No Name field. It decided nothing: a clock is a clock and a picture
+            is named by its source, so the box only invited the owner to type a
+            second name for something already named. `title` stays in the schema
+            and keeps whatever it was created with -- removing a field would be a
+            migration, and this is a change to what is offered, not to what is
+            stored. The pomodoro's "Timer label" below is NOT this: that one is
+            drawn on the panel. */}
 
         {card.kind === "clock" && (
           <label className="check-field">

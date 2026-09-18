@@ -178,7 +178,11 @@ export function addCard(
         card = {
           kind: request,
           ...common,
-          title: "Desk",
+          // Unnamed. With no Name field there is nothing to change it with, so
+          // seeding "Desk" would put a word on the tile that the owner never
+          // chose and cannot remove. The tile says "Clock", which is the whole
+          // truth about it.
+          title: "",
           show_seconds: true,
           template: { kind: "digital-clock" },
           refresh: { kind: "device-local" },

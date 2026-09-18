@@ -244,11 +244,24 @@ These are decisions, not defaults. Changing one needs the owner, not a judgement
   the library but outside the playlist, which nothing in the window could arrange. Every
   card is in the loop, so every card is shown and every card compiles to both a widget
   and a screen.
-- **A card is called the same thing on every surface, and that thing is its TEMPLATE.**
-  `cardLabel()` (the template name, "Digital clock") identifies a card everywhere;
-  `cardTitle()` (the owner's words, null when never typed) is a quiet second line beside
-  it, never absent, because two cards can share a template. Every control acting on one
-  entry names `template — title`.
+- **A CARD IS IDENTIFIED BY ITS NAME, and the tile does not classify it.** Superseded
+  the template-first rule on 2026-09-18, on the owner's direction: "DIGITAL CLOCK" above
+  a clock and "PICTURE" above five different pictures named the category the owner could
+  already see, while the line that actually told two cards apart was the small grey one
+  underneath. A tile now carries one fact -- the source name for a picture, the word
+  "Clock" for a clock, the countdown and label for a pomodoro -- and no template label.
+  - **The clock tile does not show the time.** A live clock in the grid was a second
+    clock competing with the panel's own, and the per-second re-render of the whole card
+    list that drove it is gone with it.
+  - **There is no Name field.** It decided nothing: a clock is a clock, a picture is
+    named by its source. `title` stays in the schema and keeps its creation value -- this
+    changed what is offered, not what is stored. A new clock is created unnamed, because
+    seeding a word nothing can now change is the confusion this removed. The pomodoro's
+    **"Timer label" is NOT this and stays**: it is drawn on the panel face.
+  - **Still template-first, deliberately, and not yet asked about**: the loop list under
+    the ring (`loop__entry-name`/`loop__entry-title`), the editor heading, and the
+    `template — title` accessible names on the move/remove controls. A screen reader
+    hearing "Remove Digital clock — Desk" is better served than by "Remove Desk".
 - **`DESIGN.md` is the visual language** (The Modular Face); product truth is
   `PRODUCT.md`. `docs/design/companion-visual-language.md` is superseded. A label above a
   heading and a card inside a card are both out. `ui-rounded` is the numeral face because

@@ -521,17 +521,37 @@ describe("settings accessibility and states", () => {
     expect(tier).toBe("networked");
   });
 
-  test("names the editable title consistently across surviving card kinds", () => {
+  test("no card offers a Name field, and the pomodoro keeps its timer label", () => {
+    // The owner removed Name on 2026-09-18: it decided nothing, because a clock
+    // is a clock and a picture is named by its source. "Timer label" is a
+    // different thing and stays -- it is drawn on the panel face.
     const clockHtml = renderCardEditor(clockCard("clock-1", "Desk"));
-    expect(clockHtml).toContain("<span>Name</span>");
-    expect(clockHtml).not.toContain("<span>Heading</span>");
-    expect(renderCardEditor(pictureCard())).toContain("<span>Name</span>");
+    expect(clockHtml).not.toContain("<span>Name</span>");
+    expect(renderCardEditor(pictureCard())).not.toContain("<span>Name</span>");
+    const pomodoro: CardSettings = {
+      kind: "pomodoro",
+      id: "pomodoro-1",
+      label: "Focus",
+      duration_seconds: 1500,
+      template: { kind: "progress-ring" },
+      tap_action: { kind: "start-pause" },
+      refresh: { kind: "device-local" },
+      alert: { kind: "none" },
+      dwell_seconds: null,
+    };
+    expect(renderCardEditor(pomodoro)).toContain("<span>Timer label</span>");
   });
 
-  test("a card is called the same thing everywhere, and that is its template", () => {
-    // Owner's rule: a card should say what it *is*. "Outside" and "Desk" teach a
-    // first-time reader nothing, so every surface that identifies a card leads with
-    // its template and carries the owner's own title as a quiet second line.
+  test("a card is identified by its name, and the tile no longer classifies it", () => {
+    // The rule this replaces said a card is called the same thing on every
+    // surface and that thing is its TEMPLATE. The owner overturned it on
+    // 2026-09-18: "DIGITAL CLOCK" above a clock and "PICTURE" above five
+    // different pictures classified what was already visible, and the line that
+    // actually told them apart was the small grey one underneath.
+    //
+    // The loop list and the control labels still carry template and title
+    // together -- deliberately, and not yet asked about: a screen reader hearing
+    // "Remove Digital clock — Desk" is better served than by "Remove Desk".
     const config = cardListConfig(
       [clockCard("internal-uuid-0001", "Desk")],
       [{ card_id: "internal-uuid-0001", dwell_seconds: 45 }],
@@ -559,7 +579,7 @@ describe("settings accessibility and states", () => {
     );
     const editor = renderCardEditor(clockCard("internal-uuid-0001", "Desk"));
 
-    expect(library).toContain('class="tile-label">Digital clock<');
+    expect(library).not.toContain('class="tile-label">Digital clock<');
     expect(library).toContain('class="card-tile__name">Desk<');
     expect(library).toContain('aria-label="Move Digital clock — Desk earlier"');
     expect(library).toContain('aria-label="Move Digital clock — Desk later"');
@@ -592,7 +612,7 @@ describe("settings accessibility and states", () => {
     expect(library).not.toContain("card-tile__name");
   });
 
-  test("a picture tile leads with its template and names every entry control", () => {
+  test("a picture tile leads with its source and names every entry control", () => {
     const picture = pictureCard();
     const html = renderToStaticMarkup(
       <CardList
@@ -608,10 +628,10 @@ describe("settings accessibility and states", () => {
       />,
     );
 
-    expect(html).toContain('class="tile-label">Picture<');
-    // The template still names the card, but the tile's live fact is now the
-    // SOURCE. "PNG" read identically on every picture card, which is what made a
-    // grid of them indistinguishable.
+    expect(html).not.toContain('class="tile-label">Picture<');
+    // The tile's one fact is the SOURCE. "PNG" read identically on every picture
+    // card, which is what made a grid of them indistinguishable; "PICTURE" above
+    // it had the same problem and was removed for the same reason.
     expect(html).toContain('<strong class="card-tile__value numeral">Claude limits</strong>');
     expect(html).not.toContain('numeral">PNG<');
     expect(html).toContain('class="card-tile__name">Limits<');
@@ -1481,7 +1501,8 @@ describe("settings accessibility and states", () => {
       expect(container.querySelector('[role="menu"]')).toBeNull();
       expect(document.activeElement !== document.body).toBe(true);
       expect(document.activeElement?.classList.contains("card-tile__body")).toBe(true);
-      expect(document.activeElement?.textContent).toContain("Pomodoro");
+      // The tile is the countdown and the label now; the template is not printed.
+      expect(document.activeElement?.textContent).toContain("Focus");
     } finally {
       await act(async () => root.unmount());
       container.remove();

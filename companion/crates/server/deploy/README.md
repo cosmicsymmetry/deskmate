@@ -251,6 +251,46 @@ somehow matches `DESKMATE_FIRMWARE_VERSION`) confirms the whole chain --
 
 ## 6. Redeploying an already-running server
 
+**Use `deploy.sh` in this directory.** It does everything below, refuses to run
+against a dirty tree (the export is from `HEAD`, so a dirty tree deploys code nobody
+can reproduce), skips the restart when the binary came out byte-identical, and
+checks the public endpoint afterwards.
+
+```sh
+companion/crates/server/deploy/deploy.sh              # binary + UI
+companion/crates/server/deploy/deploy.sh --ui-only    # just the companion
+companion/crates/server/deploy/deploy.sh --dry-run    # build, do not install
+```
+
+### Why it is fast, and what breaks if you hand-roll it
+
+The prose recipe below was correct and still took **96 seconds to produce a
+byte-identical binary**, because the container it launched kept `CARGO_HOME` and
+`RUSTUP_HOME` inside the image: `--rm` threw the crate registry away after every
+run, so each deploy re-downloaded 229 crates and re-synced the toolchain in order
+to compile nothing. Mounting both from the VM makes that **0.7 seconds**.
+
+`target/` was already preserved, which is why this looked solved and was not: it
+caches compilation *output*, while the registry and the dependency sources live in
+`CARGO_HOME`. Half the cache was configured; the missing half was 90% of the time.
+
+Two things must stay true or the speed goes away:
+
+- **`--exclude 'target/'` on the companion rsync.** It is a 1.6 GB build cache and
+  `--delete` will take it.
+- **`--checksum` on every rsync.** `git archive` stamps each file with the commit
+  time, so a fresh export after any commit gives every file a new mtime and cargo
+  rebuilds all seven workspace crates regardless of content. Checksum mode skips
+  files whose content matches, and a skipped file keeps its old mtime.
+
+The persistent caches live at `~/deskmate-build/.cargo` and `~/deskmate-build/.rustup`
+on the VM, seeded once from the image. If they are ever lost, the next build
+re-creates them at the cost of one slow run; if the toolchain pin in
+`companion/rust-toolchain.toml` moves, delete `.rustup` so the new one is fetched.
+
+### The hand-rolled version
+
+
 This is the recipe the live deployment at `deskmate.rodi.one` actually uses. There is no
 Rust toolchain on the VM: the binary is cross-built in a throwaway container over an
 rsync'd source export.

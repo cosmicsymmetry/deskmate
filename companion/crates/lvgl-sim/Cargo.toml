@@ -32,8 +32,8 @@ glob = "0.3"
 # `[lints] workspace = true` cannot be used here (it would inherit the
 # forbid and make the crate uncompilable). Instead the clippy groups are
 # copied verbatim from `[workspace.lints.clippy]` and `unsafe_code` is
-# explicitly allowed, contained to `src/lib.rs`'s `extern "C"` block and the
-# `unsafe` calls into it.
+# explicitly allowed, contained to the `extern "C"` blocks and their
+# `unsafe` calls in `src/lib.rs` and `src/scene.rs`.
 [lints.rust]
 unsafe_code = "allow"
 

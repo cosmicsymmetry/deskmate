@@ -7,9 +7,6 @@ mod common;
 use lvgl_sim::{LOGICAL_WIDTH, Simulator, cases};
 use protocol::{SceneNode, SceneValue};
 
-fn evidence_cases() -> Vec<(String, lvgl_sim::scene::SceneRenderRequest)> {
-    cases::date_truncation_scene_cases()
-}
 fn generated_array<'a>(source: &'a str, declaration: &str) -> &'a str {
     let after = source
         .split_once(declaration)
@@ -134,10 +131,8 @@ fn date_scene_goldens_match() {
     common::assert_goldens(
         "evidence-scene",
         std::env::var_os("BLESS").is_some(),
-        Some("evidence scene golden mismatches"),
+        "evidence scene golden mismatches",
         "orphan golden (run with BLESS=1 to delete)",
-        evidence_cases(),
-        |_, _| {},
-        lvgl_sim::Simulator::render_scene_png,
+        cases::date_truncation_scene_cases(),
     );
 }

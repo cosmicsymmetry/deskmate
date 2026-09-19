@@ -5,7 +5,6 @@
 
 #include "lvgl.h"
 #include "core/asset_store.h"
-#include "core/clock_source.h"
 #include "core/scene_binding.h"
 #include "core/scene_model.h"
 #include "ui/font_registry.h"
@@ -20,8 +19,8 @@ static uint32_t s_fake_tick;
 
 static uint32_t sim_tick_cb(void) { return s_fake_tick; }
 
-/* Shared by sim_render and sim_render_scene: copies the just-flushed frame
- * out, applying the 180° flip that models the 270° mount. */
+/* Copies the scene renderer's just-flushed frame out, applying the 180°
+ * flip that models the 270° mount. */
 static void copy_frame_out(bool orientation_flipped, uint16_t *out_pixels)
 {
     if (orientation_flipped) {
@@ -45,19 +44,13 @@ static void sim_flush_cb(lv_display_t *display, const lv_area_t *area,
     lv_display_flush_ready(display);
 }
 
-/* Shared by sim_render and sim_render_scene: starts
- * every render on a 1000ms fake-tick boundary, then advances four ×40ms
- * ticks so LVGL runs its refresh timer.
+/* Starts every scene render on a 1000ms fake-tick boundary, then advances
+ * four ×40ms ticks so LVGL runs its refresh timer.
  *
- * The tick counter is process-global and monotonic (LVGL timers must never
- * see it move backwards), so without pinning the phase, the instant a render
- * begins at would depend on how many renders preceded it -- and anything
- * whose pixels derive from elapsed ticks (e.g. progress_ring's arc value)
- * would then differ purely because a case was added earlier in the table.
- * Pinning the phase makes every golden independent of case ordering, and
- * extracting it here keeps the three renderers provably in the same phase --
- * see sim_init()'s own comment on why the first render's anchor/boundary
- * offset matters too. */
+ * The tick counter is process-global and monotonic: LVGL timers must never
+ * see it move backwards. Pinning the phase gives every render the same
+ * refresh cadence regardless of how many cases preceded it. Scene binding
+ * time comes from the explicit context, not this refresh clock. */
 static void advance_fake_tick_phase(void)
 {
     s_fake_tick = (s_fake_tick / 1000U + 1U) * 1000U;
@@ -73,17 +66,8 @@ bool sim_init(void)
         return true;
     }
     lv_init();
-    /* Templates that capture lv_tick_get() while being built or patched
-     * (e.g. progress_ring's progress_anchor_ms) read s_fake_tick *before*
-     * sim_render's own "round up to the next 1000ms boundary" runs. After
-     * render N, s_fake_tick is left at boundary_N + 160 (four +40 ticks past
-     * the boundary), so render N+1 captures its anchor at boundary_N + 160
-     * and then rounds to boundary_N + 1000 — a fixed 840-tick offset between
-     * anchor and boundary on every render but the first. s_fake_tick starts
-     * at 0, not "boundary + 160", so the first render's anchor/boundary
-     * offset was 1000, not 840: an order-dependence exception for whichever
-     * case happened to run first. Starting one boundary in at 160 makes the
-     * first render match the steady state instead. */
+    /* Start at the same boundary + 160 phase left by each completed render,
+     * so the first refresh advances by the same interval as later ones. */
     s_fake_tick = 160U;
     lv_tick_set_cb(sim_tick_cb);
     s_display = lv_display_create(SIM_WIDTH, SIM_HEIGHT);
@@ -330,14 +314,13 @@ static sim_scene_result_t map_decode_result(scene_model_result_t result)
 }
 
 static void fill_scene_timer_context(scene_binding_context_t *context,
-                                     bool timer_active,
                                      uint32_t timer_total_ms,
                                      uint32_t timer_remaining_ms,
                                      bool timer_running)
 {
     scene_timer_snapshot_t snapshot = scene_timer_snapshot_ms(
         timer_total_ms, timer_remaining_ms, timer_running, 0U);
-    context->timer_active = timer_active && snapshot.total_ms != 0U;
+    context->timer_active = snapshot.total_ms != 0U;
     context->timer_running = context->timer_active && snapshot.running;
     context->timer_total_ms = snapshot.total_ms;
     context->timer_remaining_ms = snapshot.remaining_ms;
@@ -347,7 +330,7 @@ static void fill_scene_timer_context(scene_binding_context_t *context,
 
 sim_scene_result_t sim_render_scene(const uint8_t *payload, size_t payload_length,
                                     int16_t utc_offset_minutes, int64_t now_unix_seconds,
-                                    bool timer_active, uint32_t timer_total_ms,
+                                    uint32_t timer_total_ms,
                                     uint32_t timer_remaining_ms, bool timer_running,
                                     bool orientation_flipped,
                                     uint16_t *out_pixels)
@@ -383,7 +366,7 @@ sim_scene_result_t sim_render_scene(const uint8_t *payload, size_t payload_lengt
         .unix_seconds = now_unix_seconds,
         .utc_offset_minutes = utc_offset_minutes,
     };
-    fill_scene_timer_context(&context, timer_active, timer_total_ms,
+    fill_scene_timer_context(&context, timer_total_ms,
                              timer_remaining_ms, timer_running);
     /* Every binding is evaluated inside this call, so `context` only has to
      * outlive it. */

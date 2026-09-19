@@ -18,8 +18,8 @@ HERO_RANGE='0x25,0x2D,0x30-0x3A,0xB0'
 mkdir -p "$FONT_DIR"
 
 # `lv_font_conv` does not apply OpenType GSUB features, so ordinary proportional
-# faces silently lose tabular alignment. Requiring prepatched inputs keeps that
-# constraint explicit now that the repository no longer owns a font-patching tool.
+# faces silently lose tabular alignment. This script consumes caller-supplied
+# tabular-cmap fonts; it does not patch them itself.
 gen() { # size, ttf, range, name
   # --lv-include lvgl.h: the vendored LVGL component exposes lvgl.h directly
   # on the include path (firmware/managed_components/lvgl__lvgl/lvgl.h), not

@@ -1,7 +1,7 @@
 //! The clock faces draw no card title.
 //!
-//! `title` remains a schema field — it names the card in configuration and
-//! management surfaces — but no clock face renders it. See
+//! `title` remains serialized in configuration, but it neither names clock
+//! tiles nor appears on clock faces. See
 //! `docs/superpowers/specs/2026-08-17-deskmate-clock-title-removal-design.md`.
 //! Golden PNGs cannot state this: they pin one frame per case, not the
 //! relationship between two frames that differ only in their title. This test
@@ -18,7 +18,7 @@ use app_core::{
 use lvgl_sim::scene::SceneRenderRequest;
 use lvgl_sim::{LOGICAL_WIDTH, SimOrientation, Simulator};
 
-/// 2025-08-12 12:00:00 UTC at +4, matching `cases.rs`'s clock instants.
+/// 2025-08-12 12:00:00 UTC at +4, matching the `cases` module's clock instants.
 const NOW: i64 = 1_755_000_000;
 const OFFSET: i16 = 240;
 

@@ -1,23 +1,18 @@
 use std::collections::BTreeSet;
 
-use lvgl_sim::{SimError, Simulator};
+use lvgl_sim::Simulator;
+use lvgl_sim::scene::SceneRenderRequest;
 
 /// Runs one golden suite while storing only landscape frames. Flipped cases
 /// remain in the source tables for hardware use; the simulator's one
 /// `copy_frame_out` reversal is pinned separately once per render wrapper.
-pub fn assert_goldens<T, Cases, Before, Render>(
+pub fn assert_goldens(
     subdirectory: &str,
     bless: bool,
-    failure_prefix: Option<&str>,
+    failure_prefix: &str,
     orphan_detail: &str,
-    cases: Cases,
-    mut before_render: Before,
-    mut render: Render,
-) where
-    Cases: IntoIterator<Item = (String, T)>,
-    Before: FnMut(&str, &T),
-    Render: FnMut(&mut Simulator, &T) -> Result<Vec<u8>, SimError>,
-{
+    cases: Vec<(String, SceneRenderRequest)>,
+) {
     let golden_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
     let golden_dir = if subdirectory.is_empty() {
         golden_root
@@ -35,9 +30,9 @@ pub fn assert_goldens<T, Cases, Before, Render>(
             continue;
         }
         expected_names.insert(name.clone());
-        before_render(&name, &request);
-        let png =
-            render(&mut simulator, &request).unwrap_or_else(|error| panic!("{name}: {error}"));
+        let png = simulator
+            .render_scene_png(&request)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
         let path = golden_dir.join(format!("{name}.png"));
         if bless {
             std::fs::write(&path, &png).expect("write golden");
@@ -71,9 +66,6 @@ pub fn assert_goldens<T, Cases, Before, Render>(
     }
 
     let failure_detail = failures.join("\n");
-    let failure_message = match failure_prefix {
-        Some(prefix) => format!("{prefix}:\n{failure_detail}"),
-        None => failure_detail,
-    };
+    let failure_message = format!("{failure_prefix}:\n{failure_detail}");
     assert!(failures.is_empty(), "{failure_message}");
 }

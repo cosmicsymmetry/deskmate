@@ -11,41 +11,66 @@
 
 mod common;
 
-use lvgl_sim::cases;
+use lvgl_sim::{SimOrientation, cases};
+use protocol::SceneNode;
 
 #[test]
 fn scene_goldens_match() {
     common::assert_goldens(
         "scene",
         std::env::var("BLESS").is_ok(),
-        Some("scene golden mismatches"),
+        "scene golden mismatches",
         "orphan golden with no matching case (run with BLESS=1 to delete)",
         cases::scene_cases(),
-        |_, _| {},
-        lvgl_sim::Simulator::render_scene_png,
     );
 }
 
-/// Every `scene_node_kind_t` is covered. Written as an explicit roll-call
-/// rather than a count so that adding another node kind to the model fails
-/// here, loudly, instead of leaving the new kind with no golden at all.
+fn node_kind_slug(node: &SceneNode) -> &'static str {
+    match node {
+        SceneNode::Rect(_) => "rect",
+        SceneNode::Arc(_) => "arc",
+        SceneNode::Line(_) => "line",
+        SceneNode::Text(_) => "text",
+        SceneNode::Image(_) => "image",
+        SceneNode::Glyph(_) => "glyph",
+        SceneNode::Scale(_) => "scale",
+        SceneNode::Label(_) => "label",
+        SceneNode::RotRect(_) => "rot-rect",
+    }
+}
+
+/// Exhaustively handles Rust node variants, checks each advertised kind is
+/// present, and requires two correctly oriented rows per kind.
 #[test]
 fn every_node_kind_has_a_case() {
-    let names: Vec<String> = cases::scene_cases()
-        .into_iter()
-        .map(|(name, _)| name)
-        .collect();
+    let cases = cases::scene_cases();
     for kind in [
         "rect", "arc", "line", "text", "image", "glyph", "scale", "label", "rot-rect",
     ] {
-        for orientation in ["landscape", "flipped"] {
-            let expected = format!("scene-{kind}--{orientation}");
-            assert!(
-                names.contains(&expected),
-                "no scene case named {expected}; every scene_node_kind_t needs \
+        for (suffix, orientation) in [
+            ("landscape", SimOrientation::Landscape),
+            ("flipped", SimOrientation::LandscapeFlipped),
+        ] {
+            let expected = format!("scene-{kind}--{suffix}");
+            let (_, request) = cases
+                .iter()
+                .find(|(name, _)| name == &expected)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no scene case named {expected}; every scene_node_kind_t needs \
                  one at both orientations"
+                    )
+                });
+            assert_eq!(request.orientation, orientation, "{expected}: orientation");
+            assert!(
+                request
+                    .scene
+                    .nodes
+                    .iter()
+                    .any(|node| node_kind_slug(node) == kind),
+                "{expected}: no {kind} node"
             );
         }
     }
-    assert_eq!(names.len(), 18, "9 node kinds x 2 orientations");
+    assert_eq!(cases.len(), 18, "9 node kinds x 2 orientations");
 }

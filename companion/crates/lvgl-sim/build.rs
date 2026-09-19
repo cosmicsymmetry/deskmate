@@ -10,7 +10,6 @@ fn main() {
         .collect();
     for core in [
         "timefmt.c",
-        "clock_source.c",
         // The runtime asset store is compiled unmodified so the
         // simulator's digest -> bytes lookup uses the identical format and
         // logic the device's link/asset_flash.c backs with real flash
@@ -18,7 +17,7 @@ fn main() {
         "asset_store.c",
         // The scene model, its CBOR decoder and its
         // binding evaluator, compiled unmodified for the same reason
-        // ui/scene_view.c below is -- the stage-2 parity gate compares a
+        // ui/scene_view.c below is -- physical framebuffer comparison checks a
         // device framebuffer against a simulator framebuffer, and that is
         // only meaningful while both run the same translation units. All
         // four are free of ESP-IDF includes by design (see ui/scene_view.h's

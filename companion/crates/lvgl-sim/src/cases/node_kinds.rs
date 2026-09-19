@@ -1,229 +1,19 @@
-//! The render case table: every card face x both mount orientations x the
-//! data states chosen to exercise each face's visually distinct appearances.
-//! `tests/golden.rs` pins the landscape outputs under `tests/golden/`; flipped
-//! rows remain available to the physical harness. The physical framebuffer
-//! diff drives both [`scene_cases`] and [`face_scene_cases`], because a scene
-//! is the only thing shipping firmware draws. This lives under `src/` rather
-//! than `tests/` so integration tests and hardware examples can reach it as
-//! `lvgl_sim::cases`.
-//!
-//! Every value a node binds comes from the closed vocabulary in
-//! `firmware/main/core/scene_binding.h`: `time:`, `date` and the `timer.*`
-//! family.
-
 use std::sync::{Arc, LazyLock};
 
+use super::orientations;
 use crate::SimOrientation;
-use protocol::AssetKind;
-
-fn orientations() -> [(&'static str, SimOrientation); 2] {
-    [
-        ("landscape", SimOrientation::Landscape),
-        ("flipped", SimOrientation::LandscapeFlipped),
-    ]
-}
-
-/// 2025-08-13 11:35:00 UTC — the "widest-looking" of the tabular pair.
-pub const TABULAR_1135: i64 = 1_755_084_900;
-/// 2025-08-13 00:00:00 UTC — the "narrowest-looking" of the tabular pair.
-pub const TABULAR_0000: i64 = 1_755_043_200;
-
-/// The shipping-face rows as device-pushable scenes.
-///
-/// This is both the golden table (`tests/golden.rs` pins the landscape rows
-/// under `tests/golden/`) and the hardware-facing half of the framebuffer
-/// matrix that `framebuffer_diff` drives.
-///
-/// The field matrix is expressed directly as scene-builder inputs. Row names
-/// are stable because `framebuffer_diff` exclusions are keyed by them; a
-/// rename would silently make an exclusion branch unreachable.
-#[allow(clippy::too_many_lines)] // one explicit row per shipped face case
-pub fn face_scene_cases() -> Vec<(String, SceneRenderRequest)> {
-    use app_core::scene_build::{
-        AnalogClockCard, BakedFontMetrics, ClockCard, ProgressRingCard, SceneDataState,
-        build_analog_clock_scene, build_digital_clock_scene, build_progress_ring_scene,
-        with_scene_data_state,
-    };
-
-    /// 2025-08-12 12:00:00 UTC.
-    const NOW: i64 = 1_755_000_000;
-    /// -> 16:00 local.
-    const OFFSET: i16 = 240;
-    /// The analog brief's pinned instant. `typical` and `no-seconds` share it
-    /// on purpose: together they pin that the hour and minute hands do not
-    /// depend on `show_seconds`, which is the deterministic form of the
-    /// 2026-08-11 no-seconds defect.
-    const ANALOG_INSTANT: i64 = 1_755_081_480;
-    /// 2025-08-13 00:00:00 UTC.
-    const MIDNIGHT_INSTANT: i64 = 1_755_043_200;
-    const DURATION_SECONDS: i64 = 1500;
-
-    let metrics = &BakedFontMetrics::SHIPPED;
-
-    let clock = |show_seconds: bool, now_unix_seconds: i64, utc_offset_minutes: i16| {
-        let local_seconds = now_unix_seconds + i64::from(utc_offset_minutes) * 60;
-        let local_now = chrono::DateTime::from_timestamp(local_seconds, 0)
-            .expect("golden clock instant is representable")
-            .naive_utc();
-        build_digital_clock_scene(
-            &ClockCard {
-                revision: 1,
-                show_seconds,
-                local_now,
-            },
-            metrics,
-        )
-    };
-    let analog = |show_seconds: bool| {
-        build_analog_clock_scene(&AnalogClockCard {
-            revision: 1,
-            show_seconds,
-        })
-    };
-    let ring = |remaining_seconds: i64, running: bool| {
-        let scene = build_progress_ring_scene(
-            &ProgressRingCard {
-                revision: 1,
-                label: "Pomodoro",
-                duration_seconds: DURATION_SECONDS,
-            },
-            metrics,
-        );
-        let to_milliseconds = |seconds: i64| {
-            u32::try_from(seconds * 1_000).expect("progress-ring fixture is inside u32")
-        };
-        (
-            scene,
-            Some(SceneTimer {
-                total_ms: to_milliseconds(DURATION_SECONDS),
-                remaining_ms: to_milliseconds(remaining_seconds),
-                running,
-            }),
-        )
-    };
-
-    let rows: Vec<(&'static str, Scene, Option<SceneTimer>, i64, i16)> = vec![
-        (
-            "digital-clock--typical",
-            clock(true, NOW, OFFSET),
-            None,
-            NOW,
-            OFFSET,
-        ),
-        (
-            "digital-clock--no-seconds",
-            clock(false, NOW, OFFSET),
-            None,
-            NOW,
-            OFFSET,
-        ),
-        // Tabular-figure pair. Both instants render an HH:MM with no repeated
-        // digit shape in common, at the same font and the same box, so their
-        // lit column spans must be identical -- proportional figures would
-        // shift the second frame. `tests/tabular.rs` asserts that equality in
-        // pixels; these goldens pin the frames it asserts over.
-        (
-            "digital-clock--tabular-1135",
-            clock(false, TABULAR_1135, 0),
-            None,
-            TABULAR_1135,
-            0,
-        ),
-        (
-            "digital-clock--tabular-0000",
-            clock(false, TABULAR_0000, 0),
-            None,
-            TABULAR_0000,
-            0,
-        ),
-        (
-            "analog-clock--typical",
-            analog(true),
-            None,
-            ANALOG_INSTANT,
-            0,
-        ),
-        (
-            "analog-clock--no-seconds",
-            analog(false),
-            None,
-            ANALOG_INSTANT,
-            0,
-        ),
-        (
-            "analog-clock--midnight",
-            analog(true),
-            None,
-            MIDNIGHT_INSTANT,
-            0,
-        ),
-    ];
-
-    // A running ring mid-countdown is the only pixel coverage of the running
-    // arc-indicator hue: `running` drives the indicator and status-text
-    // colours, and at a zero-length arc the indicator is not drawn at all. It
-    // is golden-only -- `framebuffer_diff` excludes it by name, because the
-    // device keeps ticking a running timer through `scene_view_tick_bindings`
-    // while this simulator's fake tick is fixed.
-    let ring_rows: Vec<(&'static str, (Scene, Option<SceneTimer>))> = vec![
-        ("progress-ring--running-mid-countdown", ring(900, true)),
-        // The hardware-comparable half of the row above: the same partial arc
-        // with the ring stopped, so both sides render the pinned value.
-        ("progress-ring--paused-mid-countdown", ring(900, false)),
-        // The only running ring hardware can be compared on, and so the only
-        // on-device coverage of the running palette -- here the status text,
-        // since a zero-length arc draws no indicator.
-        ("progress-ring--running-at-zero", ring(0, true)),
-        ("progress-ring--finished", ring(0, false)),
-        (
-            "progress-ring--never-started",
-            ring(DURATION_SECONDS, false),
-        ),
-    ];
-
-    let mut cases = Vec::new();
-    let all = rows.into_iter().chain(
-        ring_rows
-            .into_iter()
-            .map(|(name, (scene, timer))| (name, scene, timer, NOW, 0)),
-    );
-    for (name, scene, timer, now_unix_seconds, utc_offset_minutes) in all {
-        let scene = with_scene_data_state(
-            scene,
-            SceneDataState {
-                stale: false,
-                error: None,
-            },
-            metrics,
-        );
-        for (orientation_slug, orientation) in orientations() {
-            cases.push((
-                format!("{name}--{orientation_slug}"),
-                SceneRenderRequest {
-                    scene: scene.clone(),
-                    assets: Vec::new(),
-                    utc_offset_minutes,
-                    now_unix_seconds,
-                    timer,
-                    orientation,
-                },
-            ));
-        }
-    }
-    cases
-}
 
 // One scene case per `scene_node_kind_t`, at both orientations.
 
 use protocol::{
-    SCENE_CANVAS_WIDTH, Scene, SceneAlign, SceneArc, SceneClipRect, SceneFont, SceneFontTier,
-    SceneGlyph, SceneImage, SceneLabel, SceneLabelAnchor, SceneLine, SceneNode, SceneRect,
-    SceneRotRect, SceneScale, SceneText, SceneValue,
+    AssetKind, SCENE_CANVAS_WIDTH, Scene, SceneAlign, SceneArc, SceneClipRect, SceneFont,
+    SceneFontTier, SceneGlyph, SceneImage, SceneLabel, SceneLabelAnchor, SceneLine, SceneNode,
+    SceneRect, SceneRotRect, SceneScale, SceneText, SceneValue,
 };
 
 use crate::scene::{SceneAsset, SceneRenderRequest, SceneTimer};
 
-/// `template_internal.h`'s palette, so a scene golden reads as a plausible
+/// `app-core/src/scene_build.rs`'s palette, so a scene golden reads as a plausible
 /// Deskmate frame rather than a test pattern.
 const CANVAS: u32 = 0x0000_0000;
 const PRIMARY: u32 = 0x00f5_f5f7;
@@ -236,7 +26,7 @@ const GREEN: u32 = 0x002e_cc71;
 const PINK: u32 = 0x00ff_2e6c;
 
 /// 2025-08-12 12:00:00 UTC at +240 minutes — 16:00 local, the instant the
-/// template cases already use, so a scene clock and a `DigitalClock` golden
+/// face cases already use, so a scene clock and a `DigitalClock` golden
 /// can be read side by side.
 const SCENE_NOW: i64 = 1_755_000_000;
 const SCENE_OFFSET: i16 = 240;
@@ -383,7 +173,7 @@ fn baseline_rule(y: i32) -> SceneNode {
     })
 }
 
-/// Appends one scene case at both orientations, mirroring [`case`]'s naming:
+/// Appends one scene case at both orientations with a stable name:
 /// `scene-{kind_slug}--{orientation_slug}`.
 fn scene_case(
     cases: &mut Vec<(String, SceneRenderRequest)>,
@@ -444,7 +234,7 @@ fn scene_rect_nodes() -> Vec<SceneNode> {
             w: 112,
             h: 112,
             // Half the side: LVGL draws this as a circle, which is how the
-            // templates make their pills and dots.
+            // scene builders make their pills and dots.
             radius: 56,
             fill: GREEN,
             opacity: 255,
@@ -820,14 +610,14 @@ fn scene_glyph_nodes() -> Vec<SceneNode> {
     ]
 }
 
-/// `scale`: `digital_clock.c`'s own dial — a 112px box with 13 ticks and
+/// `scale`: a synthetic dial in a 112px box with 13 ticks and
 /// every third major, so the majors land at twelve, three, six and nine —
 /// with two ordinary line nodes standing in for its hands, because a scale
 /// node carries no needle. A second, denser dial pins the tick machinery at
 /// a minute scale rather than an hour one.
 ///
 /// The hands are drawn from the scale's own centre, `(x + box/2, y + box/2)`,
-/// which is the translation `scene_build.rs` has to do for real: LVGL
+/// which is the translation `app-core/src/scene_build.rs` uses: LVGL
 /// positions a scale's ticks from that centre and a scene has no nesting.
 fn scene_scale_nodes() -> Vec<SceneNode> {
     const BOX: i32 = 112;
@@ -1050,7 +840,7 @@ fn scene_rot_rect_nodes() -> Vec<SceneNode> {
 /// One case per `scene_node_kind_t`, each at both mount orientations, pinned
 /// by `tests/scene.rs` against `tests/golden/scene/`.
 ///
-/// A separate table from [`face_scene_cases`]: one case per scene node kind,
+/// A separate table from [`crate::cases::face_scene_cases`]: one case per scene node kind,
 /// rather than per shipped card face. The physical harness drives both with
 /// `PushScene`, the same message shipping firmware renders.
 pub fn scene_cases() -> Vec<(String, SceneRenderRequest)> {
@@ -1087,75 +877,6 @@ pub fn scene_cases() -> Vec<(String, SceneRenderRequest)> {
     scene_case(&mut cases, "label", &scene_label_nodes(), &[], None);
     scene_case(&mut cases, "rot-rect", &scene_rot_rect_nodes(), &[], None);
     cases
-}
-
-// ---------------------------------------------------------------------------
-// Native date-overflow evidence.
-// ---------------------------------------------------------------------------
-
-/// 2026-05-13 08:34:56 UTC, which becomes Wednesday 12:34:56 at UTC+04:00.
-pub const DATE_OVERFLOW_NOW_UNIX_SECONDS: i64 = 1_778_661_296;
-/// Non-zero by construction: the date producer must apply this before
-/// breaking the instant down into `Wed, May 13`.
-pub const DATE_OVERFLOW_UTC_OFFSET_MINUTES: i16 = 240;
-/// The exact LVGL BODY-font width of the produced date. Derived from the
-/// shipped generated font in `tests/evidence_scene.rs`.
-pub const DATE_OVERFLOW_BODY_WIDTH: i32 = 178;
-/// `build_digital_clock_scene()`'s date content box.
-pub const DATE_CONTENT_WIDTH: i32 = 176;
-/// The local date text selected by the native `date` producer fixture.
-/// Constructed from the chosen UTC instant and offset rather than written as
-/// a test literal; the simulator independently evaluates the C producer.
-pub fn date_overflow_text() -> String {
-    use chrono::Datelike;
-
-    let local_seconds =
-        DATE_OVERFLOW_NOW_UNIX_SECONDS + i64::from(DATE_OVERFLOW_UTC_OFFSET_MINUTES) * 60;
-    let local = chrono::DateTime::from_timestamp(local_seconds, 0)
-        .expect("the date-overflow instant is representable")
-        .naive_utc();
-    format!(
-        "{}, {} {}",
-        local.format("%a"),
-        local.format("%b"),
-        local.day()
-    )
-}
-
-/// A native `DigitalClock` scene whose real device-side `date` binding produces
-/// a 178px BODY-font run inside the builder's 176px content box. Both the UTC
-/// instant and the non-zero offset reach the C producer unchanged.
-pub fn date_truncation_scene_cases() -> Vec<(String, SceneRenderRequest)> {
-    let local_seconds =
-        DATE_OVERFLOW_NOW_UNIX_SECONDS + i64::from(DATE_OVERFLOW_UTC_OFFSET_MINUTES) * 60;
-    let local_now = chrono::DateTime::from_timestamp(local_seconds, 0)
-        .expect("the date-overflow instant is representable")
-        .naive_utc();
-    let scene = app_core::build_digital_clock_scene(
-        &app_core::ClockCard {
-            revision: 1,
-            show_seconds: false,
-            local_now,
-        },
-        &app_core::BakedFontMetrics::SHIPPED,
-    );
-
-    orientations()
-        .into_iter()
-        .map(|(orientation_slug, orientation)| {
-            (
-                format!("digital-clock--date-overflow--{orientation_slug}"),
-                SceneRenderRequest {
-                    scene: scene.clone(),
-                    assets: Vec::new(),
-                    utc_offset_minutes: DATE_OVERFLOW_UTC_OFFSET_MINUTES,
-                    now_unix_seconds: DATE_OVERFLOW_NOW_UNIX_SECONDS,
-                    timer: None,
-                    orientation,
-                },
-            )
-        })
-        .collect()
 }
 
 #[cfg(test)]

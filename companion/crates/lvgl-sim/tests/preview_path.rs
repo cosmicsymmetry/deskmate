@@ -1,9 +1,10 @@
 //! The Rust preview path from app configuration to rendered device pixels.
 //!
-//! `render_card_preview` builds `app_core::preview_card_scene(..)` and hands it
-//! to this simulator. The development browser harness cannot check this: it mocks
-//! `render_card_preview` outright (`src/dev/mockPreview.ts`), so a broken Rust
-//! preview path renders perfectly there. This test exercises the real path.
+//! This test exercises `app_core::preview_card_scene(..)` plus the simulator.
+//! The server uses that path for `POST /v1/app/{id}/preview`; the HTTP endpoint
+//! itself is not exercised here. The development browser harness dispatches
+//! `render_card_preview` to `src/dev/mockPreview.ts`, so a broken Rust preview
+//! path can still render perfectly there.
 
 use app_core::{AppConfig, CardAlert, CardSettings, RefreshPolicy, WidgetTapAction};
 use lvgl_sim::scene::{SceneRenderRequest, SceneTimer};

@@ -13,8 +13,9 @@ codepoints are repointed at the tabular glyphs before conversion.
 This script rewrites the `cmap` table of a copy of the input font so that
 U+0030-U+0039 (0-9) resolve directly to the glyphs the font's own `tnum`
 GSUB feature would have selected, then writes that copy out. It is a
-scripted, reproducible transform (never hand-edited) invoked by
-tools/genfonts.sh; the output is a build artifact, not a vendored file.
+scripted, reproducible transform (never hand-edited). Callers can supply its
+output to tools/genfonts.sh, which requires tabular-cmap fonts but does not
+invoke this script.
 """
 import sys
 

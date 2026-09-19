@@ -20,9 +20,9 @@
 //! by default — the tabular ("tnum") forms only become reachable once a
 //! text shaper applies the `tnum` feature — so an unpatched Inter loaded at
 //! runtime would render **proportional** digits, exactly the failure mode
-//! `tools/genfonts.sh` and `tools/fonts/patch_tabular_figures.py` already
-//! document and fix for the four baked `deskmate_font_*` faces
-//! (`lv_font_conv` has the identical raw-cmap limitation). This golden
+//! `tools/genfonts.sh` avoids by requiring caller-supplied tabular-cmap
+//! fonts for the four baked `deskmate_font_*` faces (`lv_font_conv` has the
+//! identical raw-cmap limitation). This golden
 //! renders `12:34`, where digit advance width and colon alignment are
 //! precisely what would regress if that patch were skipped. The renderer only
 //! needs this derived, independently licensed, content-addressed test asset at

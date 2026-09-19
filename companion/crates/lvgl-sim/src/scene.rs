@@ -20,8 +20,8 @@
 //! # Assets
 //!
 //! `image` and asset-font nodes name content by digest, and nothing on the host
-//! resolves a digest by itself. [`SceneAsset`] entries are registered into
-//! `csrc/sim_shim.c`'s RAM-backed asset store (the same
+//! resolves a digest by itself. [`crate::scene::SceneAsset`] entries are registered
+//! into `csrc/sim_shim.c`'s RAM-backed asset store (the same
 //! `firmware/main/core/asset_store.c` the device uses, over a heap buffer
 //! instead of flash) before the scene is
 //! decoded, and `sim_render_scene` wires that store to `scene_view.c` through
@@ -171,7 +171,6 @@ unsafe extern "C" {
         payload_length: usize,
         utc_offset_minutes: i16,
         now_unix_seconds: i64,
-        timer_active: bool,
         timer_total_ms: u32,
         timer_remaining_ms: u32,
         timer_running: bool,
@@ -184,7 +183,7 @@ impl Simulator {
     /// Registers `request`'s assets, encodes its scene as the standalone CBOR
     /// payload the device's `scene_decode()` takes, and renders the result
     /// through `ui/scene_view.c`. Returns 448*368 RGB565 pixels in logical
-    /// landscape orientation, like [`Simulator::render`].
+    /// canvas order at the requested orientation (flipped is a 180° rotation).
     ///
     /// # Errors
     ///
@@ -227,7 +226,6 @@ impl Simulator {
                 payload.len(),
                 request.utc_offset_minutes,
                 request.now_unix_seconds,
-                request.timer.is_some(),
                 timer.total_ms,
                 timer.remaining_ms,
                 timer.running,
@@ -240,7 +238,7 @@ impl Simulator {
     }
 
     /// Renders like [`Simulator::render_scene`] and encodes the result as an
-    /// 8-bit RGB PNG, matching [`Simulator::render_png`].
+    /// 8-bit RGB PNG.
     ///
     /// # Errors
     ///
@@ -316,6 +314,47 @@ mod tests {
         assert_eq!(first, second);
     }
 
+    /// Zero-total snapshots are absent even when their other fields are set;
+    /// a paused timer still has a status distinct from absence and running.
+    #[test]
+    fn timer_status_distinguishes_absent_paused_and_running() {
+        let (_, mut request) = crate::cases::scene_cases()
+            .into_iter()
+            .find(|(name, _)| name == "scene-text--landscape")
+            .expect("scene-text fixture");
+        assert!(request.scene.nodes.iter().any(|node| matches!(
+            node,
+            SceneNode::Text(text)
+                if text.value == protocol::SceneValue::Binding("timer.status".to_string())
+        )));
+        let mut sim = Simulator::new().expect("simulator");
+        for orientation in [SimOrientation::Landscape, SimOrientation::LandscapeFlipped] {
+            request.orientation = orientation;
+            request.timer = None;
+            let absent = sim.render_scene(&request).expect("absent timer");
+            for running in [false, true] {
+                request.timer = Some(SceneTimer {
+                    total_ms: 0,
+                    remaining_ms: 35_000,
+                    running,
+                });
+                let zero_total = sim.render_scene(&request).expect("zero-total timer");
+                assert_eq!(absent, zero_total, "{orientation:?}, running={running}");
+            }
+            request.timer = Some(SceneTimer {
+                total_ms: 100_000,
+                remaining_ms: 35_000,
+                running: false,
+            });
+            let paused = sim.render_scene(&request).expect("paused timer");
+            request.timer.as_mut().expect("active timer").running = true;
+            let running = sim.render_scene(&request).expect("running timer");
+            assert_ne!(absent, paused, "{orientation:?}: absent versus paused");
+            assert_ne!(absent, running, "{orientation:?}: absent versus running");
+            assert_ne!(paused, running, "{orientation:?}: paused versus running");
+        }
+    }
+
     /// A scene the protocol validator rejects never reaches the C at all, and
     /// says why. Without this the first sign would be a bare "render failed"
     /// from `scene_decode`.
@@ -366,8 +405,8 @@ mod tests {
         );
     }
 
-    /// The flip is the same 180° rotation of the logical canvas the template
-    /// path applies, so an asymmetric scene must reverse exactly.
+    /// The flipped mount rotates the logical canvas by 180°, so an
+    /// asymmetric scene must reverse exactly.
     #[test]
     fn flipped_orientation_is_a_180_rotation_of_landscape() {
         let mut sim = Simulator::new().expect("simulator");

@@ -1,8 +1,8 @@
 //! Tabular-figure proof for the digital clock's hero time label.
 //!
-//! `tools/genfonts.sh` bakes Inter's tabular ("tnum") digit forms into the
-//! DISPLAY and HERO tiers so a ticking clock does not shimmer: every digit
-//! must carry the same advance, so an HH:MM label occupies the same box
+//! `tools/genfonts.sh` consumes caller-supplied fonts with tabular digit cmap
+//! entries for the DISPLAY and HERO tiers so a ticking clock does not shimmer:
+//! every digit must carry the same advance, so an HH:MM label occupies the same box
 //! whatever the time reads. Golden PNGs cannot state that on their own — they
 //! pin two frames, not the relationship between them — so this test measures
 //! the rendered frames and asserts the relationship.
@@ -29,9 +29,10 @@ use lvgl_sim::scene::SceneRenderRequest;
 use lvgl_sim::{LOGICAL_WIDTH, SimOrientation, Simulator, cases};
 
 /// Rows covering the hero time label and nothing else: the face has no title
-/// chip above it and the module row starts at y = 176 (see `digital_clock.c`,
-/// where the hero sits at `TIME_Y` = 64 and the HERO tier's line box is 72
-/// tall). Inset 4px top and bottom so the band cannot catch a neighbour.
+/// chip above it and the module row starts at y = 176 (see
+/// `app-core/src/scene_build.rs`, where the hero sits at y = 64 and the HERO
+/// tier's line box is 72 tall). Inset 4px top and bottom so the band cannot
+/// catch a neighbour.
 const TIME_BAND: std::ops::Range<usize> = 68..132;
 
 /// 2025-08-13, at times that all render `1X:Y0` and together use every digit:

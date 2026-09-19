@@ -20,9 +20,8 @@ pub const TABULAR_0000: i64 = 1_755_043_200;
 #[allow(clippy::too_many_lines)] // one explicit row per shipped face case
 pub fn face_scene_cases() -> Vec<(String, SceneRenderRequest)> {
     use app_core::scene_build::{
-        AnalogClockCard, BakedFontMetrics, ClockCard, ProgressRingCard, SceneDataState,
-        build_analog_clock_scene, build_digital_clock_scene, build_progress_ring_scene,
-        with_scene_data_state,
+        AnalogClockCard, ClockCard, ProgressRingCard, build_analog_clock_scene,
+        build_digital_clock_scene, build_progress_ring_scene,
     };
 
     /// 2025-08-12 12:00:00 UTC.
@@ -38,21 +37,11 @@ pub fn face_scene_cases() -> Vec<(String, SceneRenderRequest)> {
     const MIDNIGHT_INSTANT: i64 = 1_755_043_200;
     const DURATION_SECONDS: i64 = 1500;
 
-    let metrics = &BakedFontMetrics::SHIPPED;
-
-    let clock = |show_seconds: bool, now_unix_seconds: i64, utc_offset_minutes: i16| {
-        let local_seconds = now_unix_seconds + i64::from(utc_offset_minutes) * 60;
-        let local_now = chrono::DateTime::from_timestamp(local_seconds, 0)
-            .expect("golden clock instant is representable")
-            .naive_utc();
-        build_digital_clock_scene(
-            &ClockCard {
-                revision: 1,
-                show_seconds,
-                local_now,
-            },
-            metrics,
-        )
+    let clock = |show_seconds: bool| {
+        build_digital_clock_scene(&ClockCard {
+            revision: 1,
+            show_seconds,
+        })
     };
     let analog = |show_seconds: bool| {
         build_analog_clock_scene(&AnalogClockCard {
@@ -61,14 +50,11 @@ pub fn face_scene_cases() -> Vec<(String, SceneRenderRequest)> {
         })
     };
     let ring = |remaining_seconds: i64, running: bool| {
-        let scene = build_progress_ring_scene(
-            &ProgressRingCard {
-                revision: 1,
-                label: "Pomodoro",
-                duration_seconds: DURATION_SECONDS,
-            },
-            metrics,
-        );
+        let scene = build_progress_ring_scene(&ProgressRingCard {
+            revision: 1,
+            label: "Pomodoro",
+            duration_seconds: DURATION_SECONDS,
+        });
         let to_milliseconds = |seconds: i64| {
             u32::try_from(seconds * 1_000).expect("progress-ring fixture is inside u32")
         };
@@ -83,20 +69,8 @@ pub fn face_scene_cases() -> Vec<(String, SceneRenderRequest)> {
     };
 
     let rows: Vec<(&'static str, Scene, Option<SceneTimer>, i64, i16)> = vec![
-        (
-            "digital-clock--typical",
-            clock(true, NOW, OFFSET),
-            None,
-            NOW,
-            OFFSET,
-        ),
-        (
-            "digital-clock--no-seconds",
-            clock(false, NOW, OFFSET),
-            None,
-            NOW,
-            OFFSET,
-        ),
+        ("digital-clock--typical", clock(true), None, NOW, OFFSET),
+        ("digital-clock--no-seconds", clock(false), None, NOW, OFFSET),
         // Tabular-figure pair. Both instants render an HH:MM with no repeated
         // digit shape in common, at the same font and the same box, so their
         // lit column spans must be identical -- proportional figures would
@@ -104,14 +78,14 @@ pub fn face_scene_cases() -> Vec<(String, SceneRenderRequest)> {
         // pixels; these goldens pin the frames it asserts over.
         (
             "digital-clock--tabular-1135",
-            clock(false, TABULAR_1135, 0),
+            clock(false),
             None,
             TABULAR_1135,
             0,
         ),
         (
             "digital-clock--tabular-0000",
-            clock(false, TABULAR_0000, 0),
+            clock(false),
             None,
             TABULAR_0000,
             0,
@@ -168,14 +142,6 @@ pub fn face_scene_cases() -> Vec<(String, SceneRenderRequest)> {
             .map(|(name, (scene, timer))| (name, scene, timer, NOW, 0)),
     );
     for (name, scene, timer, now_unix_seconds, utc_offset_minutes) in all {
-        let scene = with_scene_data_state(
-            scene,
-            SceneDataState {
-                stale: false,
-                error: None,
-            },
-            metrics,
-        );
         for (orientation_slug, orientation) in orientations() {
             cases.push((
                 format!("{name}--{orientation_slug}"),

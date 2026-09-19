@@ -27,7 +27,7 @@ pub use protocol::{
     MAX_DEVICE_ID_LEN, MAX_DEVICE_TOKEN_LEN, MAX_PSK_LEN, MAX_SERVER_URL_LEN, MAX_SSID_LEN,
 };
 pub use render_negotiation::{
-    DeviceRenderProfile, RenderRequirements, SceneNodeKind, analyze_scene, validate_native_scene,
+    DeviceRenderProfile, RenderRequirements, analyze_scene, validate_native_scene,
 };
 pub use runtime::{
     DeviceConnection, ImageSourceFrame, ImageSourceHost, RuntimeDevice, RuntimeHandle,
@@ -35,9 +35,8 @@ pub use runtime::{
 };
 pub use runtime_command::{PomodoroAction, RuntimeError};
 pub use scene_build::{
-    AnalogClockCard, BakedFontMetrics, ClockCard, ProgressRingCard, SceneDataState,
-    build_analog_clock_scene, build_digital_clock_scene, build_progress_ring_scene,
-    with_scene_data_state,
+    AnalogClockCard, ClockCard, ProgressRingCard, build_analog_clock_scene,
+    build_digital_clock_scene, build_progress_ring_scene,
 };
 pub use state::{
     AppSnapshot, CardDataSnapshot, CardError, CardErrorKind, CardField, CardFieldValue,

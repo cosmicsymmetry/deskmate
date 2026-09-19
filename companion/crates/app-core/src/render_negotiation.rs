@@ -11,71 +11,8 @@ use protocol::{ASSET_DIGEST_LEN, CAPABILITY_SCENE_RENDER, Scene, SceneFont, Scen
 
 pub type AssetDigest = [u8; ASSET_DIGEST_LEN];
 
-/// The nine scene node kinds stay explicit even though bit 8 currently gates
-/// all of them. A future node-specific capability must change this match rather
-/// than inheriting broad support by accident.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum SceneNodeKind {
-    Rect,
-    Arc,
-    Line,
-    Text,
-    Image,
-    Glyph,
-    Scale,
-    Label,
-    RotRect,
-}
-
-impl SceneNodeKind {
-    fn of(node: &SceneNode) -> Self {
-        match node {
-            SceneNode::Rect(_) => Self::Rect,
-            SceneNode::Arc(_) => Self::Arc,
-            SceneNode::Line(_) => Self::Line,
-            SceneNode::Text(_) => Self::Text,
-            SceneNode::Image(_) => Self::Image,
-            SceneNode::Glyph(_) => Self::Glyph,
-            SceneNode::Scale(_) => Self::Scale,
-            SceneNode::Label(_) => Self::Label,
-            SceneNode::RotRect(_) => Self::RotRect,
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::Rect => "rect",
-            Self::Arc => "arc",
-            Self::Line => "line",
-            Self::Text => "text",
-            Self::Image => "image",
-            Self::Glyph => "glyph",
-            Self::Scale => "scale",
-            Self::Label => "label",
-            Self::RotRect => "rotated rect",
-        }
-    }
-}
-
-#[must_use]
-pub fn node_kind_supported(kind: SceneNodeKind, capabilities: u64) -> bool {
-    let scene_render = capabilities & CAPABILITY_SCENE_RENDER != 0;
-    match kind {
-        SceneNodeKind::Rect
-        | SceneNodeKind::Arc
-        | SceneNodeKind::Line
-        | SceneNodeKind::Text
-        | SceneNodeKind::Image
-        | SceneNodeKind::Glyph
-        | SceneNodeKind::Scale
-        | SceneNodeKind::Label
-        | SceneNodeKind::RotRect => scene_render,
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderRequirements {
-    pub node_kinds: BTreeSet<SceneNodeKind>,
     pub asset_digests: BTreeSet<AssetDigest>,
 }
 
@@ -89,11 +26,11 @@ pub struct DeviceRenderProfile {
 #[must_use]
 pub fn analyze_scene(scene: &Scene) -> RenderRequirements {
     let mut requirements = RenderRequirements {
-        node_kinds: BTreeSet::new(),
         asset_digests: BTreeSet::new(),
     };
     for node in &scene.nodes {
-        requirements.node_kinds.insert(SceneNodeKind::of(node));
+        // A new SceneNode variant must be classified here; bit 8 gates
+        // PushScene as a whole today.
         match node {
             SceneNode::Image(image) => {
                 requirements.asset_digests.insert(image.digest);
@@ -126,19 +63,12 @@ pub fn validate_native_scene(
                 .into(),
         );
     }
-    if let Some(kind) = requirements
-        .node_kinds
-        .iter()
-        .find(|kind| !node_kind_supported(**kind, profile.capabilities))
-    {
-        return Err(format!("the display cannot draw {} nodes", kind.name()));
-    }
     if let Some(digest) = requirements.asset_digests.iter().find(|digest| {
         !profile.confirmed_assets.contains(*digest) && !profile.installable_assets.contains(*digest)
     }) {
         return Err(format!(
             "asset sha256:{} is neither on the display nor available from this host",
-            hex(digest)
+            protocol::digest_hex(digest)
         ));
     }
     Ok(())
@@ -148,16 +78,6 @@ fn collect_font(font: &SceneFont, digests: &mut BTreeSet<AssetDigest>) {
     if let SceneFont::Asset { digest, .. } = font {
         digests.insert(*digest);
     }
-}
-
-fn hex(digest: &AssetDigest) -> String {
-    digest
-        .iter()
-        .fold(String::with_capacity(digest.len() * 2), |mut out, byte| {
-            use std::fmt::Write;
-            let _ = write!(out, "{byte:02x}");
-            out
-        })
 }
 
 #[cfg(test)]
@@ -174,7 +94,7 @@ mod tests {
     }
 
     #[test]
-    fn analysis_collects_node_kinds_and_asset_digests() {
+    fn analysis_collects_asset_digests() {
         let scene = Scene {
             revision: 7,
             background: 0,
@@ -204,16 +124,6 @@ mod tests {
         };
         let requirements = analyze_scene(&scene);
         assert_eq!(
-            requirements.node_kinds,
-            BTreeSet::from([
-                SceneNodeKind::Rect,
-                SceneNodeKind::Image,
-                SceneNodeKind::Glyph,
-                SceneNodeKind::Text,
-                SceneNodeKind::Label,
-            ])
-        );
-        assert_eq!(
             requirements.asset_digests,
             BTreeSet::from([digest(1), digest(2), digest(3)])
         );
@@ -222,7 +132,6 @@ mod tests {
     #[test]
     fn a_picture_digest_must_be_confirmed_or_installable() {
         let requirements = RenderRequirements {
-            node_kinds: BTreeSet::from([SceneNodeKind::Image]),
             asset_digests: BTreeSet::from([digest(9)]),
         };
         let mut profile = DeviceRenderProfile {
@@ -240,7 +149,6 @@ mod tests {
     #[test]
     fn a_device_without_scene_support_is_refused() {
         let requirements = RenderRequirements {
-            node_kinds: BTreeSet::from([SceneNodeKind::Rect]),
             asset_digests: BTreeSet::new(),
         };
         let error = validate_native_scene(&requirements, &DeviceRenderProfile::default())

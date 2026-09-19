@@ -601,14 +601,10 @@ async fn digital_clock_scene_written_by_admin_reaches_the_device() {
     assert_eq!(pushed.revision, 17);
     assert_eq!(
         pushed.scene,
-        app_core::build_digital_clock_scene(
-            &app_core::ClockCard {
-                revision: 17,
-                show_seconds: true,
-                local_now: local_now.parse().expect("valid test instant"),
-            },
-            &app_core::BakedFontMetrics::SHIPPED,
-        )
+        app_core::build_digital_clock_scene(&app_core::ClockCard {
+            revision: 17,
+            show_seconds: true,
+        })
     );
 }
 

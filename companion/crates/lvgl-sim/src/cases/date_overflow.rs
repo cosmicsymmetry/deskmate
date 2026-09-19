@@ -34,19 +34,10 @@ pub fn date_overflow_text() -> String {
 /// a 178px BODY-font run inside the builder's 176px content box. Both the UTC
 /// instant and the non-zero offset reach the C producer unchanged.
 pub fn date_truncation_scene_cases() -> Vec<(String, SceneRenderRequest)> {
-    let local_seconds =
-        DATE_OVERFLOW_NOW_UNIX_SECONDS + i64::from(DATE_OVERFLOW_UTC_OFFSET_MINUTES) * 60;
-    let local_now = chrono::DateTime::from_timestamp(local_seconds, 0)
-        .expect("the date-overflow instant is representable")
-        .naive_utc();
-    let scene = app_core::build_digital_clock_scene(
-        &app_core::ClockCard {
-            revision: 1,
-            show_seconds: false,
-            local_now,
-        },
-        &app_core::BakedFontMetrics::SHIPPED,
-    );
+    let scene = app_core::build_digital_clock_scene(&app_core::ClockCard {
+        revision: 1,
+        show_seconds: false,
+    });
 
     orientations()
         .into_iter()

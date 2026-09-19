@@ -51,34 +51,17 @@ pub(super) fn build_card_scene(
         .iter()
         .find(|card| card.id() == card_id)
         .ok_or_else(|| format!("card {card_id:?} is not present in the active configuration"))?;
-    let metrics = &BakedFontMetrics::SHIPPED;
     let scene = if let CardSettings::Picture { source_id, .. } = card {
         let host = image_source_host.ok_or_else(|| {
             format!("card {card_id:?} cannot render because no image source host is configured")
         })?;
         match host.image_source_frame(source_id) {
-            Some(frame) => with_scene_data_state(
-                frame_face_scene(revision, frame.digest),
-                SceneDataState {
-                    stale: frame.stale,
-                    error: None,
-                },
-                metrics,
-            ),
+            Some(frame) => with_stale_footer(frame_face_scene(revision, frame.digest), frame.stale),
             // No frame at all, so there is nothing to badge.
-            None => waiting_for_first_picture_scene(revision, metrics),
+            None => waiting_for_first_picture_scene(revision),
         }
     } else {
-        let scene = build_template_card_scene(config, card, card_id, fields, revision, metrics)?;
-        let error = field_text(fields, "error");
-        with_scene_data_state(
-            scene,
-            SceneDataState {
-                stale: field_boolean(fields, "stale"),
-                error: (!error.is_empty()).then_some(error),
-            },
-            metrics,
-        )
+        build_template_card_scene(card, card_id, fields, revision)?
     };
     let push = PushScene {
         card_id: card_id.to_owned(),
@@ -118,19 +101,16 @@ pub fn preview_card_scene(
     build_card_scene(config, card_id, fields, None, 1).map(|push| push.scene)
 }
 
-pub(super) fn waiting_for_first_picture_scene(
-    revision: u32,
-    metrics: &BakedFontMetrics,
-) -> protocol::Scene {
+pub(super) fn waiting_for_first_picture_scene(revision: u32) -> protocol::Scene {
     let tier = protocol::SceneFontTier::Caption;
-    let caption = metrics.tier(tier);
+    let caption = BakedFontMetrics::SHIPPED.tier(tier);
     let top = (protocol::SCENE_CANVAS_HEIGHT - caption.line_height) / 2;
     protocol::Scene {
         revision,
         background: 0,
         nodes: vec![protocol::SceneNode::Text(protocol::SceneText {
             x: 0,
-            baseline_y: top + metrics.baseline_offset(tier),
+            baseline_y: top + BakedFontMetrics::SHIPPED.baseline_offset(tier),
             w: protocol::SCENE_CANVAS_WIDTH,
             align: protocol::SceneAlign::Center,
             font: protocol::SceneFont::Baked(tier),
@@ -143,41 +123,25 @@ pub(super) fn waiting_for_first_picture_scene(
 }
 
 pub(super) fn build_template_card_scene(
-    config: &AppConfig,
     card: &CardSettings,
     card_id: &str,
     fields: &[CardField],
     revision: u32,
-    metrics: &BakedFontMetrics,
 ) -> Result<protocol::Scene, String> {
     let scene = match card.template() {
-        Some(DisplayTemplate::DigitalClock) => {
-            let timezone: Tz = config
-                .preferences
-                .timezone
-                .parse()
-                .map_err(|_| "the configured timezone is not recognized".to_owned())?;
-            build_digital_clock_scene(
-                &ClockCard {
-                    revision,
-                    show_seconds: field_boolean(fields, "show_seconds"),
-                    local_now: Utc::now().with_timezone(&timezone).naive_local(),
-                },
-                metrics,
-            )
-        }
+        Some(DisplayTemplate::DigitalClock) => build_digital_clock_scene(&ClockCard {
+            revision,
+            show_seconds: field_boolean(fields, "show_seconds"),
+        }),
         Some(DisplayTemplate::AnalogClock) => build_analog_clock_scene(&AnalogClockCard {
             revision,
             show_seconds: field_boolean(fields, "show_seconds"),
         }),
-        Some(DisplayTemplate::ProgressRing) => build_progress_ring_scene(
-            &ProgressRingCard {
-                revision,
-                label: field_text(fields, "label"),
-                duration_seconds: field_integer(fields, "duration_seconds"),
-            },
-            metrics,
-        ),
+        Some(DisplayTemplate::ProgressRing) => build_progress_ring_scene(&ProgressRingCard {
+            revision,
+            label: field_text(fields, "label"),
+            duration_seconds: field_integer(fields, "duration_seconds"),
+        }),
         None => {
             return Err(format!("card {card_id:?} has no display template"));
         }
@@ -443,12 +407,7 @@ pub(super) fn ensure_durable_assets_for_scene(
     }) {
         return Err(AssetSyncError::MissingRequiredAsset { digest: *digest });
     }
-    let keep_set = AssetSync::reconcile_with_active_volatile(
-        device,
-        &desired,
-        None,
-        state.device.capability_bits(),
-    )?;
+    let keep_set = AssetSync::reconcile(device, &desired, state.device.capability_bits())?;
     state.confirmed_durable_assets = keep_set.into_iter().collect();
     Ok(())
 }

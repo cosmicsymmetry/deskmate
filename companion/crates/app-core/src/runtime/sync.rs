@@ -43,12 +43,7 @@ pub(super) fn synchronize_full(
         let digests: Vec<_> = desired.iter().map(|asset| asset.digest).collect();
         Some((
             digests,
-            AssetSync::reconcile_with_active_volatile(
-                device,
-                &desired,
-                None,
-                state.device.capability_bits(),
-            ),
+            AssetSync::reconcile(device, &desired, state.device.capability_bits()),
         ))
     });
     match asset_result {

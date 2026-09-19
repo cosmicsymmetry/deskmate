@@ -35,7 +35,7 @@ use std::process;
 use std::thread;
 use std::time::Duration;
 
-use app_core::{BakedFontMetrics, ClockCard, build_digital_clock_scene};
+use app_core::{ClockCard, build_digital_clock_scene};
 use chrono::{NaiveDate, NaiveDateTime};
 use device::framebuffer_capture::{CaptureError, FRAME_BYTES, capture_framebuffer};
 use device::{DeviceClient, DeviceError, Transport, connect};
@@ -191,14 +191,10 @@ fn digital_clock_cases() -> Vec<CheckCase> {
                     instant.slug,
                     orientation_slug(orientation)
                 );
-                let scene = build_digital_clock_scene(
-                    &ClockCard {
-                        revision: 1,
-                        show_seconds,
-                        local_now: instant.local_now(),
-                    },
-                    &BakedFontMetrics::SHIPPED,
-                );
+                let scene = build_digital_clock_scene(&ClockCard {
+                    revision: 1,
+                    show_seconds,
+                });
                 checks.push(CheckCase {
                     name,
                     request: SceneRenderRequest {

@@ -2,8 +2,8 @@
 //! and status routes.
 
 use app_core::{
-    AppConfig, AppSnapshot, BakedFontMetrics, ClockCard, MAX_CONFIG_FILE_BYTES, RuntimeError,
-    SaveReceipt, StoreError, ValidationIssue, build_digital_clock_scene,
+    AppConfig, AppSnapshot, ClockCard, MAX_CONFIG_FILE_BYTES, RuntimeError, SaveReceipt,
+    StoreError, ValidationIssue, build_digital_clock_scene,
 };
 use axum::Json;
 use axum::Router;
@@ -147,18 +147,16 @@ fn build_operator_scene(request: PushSceneRequest) -> Result<PushScene, AdminErr
             let local_now = local_now.ok_or_else(|| AdminError::InvalidScene {
                 message: "local_now is required for scene template \"digital_clock\"".into(),
             })?;
-            let local_now = NaiveDateTime::parse_from_str(&local_now, "%Y-%m-%dT%H:%M:%S")
-                .map_err(|_| AdminError::InvalidScene {
+            // Accepted for compatibility; this field no longer reaches the builder.
+            NaiveDateTime::parse_from_str(&local_now, "%Y-%m-%dT%H:%M:%S").map_err(|_| {
+                AdminError::InvalidScene {
                     message: "local_now must use YYYY-MM-DDTHH:MM:SS".into(),
-                })?;
-            let scene = build_digital_clock_scene(
-                &ClockCard {
-                    revision,
-                    show_seconds,
-                    local_now,
-                },
-                &BakedFontMetrics::SHIPPED,
-            );
+                }
+            })?;
+            let scene = build_digital_clock_scene(&ClockCard {
+                revision,
+                show_seconds,
+            });
             let push = PushScene {
                 card_id,
                 revision,
@@ -390,14 +388,10 @@ mod tests {
         assert_eq!(push.revision, 17);
         assert_eq!(
             push.scene,
-            app_core::build_digital_clock_scene(
-                &app_core::ClockCard {
-                    revision: 17,
-                    show_seconds: true,
-                    local_now: local_now.parse().expect("valid test instant"),
-                },
-                &app_core::BakedFontMetrics::SHIPPED,
-            )
+            app_core::build_digital_clock_scene(&app_core::ClockCard {
+                revision: 17,
+                show_seconds: true,
+            })
         );
     }
 

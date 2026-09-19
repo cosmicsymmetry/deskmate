@@ -2,7 +2,7 @@
 //!
 //! Server-owned WebSocket devices support asset transfer through the same
 //! `RuntimeDevice` methods as other runtime devices, so
-//! [`AssetSync::reconcile_with_active_volatile`] can reconcile the complete
+//! [`AssetSync::reconcile`] can reconcile the complete
 //! desired set without transport-specific branching.
 //!
 //! Content addressing is the whole inventory protocol: there is no separate
@@ -30,7 +30,7 @@ use protocol::{
 /// address it by, its wire kind, and the payload itself.
 ///
 /// For a raster frame, `bytes` is always the decoded canonical LVGL blob and
-/// `digest` hashes those decoded bytes. Volatile transfer encoding is chosen
+/// `digest` hashes those decoded bytes. Transfer encoding is chosen
 /// inside [`AssetSync`], never by the caller constructing this value.
 ///
 /// Image-source hosts build these from bytes they already own; tests
@@ -86,28 +86,6 @@ pub(crate) enum AssetSyncError {
     },
 }
 
-/// Compose the one device-wide `AssetRelease` keep-set without sending it.
-/// Every desired durable digest is followed by the active volatile
-/// raster digest, deduplicated and bounded by the wire ceiling.
-fn compose_asset_keep_set(
-    durable: &[[u8; ASSET_DIGEST_LEN]],
-    active_volatile: Option<[u8; ASSET_DIGEST_LEN]>,
-) -> Result<Vec<[u8; ASSET_DIGEST_LEN]>, AssetSyncError> {
-    let mut keep = Vec::with_capacity(durable.len() + usize::from(active_volatile.is_some()));
-    for digest in durable.iter().copied().chain(active_volatile) {
-        if !keep.contains(&digest) {
-            keep.push(digest);
-        }
-    }
-    if keep.len() > MAX_ASSET_DIGESTS {
-        return Err(AssetSyncError::TooManyDesiredAssets {
-            desired: keep.len(),
-            maximum: MAX_ASSET_DIGESTS,
-        });
-    }
-    Ok(keep)
-}
-
 pub(crate) struct AssetSync;
 
 struct SelectedAssetEncoding<'a> {
@@ -152,11 +130,9 @@ impl AssetSync {
     fn transfer_one(
         device: &mut dyn RuntimeDevice,
         asset: &DesiredAsset,
-        volatile: bool,
         wire_bytes: &[u8],
         encoding: u8,
         decoded_length: Option<u32>,
-        on_chunk_sent: &mut dyn FnMut(),
     ) -> Result<(), AssetSyncError> {
         let total_length =
             u32::try_from(wire_bytes.len()).map_err(|_| AssetSyncError::AssetTooLarge {
@@ -169,7 +145,7 @@ impl AssetSync {
                 digest: asset.digest,
                 kind: asset.kind,
                 total_length,
-                volatile,
+                volatile: false,
                 encoding,
                 decoded_length,
             })
@@ -197,7 +173,6 @@ impl AssetSync {
                     source,
                 })?;
             offset += chunk_len;
-            on_chunk_sent();
         }
 
         device
@@ -211,49 +186,11 @@ impl AssetSync {
         Ok(())
     }
 
-    /// Reconciles durable assets while retaining the volatile digest read by
-    /// the currently displayed scene, and returns the exact keep-set sent to
-    /// the device. This is the only safe full-sync shape before its
-    /// replacement `PushScene` succeeds.
-    pub(crate) fn reconcile_with_active_volatile(
+    /// Reconciles desired assets and returns the exact keep-set sent to the device.
+    pub(crate) fn reconcile(
         device: &mut dyn RuntimeDevice,
         desired: &[DesiredAsset],
-        active_volatile: Option<[u8; ASSET_DIGEST_LEN]>,
         capabilities: u64,
-    ) -> Result<Vec<[u8; ASSET_DIGEST_LEN]>, AssetSyncError> {
-        Self::reconcile_with_active_volatile_yielding(
-            device,
-            desired,
-            active_volatile,
-            capabilities,
-            &mut || {},
-        )
-    }
-
-    /// Same as [`Self::reconcile_with_active_volatile`], but calls
-    /// `on_chunk_sent` after every chunk the device accepts.
-    ///
-    /// Protocol v1 allows exactly one outstanding request per connection
-    /// (spec §4's "one outstanding plus preemption", chosen deliberately
-    /// over a windowed transfer), and one asset can be on the order of 250
-    /// sequential chunk round trips. `RuntimeDevice`'s methods are
-    /// synchronous by design (see `runtime_device.rs`'s own doc comment on
-    /// why: it avoids entering a Tokio runtime from a synchronous trait), so
-    /// there is no `.await` point here for interactive traffic to preempt
-    /// implicitly. `on_chunk_sent` is the explicit substitute: a caller that
-    /// embeds this operation inside a command loop (the runtime
-    /// worker's, or the WebSocket actor's) is expected to use this hook to
-    /// service one pending non-asset command -- a tap, a heartbeat, a
-    /// pomodoro tick -- before the next chunk claims the connection's one
-    /// outstanding-request slot again. The non-yielding wrapper passes a
-    /// no-op hook, which is correct for a caller that owns the device
-    /// exclusively for the duration of the pass.
-    fn reconcile_with_active_volatile_yielding(
-        device: &mut dyn RuntimeDevice,
-        desired: &[DesiredAsset],
-        active_volatile: Option<[u8; ASSET_DIGEST_LEN]>,
-        capabilities: u64,
-        on_chunk_sent: &mut dyn FnMut(),
     ) -> Result<Vec<[u8; ASSET_DIGEST_LEN]>, AssetSyncError> {
         // `MAX_ASSET_DIGESTS` (32) comfortably covers the config's own
         // `MAX_ASSETS` (16) today, but that headroom is a property of two
@@ -284,17 +221,18 @@ impl AssetSync {
             Self::transfer_one(
                 device,
                 asset,
-                false,
                 &selected.wire,
                 selected.encoding,
                 selected.decoded_length,
-                on_chunk_sent,
             )?;
         }
 
-        let durable: Vec<[u8; ASSET_DIGEST_LEN]> =
-            desired.iter().map(|asset| asset.digest).collect();
-        let keep_set = compose_asset_keep_set(&durable, active_volatile)?;
+        let mut keep_set = Vec::with_capacity(desired.len());
+        for digest in desired.iter().map(|asset| asset.digest) {
+            if !keep_set.contains(&digest) {
+                keep_set.push(digest);
+            }
+        }
         device
             .send_asset_release(AssetRelease {
                 digests: keep_set.clone(),
@@ -507,6 +445,33 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_deduplicates_the_keep_set_in_first_seen_order() {
+        let mut device = FakeDevice::new();
+        let first = [0xbb; ASSET_DIGEST_LEN];
+        let second = [0xaa; ASSET_DIGEST_LEN];
+        let desired = vec![
+            asset_blob(first, 16),
+            asset_blob(second, 16),
+            asset_blob(first, 16),
+        ];
+
+        let keep_set = AssetSync::reconcile(&mut device, &desired, 0).expect("reconcile");
+
+        assert_eq!(keep_set, vec![first, second]);
+        assert_eq!(device.last_release(), Some(keep_set));
+    }
+
+    #[test]
+    fn reconcile_sends_an_empty_keep_set() {
+        let mut device = FakeDevice::new();
+
+        let keep_set = AssetSync::reconcile(&mut device, &[], 0).expect("reconcile");
+
+        assert!(keep_set.is_empty());
+        assert_eq!(device.last_release(), Some(Vec::new()));
+    }
+
+    #[test]
     fn reconcile_skips_assets_the_device_already_holds() {
         let mut device = FakeDevice::new().with_already_present([0xaa; ASSET_DIGEST_LEN]);
         let desired = vec![
@@ -514,8 +479,7 @@ mod tests {
             asset_blob([0xbb; ASSET_DIGEST_LEN], 2048),
         ];
 
-        let keep_set = AssetSync::reconcile_with_active_volatile(&mut device, &desired, None, 0)
-            .expect("reconcile");
+        let keep_set = AssetSync::reconcile(&mut device, &desired, 0).expect("reconcile");
 
         // Content addressing is the inventory protocol: AssetBegin answers
         // already_present and we send no chunks at all for that digest.
@@ -539,8 +503,7 @@ mod tests {
         let digest = [0xcc; ASSET_DIGEST_LEN];
         let desired = vec![asset_blob(digest, MAX_ASSET_CHUNK_BYTES * 5)];
 
-        let first_attempt =
-            AssetSync::reconcile_with_active_volatile(&mut device, &desired, None, 0);
+        let first_attempt = AssetSync::reconcile(&mut device, &desired, 0);
         assert!(
             first_attempt.is_err(),
             "the injected failure must actually fire"
@@ -549,35 +512,14 @@ mod tests {
         assert_eq!(device.chunks_sent_for(&digest), 2);
 
         device.recovered();
-        let keep_set = AssetSync::reconcile_with_active_volatile(&mut device, &desired, None, 0)
-            .expect("the retry must succeed");
+        let keep_set =
+            AssetSync::reconcile(&mut device, &desired, 0).expect("the retry must succeed");
 
         // The retry sent all 5 chunks again, not just the remaining 3 --
         // proving it restarted rather than resuming from offset 2 * CHUNK.
         assert_eq!(device.chunks_sent_for(&digest), 5);
         assert_eq!(keep_set, vec![digest]);
         assert_eq!(device.last_release(), Some(keep_set));
-    }
-
-    #[test]
-    fn reconcile_with_active_volatile_yielding_calls_the_hook_once_per_chunk() {
-        let mut device = FakeDevice::new();
-        let desired = vec![asset_blob(
-            [0xee; ASSET_DIGEST_LEN],
-            MAX_ASSET_CHUNK_BYTES * 3,
-        )];
-        let mut yields = 0usize;
-
-        AssetSync::reconcile_with_active_volatile_yielding(
-            &mut device,
-            &desired,
-            None,
-            0,
-            &mut || yields += 1,
-        )
-        .expect("reconcile");
-
-        assert_eq!(yields, 3);
     }
 
     #[test]
@@ -590,8 +532,7 @@ mod tests {
             .collect();
         assert!(desired.len() > MAX_ASSET_DIGESTS);
 
-        let error = AssetSync::reconcile_with_active_volatile(&mut device, &desired, None, 0)
-            .expect_err("must be rejected");
+        let error = AssetSync::reconcile(&mut device, &desired, 0).expect_err("must be rejected");
 
         assert!(matches!(error, AssetSyncError::TooManyDesiredAssets { .. }));
         assert!(device.last_release().is_none());
@@ -602,10 +543,9 @@ mod tests {
         let mut device = FakeDevice::new();
         let frame = raster_frame([0xd1; ASSET_DIGEST_LEN], false);
 
-        AssetSync::reconcile_with_active_volatile(
+        AssetSync::reconcile(
             &mut device,
             std::slice::from_ref(&frame),
-            None,
             CAPABILITY_DURABLE_ASSET_ENCODING,
         )
         .expect("durable reconcile");
@@ -634,10 +574,9 @@ mod tests {
         let mut device = FakeDevice::new();
         let frame = raster_frame([0xd2; ASSET_DIGEST_LEN], true);
 
-        AssetSync::reconcile_with_active_volatile(
+        AssetSync::reconcile(
             &mut device,
             std::slice::from_ref(&frame),
-            None,
             CAPABILITY_DURABLE_ASSET_ENCODING,
         )
         .expect("durable reconcile");
@@ -654,10 +593,9 @@ mod tests {
         let mut device = FakeDevice::new();
         let frame = raster_frame([0xd3; ASSET_DIGEST_LEN], false);
 
-        AssetSync::reconcile_with_active_volatile(
+        AssetSync::reconcile(
             &mut device,
             std::slice::from_ref(&frame),
-            None,
             CAPABILITY_VOLATILE_ASSETS,
         )
         .expect("durable reconcile");
@@ -674,17 +612,15 @@ mod tests {
         let mut rle_device = FakeDevice::new();
         let mut raw_device = FakeDevice::new();
 
-        AssetSync::reconcile_with_active_volatile(
+        AssetSync::reconcile(
             &mut rle_device,
             std::slice::from_ref(&frame),
-            None,
             CAPABILITY_DURABLE_ASSET_ENCODING,
         )
         .expect("RLE durable reconcile");
-        AssetSync::reconcile_with_active_volatile(
+        AssetSync::reconcile(
             &mut raw_device,
             std::slice::from_ref(&frame),
-            None,
             CAPABILITY_VOLATILE_ASSETS,
         )
         .expect("raw durable reconcile");
@@ -694,85 +630,5 @@ mod tests {
         assert_eq!(rle_chunks, 1);
         assert_eq!(raw_chunks, 172);
         assert!(rle_chunks < raw_chunks);
-    }
-
-    #[test]
-    fn compose_asset_keep_set_preserves_an_empty_keep_set() {
-        assert_eq!(
-            compose_asset_keep_set(&[], None).unwrap(),
-            Vec::<[u8; ASSET_DIGEST_LEN]>::new()
-        );
-    }
-
-    #[test]
-    fn compose_asset_keep_set_preserves_durable_order() {
-        let durable_a = [0xa1; ASSET_DIGEST_LEN];
-        let durable_b = [0xa2; ASSET_DIGEST_LEN];
-        assert_eq!(
-            compose_asset_keep_set(&[durable_a, durable_b], None).unwrap(),
-            vec![durable_a, durable_b]
-        );
-    }
-
-    #[test]
-    fn compose_asset_keep_set_keeps_an_active_volatile_digest() {
-        let raster = [0xb1; ASSET_DIGEST_LEN];
-        assert_eq!(
-            compose_asset_keep_set(&[], Some(raster)).unwrap(),
-            vec![raster]
-        );
-    }
-
-    #[test]
-    fn compose_asset_keep_set_appends_active_volatile_after_durable_assets() {
-        let durable_a = [0xa1; ASSET_DIGEST_LEN];
-        let durable_b = [0xa2; ASSET_DIGEST_LEN];
-        let raster = [0xb1; ASSET_DIGEST_LEN];
-        assert_eq!(
-            compose_asset_keep_set(&[durable_a, durable_b], Some(raster)).unwrap(),
-            vec![durable_a, durable_b, raster]
-        );
-    }
-
-    #[test]
-    fn compose_asset_keep_set_deduplicates_the_active_volatile_digest() {
-        let same = [0xc1; ASSET_DIGEST_LEN];
-        assert_eq!(
-            compose_asset_keep_set(&[same], Some(same)).unwrap(),
-            vec![same]
-        );
-    }
-
-    #[test]
-    fn compose_asset_keep_set_enforces_the_wire_ceiling() {
-        let durable: Vec<[u8; ASSET_DIGEST_LEN]> = (0..MAX_ASSET_DIGESTS)
-            .map(|index| {
-                let mut digest = [0u8; ASSET_DIGEST_LEN];
-                digest[0] = u8::try_from(index).unwrap();
-                digest
-            })
-            .collect();
-        assert!(matches!(
-            compose_asset_keep_set(&durable, Some([0xff; ASSET_DIGEST_LEN])),
-            Err(AssetSyncError::TooManyDesiredAssets { .. })
-        ));
-    }
-
-    #[test]
-    fn reconcile_releases_the_union_of_durable_and_active_volatile_digests() {
-        let durable = asset_blob([0xd5; ASSET_DIGEST_LEN], 16);
-        let active_volatile = [0xe5; ASSET_DIGEST_LEN];
-        let mut device = FakeDevice::new();
-
-        let keep_set = AssetSync::reconcile_with_active_volatile(
-            &mut device,
-            std::slice::from_ref(&durable),
-            Some(active_volatile),
-            0,
-        )
-        .expect("reconcile");
-
-        assert_eq!(keep_set, vec![durable.digest, active_volatile]);
-        assert_eq!(device.last_release(), Some(keep_set));
     }
 }

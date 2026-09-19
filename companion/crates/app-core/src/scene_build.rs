@@ -19,7 +19,6 @@
 //! chain to absolute canvas coordinates. `hand_line()` is where that matters
 //! most.
 
-use chrono::{NaiveDateTime, Timelike};
 use protocol::{
     SCENE_CANVAS_HEIGHT, SCENE_CANVAS_WIDTH, Scene, SceneAlign, SceneArc, SceneClipRect, SceneFont,
     SceneFontTier, SceneLabel, SceneLabelAnchor, SceneLine, SceneNode, SceneRect, SceneRotRect,
@@ -30,6 +29,8 @@ use protocol::{
 // Shared design-system constants.
 // ---------------------------------------------------------------------------
 
+const METRICS: &BakedFontMetrics = &BakedFontMetrics::SHIPPED;
+
 const GRID: i32 = 8;
 const MARGIN: i32 = 3 * GRID;
 const RADIUS_MODULE: i32 = 3 * GRID;
@@ -38,10 +39,8 @@ const COLOR_CANVAS: u32 = 0x0000_0000;
 const COLOR_PRIMARY: u32 = 0x00f5_f5f7;
 const COLOR_TERTIARY: u32 = 0x005c_5c66;
 const COLOR_SURFACE: u32 = 0x001a_1a1f;
-/// Reserved for the shared state footer.
+/// Reserved for the stale-picture footer.
 const COLOR_STALE: u32 = 0x00f2_c94c;
-/// Reserved for the shared state footer.
-const COLOR_ERROR: u32 = 0x00ff_6b6b;
 /// LVGL's `LV_OPA_20` constant.
 const OPACITY_20_PERCENT: u8 = 51;
 /// Both clock faces share this accent hue.
@@ -181,7 +180,7 @@ pub(crate) struct TierMetrics {
 /// baseline offset invented here would be invisible to every other check and
 /// would surface only as a failed pixel diff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BakedFontMetrics {
+pub(crate) struct BakedFontMetrics {
     caption: TierMetrics,
     body: TierMetrics,
     display: TierMetrics,
@@ -190,15 +189,14 @@ pub struct BakedFontMetrics {
 
 impl BakedFontMetrics {
     /// The metrics of the faces this repository ships.
-    pub const SHIPPED: Self = Self {
+    pub(crate) const SHIPPED: Self = Self {
         // deskmate_font_18.c — full range, so no numeric table.
         caption: TierMetrics {
             line_height: 22,
             base_line: 4,
             numeric: None,
         },
-        // deskmate_font_28.c — full range: the only tier with letters, and the
-        // only one carrying the '.' LV_LABEL_LONG_DOT appends.
+        // deskmate_font_28.c — full range, like Caption, so no numeric table.
         body: TierMetrics {
             line_height: 36,
             base_line: 7,
@@ -276,10 +274,6 @@ pub struct ClockCard {
     /// False drops the seconds node without moving anything else because the
     /// hero is left-anchored.
     pub show_seconds: bool,
-    /// The local wall-clock instant used only to measure the fixed-width hero
-    /// reading while constructing the scene. Every visible time/date value is
-    /// a device-side binding and continues changing between pushes.
-    pub local_now: NaiveDateTime,
 }
 
 /// Inputs needed to build an analog-clock scene.
@@ -306,59 +300,16 @@ pub struct ProgressRingCard<'a> {
     pub duration_seconds: i64,
 }
 
-/// The host-owned data state shared by all six scene builders.
+/// Adds the host-owned stale marker to a picture face.
 ///
-/// This deliberately is not a scene binding. The host learns that upstream data
-/// state changed, rebuilds the scene, and pushes it with the new facts. A
-/// non-empty error wins over stale.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SceneDataState<'a> {
-    /// Whether the last-good value has aged past its freshness bound.
-    pub stale: bool,
-    /// The host-visible data/configuration error, when one exists.
-    pub error: Option<&'a str>,
-}
-
-/// Applies the shared data-state footer to a freshly built scene.
-///
-/// The six builders emit the OK state directly, with no footer node. A host
-/// that owns a stale/error fact passes the builder result through this
-/// function before pushing it, keeping the stateful footer path shared.
-pub fn with_scene_data_state(
-    mut scene: Scene,
-    state: SceneDataState<'_>,
-    metrics: &BakedFontMetrics,
-) -> Scene {
-    push_state_footer(&mut scene.nodes, state, metrics);
-    // A five-row RowList is the binding node-count case: its 23 face nodes
-    // plus this footer land exactly at protocol::MAX_SCENE_NODES. Validate
-    // through the protocol's canonical bounds so adding one more RowList node
-    // fails here with the real reason instead of surfacing later as an opaque
-    // decoder refusal only when that card becomes stale or errored.
-    #[cfg(debug_assertions)]
-    {
-        let validation = protocol::validate_scene(&scene);
-        debug_assert!(
-            validation.is_ok(),
-            "scene became invalid after adding the shared data-state footer: {validation:?}"
-        );
+/// Staleness is not a device binding: the host rebuilds the scene when the
+/// source's freshness changes. A fresh picture keeps its single image node.
+pub(crate) fn with_stale_footer(mut scene: Scene, stale: bool) -> Scene {
+    if !stale {
+        return scene;
     }
-    scene
-}
-
-/// Shared footer construction for every built-in face.
-fn push_state_footer(
-    nodes: &mut Vec<SceneNode>,
-    state: SceneDataState<'_>,
-    metrics: &BakedFontMetrics,
-) {
-    let (text, color) = match state.error.filter(|error| !error.is_empty()) {
-        Some(error) => (error, COLOR_ERROR),
-        None if state.stale => ("Stale", COLOR_STALE),
-        None => return,
-    };
-    let caption = metrics.tier(SceneFontTier::Caption);
-    nodes.push(SceneNode::Text(SceneText {
+    let caption = METRICS.tier(SceneFontTier::Caption);
+    scene.nodes.push(SceneNode::Text(SceneText {
         // A content-sized bottom-centred label computes `parent_w / 2 -
         // label_w / 2`; a full-width text box computes
         // `(parent_w - text_w) / 2`. Those differ by one pixel when the text
@@ -371,11 +322,12 @@ fn push_state_footer(
         w: SCENE_CANVAS_WIDTH - 1,
         align: SceneAlign::Center,
         font: SceneFont::Baked(SceneFontTier::Caption),
-        color,
+        color: COLOR_STALE,
         running_color: None,
-        value: SceneValue::Literal(text.to_string()),
+        value: SceneValue::Literal("Stale".to_string()),
         ellipsize: false,
     }));
+    scene
 }
 
 fn finish_scene(revision: u32, nodes: Vec<SceneNode>) -> Scene {
@@ -384,12 +336,6 @@ fn finish_scene(revision: u32, nodes: Vec<SceneNode>) -> Scene {
         background: COLOR_CANVAS,
         nodes,
     }
-}
-
-/// `timefmt_hhmm()`: `"%02d:%02d"`. The host renders it only to *measure* it —
-/// the node carries a binding, so the device renders the reading itself.
-fn time_text(now: NaiveDateTime) -> String {
-    format!("{:02}:{:02}", now.hour(), now.minute())
 }
 
 /// One live clock hand in absolute canvas coordinates.
@@ -424,9 +370,8 @@ fn hand_line(
 /// Builds the whole `DigitalClock` face as a scene.
 ///
 /// Node order is z-order: reading, seconds, date module and label, dial module,
-/// dial, then the two hands. The OK state has no footer node; stale/error
-/// callers append one through [`with_scene_data_state`].
-pub fn build_digital_clock_scene(card: &ClockCard, metrics: &BakedFontMetrics) -> Scene {
+/// dial, then the two hands. Clock faces have no footer node.
+pub fn build_digital_clock_scene(card: &ClockCard) -> Scene {
     let mut nodes = Vec::with_capacity(8);
 
     // The width is deliberately generous: the visible reading is
@@ -435,7 +380,7 @@ pub fn build_digital_clock_scene(card: &ClockCard, metrics: &BakedFontMetrics) -
     // one-pixel clip if the device's measurement differs. LEFT alignment
     // starts at the box edge and LONG_MODE_CLIP suppresses wrapping, so extra
     // width costs nothing.
-    let hero_baseline = TIME_Y + metrics.baseline_offset(SceneFontTier::Hero);
+    let hero_baseline = TIME_Y + METRICS.baseline_offset(SceneFontTier::Hero);
     nodes.push(SceneNode::Text(SceneText {
         x: MARGIN,
         baseline_y: hero_baseline,
@@ -455,10 +400,10 @@ pub fn build_digital_clock_scene(card: &ClockCard, metrics: &BakedFontMetrics) -
     // it collapses to "the same baseline_y". The x has to be computed, and it
     // is safe to compute once because every digit in the HERO subset has the
     // same advance -- so "HH:mm" measures the same width at every minute of
-    // the day. A test walks all 1440 of them.
+    // the day. The font provenance test pins every digit advance.
     if card.show_seconds {
-        let hero_width = metrics
-            .measure(SceneFontTier::Hero, &time_text(card.local_now))
+        let hero_width = METRICS
+            .measure(SceneFontTier::Hero, "00:00")
             .expect("a HH:mm reading is inside the HERO subset");
         let seconds_x = MARGIN + hero_width + SECONDS_GAP;
         nodes.push(SceneNode::Text(SceneText {
@@ -487,13 +432,13 @@ pub fn build_digital_clock_scene(card: &ClockCard, metrics: &BakedFontMetrics) -
     }));
     // The date is the module's whole content -- no eyebrow names it -- so the
     // value centres in the surface.
-    let value_line = metrics.tier(SceneFontTier::Body).line_height;
+    let value_line = METRICS.tier(SceneFontTier::Body).line_height;
     let stack_top = (MODULE_H - value_line) / 2;
     nodes.push(SceneNode::Text(SceneText {
         // The label has one margin inside a module that itself starts at the
         // canvas margin.
         x: MARGIN + MARGIN,
-        baseline_y: MODULE_Y + stack_top + metrics.baseline_offset(SceneFontTier::Body),
+        baseline_y: MODULE_Y + stack_top + METRICS.baseline_offset(SceneFontTier::Body),
         // This box is fixed on both sides; a wider one would ellipsize
         // differently.
         w: DATE_W - 2 * MARGIN,
@@ -700,7 +645,6 @@ fn push_progress_module(
     value: SceneValue,
     value_color: u32,
     running_color: Option<u32>,
-    metrics: &BakedFontMetrics,
 ) {
     nodes.push(SceneNode::Rect(SceneRect {
         x: PROGRESS_CHIP_X,
@@ -713,8 +657,8 @@ fn push_progress_module(
         clip: None,
     }));
 
-    let eyebrow_line = metrics.tier(SceneFontTier::Caption).line_height;
-    let value_line = metrics.tier(SceneFontTier::Body).line_height;
+    let eyebrow_line = METRICS.tier(SceneFontTier::Caption).line_height;
+    let value_line = METRICS.tier(SceneFontTier::Body).line_height;
     let stack_top = (PROGRESS_CHIP_H - eyebrow_line - GRID - value_line) / 2;
     nodes.push(SceneNode::Label(SceneLabel {
         x: PROGRESS_CHIP_X + PROGRESS_CHIP_PAD,
@@ -737,7 +681,7 @@ fn push_progress_module(
             + stack_top
             + eyebrow_line
             + GRID
-            + metrics.baseline_offset(SceneFontTier::Body),
+            + METRICS.baseline_offset(SceneFontTier::Body),
         w: PROGRESS_CHIP_W - 2 * PROGRESS_CHIP_PAD,
         align: SceneAlign::Left,
         font: SceneFont::Baked(SceneFontTier::Body),
@@ -763,7 +707,7 @@ fn progress_timer_value(timer_active: bool, binding: &str, inactive: &str) -> Sc
 /// palette hue at `LV_OPA_20`, preserving LVGL's opacity-before-mask blend, while the
 /// indicator and countdown remain live through `timer.permille` and
 /// `timer.remaining:mm:ss`.
-pub fn build_progress_ring_scene(card: &ProgressRingCard<'_>, metrics: &BakedFontMetrics) -> Scene {
+pub fn build_progress_ring_scene(card: &ProgressRingCard<'_>) -> Scene {
     let timer_active = card.duration_seconds >= 1;
     let mut nodes = Vec::with_capacity(13);
     for (color, running_color, opacity, rounded, end_binding) in [
@@ -797,12 +741,12 @@ pub fn build_progress_ring_scene(card: &ProgressRingCard<'_>, metrics: &BakedFon
         }));
     }
 
-    let label_line = metrics.tier(SceneFontTier::Caption).line_height;
-    let time_line = metrics.tier(SceneFontTier::Display).line_height;
+    let label_line = METRICS.tier(SceneFontTier::Caption).line_height;
+    let time_line = METRICS.tier(SceneFontTier::Display).line_height;
     let pair_top = PROGRESS_RING_CENTER_Y - (label_line + GRID + time_line) / 2;
     nodes.push(SceneNode::Text(SceneText {
         x: PROGRESS_RING_TEXT_X,
-        baseline_y: pair_top + metrics.baseline_offset(SceneFontTier::Caption),
+        baseline_y: pair_top + METRICS.baseline_offset(SceneFontTier::Caption),
         w: PROGRESS_RING_TEXT_W,
         align: SceneAlign::Center,
         font: SceneFont::Baked(SceneFontTier::Caption),
@@ -813,7 +757,7 @@ pub fn build_progress_ring_scene(card: &ProgressRingCard<'_>, metrics: &BakedFon
     }));
     nodes.push(SceneNode::Text(SceneText {
         x: PROGRESS_RING_TEXT_X,
-        baseline_y: pair_top + label_line + GRID + metrics.baseline_offset(SceneFontTier::Display),
+        baseline_y: pair_top + label_line + GRID + METRICS.baseline_offset(SceneFontTier::Display),
         w: PROGRESS_RING_TEXT_W,
         align: SceneAlign::Center,
         font: SceneFont::Baked(SceneFontTier::Display),
@@ -830,7 +774,6 @@ pub fn build_progress_ring_scene(card: &ProgressRingCard<'_>, metrics: &BakedFon
         progress_timer_value(timer_active, "timer.total:mm:ss", ""),
         COLOR_PRIMARY,
         None,
-        metrics,
     );
     push_progress_module(
         &mut nodes,
@@ -839,7 +782,6 @@ pub fn build_progress_ring_scene(card: &ProgressRingCard<'_>, metrics: &BakedFon
         progress_timer_value(timer_active, "timer.elapsed:mm:ss", ""),
         PROGRESS_RING_TINT,
         None,
-        metrics,
     );
     push_progress_module(
         &mut nodes,
@@ -848,7 +790,6 @@ pub fn build_progress_ring_scene(card: &ProgressRingCard<'_>, metrics: &BakedFon
         progress_timer_value(timer_active, "timer.status", ""),
         COLOR_PRIMARY,
         Some(PROGRESS_RING_HUE),
-        metrics,
     );
 
     finish_scene(card.revision, nodes)
@@ -857,7 +798,6 @@ pub fn build_progress_ring_scene(card: &ProgressRingCard<'_>, metrics: &BakedFon
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDate;
     use protocol::{
         MAX_PAYLOAD_SIZE, Message, PushScene, SceneAlign, SceneFont, SceneLine, SceneNode,
         SceneRect, SceneScale, SceneText, SceneValue, decode_wire_frame, encode_message,
@@ -866,22 +806,11 @@ mod tests {
 
     // ---------------------------------------------------------------- fixtures
 
-    fn at(hour: u32, minute: u32) -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(2026, 8, 12)
-            .expect("a real date")
-            .and_hms_opt(hour, minute, 30)
-            .expect("a real time")
-    }
-
-    fn scene_at(hour: u32, minute: u32, show_seconds: bool) -> Scene {
-        build_digital_clock_scene(
-            &ClockCard {
-                revision: 7,
-                show_seconds,
-                local_now: at(hour, minute),
-            },
-            &BakedFontMetrics::SHIPPED,
-        )
+    fn scene(show_seconds: bool) -> Scene {
+        build_digital_clock_scene(&ClockCard {
+            revision: 7,
+            show_seconds,
+        })
     }
 
     fn text(scene: &Scene, index: usize) -> &SceneText {
@@ -938,8 +867,9 @@ mod tests {
     // ----------------------------------------------- the metrics' provenance
 
     /// A hardcoded baseline offset with no provenance is the single most
-    /// likely cause of a failed parity gate, so this test reads the shipped
-    /// baked font sources -- the exact bytes `lv_font_get_line_height()` and
+    /// likely cause of text landing off its baseline on the panel (and of a
+    /// framebuffer-matrix mismatch), so this test reads the shipped baked font
+    /// sources -- the exact bytes `lv_font_get_line_height()` and
     /// `font->base_line` return on the device -- and refuses any table that
     /// disagrees with them.
     #[test]
@@ -1086,7 +1016,7 @@ mod tests {
 
     #[test]
     fn the_digital_clock_scene_has_the_expected_z_order() {
-        let scene = scene_at(10, 9, true);
+        let scene = scene(true);
         // Reading, seconds, date module and label, dial module and scale, then
         // hour and minute hands. The OK state draws no footer.
         assert_eq!(8, scene.nodes.len());
@@ -1103,24 +1033,10 @@ mod tests {
     }
 
     #[test]
-    fn the_shared_footer_prioritises_error_and_treats_an_empty_error_as_absent() {
-        let ok = scene_at(10, 9, true);
-        let stale = with_scene_data_state(
-            ok.clone(),
-            SceneDataState {
-                stale: true,
-                error: Some(""),
-            },
-            &BakedFontMetrics::SHIPPED,
-        );
-        let error = with_scene_data_state(
-            ok.clone(),
-            SceneDataState {
-                stale: true,
-                error: Some("Sync failed"),
-            },
-            &BakedFontMetrics::SHIPPED,
-        );
+    fn the_stale_footer_is_one_yellow_caption_line() {
+        let ok = scene(true);
+        let stale = with_stale_footer(ok.clone(), true);
+        assert_eq!(with_stale_footer(ok.clone(), false), ok);
 
         assert_eq!(stale.nodes.len(), ok.nodes.len() + 1);
         let stale_footer = text(&stale, stale.nodes.len() - 1);
@@ -1131,18 +1047,11 @@ mod tests {
         assert_eq!(348, stale_footer.baseline_y);
         assert_eq!(SceneAlign::Center, stale_footer.align);
         assert_eq!(SceneFont::Baked(SceneFontTier::Caption), stale_footer.font);
-
-        let error_footer = text(&error, error.nodes.len() - 1);
-        assert_eq!(
-            SceneValue::Literal("Sync failed".to_string()),
-            error_footer.value
-        );
-        assert_eq!(COLOR_ERROR, error_footer.color);
     }
 
     #[test]
     fn the_hero_reading_uses_the_shipped_baseline() {
-        let scene = scene_at(10, 9, true);
+        let scene = scene(true);
         let hero = text(&scene, 0);
         // MARGIN = 3 * 8 = 24 and TIME_Y = 8 * 8 = 64, plus
         // baseline_offset(HERO) = line_height 72 - base_line 1 = 71.
@@ -1161,13 +1070,13 @@ mod tests {
 
     #[test]
     fn the_seconds_share_the_heros_baseline_and_sit_one_gap_right() {
-        let scene = scene_at(10, 9, true);
+        let scene = scene(true);
         let hero = text(&scene, 0);
         let seconds = text(&scene, 1);
         // Seconds follow the content-sized hero with a 2 * GRID gap and a y offset of
         // baseline_offset(HERO) - baseline_offset(DISPLAY), which puts both on
         // one baseline. "00:00" in HERO is 4 * 62 + 31 = 279px.
-        assert_eq!(24 + 279 + 16, seconds.x);
+        assert_eq!(MARGIN + 279 + SECONDS_GAP, seconds.x);
         assert_eq!(hero.baseline_y, seconds.baseline_y);
         assert_eq!(SceneFont::Baked(SceneFontTier::Display), seconds.font);
         // The face's accent hue.
@@ -1179,7 +1088,7 @@ mod tests {
 
     #[test]
     fn the_two_modules_land_on_the_design_grid() {
-        let scene = scene_at(10, 9, true);
+        let scene = scene(true);
         // MODULE_Y = 22 * 8, DATE_W = 28 * 8, MODULE_H = 17 * 8, and
         // RADIUS_MODULE = 3 * 8.
         let date_module = rect(&scene, 2);
@@ -1204,7 +1113,7 @@ mod tests {
 
     #[test]
     fn the_date_box_is_centered_inside_its_module() {
-        let scene = scene_at(10, 9, true);
+        let scene = scene(true);
         let date = text(&scene, 3);
         // stack_top = (MODULE_H - line_height(BODY)) / 2 = (136 - 36) / 2
         // = 50, so the box top is 176 + 50 = 226 and the baseline is that plus
@@ -1222,7 +1131,7 @@ mod tests {
 
     #[test]
     fn the_dial_is_a_scale_node_at_the_module_centre() {
-        let scene = scene_at(10, 9, true);
+        let scene = scene(true);
         let dial = scale(&scene, 5);
         // DIAL_BOX = 14 * 8 = 112, centered inside the dial module whose
         // origin is (DIAL_X, MODULE_Y).
@@ -1236,7 +1145,7 @@ mod tests {
 
     #[test]
     fn the_hands_are_bound_at_the_scales_canvas_space_pivot() {
-        let scene = scene_at(10, 9, true);
+        let scene = scene(true);
         // lv_scale_set_line_needle_value writes points in the scale's own
         // frame: (box/2, box/2) and (box/2 + dx, box/2 + dy), with the line
         // aligned to the scale's top-left. The scale's top-left is (288, 188),
@@ -1264,17 +1173,9 @@ mod tests {
     }
 
     #[test]
-    fn changing_the_push_instant_does_not_change_the_hands() {
-        let midnight = scene_at(0, 0, true);
-        let quarter_past = scene_at(3, 15, true);
-        assert_eq!(line(&midnight, 6), line(&quarter_past, 6));
-        assert_eq!(line(&midnight, 7), line(&quarter_past, 7));
-    }
-
-    #[test]
     fn hiding_the_seconds_drops_the_node_rather_than_moving_anything() {
-        let with = scene_at(10, 9, true);
-        let without = scene_at(10, 9, false);
+        let with = scene(true);
+        let without = scene(false);
         assert_eq!(7, without.nodes.len());
         // The hero is left-anchored, so hiding the seconds moves nothing.
         assert_eq!(with.nodes[0], without.nodes[0]);
@@ -1286,23 +1187,6 @@ mod tests {
                 .all(|node| !matches!(node, SceneNode::Text(t)
                     if t.value == SceneValue::Binding("time:ss".to_string())))
         );
-    }
-
-    #[test]
-    fn every_digit_shares_one_advance_so_the_seconds_never_move() {
-        // The scene pins the seconds x at build time. That is only
-        // sound because every digit in the HERO subset has the same advance,
-        // so "HH:mm" measures 279px whatever the time.
-        let reference = text(&scene_at(0, 0, true), 1).x;
-        for hour in 0..24 {
-            for minute in 0..60 {
-                assert_eq!(
-                    reference,
-                    text(&scene_at(hour, minute, true), 1).x,
-                    "{hour:02}:{minute:02}"
-                );
-            }
-        }
     }
 
     // ------------------------------------------------------- shipped metrics
@@ -1333,15 +1217,29 @@ mod tests {
     }
 
     #[test]
+    fn progress_ring_without_a_duration_keeps_the_offline_preview_values() {
+        let scene = build_progress_ring_scene(&ProgressRingCard {
+            revision: 1,
+            label: "Pomodoro",
+            duration_seconds: 0,
+        });
+
+        assert_eq!(text(&scene, 3).value, SceneValue::Literal("00:00".into()));
+        for index in [6, 9, 12] {
+            assert_eq!(
+                text(&scene, index).value,
+                SceneValue::Literal(String::new())
+            );
+        }
+    }
+
+    #[test]
     fn progress_ring_scene_uses_live_timer_bindings() {
-        let scene = build_progress_ring_scene(
-            &ProgressRingCard {
-                revision: 1,
-                label: "Pomodoro",
-                duration_seconds: 1_500,
-            },
-            &BakedFontMetrics::SHIPPED,
-        );
+        let scene = build_progress_ring_scene(&ProgressRingCard {
+            revision: 1,
+            label: "Pomodoro",
+            duration_seconds: 1_500,
+        });
         let bindings: Vec<&str> = scene
             .nodes
             .iter()
@@ -1368,7 +1266,7 @@ mod tests {
 
     #[test]
     fn the_scene_validates_and_fits_one_protocol_envelope() {
-        let scene = scene_at(10, 9, true);
+        let scene = scene(true);
         validate_scene(&scene).expect("the builder emits a scene the device accepts");
 
         let wire = encode_message(

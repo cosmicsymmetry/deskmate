@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 use crate::interrupts::InterruptArbiter;
 use crate::pomodoro::Pomodoro;
 use chrono::Utc;
-use chrono_tz::Tz;
 use device::{DeviceError, ReceivedEvent, SessionDiagnostics};
 use protocol::{
     Ack, AssetBegin, AssetChunk, AssetCommit, AssetRelease, CardConfig, EventAction, EventKind,
@@ -18,14 +17,14 @@ use protocol::{
 use crate::asset_sync::{AssetSync, AssetSyncError};
 use crate::render_negotiation;
 use crate::runtime_command::{CommandReply, PomodoroAction, RuntimeCommand, RuntimeError};
+use crate::scene_build::{BakedFontMetrics, with_stale_footer};
 use crate::scheduler::Scheduler;
 use crate::{
-    AlertHold, AnalogClockCard, AppConfig, AppSnapshot, BakedFontMetrics, CardAlert,
-    CardDataSnapshot, CardError, CardErrorKind, CardField, CardFieldValue, CardSettings, ClockCard,
-    ConnectionState, DesiredAsset, DeviceCounters, DeviceSnapshot, DeviceTier, DisplayTemplate,
-    PersistenceState, PomodoroSnapshot, PomodoroState, ProgressRingCard, RuntimeDiagnostics,
-    RuntimeState, SceneDataState, build_analog_clock_scene, build_digital_clock_scene,
-    build_progress_ring_scene, with_scene_data_state,
+    AlertHold, AnalogClockCard, AppConfig, AppSnapshot, CardAlert, CardDataSnapshot, CardError,
+    CardErrorKind, CardField, CardFieldValue, CardSettings, ClockCard, ConnectionState,
+    DesiredAsset, DeviceCounters, DeviceSnapshot, DeviceTier, DisplayTemplate, PersistenceState,
+    PomodoroSnapshot, PomodoroState, ProgressRingCard, RuntimeDiagnostics, RuntimeState,
+    build_analog_clock_scene, build_digital_clock_scene, build_progress_ring_scene,
 };
 
 mod link;
@@ -816,12 +815,7 @@ fn apply_image_source_update(
     // This is deliberately the entire host-owned set. AssetRelease is a
     // device-wide KEEP-SET, so reconciling only this source would delete every
     // other picture digest omitted from the partial list.
-    let keep_set = match AssetSync::reconcile_with_active_volatile(
-        device,
-        &desired,
-        None,
-        state.device.capability_bits(),
-    ) {
+    let keep_set = match AssetSync::reconcile(device, &desired, state.device.capability_bits()) {
         Ok(keep_set) => keep_set,
         Err(error) => {
             if visible_uses_source {

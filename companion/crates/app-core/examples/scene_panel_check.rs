@@ -1,7 +1,7 @@
 //! Dev-only physical check for the scene interpreter's RGB565 output.
 //!
-//! This sends the parity gate's `DigitalClock` scenes and the asset-free,
-//! representable entries from `lvgl_sim::cases::scene_cases()` to a device,
+//! This sends a local seven-instant `DigitalClock` matrix and the asset-free,
+//! representable shared cases from `lvgl_sim::cases::scene_cases()` to a device,
 //! then byte-compares a 0x7E capture against `Simulator::render_scene()` for
 //! the identical scene and render context. It must run against a device in
 //! local tier flashed from a `DESKMATE_DEV_DIAG=1` build.
@@ -746,7 +746,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn case_table_has_the_parity_matrix_and_only_explicit_scene_exclusions() {
+    fn case_table_has_the_clock_matrix_and_only_explicit_scene_exclusions() {
         let checks = all_cases();
         assert_eq!(
             checks

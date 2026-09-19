@@ -85,28 +85,27 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+  # The build, and ONLY the build. `companion` and `firmware-host-tests` both need
+  # this job for one thing: firmware/managed_components/ is gitignored and exists
+  # only once the component manager has fetched it, so this job fetches it and
+  # hands the two directories anyone compiles on as an artifact.
+  #
+  # The host tests used to run in this job's one step. When they broke on Linux
+  # (2026-08-23, a glibc feature-test macro -- see host_tests/Makefile) the job
+  # failed before the upload, `companion` was skipped, and NO Rust or frontend gate
+  # ran in CI for four weeks while every local run stayed green. A failing host
+  # test must fail loudly in its own job, not switch the rest of CI off.
   firmware:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Host tests run inside the IDF container AFTER idf.py build because
-      # firmware/managed_components/ (tinycbor sources) is gitignored and only
-      # exists once the component manager has fetched dependencies.
-      #
-      # The `sanitize` pass is not a nicety. Two of scene_decode.c's bounds --
-      # the node-array cap and the line-point cap -- guard out-of-bounds
-      # WRITES whose only symptom is the write itself: with either bound
-      # deleted, scene_model_validate() still returns the same error code the
-      # test asserts, so the plain suite passes against the broken decoder.
-      # ASan is what distinguishes them, and there is no way to rewrite either
-      # test so it fails without it.
-      - name: idf build + host tests
+      - name: idf build
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: v5.5.5
           target: esp32s3
           path: firmware
-          command: idf.py build && make -C host_tests clean test && make -C host_tests sanitize
+          command: idf.py build
       - name: verify firmware lockfile unchanged
         run: git diff --exit-code -- firmware/dependencies.lock
       # lvgl-sim compiles these exact lockfile-resolved sources on macOS. Keep
@@ -124,3 +123,27 @@ jobs:
             firmware/managed_components/espressif__cbor/tinycbor/src
           retention-days: 1
           if-no-files-found: error
+
+  firmware-host-tests:
+    needs: firmware
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The host tests are plain C and need one fetched directory: tinycbor's
+      # sources, which the artifact carries. No IDF container required.
+      - name: download firmware components
+        uses: actions/download-artifact@v4
+        with:
+          name: firmware-managed-components
+          path: firmware/managed_components
+      - name: host tests
+        run: make -C firmware/host_tests clean test
+      # The `sanitize` pass is not a nicety. Two of scene_decode.c's bounds --
+      # the node-array cap and the line-point cap -- guard out-of-bounds
+      # WRITES whose only symptom is the write itself: with either bound
+      # deleted, scene_model_validate() still returns the same error code the
+      # test asserts, so the plain suite passes against the broken decoder.
+      # ASan is what distinguishes them, and there is no way to rewrite either
+      # test so it fails without it.
+      - name: host tests under ASan + UBSan
+        run: make -C firmware/host_tests sanitize

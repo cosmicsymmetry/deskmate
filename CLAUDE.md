@@ -194,6 +194,14 @@ Each of these cost this project real time at least once.
   macro takes its target from the enclosing module, so MOVING a `warn!` silently changes
   its target and any filter keyed on it -- pass `target:` explicitly when moving one.
   Both survived green suites during the 2026-09-19 sweep and were caught only by mutation.
+- **A red CI is not background noise here -- it was, for four weeks.** From 2026-08-23
+  to 2026-09-19 the firmware host tests failed on Linux only (`-std=c11` makes glibc hide
+  `gmtime_r`; Apple's headers declare it regardless, so every Mac was green). The job
+  died before its artifact upload and `companion`, which `needs` that artifact, was
+  SKIPPED on every push: no Rust or frontend gate ran in CI through the move to the
+  browser, the Tauri deletion and the engine fold. The host tests now have their own job
+  so they fail loudly instead of switching the rest off. Run `gh run list` before
+  believing CI agrees with your laptop; a skipped job is grey, not red.
 - **Green tests say nothing about whether OTA still works**, and `make -C
   firmware/host_tests sanitize` is not optional: two `core/scene_decode.c` bounds guard
   out-of-bounds *writes* that `scene_model_validate()` then reports with the same error

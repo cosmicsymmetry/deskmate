@@ -1,5 +1,14 @@
 CC ?= cc
-CFLAGS = -Wall -Wextra -Werror -std=c11 -DCBOR_PARSER_MAX_RECURSIONS=8
+# -D_DEFAULT_SOURCE: `-std=c11` is strict ISO C, and under it glibc declares no POSIX
+# function unless a feature-test macro asks. core/scene_binding.c calls gmtime_r, so on
+# Linux -- which is where CI runs these -- the build died on an implicit declaration
+# while every Mac stayed green, because Apple's headers declare it regardless. CI was red
+# from 2026-08-23 to 2026-09-19 for this, and the companion job `needs: firmware`, so it
+# did not run once in that time. The macro is a no-op on macOS; _POSIX_C_SOURCE is not
+# (it HIDES non-POSIX declarations there), which is why it is not the one used.
+# It is set here and not in the source: the ESP-IDF build already sees gmtime_r through
+# newlib, and nothing under main/ should change to satisfy a host compiler.
+CFLAGS = -Wall -Wextra -Werror -std=c11 -D_DEFAULT_SOURCE -DCBOR_PARSER_MAX_RECURSIONS=8
 CBOR_DIR = ../managed_components/espressif__cbor/tinycbor/src
 CBOR_SRCS = $(CBOR_DIR)/cborencoder.c \
 	$(CBOR_DIR)/cborencoder_close_container_checked.c \

@@ -237,11 +237,10 @@ async fn mint_source(
     // source is revoked rather than left behind: a half-made source shows up in
     // the add menu as something the owner never asked for and cannot explain.
     if let Some(kind) = face_kind {
-        let runtime = tokio::runtime::Handle::current();
         let face_state = state.clone();
         let source_id = minted.id.clone();
         let attached = tokio::task::spawn_blocking(move || {
-            crate::data_cards::create_face(&face_state, &runtime, &source_id, &kind)
+            crate::data_cards::create_face(&face_state, &source_id, &kind)
         })
         .await
         .map_err(|_| ImageRouteError::WorkerFailed)?;
@@ -554,8 +553,7 @@ mod tests {
         kind: &str,
     ) -> crate::image_sources::MintedSource {
         let source = state.image_sources().mint(name).expect("mint source");
-        crate::data_cards::create_face(state, &tokio::runtime::Handle::current(), &source.id, kind)
-            .expect("create face");
+        crate::data_cards::create_face(state, &source.id, kind).expect("create face");
         source
     }
 

@@ -49,7 +49,7 @@ pub(crate) fn relative_age(published: DateTime<Utc>, now: DateTime<Utc>) -> Stri
         return format!("{days}d");
     }
     let weeks = days / 7;
-    if weeks < 52 {
+    if days < 365 {
         return format!("{weeks}w");
     }
     format!("{}y", days / 365)
@@ -74,6 +74,9 @@ mod tests {
         assert_eq!(relative_age(at(3, 0), now), "3h");
         assert_eq!(relative_age(at(30, 0), now), "1d");
         assert_eq!(relative_age(at(24 * 10, 0), now), "1w");
+        assert_eq!(relative_age(at(24 * 363, 0), now), "51w");
+        assert_eq!(relative_age(at(24 * 364, 0), now), "52w");
+        assert_eq!(relative_age(at(24 * 365, 0), now), "1y");
     }
 
     #[test]

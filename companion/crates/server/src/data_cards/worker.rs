@@ -7,7 +7,7 @@ use providers::token::{TokenOptions, TokenProvider};
 use providers::weather::{WeatherOptions, WeatherProvider, WeatherUnits};
 use tokio::task::JoinHandle;
 
-use super::{DataCardSpec, FaceSpec, Units};
+use super::{DataCardSpec, FaceSpec, Units, render_snapshot};
 use crate::egress_client::EgressHttpClient;
 use crate::face_render::frame_from_svg;
 use crate::faces::{adapt, rss, token, weather};
@@ -48,40 +48,20 @@ fn clamped_refresh(refresh_seconds: u64) -> Duration {
 /// Synchronous and network-touching, so it must be called from
 /// `spawn_blocking` -- [`EgressHttpClient`] blocks on the runtime. The
 /// provider is passed in and handed back so its last-good state survives
-/// across refreshes: without that, one failed fetch would blank a face that
-/// has a perfectly good previous reading.
-fn render_face<C: HttpClient>(
-    provider: &mut FaceProvider<C>,
-) -> Result<(String, Option<String>), String> {
+/// across refreshes. Failed refreshes do not publish: the durable image source
+/// retains the previous frame without renewing its freshness.
+fn render_face<C: HttpClient>(provider: &mut FaceProvider<C>) -> Result<String, String> {
     let now = Utc::now();
     match provider {
-        FaceProvider::Weather { provider } => {
-            let snapshot = provider.refresh();
-            // A refresh that failed with no previous reading has nothing to
-            // draw: a default reading would render a confident "0°" for a
-            // card that has never worked.
-            let Some(value) = snapshot.value else {
-                return Err(snapshot.error.unwrap_or_default());
-            };
-            let face = adapt::weather_face(&value);
-            Ok((weather::render(&face), snapshot.error))
-        }
-        FaceProvider::Rss { provider, title } => {
-            let snapshot = provider.refresh();
-            let Some(value) = snapshot.value else {
-                return Err(snapshot.error.unwrap_or_default());
-            };
-            let face = adapt::rss_face(&value, title, now);
-            Ok((rss::render(&face), snapshot.error))
-        }
-        FaceProvider::Token { provider } => {
-            let snapshot = provider.refresh();
-            let Some(value) = snapshot.value else {
-                return Err(snapshot.error.unwrap_or_default());
-            };
-            let face = adapt::token_face(&value);
-            Ok((token::render(&face), snapshot.error))
-        }
+        FaceProvider::Weather { provider } => render_snapshot(provider.refresh(), |value| {
+            weather::render(&adapt::weather_face(value))
+        }),
+        FaceProvider::Rss { provider, title } => render_snapshot(provider.refresh(), |value| {
+            rss::render(&adapt::rss_face(value, title, now))
+        }),
+        FaceProvider::Token { provider } => render_snapshot(provider.refresh(), |value| {
+            token::render(&adapt::token_face(value))
+        }),
     }
 }
 
@@ -177,8 +157,7 @@ async fn refresh_loop(state: ServerState, spec: DataCardSpec, refresh: Duration)
         // the runtime, and rasterizing is CPU work that has no business on an
         // async worker.
         let outcome = tokio::task::spawn_blocking(move || {
-            let rendered = render_face(&mut provider)
-                .map(|(svg, data_error)| (frame_from_svg(&svg), data_error));
+            let rendered = render_face(&mut provider).map(|svg| frame_from_svg(&svg));
             (rendered, provider)
         })
         .await;
@@ -192,25 +171,13 @@ async fn refresh_loop(state: ServerState, spec: DataCardSpec, refresh: Duration)
         provider = returned;
 
         let rasterized = match rendered {
-            Ok((frame, data_error)) => {
-                if let Some(error) = data_error {
-                    // The face still renders -- from the last good reading --
-                    // and the store's own push history is what marks it stale.
-                    tracing::warn!(target: "server::data_cards",
-                        source_id = %source_id,
-                        kind,
-                        %error,
-                        "the data fetch failed; redrawing the last good reading"
-                    );
-                }
-                frame
-            }
+            Ok(frame) => frame,
             Err(error) => {
                 tracing::warn!(target: "server::data_cards",
                     source_id = %source_id,
                     kind,
                     %error,
-                    "the card has no reading yet; nothing to draw"
+                    "the data fetch failed; keeping the stored frame unchanged"
                 );
                 continue;
             }
@@ -288,13 +255,38 @@ mod tests {
     }
 
     fn assert_cached_face_retains_error(mut provider: FaceProvider<FakeClient>, expected: &str) {
-        let (first_face, first_error) =
-            render_face(&mut provider).expect("the first fetch succeeds");
-        assert!(first_error.is_none());
+        let first_face = render_face(&mut provider).expect("the first fetch succeeds");
         frame_from_svg(&first_face).expect("the reading renders a valid frame");
+        assert_eq!(render_face(&mut provider), Err(expected.to_owned()));
 
-        let (cached_face, error) =
-            render_face(&mut provider).expect("a failed fetch still renders the cached reading");
+        // The cached reading remains renderable, but the publication gate refuses it.
+        let (cached_face, error) = match &mut provider {
+            FaceProvider::Weather { provider } => {
+                let snapshot = provider.refresh();
+                (
+                    weather::render(&adapt::weather_face(&snapshot.value.unwrap())),
+                    snapshot.error,
+                )
+            }
+            FaceProvider::Rss { provider, title } => {
+                let snapshot = provider.refresh();
+                (
+                    rss::render(&adapt::rss_face(
+                        &snapshot.value.unwrap(),
+                        title,
+                        Utc::now(),
+                    )),
+                    snapshot.error,
+                )
+            }
+            FaceProvider::Token { provider } => {
+                let snapshot = provider.refresh();
+                (
+                    token::render(&adapt::token_face(&snapshot.value.unwrap())),
+                    snapshot.error,
+                )
+            }
+        };
         assert_eq!(cached_face, first_face);
         assert_eq!(error.as_deref(), Some(expected));
     }
@@ -305,6 +297,7 @@ mod tests {
             responses: VecDeque::from([
                 Ok(include_str!("../../../providers/tests/fixtures/weather-location.json").into()),
                 Ok(include_str!("../../../providers/tests/fixtures/weather-current.json").into()),
+                Err(ProviderError::Timeout),
                 Err(ProviderError::Timeout),
             ]),
         };
@@ -331,6 +324,7 @@ mod tests {
                         .into(),
                 ),
                 Err(ProviderError::HttpStatus(503)),
+                Err(ProviderError::HttpStatus(503)),
             ]),
         };
         assert_cached_face_retains_error(
@@ -355,6 +349,7 @@ mod tests {
                 Ok(r#"[{"symbol":"sol","name":"Solana","current_price":142.37}]"#.into()),
                 Ok(r#"{"prices":[[1,140.0],[2,142.37]]}"#.into()),
                 Err(ProviderError::HttpStatus(429)),
+                Err(ProviderError::HttpStatus(429)),
             ]),
         };
         assert_cached_face_retains_error(
@@ -370,6 +365,28 @@ mod tests {
             },
             "provider returned HTTP 429",
         );
+    }
+
+    #[test]
+    fn a_token_chart_failure_still_publishes_the_successful_quote() {
+        let mut provider = FaceProvider::Token {
+            provider: Box::new(TokenProvider::new(
+                FakeClient {
+                    responses: VecDeque::from([
+                        Ok(r#"[{"symbol":"sol","name":"Solana","current_price":142.37}]"#.into()),
+                        Err(ProviderError::Timeout),
+                    ]),
+                },
+                TokenOptions {
+                    coin_id: "solana".into(),
+                    currency: "usd".into(),
+                    api_key: None,
+                },
+            )),
+        };
+        let svg = render_face(&mut provider).expect("a quote needs no chart");
+        assert!(svg.contains("142.37"));
+        frame_from_svg(&svg).expect("the successful quote remains publishable");
     }
 
     #[test]

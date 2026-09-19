@@ -557,3 +557,177 @@ async fn a_source_without_a_server_face_refuses_settings_updates() {
             .is_some_and(|message| message.contains("external producer"))
     );
 }
+
+async fn local_json_request(
+    state: &ServerState,
+    method: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> (axum::http::StatusCode, serde_json::Value) {
+    use axum::body::{Body, to_bytes};
+    use tower::ServiceExt as _;
+
+    let response = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method(method)
+                .uri(path)
+                .header("authorization", format!("Bearer {ADMIN_TOKEN}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let body = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap()
+    };
+    (status, body)
+}
+
+#[tokio::test]
+async fn server_owned_faces_accept_and_persist_partial_settings() {
+    let root = tempfile::tempdir().unwrap();
+    let state = ServerState::new(
+        ADMIN_TOKEN.into(),
+        FirmwareCatalog::in_memory(),
+        root.path().to_path_buf(),
+    );
+    let (status, defaults) =
+        local_json_request(&state, "GET", "/v1/faces", serde_json::Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    for (kind, key, value) in [
+        ("weather", "units", "imperial"),
+        ("rss", "title", "News"),
+        ("token", "currency", "eur"),
+    ] {
+        let (status, minted) = local_json_request(
+            &state,
+            "POST",
+            "/v1/images",
+            serde_json::json!({"name":kind, "face_kind":kind}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(minted.as_object().unwrap().len(), 2);
+        assert_eq!(minted["token"].as_str().unwrap().len(), 64);
+        let id = minted["id"].as_str().unwrap();
+        let path = format!("/v1/images/{id}/face");
+        let mut expected = defaults
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|face| face["kind"] == kind)
+            .unwrap()
+            .clone();
+        assert_eq!(
+            local_json_request(&state, "PUT", &path, serde_json::json!({"fields":{}})).await,
+            (StatusCode::OK, expected.clone())
+        );
+        expected["fields"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|field| field["key"] == key)
+            .unwrap()["value"] = value.into();
+        assert_eq!(
+            local_json_request(
+                &state,
+                "PUT",
+                &path,
+                serde_json::json!({"fields":{key:value}})
+            )
+            .await,
+            (StatusCode::OK, expected.clone())
+        );
+        let (status, listed) =
+            local_json_request(&state, "GET", "/v1/images", serde_json::Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|source| source["id"] == id)
+                .unwrap()["face"],
+            expected
+        );
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.path().join("data-cards.json")).unwrap())
+                .unwrap();
+        let spec = persisted
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|spec| spec["source_id"] == id)
+            .unwrap();
+        assert_eq!(spec["face"][key], value);
+        assert_eq!(spec["refresh_seconds"], 900);
+    }
+    state.shutdown();
+}
+
+#[tokio::test]
+async fn server_owned_face_updates_keep_existing_rejection_contracts() {
+    let state = ServerState::in_memory();
+    let (_, minted) = local_json_request(
+        &state,
+        "POST",
+        "/v1/images",
+        serde_json::json!({"name":"Weather", "face_kind":"weather"}),
+    )
+    .await;
+    let path = format!("/v1/images/{}/face", minted["id"].as_str().unwrap());
+    for (fields, message) in [
+        (
+            serde_json::json!({"location":" "}),
+            "location: must not be empty",
+        ),
+        (
+            serde_json::json!({"units":"kelvin"}),
+            "units: has an unsupported value",
+        ),
+        (
+            serde_json::json!({"unknown":"value"}),
+            "unknown face field \"unknown\"",
+        ),
+    ] {
+        assert_eq!(
+            local_json_request(&state, "PUT", &path, serde_json::json!({"fields":fields})).await,
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                serde_json::json!({"kind":"invalid-face-fields", "message":message})
+            )
+        );
+    }
+    assert_eq!(
+        local_json_request(
+            &state,
+            "PUT",
+            "/v1/images/missing/face",
+            serde_json::json!({"fields":{}})
+        )
+        .await,
+        (StatusCode::NOT_FOUND, serde_json::Value::Null)
+    );
+    let (status, _) = local_json_request(
+        &state,
+        "POST",
+        "/v1/images",
+        serde_json::json!({"name":"Unknown", "face_kind":"unknown"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (_, listed) =
+        local_json_request(&state, "GET", "/v1/images", serde_json::Value::Null).await;
+    assert_eq!(
+        listed.as_array().unwrap().len(),
+        1,
+        "failed attachments roll back their source"
+    );
+    state.shutdown();
+}

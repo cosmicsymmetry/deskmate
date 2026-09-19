@@ -277,7 +277,18 @@ pub(crate) fn wrap(
 
         if text_width(&candidate, size, weight) <= max_width {
             current = candidate;
-        } else if current.is_empty() {
+        } else {
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+                if lines.len() == max_lines {
+                    let remainder = std::iter::once(word)
+                        .chain(words)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    return finish_lines(lines, &remainder, false, size, weight, max_width);
+                }
+            }
+
             // One word that does not fit on its own line. Break it by
             // character rather than letting it overhang the canvas -- and keep
             // breaking, because one split is only enough for a word under
@@ -303,17 +314,6 @@ pub(crate) fn wrap(
                 );
             }
             current = remainder;
-        } else {
-            lines.push(std::mem::take(&mut current));
-            if lines.len() == max_lines {
-                let remainder = std::iter::once(word)
-                    .chain(words)
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                return finish_lines(lines, &remainder, false, size, weight, max_width);
-            }
-            current.clear();
-            current.push_str(word);
         }
     }
 
@@ -509,6 +509,44 @@ mod tests {
         assert!(lines.len() > 1, "the word is broken across lines");
         for line in &lines {
             assert!(text_width(line, 28.0, 600) <= 120.0, "line {line:?} fits");
+        }
+        let prefixed = wrap("A Donaudampfschiffahrtsgesellschaft", 28.0, 600, 120.0, 8);
+        assert!(prefixed.len() <= 8);
+        assert_eq!(prefixed[0], "A");
+        assert_eq!(prefixed[1..].concat(), "Donaudampfschiffahrtsgesellschaft");
+        for line in &prefixed {
+            assert!(text_width(line, 28.0, 600) <= 120.0, "line {line:?} fits");
+        }
+        assert_eq!(
+            wrap(
+                "alpha beta gamma",
+                28.0,
+                600,
+                text_width("alpha beta", 28.0, 600),
+                3
+            ),
+            ["alpha beta", "gamma"]
+        );
+    }
+
+    #[test]
+    fn a_prefixed_compound_respects_the_last_line_and_marks_truncation() {
+        for max_lines in [1, 2, 3] {
+            let lines = wrap(
+                "A Donaudampfschiffahrtsgesellschaft",
+                28.0,
+                600,
+                120.0,
+                max_lines,
+            );
+            assert_eq!(lines.len(), max_lines);
+            for line in &lines {
+                assert!(text_width(line, 28.0, 600) <= 120.0, "line {line:?} fits");
+            }
+            assert!(
+                lines.last().unwrap().ends_with('…'),
+                "truncation is marked: {lines:?}"
+            );
         }
     }
 

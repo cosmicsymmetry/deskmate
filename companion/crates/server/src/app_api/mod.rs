@@ -934,13 +934,7 @@ mod tests {
 
     fn mint_face(state: &ServerState) -> crate::image_sources::MintedSource {
         let source = state.image_sources().mint("Weather").expect("mint source");
-        crate::data_cards::create_face(
-            state,
-            &tokio::runtime::Handle::current(),
-            &source.id,
-            "weather",
-        )
-        .expect("create face");
+        crate::data_cards::create_face(state, &source.id, "weather").expect("create face");
         source
     }
 

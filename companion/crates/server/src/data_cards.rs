@@ -260,6 +260,17 @@ fn face_descriptor(face: &FaceSpec) -> FaceDescriptor {
     }
 }
 
+fn render_snapshot<T>(
+    snapshot: providers::ProviderSnapshot<T>,
+    render: impl FnOnce(&T) -> String,
+) -> Result<String, String> {
+    if let Some(error) = snapshot.error {
+        return Err(error);
+    }
+    let value = snapshot.value.ok_or_else(String::new)?;
+    Ok(render(&value))
+}
+
 /// Server-owned data-card state. The path, parsed specs, and every live task
 /// stay together so an update can atomically replace the persisted spec and the
 /// one refresher that consumes it.
@@ -449,8 +460,8 @@ pub(crate) fn descriptor_for_source(
         .map(|spec| face_descriptor(&spec.face))
 }
 
-/// Validates and persists one face update, then aborts and replaces exactly
-/// that source's refresher. The descriptor drives validation and mutation, so
+/// Validates and persists one face update, then aborts that source's refresher
+/// and replaces it only when complete. The descriptor drives validation and mutation, so
 /// face-specific knowledge is confined to [`face_descriptor`].
 pub(crate) fn update_face_fields(
     state: &ServerState,
@@ -491,10 +502,12 @@ pub(crate) fn update_face_fields(
     if let Some(task) = data_cards.tasks.remove(source_id) {
         task.abort();
     }
-    data_cards.tasks.insert(
-        source_id.to_owned(),
-        worker::spawn_refresher(runtime, state.clone(), updated_spec.clone()),
-    );
+    if face_is_complete(&updated_spec.face) {
+        data_cards.tasks.insert(
+            source_id.to_owned(),
+            worker::spawn_refresher(runtime, state.clone(), updated_spec.clone()),
+        );
+    }
     Ok(face_descriptor(&updated_spec.face))
 }
 
@@ -506,7 +519,6 @@ pub(crate) fn update_face_fields(
 /// next restart and leave a card pointing at a source nothing draws.
 pub(crate) fn create_face(
     state: &ServerState,
-    runtime: &tokio::runtime::Handle,
     source_id: &str,
     kind: &str,
 ) -> Result<FaceDescriptor, FaceUpdateError> {
@@ -537,13 +549,6 @@ pub(crate) fn create_face(
     persist_specs(&data_cards.spec_path, &updated_specs)?;
     data_cards.specs = updated_specs;
 
-    // A blank face is not fetched; see `face_is_complete`.
-    if face_is_complete(&spec.face) {
-        data_cards.tasks.insert(
-            source_id.to_owned(),
-            worker::spawn_refresher(runtime, state.clone(), spec.clone()),
-        );
-    }
     Ok(face_descriptor(&spec.face))
 }
 
@@ -557,17 +562,16 @@ pub(crate) fn remove_face(state: &ServerState, source_id: &str) -> Result<(), Fa
         .data_cards
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Revocation has already removed the source, so its task must stop even
+    // when the durable spec replacement fails and needs an internal retry.
+    if let Some(task) = data_cards.tasks.remove(source_id) {
+        task.abort();
+    }
     if !data_cards
         .specs
         .iter()
         .any(|spec| spec.source_id == source_id)
     {
-        // Stop the task anyway: a spec can have been removed by an earlier call
-        // whose task abort did not happen, and leaving a live refresher for a
-        // spec nobody holds is exactly the state this function exists to end.
-        if let Some(task) = data_cards.tasks.remove(source_id) {
-            task.abort();
-        }
         return Ok(());
     }
 
@@ -578,13 +582,9 @@ pub(crate) fn remove_face(state: &ServerState, source_id: &str) -> Result<(), Fa
         .cloned()
         .collect();
     persist_specs(&data_cards.spec_path, &updated_specs)?;
-    // The file is the durable record, so it is replaced before the in-memory
-    // copy and the task are -- a crash between the two leaves a spec that is
-    // gone from disk and a task that dies with the process.
+    // Only replace the in-memory specs after persistence succeeds, retaining
+    // the original spec for a retry if the write fails.
     data_cards.specs = updated_specs;
-    if let Some(task) = data_cards.tasks.remove(source_id) {
-        task.abort();
-    }
     Ok(())
 }
 
@@ -656,6 +656,96 @@ fn validate_face_fields(
 mod tests {
     use super::*;
     use providers::weather::WeatherUnits;
+
+    #[test]
+    fn failed_snapshots_never_render_cached_values() {
+        for value in [None, Some("last good")] {
+            let mut rendered = false;
+            let result = render_snapshot(
+                providers::ProviderSnapshot {
+                    value,
+                    error: Some("fetch failed".into()),
+                },
+                |value| {
+                    rendered = true;
+                    (*value).to_owned()
+                },
+            );
+            assert!(!rendered, "failed snapshots must not invoke the renderer");
+            assert_eq!(result.unwrap_err(), "fetch failed");
+        }
+    }
+
+    #[test]
+    fn cached_rss_failures_preserve_stored_frame_and_liveness_until_recovery() {
+        use crate::face_render::frame_from_svg;
+        use crate::faces::{adapt, rss};
+        use crate::image_sources::{AcceptOutcome, ImageSourceStore};
+        use chrono::{Duration, TimeZone, Utc};
+        use providers::rss::{FeedItem, RssFeed};
+
+        let directory = tempfile::tempdir().expect("temp directory");
+        let store = ImageSourceStore::new(directory.path().to_path_buf()).expect("store");
+        let source = store.mint("News").expect("source");
+        let at = |seconds: i64| Utc.timestamp_opt(1_700_000_000 + seconds, 0).unwrap();
+        let feed = RssFeed {
+            items: vec![FeedItem {
+                title: "Cached headline".into(),
+                published: Some((at(0) - Duration::days(2)).to_rfc3339()),
+                ..FeedItem::default()
+            }],
+        };
+        let publish = |error: Option<String>, now| {
+            render_snapshot(
+                providers::ProviderSnapshot {
+                    value: Some(feed.clone()),
+                    error,
+                },
+                |value| rss::render(&adapt::rss_face(value, "News", now)),
+            )
+            .map(|svg| {
+                store
+                    .accept(&source.id, frame_from_svg(&svg).expect("frame"), now)
+                    .expect("accept")
+            })
+        };
+        for seconds in [0, 60, 120] {
+            publish(None, at(seconds)).expect("successful refresh");
+        }
+        assert!(
+            !store.frame(&source.id, at(100_000)).unwrap().stale,
+            "fewer than four pushes cannot establish a cadence"
+        );
+        assert_eq!(publish(None, at(180)), Ok(AcceptOutcome::Unchanged));
+        let before = store.frame(&source.id, at(180)).unwrap();
+        let disk_before = std::fs::read(directory.path().join("image-sources.json")).unwrap();
+        for seconds in [240, 600, 1_200] {
+            let result = publish(Some("fetch failed".into()), at(seconds));
+            assert_eq!(result, Err("fetch failed".into()));
+        }
+        let after = store.frame(&source.id, at(1_200)).unwrap();
+        assert_eq!(after.digest, before.digest);
+        assert_eq!(after.bytes, before.bytes);
+        assert_eq!(store.summaries(at(1_200))[0].last_push, Some(at(180)));
+        assert_eq!(
+            std::fs::read(directory.path().join("image-sources.json")).unwrap(),
+            disk_before
+        );
+        assert!(after.stale);
+        assert_eq!(publish(None, at(1_300)), Ok(AcceptOutcome::Unchanged));
+        assert_eq!(store.summaries(at(1_300))[0].last_push, Some(at(1_300)));
+        assert!(!store.frame(&source.id, at(1_300)).unwrap().stale);
+        // RSS ages would change after a day, but failed refreshes leave those pixels alone.
+        assert_eq!(
+            publish(Some("fetch failed".into()), at(90_000)),
+            Err("fetch failed".into())
+        );
+        let aged = store.frame(&source.id, at(90_000)).unwrap();
+        assert_eq!(aged.bytes, before.bytes);
+        assert_eq!(aged.digest, before.digest);
+        assert_eq!(store.summaries(at(90_000))[0].last_push, Some(at(1_300)));
+        assert!(aged.stale);
+    }
 
     fn write(contents: &str) -> tempfile::TempDir {
         let directory = tempfile::tempdir().expect("a temp directory");
@@ -893,6 +983,349 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn blank_faces_persist_their_defaults_without_starting_tasks() {
+        let state = ServerState::in_memory();
+        for (kind, expected) in [
+            (
+                "weather",
+                serde_json::json!({"kind":"weather", "location":"", "units":"metric"}),
+            ),
+            (
+                "rss",
+                serde_json::json!({"kind":"rss", "url":"", "title":""}),
+            ),
+            (
+                "token",
+                serde_json::json!({"kind":"token", "coin_id":"", "currency":"usd", "api_key":null}),
+            ),
+        ] {
+            let descriptor = create_face(&state, kind, kind).expect("create blank face");
+            assert_eq!(
+                descriptor,
+                creatable_faces()
+                    .into_iter()
+                    .find(|face| face.kind == kind)
+                    .unwrap()
+            );
+            let retained = state.inner.data_cards.lock().unwrap();
+            assert!(retained.tasks.is_empty());
+            let persisted = load_specs(&retained.spec_path).unwrap();
+            let spec = persisted.last().unwrap();
+            assert_eq!(spec.source_id, kind);
+            assert_eq!(spec.refresh_seconds, 900);
+            assert_eq!(serde_json::to_value(&spec.face).unwrap(), expected);
+            assert_eq!(persisted, retained.specs);
+        }
+        state.shutdown();
+    }
+
+    async fn assert_partial_update_stays_dormant(kind: &str, partial: BTreeMap<String, String>) {
+        let state = ServerState::in_memory();
+        let runtime = tokio::runtime::Handle::current();
+        create_face(&state, "target", kind).unwrap();
+        update_face_fields(&state, &runtime, "target", &partial).unwrap();
+        {
+            let retained = state.inner.data_cards.lock().unwrap();
+            assert!(
+                retained.tasks.is_empty(),
+                "incomplete {kind} must remain dormant"
+            );
+            assert_eq!(load_specs(&retained.spec_path).unwrap(), retained.specs);
+            let face = serde_json::to_value(&retained.specs[0].face).unwrap();
+            for (key, value) in &partial {
+                assert_eq!(face[key], *value);
+            }
+        }
+        let remaining = match kind {
+            "weather" => BTreeMap::from([("location".into(), "Berlin".into())]),
+            "rss" if partial.contains_key("url") => {
+                BTreeMap::from([("title".into(), "News".into())])
+            }
+            "rss" => BTreeMap::from([
+                ("url".into(), "https://example.test/feed".into()),
+                ("title".into(), "News".into()),
+            ]),
+            "token" => BTreeMap::from([("coin_id".into(), "solana".into())]),
+            _ => unreachable!(),
+        };
+        update_face_fields(&state, &runtime, "target", &remaining).unwrap();
+        let (first_id, first_abort) = {
+            let retained = state.inner.data_cards.lock().unwrap();
+            assert_eq!(retained.tasks.len(), 1);
+            (
+                retained.tasks["target"].id(),
+                retained.tasks["target"].abort_handle(),
+            )
+        };
+        update_face_fields(&state, &runtime, "target", &BTreeMap::new()).unwrap();
+        {
+            let retained = state.inner.data_cards.lock().unwrap();
+            assert_eq!(retained.tasks.len(), 1);
+            assert_ne!(retained.tasks["target"].id(), first_id);
+        }
+        // No refresher gets polled on this current-thread runtime before abortion.
+        stop_refreshers(&state);
+        tokio::task::yield_now().await;
+        assert!(first_abort.is_finished());
+        state.shutdown();
+    }
+
+    #[tokio::test]
+    async fn empty_updates_leave_all_blank_kinds_dormant() {
+        for kind in ["weather", "rss", "token"] {
+            assert_partial_update_stays_dormant(kind, BTreeMap::new()).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_fields_persist_without_starting_incomplete_faces() {
+        for (kind, key, value) in [
+            ("weather", "units", "imperial"),
+            ("rss", "title", "News"),
+            ("rss", "url", "https://example.test/feed"),
+            ("token", "currency", "eur"),
+        ] {
+            assert_partial_update_stays_dormant(kind, BTreeMap::from([(key.into(), value.into())]))
+                .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn public_token_updates_preserve_private_key_and_refresh_interval() {
+        let state = ServerState::in_memory();
+        let runtime = tokio::runtime::Handle::current();
+        {
+            let mut retained = state.inner.data_cards.lock().unwrap();
+            retained.specs.push(DataCardSpec {
+                source_id: "target".into(),
+                refresh_seconds: 3_600,
+                face: FaceSpec::Token {
+                    coin_id: "solana".into(),
+                    currency: "usd".into(),
+                    api_key: Some("secret".into()),
+                },
+            });
+        }
+        update_face_fields(
+            &state,
+            &runtime,
+            "target",
+            &BTreeMap::from([("currency".into(), "eur".into())]),
+        )
+        .unwrap();
+        {
+            let retained = state.inner.data_cards.lock().unwrap();
+            assert_eq!(retained.tasks.len(), 1);
+            let persisted = load_specs(&retained.spec_path).unwrap();
+            assert_eq!(persisted[0].refresh_seconds, 3_600);
+            assert!(
+                matches!(&persisted[0].face, FaceSpec::Token { currency, api_key, .. }
+                if currency == "eur" && api_key.as_deref() == Some("secret"))
+            );
+        }
+        stop_refreshers(&state);
+        state.shutdown();
+    }
+
+    #[tokio::test]
+    async fn invalid_updates_preserve_existing_specs_tasks_and_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cards.json");
+        let state = ServerState::in_memory();
+        let task = tokio::spawn(std::future::pending::<()>());
+        let task_id = task.id();
+        let abort = task.abort_handle();
+        let original = vec![DataCardSpec {
+            source_id: "target".into(),
+            refresh_seconds: 900,
+            face: FaceSpec::Weather {
+                location: "Berlin".into(),
+                units: Units::Metric,
+            },
+        }];
+        persist_specs(&path, &original).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        {
+            let mut retained = state.inner.data_cards.lock().unwrap();
+            retained.spec_path = path.clone();
+            retained.specs = original.clone();
+            retained.tasks.insert("target".into(), task);
+        }
+        for (key, value) in [("location", " "), ("units", "kelvin"), ("unknown", "value")] {
+            assert!(
+                update_face_fields(
+                    &state,
+                    &tokio::runtime::Handle::current(),
+                    "target",
+                    &BTreeMap::from([(key.into(), value.into())])
+                )
+                .is_err()
+            );
+            let retained = state.inner.data_cards.lock().unwrap();
+            assert_eq!(retained.specs, original);
+            assert_eq!(retained.tasks.len(), 1);
+            assert_eq!(retained.tasks["target"].id(), task_id);
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+        tokio::task::yield_now().await;
+        assert!(!abort.is_finished());
+        state.shutdown();
+    }
+
+    #[tokio::test]
+    async fn revoked_source_cancels_before_failed_persistence_and_can_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let parent = directory.path().join("specs");
+        std::fs::create_dir(&parent).unwrap();
+        let path = parent.join("cards.json");
+        let backup = directory.path().join("backup");
+        let state = ServerState::in_memory();
+        let removed = state.image_sources().mint("Removed").unwrap();
+        let retained = state.image_sources().mint("Retained").unwrap();
+        let original: Vec<_> = [&removed.id, &retained.id]
+            .into_iter()
+            .map(|id| DataCardSpec {
+                source_id: id.clone(),
+                refresh_seconds: 900,
+                face: blank_face("weather").unwrap(),
+            })
+            .collect();
+        persist_specs(&path, &original).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let task = tokio::spawn(std::future::pending::<()>());
+        let abort = task.abort_handle();
+        {
+            let mut cards = state.inner.data_cards.lock().unwrap();
+            cards.spec_path = path.clone();
+            cards.specs = original.clone();
+            cards.tasks.insert(removed.id.clone(), task);
+        }
+        tokio::task::yield_now().await;
+        state.image_sources().revoke(&removed.id).unwrap();
+        std::fs::rename(&parent, &backup).unwrap();
+        std::fs::write(&parent, b"not a directory").unwrap();
+        assert!(matches!(
+            remove_face(&state, &removed.id),
+            Err(FaceUpdateError::Persist(_))
+        ));
+        {
+            let cards = state.inner.data_cards.lock().unwrap();
+            assert!(
+                !cards.tasks.contains_key(&removed.id),
+                "revoked refresher must be removed even if persistence fails"
+            );
+            assert_eq!(cards.specs, original);
+        }
+        tokio::task::yield_now().await;
+        assert!(abort.is_finished(), "the executor processes cancellation");
+        assert_eq!(std::fs::read(backup.join("cards.json")).unwrap(), bytes);
+        assert_eq!(std::fs::read(&parent).unwrap(), b"not a directory");
+        std::fs::remove_file(&parent).unwrap();
+        std::fs::rename(&backup, &parent).unwrap();
+        remove_face(&state, &removed.id).expect("internal retry persists the removal");
+        assert_eq!(load_specs(&path).unwrap(), original[1..]);
+        assert_eq!(state.inner.data_cards.lock().unwrap().specs, original[1..]);
+        assert!(std::fs::read(&path).unwrap().ends_with(b"\n"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        state.shutdown();
+    }
+
+    #[tokio::test]
+    async fn removing_an_absent_spec_still_cancels_its_task() {
+        let state = ServerState::in_memory();
+        let task = tokio::spawn(std::future::pending::<()>());
+        let abort = task.abort_handle();
+        state
+            .inner
+            .data_cards
+            .lock()
+            .unwrap()
+            .tasks
+            .insert("absent".into(), task);
+        remove_face(&state, "absent").unwrap();
+        assert!(state.inner.data_cards.lock().unwrap().tasks.is_empty());
+        tokio::task::yield_now().await;
+        assert!(abort.is_finished());
+        state.shutdown();
+    }
+
+    #[tokio::test]
+    async fn successful_removal_cancels_only_the_matching_task_and_spec() {
+        let state = ServerState::in_memory();
+        for id in ["removed", "retained"] {
+            create_face(&state, id, "weather").unwrap();
+        }
+        let removed = tokio::spawn(std::future::pending::<()>());
+        let abort = removed.abort_handle();
+        let retained = tokio::spawn(std::future::pending::<()>());
+        let retained_id = retained.id();
+        {
+            let mut cards = state.inner.data_cards.lock().unwrap();
+            cards.tasks.insert("removed".into(), removed);
+            cards.tasks.insert("retained".into(), retained);
+        }
+        remove_face(&state, "removed").unwrap();
+        {
+            let cards = state.inner.data_cards.lock().unwrap();
+            assert_eq!(cards.specs.len(), 1);
+            assert_eq!(cards.specs[0].source_id, "retained");
+            assert_eq!(load_specs(&cards.spec_path).unwrap(), cards.specs);
+            assert_eq!(cards.tasks.len(), 1);
+            assert_eq!(cards.tasks["retained"].id(), retained_id);
+        }
+        tokio::task::yield_now().await;
+        assert!(abort.is_finished());
+        state.shutdown();
+    }
+
+    #[tokio::test]
+    async fn startup_prunes_revoked_sources_even_when_pruning_cannot_be_persisted() {
+        for blocked in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("cards.json");
+            let state = ServerState::in_memory();
+            let removed = state.image_sources().mint("Removed").unwrap();
+            let retained = state.image_sources().mint("Retained").unwrap();
+            let original: Vec<_> = [&removed.id, &retained.id]
+                .into_iter()
+                .map(|id| DataCardSpec {
+                    source_id: id.clone(),
+                    refresh_seconds: 900,
+                    face: blank_face("weather").unwrap(),
+                })
+                .collect();
+            persist_specs(&path, &original).unwrap();
+            state.image_sources().revoke(&removed.id).unwrap();
+            if blocked {
+                let blocker = directory.path().join("not-a-directory");
+                std::fs::write(&blocker, b"blocked").unwrap();
+                spawn_refreshers(
+                    &state,
+                    blocker.join("cards.json"),
+                    load_specs(&path).unwrap(),
+                );
+                assert_eq!(load_specs(&path).unwrap(), original);
+            } else {
+                start_data_cards(&state, path.clone()).unwrap();
+                assert_eq!(load_specs(&path).unwrap(), original[1..]);
+            }
+            {
+                let cards = state.inner.data_cards.lock().unwrap();
+                assert_eq!(cards.specs, original[1..]);
+                assert!(cards.tasks.is_empty());
+            }
+            state.shutdown();
+        }
+    }
+
     async fn assert_failed_mutation_preserves_state(operation: &str) {
         let directory = tempfile::tempdir().expect("a temp directory");
         // A regular file cannot contain the spec, even when tests run as root.
@@ -926,7 +1359,7 @@ mod tests {
                 &BTreeMap::from([("location".into(), "Berlin".into())]),
             )
             .map(|_| ()),
-            "create" => create_face(&state, &runtime, "new-source", "weather").map(|_| ()),
+            "create" => create_face(&state, "new-source", "weather").map(|_| ()),
             "remove" => remove_face(&state, "target"),
             _ => panic!("unknown test operation"),
         };
@@ -936,11 +1369,18 @@ mod tests {
             let retained = state.inner.data_cards.lock().expect("data cards");
             assert_eq!(retained.spec_path, path);
             assert_eq!(retained.specs, original);
-            assert_eq!(retained.tasks.len(), 1);
-            assert_eq!(retained.tasks["target"].id(), task_id);
-            assert!(!retained.tasks["target"].is_finished());
+            if operation == "remove" {
+                assert!(
+                    retained.tasks.is_empty(),
+                    "revoked tasks must stop despite persistence failure"
+                );
+            } else {
+                assert_eq!(retained.tasks.len(), 1);
+                assert_eq!(retained.tasks["target"].id(), task_id);
+                assert!(!retained.tasks["target"].is_finished());
+            }
         }
-        assert!(!abort.is_finished(), "the original task was not aborted");
+        assert_eq!(abort.is_finished(), operation == "remove");
         assert_eq!(
             std::fs::read(blocker).expect("read blocker"),
             b"retained bytes"
@@ -960,7 +1400,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_persistence_failure_preserves_specs_and_tasks() {
+    async fn remove_persistence_failure_preserves_specs_and_cancels_tasks() {
         assert_failed_mutation_preserves_state("remove").await;
     }
 

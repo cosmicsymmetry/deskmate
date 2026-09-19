@@ -120,6 +120,17 @@ fn rss_cases() -> Vec<Case> {
         }),
     });
 
+    cases.push(Case {
+        name: "rss--prefixed-compound-lead",
+        svg: super::rss::render(&RssFace {
+            feed_title: "News".to_owned(),
+            entries: vec![entry(
+                "A Donaudampfschiffahrtsgesellschaftskapitaensversammlung",
+                "1h",
+            )],
+        }),
+    });
+
     cases
 }
 

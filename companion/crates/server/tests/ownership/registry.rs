@@ -127,13 +127,100 @@ fn persisted_registry_contains_digest_and_never_plaintext_token() {
 }
 
 #[test]
-fn corrupt_or_truncated_registry_degrades_to_empty() {
-    // Catches propagating parse failures into a startup panic/error, accepting
-    // partial state, or losing the diagnostic that explains ensuing 401s.
-    for bytes in [
-        b"this is not JSON".as_slice(),
-        br#"{"schema_version":1,"next_sequence":7,"devices":["#.as_slice(),
-    ] {
+fn invalid_registry_files_degrade_to_empty() {
+    let mut oversized =
+        registry_json(&serde_json::json!({"schema_version": 1, "next_sequence": 0, "devices": []}));
+    oversized.resize(64 * 1_024 + 1, b' ');
+    let duplicate_digest = "11".repeat(32);
+    let cases = [
+        // Catches propagating parse failures into a startup panic/error,
+        // accepting partial state, or losing the diagnostic that explains
+        // ensuing 401s.
+        (
+            "malformed-json",
+            b"this is not JSON".to_vec(),
+            "dev-0007",
+            "corrupt-admin-token",
+        ),
+        (
+            "truncated-json",
+            br#"{"schema_version":1,"next_sequence":7,"devices":["#.to_vec(),
+            "dev-0007",
+            "corrupt-admin-token",
+        ),
+        // Catches deleting the schema-version guard and silently accepting a
+        // future format whose meaning this server does not know.
+        (
+            "unsupported-schema",
+            registry_json(
+                &serde_json::json!({"schema_version": 2, "next_sequence": 0, "devices": []}),
+            ),
+            "dev-0001",
+            "persisted-fixture-admin-token",
+        ),
+        // Catches deleting duplicate-id/digest validation and loading
+        // ambiguous authentication records from otherwise valid JSON.
+        (
+            "duplicate-records",
+            registry_json(&serde_json::json!({
+                "schema_version": 1,
+                "next_sequence": 2,
+                "devices": [
+                    {"device_id": "dev-0001", "token_sha256": duplicate_digest},
+                    {"device_id": "dev-0002", "token_sha256": duplicate_digest}
+                ]
+            })),
+            "dev-0001",
+            "persisted-fixture-admin-token",
+        ),
+        // Catches deleting the sequence consistency guard and loading state
+        // that would reissue an already-present device id on the next mint.
+        (
+            "sequence-below-existing-id",
+            registry_json(&serde_json::json!({
+                "schema_version": 1,
+                "next_sequence": 6,
+                "devices": [
+                    {"device_id": "dev-0007", "token_sha256": "22".repeat(32)}
+                ]
+            })),
+            "dev-0007",
+            "persisted-fixture-admin-token",
+        ),
+        // Catches deleting the 64 KiB read bound and accepting an unbounded
+        // operator-controlled file merely because its trailing bytes are
+        // whitespace.
+        (
+            "oversized",
+            oversized,
+            "dev-0001",
+            "persisted-fixture-admin-token",
+        ),
+        // Catches deleting the exact-length or lowercase-hex digest guards,
+        // which would accept truncated or noncanonical authentication
+        // material.
+        (
+            "short-digest",
+            registry_json(&serde_json::json!({
+                "schema_version": 1,
+                "next_sequence": 1,
+                "devices": [{"device_id": "dev-0001", "token_sha256": "33".repeat(31)}]
+            })),
+            "dev-0001",
+            "persisted-fixture-admin-token",
+        ),
+        (
+            "uppercase-digest",
+            registry_json(&serde_json::json!({
+                "schema_version": 1,
+                "next_sequence": 1,
+                "devices": [{"device_id": "dev-0001", "token_sha256": "AA".repeat(32)}]
+            })),
+            "dev-0001",
+            "persisted-fixture-admin-token",
+        ),
+    ];
+    for (name, bytes, absent_device, admin_token) in cases {
         let temp = tempfile::tempdir().expect("registry test temp dir");
         let config_root = temp.path().join("configs");
         std::fs::create_dir_all(&config_root).expect("create config root");
@@ -141,13 +228,13 @@ fn corrupt_or_truncated_registry_degrades_to_empty() {
             .expect("write broken registry");
 
         let state = ServerState::new(
-            "corrupt-admin-token".to_string(),
+            admin_token.to_owned(),
             server::firmware::FirmwareCatalog::in_memory(),
             config_root,
         );
-        assert_eq!(state.registry().authenticate("any-token"), None);
-        assert!(!state.registry().contains_device("dev-0007"));
-        assert!(state.registry().store_load_failed());
+        assert_eq!(state.registry().authenticate("any-token"), None, "{name}");
+        assert!(!state.registry().contains_device(absent_device), "{name}");
+        assert!(state.registry().store_load_failed(), "{name}");
     }
 }
 
@@ -339,120 +426,8 @@ fn mint_sequence_remains_monotonic_after_reload() {
     );
 }
 
-#[test]
-fn unsupported_registry_schema_degrades_to_empty() {
-    // Catches deleting the schema-version guard and silently accepting a
-    // future format whose meaning this server does not know.
-    let temp = tempfile::tempdir().expect("registry test temp dir");
-    let config_root = temp.path().join("configs");
-    write_registry_json(
-        &config_root,
-        &serde_json::json!({"schema_version": 2, "next_sequence": 0, "devices": []}),
-    );
-    let state = persistent_test_state(config_root);
-    assert!(state.registry().store_load_failed());
-    assert!(!state.registry().contains_device("dev-0001"));
-}
-
-#[test]
-fn duplicate_registry_records_degrade_to_empty() {
-    // Catches deleting duplicate-id/digest validation and loading ambiguous
-    // authentication records from otherwise valid JSON.
-    let temp = tempfile::tempdir().expect("registry test temp dir");
-    let config_root = temp.path().join("configs");
-    let digest = "11".repeat(32);
-    write_registry_json(
-        &config_root,
-        &serde_json::json!({
-            "schema_version": 1,
-            "next_sequence": 2,
-            "devices": [
-                {"device_id": "dev-0001", "token_sha256": digest},
-                {"device_id": "dev-0002", "token_sha256": digest}
-            ]
-        }),
-    );
-    let state = persistent_test_state(config_root);
-    assert!(state.registry().store_load_failed());
-    assert!(!state.registry().contains_device("dev-0001"));
-}
-
-#[test]
-fn registry_sequence_below_an_existing_id_degrades_to_empty() {
-    // Catches deleting the sequence consistency guard and loading state that
-    // would reissue an already-present device id on the next mint.
-    let temp = tempfile::tempdir().expect("registry test temp dir");
-    let config_root = temp.path().join("configs");
-    write_registry_json(
-        &config_root,
-        &serde_json::json!({
-            "schema_version": 1,
-            "next_sequence": 6,
-            "devices": [
-                {"device_id": "dev-0007", "token_sha256": "22".repeat(32)}
-            ]
-        }),
-    );
-    let state = persistent_test_state(config_root);
-    assert!(state.registry().store_load_failed());
-    assert!(!state.registry().contains_device("dev-0007"));
-}
-
-#[test]
-fn oversized_registry_degrades_to_empty() {
-    // Catches deleting the 64 KiB read bound and accepting an unbounded
-    // operator-controlled file merely because its trailing bytes are whitespace.
-    let temp = tempfile::tempdir().expect("registry test temp dir");
-    let config_root = temp.path().join("configs");
-    std::fs::create_dir_all(&config_root).expect("create config root");
-    let mut bytes = serde_json::to_vec(
-        &serde_json::json!({"schema_version": 1, "next_sequence": 0, "devices": []}),
-    )
-    .expect("encode valid registry");
-    bytes.resize(64 * 1_024 + 1, b' ');
-    std::fs::write(config_root.join("device-identities.json"), bytes)
-        .expect("write oversized registry");
-
-    let state = persistent_test_state(config_root);
-    assert!(state.registry().store_load_failed());
-}
-
-#[test]
-fn invalid_digest_encodings_degrade_to_empty() {
-    // Catches deleting the exact-length or lowercase-hex digest guards, which
-    // would accept truncated or noncanonical authentication material.
-    for digest in ["33".repeat(31), "AA".repeat(32)] {
-        let temp = tempfile::tempdir().expect("registry test temp dir");
-        let config_root = temp.path().join("configs");
-        write_registry_json(
-            &config_root,
-            &serde_json::json!({
-                "schema_version": 1,
-                "next_sequence": 1,
-                "devices": [{"device_id": "dev-0001", "token_sha256": digest}]
-            }),
-        );
-        let state = persistent_test_state(config_root);
-        assert!(state.registry().store_load_failed());
-        assert!(!state.registry().contains_device("dev-0001"));
-    }
-}
-
-fn persistent_test_state(config_root: std::path::PathBuf) -> ServerState {
-    ServerState::new(
-        "persisted-fixture-admin-token".to_string(),
-        server::firmware::FirmwareCatalog::in_memory(),
-        config_root,
-    )
-}
-
-fn write_registry_json(config_root: &std::path::Path, value: &serde_json::Value) {
-    std::fs::create_dir_all(config_root).expect("create config root");
-    std::fs::write(
-        config_root.join("device-identities.json"),
-        serde_json::to_vec(value).expect("encode registry fixture"),
-    )
-    .expect("write registry fixture");
+fn registry_json(value: &serde_json::Value) -> Vec<u8> {
+    serde_json::to_vec(value).expect("encode registry fixture")
 }
 
 fn archived_registry_files(config_root: &std::path::Path) -> Vec<std::path::PathBuf> {

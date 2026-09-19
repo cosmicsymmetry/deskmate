@@ -14,61 +14,45 @@ async fn spawn() -> (String, server::registry::DeviceIdentity) {
     (format!("127.0.0.1:{}", address.port()), identity)
 }
 
-#[tokio::test]
-async fn device_link_accepts_a_minted_token() {
-    let (host, identity) = spawn().await;
-    let request = http::Request::builder()
+fn link_request(host: &str, authorization: Option<&str>) -> http::Request<()> {
+    let mut request = http::Request::builder()
         .uri(format!("ws://{host}/v1/device/link"))
-        .header("Authorization", format!("Bearer {}", identity.token))
-        .header("Host", &host)
+        .header("Host", host)
         .header("Connection", "Upgrade")
         .header("Upgrade", "websocket")
         .header("Sec-WebSocket-Version", "13")
         .header(
             "Sec-WebSocket-Key",
             tokio_tungstenite::tungstenite::handshake::client::generate_key(),
-        )
-        .body(())
-        .unwrap();
+        );
+    if let Some(authorization) = authorization {
+        request = request.header("Authorization", authorization);
+    }
+    request.body(()).unwrap()
+}
+
+#[tokio::test]
+async fn device_link_accepts_a_minted_token() {
+    let (host, identity) = spawn().await;
+    let authorization = format!("Bearer {}", identity.token);
+    let request = link_request(&host, Some(&authorization));
     let (_stream, response) = tokio_tungstenite::connect_async(request).await.unwrap();
     assert_eq!(response.status(), 101);
 }
 
 #[tokio::test]
-async fn device_link_refuses_an_unknown_token() {
-    let (host, _identity) = spawn().await;
-    let request = http::Request::builder()
-        .uri(format!("ws://{host}/v1/device/link"))
-        .header("Authorization", "Bearer not-a-real-token")
-        .header("Host", &host)
-        .header("Connection", "Upgrade")
-        .header("Upgrade", "websocket")
-        .header("Sec-WebSocket-Version", "13")
-        .header(
-            "Sec-WebSocket-Key",
-            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
-        )
-        .body(())
-        .unwrap();
-    assert!(tokio_tungstenite::connect_async(request).await.is_err());
-}
-
-#[tokio::test]
-async fn device_link_refuses_a_missing_authorization_header() {
-    let (host, _identity) = spawn().await;
-    let request = http::Request::builder()
-        .uri(format!("ws://{host}/v1/device/link"))
-        .header("Host", &host)
-        .header("Connection", "Upgrade")
-        .header("Upgrade", "websocket")
-        .header("Sec-WebSocket-Version", "13")
-        .header(
-            "Sec-WebSocket-Key",
-            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
-        )
-        .body(())
-        .unwrap();
-    assert!(tokio_tungstenite::connect_async(request).await.is_err());
+async fn device_link_refuses_invalid_authorization() {
+    for (name, authorization) in [
+        ("unknown-token", Some("Bearer not-a-real-token")),
+        ("missing-authorization-header", None),
+    ] {
+        let (host, _identity) = spawn().await;
+        let request = link_request(&host, authorization);
+        assert!(
+            tokio_tungstenite::connect_async(request).await.is_err(),
+            "{name}"
+        );
+    }
 }
 
 #[tokio::test]

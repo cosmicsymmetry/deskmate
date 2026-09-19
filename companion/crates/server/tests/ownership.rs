@@ -64,6 +64,31 @@ async fn connect_device(
         .map(|(s, _)| s)
 }
 
+fn clock_config() -> String {
+    std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/one-clock-card.json"
+    ))
+    .expect("fixture")
+}
+
+async fn write_config(
+    client: &reqwest::Client,
+    host: &str,
+    device_id: &str,
+    admin_token: &str,
+    body: impl Into<reqwest::Body>,
+) -> reqwest::Response {
+    client
+        .put(format!("http://{host}/v1/devices/{device_id}/config"))
+        .bearer_auth(admin_token)
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("config write")
+}
+
 #[tokio::test]
 async fn config_written_by_admin_reaches_the_device() {
     let (host, identity, admin_token) = spawn().await;
@@ -71,26 +96,13 @@ async fn config_written_by_admin_reaches_the_device() {
         .await
         .expect("connect");
 
-    let config = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/one-clock-card.json"
-    ))
-    .expect("fixture");
-
-    let admin_request = reqwest::Client::new()
-        .put(format!(
-            "http://{host}/v1/devices/{}/config",
-            identity.device_id
-        ))
-        .bearer_auth(&admin_token)
-        .header("Content-Type", "application/json")
-        .body(config)
-        .send();
+    let config = clock_config();
+    let client = reqwest::Client::new();
+    let admin_request = write_config(&client, &host, &identity.device_id, &admin_token, config);
     let (response, applied) = tokio::join!(
         admin_request,
         support::drive_until_config(&mut socket, "clock-1")
     );
-    let response = response.expect("admin request");
     assert_eq!(response.status(), 200);
 
     assert_eq!(applied.cards.len(), 1);
@@ -207,14 +219,7 @@ async fn install_pomodoro_config(
         "/tests/fixtures/one-pomodoro-card.json"
     ))
     .expect("fixture");
-    let saved = client
-        .put(format!("http://{host}/v1/devices/{device_id}/config"))
-        .bearer_auth(admin_token)
-        .header("Content-Type", "application/json")
-        .body(config)
-        .send()
-        .await
-        .expect("config write");
+    let saved = write_config(client, host, device_id, admin_token, config).await;
     assert_eq!(saved.status(), 200);
 }
 
@@ -320,23 +325,15 @@ async fn config_is_written_under_the_explicit_config_directory() {
     let former_derived_root = firmware.directory().parent().unwrap().join("configs");
     let state = ServerState::new(ADMIN_TOKEN.to_string(), firmware, config_root.clone());
     let (host, identity, admin_token) = spawn_state(state, ADMIN_TOKEN).await;
-    let config = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/one-clock-card.json"
-    ))
-    .expect("fixture");
-
-    let response = reqwest::Client::new()
-        .put(format!(
-            "http://{host}/v1/devices/{}/config",
-            identity.device_id
-        ))
-        .bearer_auth(admin_token)
-        .header("Content-Type", "application/json")
-        .body(config)
-        .send()
-        .await
-        .expect("config write");
+    let config = clock_config();
+    let response = write_config(
+        &reqwest::Client::new(),
+        &host,
+        &identity.device_id,
+        &admin_token,
+        config,
+    )
+    .await;
 
     assert_eq!(response.status(), 200);
     assert!(config_root.join("dev-0001.json").is_file());
@@ -347,49 +344,45 @@ async fn config_is_written_under_the_explicit_config_directory() {
 async fn admin_routes_refuse_a_bad_admin_token() {
     let (host, identity, _admin_token) = spawn().await;
     let client = reqwest::Client::new();
-
-    let write = client
-        .put(format!(
-            "http://{host}/v1/devices/{}/config",
-            identity.device_id
-        ))
-        .bearer_auth("not-the-admin-token")
-        .header("Content-Type", "application/json")
-        .body("{}")
-        .send()
-        .await
-        .expect("request");
-    assert_eq!(write.status(), 401);
-
-    let scene = client
-        .post(format!(
-            "http://{host}/v1/devices/{}/scene",
-            identity.device_id
-        ))
-        .bearer_auth("not-the-admin-token")
-        .header("Content-Type", "application/json")
-        .body(
-            serde_json::json!({
-                "card_id": "clock-1",
-                "revision": 17,
-                "template": "digital_clock",
-                "show_seconds": true,
-                "local_now": "2026-08-25T14:37:42",
-            })
-            .to_string(),
-        )
-        .send()
-        .await
-        .expect("request");
-    assert_eq!(scene.status(), 401);
-
-    let read = client
-        .get(format!("http://{host}/v1/devices/{}", identity.device_id))
-        .bearer_auth("not-the-admin-token")
-        .send()
-        .await
-        .expect("request");
-    assert_eq!(read.status(), 401);
+    let scene = serde_json::json!({
+        "card_id": "clock-1",
+        "revision": 17,
+        "template": "digital_clock",
+        "show_seconds": true,
+        "local_now": "2026-08-25T14:37:42",
+    })
+    .to_string();
+    for (name, method, path, body) in [
+        (
+            "config-write",
+            reqwest::Method::PUT,
+            format!("/v1/devices/{}/config", identity.device_id),
+            Some("{}".to_owned()),
+        ),
+        (
+            "scene-write",
+            reqwest::Method::POST,
+            format!("/v1/devices/{}/scene", identity.device_id),
+            Some(scene),
+        ),
+        (
+            "status-read",
+            reqwest::Method::GET,
+            format!("/v1/devices/{}", identity.device_id),
+            None,
+        ),
+    ] {
+        let mut request = client
+            .request(method, format!("http://{host}{path}"))
+            .bearer_auth("not-the-admin-token");
+        if let Some(body) = body {
+            request = request
+                .header("Content-Type", "application/json")
+                .body(body);
+        }
+        let response = request.send().await.expect("request");
+        assert_eq!(response.status(), 401, "{name}");
+    }
 
     // A device's own token must not open the admin surface either.
     let crossover = client
@@ -430,22 +423,15 @@ async fn invalid_config_is_typed_and_does_not_replace_last_good() {
     // genuinely working config.
     let (host, identity, admin_token) = spawn().await;
     let client = reqwest::Client::new();
-    let valid = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/one-clock-card.json"
-    ))
-    .expect("fixture");
-    let saved = client
-        .put(format!(
-            "http://{host}/v1/devices/{}/config",
-            identity.device_id
-        ))
-        .bearer_auth(&admin_token)
-        .header("Content-Type", "application/json")
-        .body(valid.clone())
-        .send()
-        .await
-        .expect("valid write");
+    let valid = clock_config();
+    let saved = write_config(
+        &client,
+        &host,
+        &identity.device_id,
+        &admin_token,
+        valid.clone(),
+    )
+    .await;
     assert_eq!(saved.status(), 200);
 
     let mut invalid: serde_json::Value = serde_json::from_str(&valid).unwrap();
@@ -453,17 +439,14 @@ async fn invalid_config_is_typed_and_does_not_replace_last_good() {
     // A dwell below MIN_DWELL_SECONDS: since schema v10 dwell is a card field,
     // so this is the invalid document a playlist reference used to be.
     invalid["cards"][0]["dwell_seconds"] = 1.into();
-    let rejected = client
-        .put(format!(
-            "http://{host}/v1/devices/{}/config",
-            identity.device_id
-        ))
-        .bearer_auth(&admin_token)
-        .header("Content-Type", "application/json")
-        .body(serde_json::to_vec(&invalid).unwrap())
-        .send()
-        .await
-        .expect("invalid write");
+    let rejected = write_config(
+        &client,
+        &host,
+        &identity.device_id,
+        &admin_token,
+        serde_json::to_vec(&invalid).unwrap(),
+    )
+    .await;
     assert_eq!(rejected.status(), 422);
     let error: serde_json::Value =
         serde_json::from_str(&rejected.text().await.expect("typed validation body"))
@@ -493,22 +476,15 @@ async fn invalid_config_is_typed_and_does_not_replace_last_good() {
 async fn config_without_a_wire_lowering_is_typed_and_does_not_replace_last_good() {
     let (host, identity, admin_token) = spawn().await;
     let client = reqwest::Client::new();
-    let valid = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/one-clock-card.json"
-    ))
-    .expect("fixture");
-    let saved = client
-        .put(format!(
-            "http://{host}/v1/devices/{}/config",
-            identity.device_id
-        ))
-        .bearer_auth(&admin_token)
-        .header("Content-Type", "application/json")
-        .body(valid.clone())
-        .send()
-        .await
-        .expect("valid write");
+    let valid = clock_config();
+    let saved = write_config(
+        &client,
+        &host,
+        &identity.device_id,
+        &admin_token,
+        valid.clone(),
+    )
+    .await;
     assert_eq!(saved.status(), 200);
 
     let mut unsupported: serde_json::Value = serde_json::from_str(&valid).unwrap();
@@ -523,17 +499,14 @@ async fn config_without_a_wire_lowering_is_typed_and_does_not_replace_last_good(
         .validate()
         .expect("host action passes ordinary validation");
 
-    let rejected = client
-        .put(format!(
-            "http://{host}/v1/devices/{}/config",
-            identity.device_id
-        ))
-        .bearer_auth(&admin_token)
-        .header("Content-Type", "application/json")
-        .body(serde_json::to_vec(&unsupported).unwrap())
-        .send()
-        .await
-        .expect("compile-only invalid write");
+    let rejected = write_config(
+        &client,
+        &host,
+        &identity.device_id,
+        &admin_token,
+        serde_json::to_vec(&unsupported).unwrap(),
+    )
+    .await;
     assert_eq!(rejected.status(), 422);
     let error: serde_json::Value =
         serde_json::from_str(&rejected.text().await.expect("typed validation body"))
@@ -564,17 +537,14 @@ async fn config_request_body_is_bounded_before_json_parsing() {
     // Catches deletion of the route-level body limit; ConfigStore's on-disk
     // limit is too late to stop Axum buffering an attacker-sized request.
     let (host, identity, admin_token) = spawn().await;
-    let response = reqwest::Client::new()
-        .put(format!(
-            "http://{host}/v1/devices/{}/config",
-            identity.device_id
-        ))
-        .bearer_auth(admin_token)
-        .header("Content-Type", "application/json")
-        .body(vec![b' '; app_core::MAX_CONFIG_FILE_BYTES + 1])
-        .send()
-        .await
-        .expect("oversized write");
+    let response = write_config(
+        &reqwest::Client::new(),
+        &host,
+        &identity.device_id,
+        &admin_token,
+        vec![b' '; app_core::MAX_CONFIG_FILE_BYTES + 1],
+    )
+    .await;
     assert_eq!(response.status(), 413);
 }
 
@@ -640,14 +610,8 @@ async fn admin_status_reports_defaults_used_after_stored_config_validation_failu
     );
     let identity = state.registry().mint().expect("mint identity");
     let admin_token = ADMIN_TOKEN.to_string();
-    let mut invalid: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/one-clock-card.json"
-        ))
-        .expect("fixture"),
-    )
-    .expect("fixture JSON");
+    let mut invalid: serde_json::Value =
+        serde_json::from_str(&clock_config()).expect("fixture JSON");
     invalid["cards"][0]["dwell_seconds"] = 1.into();
     std::fs::write(
         config_root.join(format!("{}.json", identity.device_id)),
@@ -702,11 +666,7 @@ async fn linked_config_recovery_remains_visible_until_explicit_save() {
     let refused_bytes = br#"{"schema_version":11,"future_body":true}"#;
     std::fs::write(&refused_path, refused_bytes).expect("write unsupported config");
     let healthy_path = config_root.join(format!("{}.json", healthy.device_id));
-    let valid = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/one-clock-card.json"
-    ))
-    .expect("valid fixture");
+    let valid = clock_config();
     std::fs::write(&healthy_path, &valid).expect("write healthy config");
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -753,20 +713,18 @@ async fn linked_config_recovery_remains_visible_until_explicit_save() {
     assert_eq!(std::fs::read(&refused_path).unwrap(), refused_bytes);
     assert_eq!(std::fs::read_to_string(&healthy_path).unwrap(), valid);
 
-    let save = client
-        .put(format!(
-            "http://{host}/v1/devices/{}/config",
-            refused.device_id
-        ))
-        .bearer_auth(ADMIN_TOKEN)
-        .header("Content-Type", "application/json")
-        .body(valid.clone())
-        .send();
+    let save = write_config(
+        &client,
+        &host,
+        &refused.device_id,
+        ADMIN_TOKEN,
+        valid.clone(),
+    );
     let (saved, applied) = tokio::join!(
         save,
         support::drive_until_config(&mut refused_socket, "clock-1")
     );
-    assert_eq!(saved.expect("explicit save").status(), 200);
+    assert_eq!(saved.status(), 200);
     assert_eq!(applied.cards[0].card_id, "clock-1");
 
     let cleared = companion_snapshot(&client, &host, &refused.device_id, ADMIN_TOKEN).await;

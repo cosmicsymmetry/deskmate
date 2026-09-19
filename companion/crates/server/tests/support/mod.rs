@@ -9,6 +9,35 @@ pub type DeviceSocket =
 
 pub const IN_MEMORY_ADMIN_TOKEN: &str = "in-memory-admin-token";
 
+pub struct HttpTestServer {
+    pub base_url: String,
+}
+
+pub async fn spawn_http(router: axum::Router) -> HttpTestServer {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let address = listener.local_addr().expect("test server address");
+    tokio::spawn(async move {
+        axum::serve(listener, router)
+            .await
+            .expect("serve test routes");
+    });
+    HttpTestServer {
+        base_url: format!("http://127.0.0.1:{}", address.port()),
+    }
+}
+
+pub async fn json_body(response: reqwest::Response) -> serde_json::Value {
+    let text = response.text().await.expect("response body");
+    serde_json::from_str(&text).unwrap_or_else(|error| panic!("body is not JSON ({error}): {text}"))
+}
+
+pub fn replace_file_with_directory(path: &std::path::Path) {
+    std::fs::rename(path, path.with_extension("backup")).expect("preserve original file");
+    std::fs::create_dir(path).expect("blocking directory");
+}
+
 pub async fn drive_until_config(socket: &mut DeviceSocket, card_id: &str) -> ApplyConfig {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let mut target_config = None;

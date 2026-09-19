@@ -5,32 +5,20 @@ use serde::Deserialize;
 use server::firmware::FirmwareCatalog;
 use server::{ServerState, app};
 
+mod support;
+
+use support::{HttpTestServer as TestServer, json_body, replace_file_with_directory};
+
 const ADMIN_TOKEN: &str = "in-memory-admin-token";
 const ONE_MEBIBYTE: usize = 1024 * 1024;
 
-struct TestServer {
-    base_url: String,
-}
-
 /// A loopback HTTP harness for producer and admin image routes.
 async fn spawn() -> TestServer {
-    let state = ServerState::in_memory();
-    spawn_with(state).await
+    support::spawn_http(app(ServerState::in_memory())).await
 }
 
 async fn spawn_with(state: ServerState) -> TestServer {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind test server");
-    let address = listener.local_addr().expect("test server address");
-    tokio::spawn(async move {
-        axum::serve(listener, app(state))
-            .await
-            .expect("serve image routes");
-    });
-    TestServer {
-        base_url: format!("http://127.0.0.1:{}", address.port()),
-    }
+    support::spawn_http(app(state)).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,11 +85,6 @@ fn png_of(width: u32, height: u32) -> Vec<u8> {
 
 fn exact_png() -> Vec<u8> {
     png_of(448, 368)
-}
-
-fn replace_file_with_directory(path: &std::path::Path) {
-    std::fs::rename(path, path.with_extension("backup")).expect("preserve original file");
-    std::fs::create_dir(path).expect("blocking directory");
 }
 
 #[tokio::test]
@@ -483,11 +466,6 @@ async fn minting_a_ninth_source_preserves_the_capacity_response() {
             "message": "the image-source capacity has been reached",
         })
     );
-}
-
-async fn json_body(response: Response) -> serde_json::Value {
-    let body = response.text().await.expect("response body");
-    serde_json::from_str(&body).unwrap_or_else(|error| panic!("invalid JSON ({error}): {body}"))
 }
 
 #[tokio::test]

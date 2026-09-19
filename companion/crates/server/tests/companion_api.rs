@@ -15,25 +15,14 @@ use server::firmware::FirmwareCatalog;
 use server::{ServerState, app, app_with_web};
 use tower::ServiceExt;
 
+mod support;
+
+use support::{HttpTestServer as TestServer, json_body, replace_file_with_directory};
+
 const ADMIN_TOKEN: &str = "in-memory-admin-token";
 
-struct TestServer {
-    base_url: String,
-}
-
 async fn spawn_with(state: ServerState, web_root: Option<std::path::PathBuf>) -> TestServer {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind test server");
-    let address = listener.local_addr().expect("test server address");
-    tokio::spawn(async move {
-        axum::serve(listener, app_with_web(state, web_root))
-            .await
-            .expect("serve companion routes");
-    });
-    TestServer {
-        base_url: format!("http://127.0.0.1:{}", address.port()),
-    }
+    support::spawn_http(app_with_web(state, web_root)).await
 }
 
 async fn spawn() -> (TestServer, ServerState) {
@@ -71,11 +60,6 @@ async fn snapshot(client: &Client, server: &TestServer, device_id: &str) -> serd
         .expect("snapshot");
     assert_eq!(response.status(), StatusCode::OK);
     json_body(response).await
-}
-
-async fn json_body(response: reqwest::Response) -> serde_json::Value {
-    let text = response.text().await.expect("response body");
-    serde_json::from_str(&text).unwrap_or_else(|error| panic!("body is not JSON ({error}): {text}"))
 }
 
 async fn direct_snapshot(state: &ServerState, device_id: &str) -> serde_json::Value {
@@ -586,17 +570,7 @@ async fn saving_a_configuration_persists_it_and_the_next_snapshot_shows_it() {
     let mut config = before["config"].clone();
     config["preferences"]["timezone"] = serde_json::json!("Europe/Berlin");
 
-    let saved = client
-        .put(format!(
-            "{}/v1/app/{}/config",
-            server.base_url, device.device_id
-        ))
-        .bearer_auth(ADMIN_TOKEN)
-        .header("content-type", "application/json")
-        .body(serde_json::json!({ "json": config.to_string() }).to_string())
-        .send()
-        .await
-        .expect("save config");
+    let saved = save_config(&client, &server, &device.device_id, &config).await;
     assert_eq!(saved.status(), StatusCode::OK);
 
     let after = snapshot(&client, &server, &device.device_id).await;
@@ -612,22 +586,8 @@ async fn a_malformed_draft_is_an_invalid_payload() {
     let client = Client::new();
     let device = mint_device(&client, &server).await;
 
-    let response = client
-        .put(format!(
-            "{}/v1/app/{}/config",
-            server.base_url, device.device_id
-        ))
-        .bearer_auth(ADMIN_TOKEN)
-        .header("content-type", "application/json")
-        .body(
-            serde_json::json!({
-                "json": serde_json::json!({ "schema_version": 10, "cards": [] }).to_string()
-            })
-            .to_string(),
-        )
-        .send()
-        .await
-        .expect("save config");
+    let malformed = serde_json::json!({ "schema_version": 10, "cards": [] });
+    let response = save_config(&client, &server, &device.device_id, &malformed).await;
     // A shape that does not deserialize is the caller's payload, not a
     // validation verdict about a configuration -- the two are different repairs.
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -672,17 +632,7 @@ async fn semantic_validation_reports_issues_and_preserves_the_last_good_document
     }));
     let expected_issues = preflight["issues"].clone();
 
-    let saved = client
-        .put(format!(
-            "{}/v1/app/{}/config",
-            server.base_url, device.device_id
-        ))
-        .bearer_auth(ADMIN_TOKEN)
-        .header("content-type", "application/json")
-        .body(envelope)
-        .send()
-        .await
-        .expect("save invalid config");
+    let saved = put_config_body(&client, &server, &device.device_id, envelope).await;
     assert_eq!(saved.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let saved = json_body(saved).await;
     assert_eq!(saved["category"], "validation");
@@ -710,17 +660,7 @@ async fn a_draft_without_a_wire_lowering_is_refused_and_remains_unsaved() {
         .validate()
         .expect("host action passes ordinary validation");
 
-    let response = client
-        .put(format!(
-            "{}/v1/app/{}/config",
-            server.base_url, device.device_id
-        ))
-        .bearer_auth(ADMIN_TOKEN)
-        .header("content-type", "application/json")
-        .body(serde_json::json!({ "json": config.to_string() }).to_string())
-        .send()
-        .await
-        .expect("save config");
+    let response = save_config(&client, &server, &device.device_id, &config).await;
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body = json_body(response).await;
     assert_eq!(body["category"], "validation");
@@ -1080,17 +1020,7 @@ async fn the_device_list_says_which_identities_have_ever_been_configured() {
     let second = mint_device(&client, &server).await;
 
     let configured = snapshot(&client, &server, &second.device_id).await;
-    let saved = client
-        .put(format!(
-            "{}/v1/app/{}/config",
-            server.base_url, second.device_id
-        ))
-        .bearer_auth(ADMIN_TOKEN)
-        .header("content-type", "application/json")
-        .body(serde_json::json!({ "json": configured["config"].to_string() }).to_string())
-        .send()
-        .await
-        .expect("save config");
+    let saved = save_config(&client, &server, &second.device_id, &configured["config"]).await;
     assert_eq!(saved.status(), StatusCode::OK);
 
     let listed = client
@@ -1135,17 +1065,7 @@ async fn preview_stays_upright_for_both_physical_mountings() {
 
     for orientation in ["landscape", "landscape-flipped"] {
         config["preferences"]["orientation"] = serde_json::json!(orientation);
-        let saved = client
-            .put(format!(
-                "{}/v1/app/{}/config",
-                server.base_url, device.device_id
-            ))
-            .bearer_auth(ADMIN_TOKEN)
-            .header("content-type", "application/json")
-            .body(serde_json::json!({ "json": config.to_string() }).to_string())
-            .send()
-            .await
-            .expect("save config");
+        let saved = save_config(&client, &server, &device.device_id, &config).await;
         assert_eq!(saved.status(), StatusCode::OK);
 
         let stored = snapshot(&client, &server, &device.device_id).await;
@@ -1209,17 +1129,7 @@ async fn saving_a_configuration_revokes_the_sources_it_no_longer_declares() {
         "alert": { "kind": "none" },
         "dwell_seconds": null,
     }]);
-    let saved = client
-        .put(format!(
-            "{}/v1/app/{}/config",
-            server.base_url, device.device_id
-        ))
-        .bearer_auth(ADMIN_TOKEN)
-        .header("content-type", "application/json")
-        .body(serde_json::json!({ "json": config.to_string() }).to_string())
-        .send()
-        .await
-        .expect("save config");
+    let saved = save_config(&client, &server, &device.device_id, &config).await;
     assert_eq!(saved.status(), StatusCode::OK);
 
     let remaining = listed_source_ids(&client, &server).await;
@@ -1256,17 +1166,7 @@ async fn saving_a_configuration_removes_an_abandoned_face_and_preserves_a_declar
         "alert": { "kind": "none" },
         "dwell_seconds": null,
     }]);
-    let saved = client
-        .put(format!(
-            "{}/v1/app/{}/config",
-            server.base_url, device.device_id
-        ))
-        .bearer_auth(ADMIN_TOKEN)
-        .header("content-type", "application/json")
-        .body(serde_json::json!({ "json": config.to_string() }).to_string())
-        .send()
-        .await
-        .expect("save config");
+    let saved = save_config(&client, &server, &device.device_id, &config).await;
 
     assert_eq!(saved.status(), StatusCode::OK);
     assert!(
@@ -1346,17 +1246,7 @@ async fn a_configuration_that_still_declares_everything_revokes_nothing() {
         { "id": first, "name": "Weather" },
         { "id": second, "name": "Hacker News" },
     ]);
-    let saved = client
-        .put(format!(
-            "{}/v1/app/{}/config",
-            server.base_url, device.device_id
-        ))
-        .bearer_auth(ADMIN_TOKEN)
-        .header("content-type", "application/json")
-        .body(serde_json::json!({ "json": config.to_string() }).to_string())
-        .send()
-        .await
-        .expect("save config");
+    let saved = save_config(&client, &server, &device.device_id, &config).await;
     assert_eq!(saved.status(), StatusCode::OK);
 
     let remaining = listed_source_ids(&client, &server).await;
@@ -1365,11 +1255,33 @@ async fn a_configuration_that_still_declares_everything_revokes_nothing() {
 }
 
 async fn mint_source(client: &Client, server: &TestServer, name: &str) -> String {
+    mint_source_with_face(client, server, name, None).await
+}
+
+async fn mint_face_source(
+    client: &Client,
+    server: &TestServer,
+    name: &str,
+    face_kind: &str,
+) -> String {
+    mint_source_with_face(client, server, name, Some(face_kind)).await
+}
+
+async fn mint_source_with_face(
+    client: &Client,
+    server: &TestServer,
+    name: &str,
+    face_kind: Option<&str>,
+) -> String {
+    let mut body = serde_json::json!({ "name": name });
+    if let Some(face_kind) = face_kind {
+        body["face_kind"] = face_kind.into();
+    }
     let response = client
         .post(format!("{}/v1/images", server.base_url))
         .bearer_auth(ADMIN_TOKEN)
         .header("content-type", "application/json")
-        .body(serde_json::json!({ "name": name }).to_string())
+        .body(body.to_string())
         .send()
         .await
         .expect("mint image source");
@@ -1383,46 +1295,35 @@ async fn mint_source(client: &Client, server: &TestServer, name: &str) -> String
         .to_owned()
 }
 
-async fn mint_face_source(
-    client: &Client,
-    server: &TestServer,
-    name: &str,
-    face_kind: &str,
-) -> String {
-    let response = client
-        .post(format!("{}/v1/images", server.base_url))
-        .bearer_auth(ADMIN_TOKEN)
-        .header("content-type", "application/json")
-        .body(serde_json::json!({ "name": name, "face_kind": face_kind }).to_string())
-        .send()
-        .await
-        .expect("mint server face");
-    assert_eq!(response.status(), StatusCode::OK);
-    json_body(response).await["id"]
-        .as_str()
-        .expect("source id")
-        .to_owned()
-}
-
 async fn save_config(
     client: &Client,
     server: &TestServer,
     device_id: &str,
     config: &serde_json::Value,
 ) -> reqwest::Response {
+    put_config_body(
+        client,
+        server,
+        device_id,
+        serde_json::json!({ "json": config.to_string() }).to_string(),
+    )
+    .await
+}
+
+async fn put_config_body(
+    client: &Client,
+    server: &TestServer,
+    device_id: &str,
+    body: String,
+) -> reqwest::Response {
     client
         .put(format!("{}/v1/app/{device_id}/config", server.base_url))
         .bearer_auth(ADMIN_TOKEN)
         .header("content-type", "application/json")
-        .body(serde_json::json!({ "json": config.to_string() }).to_string())
+        .body(body)
         .send()
         .await
         .expect("save config")
-}
-
-fn replace_file_with_directory(path: &std::path::Path) {
-    std::fs::rename(path, path.with_extension("backup")).expect("preserve original file");
-    std::fs::create_dir(path).expect("blocking directory");
 }
 
 async fn listed_source_ids(client: &Client, server: &TestServer) -> Vec<String> {

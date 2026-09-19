@@ -15,6 +15,12 @@ pub struct ReplayState {
 }
 
 impl ReplayState {
+    /// Commit rebased revisions without overwriting events received during replay.
+    pub fn commit_replay(&mut self, replay: Self) {
+        self.config = replay.config;
+        self.pushes = replay.pushes;
+    }
+
     /// Record replay state only after validating the ACK's request type and revision.
     pub fn remember_success(&mut self, request: &Message) {
         match request {

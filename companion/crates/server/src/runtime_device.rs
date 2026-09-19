@@ -503,8 +503,7 @@ impl WebSocketRuntimeDevice {
             .replay
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        live.config = replay.config;
-        live.pushes = replay.pushes;
+        live.commit_replay(replay);
         Ok(())
     }
 }

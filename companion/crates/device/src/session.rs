@@ -7,10 +7,8 @@ use std::time::{Duration, Instant};
 use protocol::{
     Ack, ActivateCard, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, AssetRelease, CardConfig,
     Deframer, DeviceEvent, Message, NetworkConfig, PushScene, PushTimer, RequestIdAllocator,
-    StatusResponse, TYPE_ACTIVATE_CARD, TYPE_APPLY_CONFIG, TYPE_ASSET_BEGIN, TYPE_ASSET_CHUNK,
-    TYPE_ASSET_COMMIT, TYPE_ASSET_RELEASE, TYPE_FACTORY_RESET, TYPE_NETWORK_CONFIG,
-    TYPE_PUSH_SCENE, TYPE_PUSH_TIMER, TYPE_TIME_SYNC, TYPE_TRIGGER_INTERRUPT, TimeSync,
-    TriggerInterrupt, decode_message, encode_message, expected_response_type,
+    StatusResponse, TYPE_ASSET_BEGIN, TimeSync, TriggerInterrupt, decode_message, encode_message,
+    expected_response_type,
 };
 
 use crate::{
@@ -177,13 +175,8 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         }
     }
 
-    fn request_ack(
-        &self,
-        message: Message,
-        acknowledged_type: u8,
-        revision: Option<u32>,
-    ) -> Result<(), DeviceError> {
-        require_ack(&self.request(message)?, acknowledged_type, revision)
+    fn request_ack(&self, message: Message) -> Result<(), DeviceError> {
+        self.request(message).map(|_| ())
     }
 
     fn allocate_revision(counter: &AtomicU32) -> Result<u32, DeviceError> {
@@ -226,15 +219,11 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
     }
 
     pub fn time_sync(&self, sync: TimeSync) -> Result<(), DeviceError> {
-        self.request_ack(Message::TimeSync(sync), TYPE_TIME_SYNC, None)
+        self.request_ack(Message::TimeSync(sync))
     }
 
     fn push_timer(&self, push: PushTimer) -> Result<(), DeviceError> {
-        let revision = push.revision;
-        self.request_ack(Message::PushTimer(push), TYPE_PUSH_TIMER, Some(revision))?;
-        self.latest_data_revision
-            .fetch_max(revision, Ordering::AcqRel);
-        Ok(())
+        self.request_ack(Message::PushTimer(push))
     }
 
     pub fn push_next_timer(
@@ -260,15 +249,7 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         // 270-degree rotation -- both described a device that rendered
         // templates; a v2 device renders scenes and accepts either mounting
         // unconditionally.
-        let revision = config.revision;
-        self.request_ack(
-            Message::ApplyConfig(config),
-            TYPE_APPLY_CONFIG,
-            Some(revision),
-        )?;
-        self.latest_config_revision
-            .fetch_max(revision, Ordering::AcqRel);
-        Ok(())
+        self.request_ack(Message::ApplyConfig(config))
     }
 
     pub fn apply_next_config(
@@ -285,21 +266,16 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
     }
 
     pub fn activate_card(&self, activation: ActivateCard) -> Result<(), DeviceError> {
-        self.request_ack(Message::ActivateCard(activation), TYPE_ACTIVATE_CARD, None)
+        self.request_ack(Message::ActivateCard(activation))
     }
 
     pub fn push_scene(&self, push: PushScene) -> Result<(), DeviceError> {
         ensure_capabilities(protocol::CAPABILITY_SCENE_RENDER, self.capabilities())?;
-        let revision = push.revision;
-        self.request_ack(Message::PushScene(push), TYPE_PUSH_SCENE, Some(revision))
+        self.request_ack(Message::PushScene(push))
     }
 
     pub fn trigger_interrupt(&self, interrupt: TriggerInterrupt) -> Result<(), DeviceError> {
-        self.request_ack(
-            Message::TriggerInterrupt(interrupt),
-            TYPE_TRIGGER_INTERRUPT,
-            None,
-        )
+        self.request_ack(Message::TriggerInterrupt(interrupt))
     }
 
     /// Provision the device's network config over USB. The device persists
@@ -308,18 +284,14 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
     /// is networked yet.
     pub fn provision(&self, config: &NetworkConfig) -> Result<(), DeviceError> {
         ensure_capabilities(protocol::CAPABILITY_NETWORKING, self.capabilities())?;
-        self.request_ack(
-            Message::NetworkConfig(config.clone()),
-            TYPE_NETWORK_CONFIG,
-            None,
-        )
+        self.request_ack(Message::NetworkConfig(config.clone()))
     }
 
     /// Erase the device's persisted network config, returning it to
     /// factory-fresh local tier on its next boot.
     pub fn factory_reset(&self) -> Result<(), DeviceError> {
         ensure_capabilities(protocol::CAPABILITY_NETWORKING, self.capabilities())?;
-        self.request_ack(Message::FactoryReset, TYPE_FACTORY_RESET, None)
+        self.request_ack(Message::FactoryReset)
     }
 
     /// Reserve (or re-attach to) storage for one asset. Unlike `provision` and
@@ -342,11 +314,11 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
     }
 
     pub fn asset_chunk(&self, chunk: AssetChunk) -> Result<(), DeviceError> {
-        self.request_ack(Message::AssetChunk(chunk), TYPE_ASSET_CHUNK, None)
+        self.request_ack(Message::AssetChunk(chunk))
     }
 
     pub fn asset_commit(&self, commit: AssetCommit) -> Result<(), DeviceError> {
-        self.request_ack(Message::AssetCommit(commit), TYPE_ASSET_COMMIT, None)
+        self.request_ack(Message::AssetCommit(commit))
     }
 
     /// Tell the device the full set of digests that should survive. The
@@ -354,7 +326,7 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
     /// from this set dead, and compacts -- so this must carry every desired
     /// digest, not just the ones this session happened to (re)upload.
     pub fn asset_release(&self, release: AssetRelease) -> Result<(), DeviceError> {
-        self.request_ack(Message::AssetRelease(release), TYPE_ASSET_RELEASE, None)
+        self.request_ack(Message::AssetRelease(release))
     }
 
     pub fn try_recv_event(&self) -> Option<ReceivedEvent> {
@@ -738,7 +710,7 @@ impl<T: Transport> SessionConnection<T> {
         for interrupt in &replay.interrupts {
             self.transact_acked(&Message::TriggerInterrupt(interrupt.clone()))?;
         }
-        self.replay = replay;
+        self.replay.commit_replay(replay);
         Ok(())
     }
 }
@@ -833,7 +805,11 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    use protocol::{EventAction, EventKind, HeartbeatAck, TapAction, decode_wire_frame};
+    use protocol::{
+        EventAction, EventKind, HeartbeatAck, TYPE_ACTIVATE_CARD, TYPE_APPLY_CONFIG,
+        TYPE_FACTORY_RESET, TYPE_NETWORK_CONFIG, TYPE_PUSH_TIMER, TYPE_TIME_SYNC,
+        TYPE_TRIGGER_INTERRUPT, TapAction, decode_wire_frame,
+    };
 
     use super::*;
 
@@ -1673,6 +1649,107 @@ mod tests {
                     if card_id == "calendar"
             )
         }));
+    }
+
+    #[test]
+    fn reconnect_preserves_navigation_received_during_replay() {
+        let event = DeviceEvent {
+            sequence: 1,
+            kind: EventKind::Navigation,
+            card_id: "calendar".into(),
+            action: EventAction::NavigateNext,
+            interrupt_token: None,
+        };
+        for mode in [
+            ReplyMode::EventBeforeReply(event.clone()),
+            ReplyMode::EventAfterReply(event),
+        ] {
+            let replayed = replay_after_concurrent_event(mode);
+            assert!(
+                replayed.contains(&Message::ActivateCard(ActivateCard {
+                    card_id: "calendar".into(),
+                })),
+                "next replay must activate the navigated-to card"
+            );
+        }
+    }
+
+    #[test]
+    fn reconnect_preserves_interrupt_dismissal_received_during_replay() {
+        let event = event(1, EventKind::InterruptDismissed, Some(5));
+        for mode in [
+            ReplyMode::EventBeforeReply(event.clone()),
+            ReplyMode::EventAfterReply(event),
+        ] {
+            let replayed = replay_after_concurrent_event(mode);
+            assert!(
+                !replayed.iter().any(|request| matches!(request,
+                    Message::TriggerInterrupt(interrupt) if interrupt.token == 5
+                )),
+                "next replay must not resend the dismissed interrupt"
+            );
+        }
+    }
+
+    fn replay_after_concurrent_event(mode: ReplyMode) -> Vec<Message> {
+        let (first_transport, _) = FakeTransport::new(status(0, 0, 1_000));
+        let session = DeviceSession::with_options(
+            first_transport,
+            &status(0, 0, 1_000),
+            options(Duration::from_mins(1), 8),
+        );
+        let mut layout = config(1);
+        layout.cards.push(CardConfig {
+            card_id: "calendar".into(),
+            tap_action: TapAction::None,
+        });
+        session.apply_config(layout).unwrap();
+        session
+            .push_next_timer("timer", 60_000, 30_000, false)
+            .unwrap();
+        session
+            .activate_card(ActivateCard {
+                card_id: "timer".into(),
+            })
+            .unwrap();
+        session
+            .trigger_interrupt(TriggerInterrupt {
+                card_id: "timer".into(),
+                token: 5,
+                reason: "done".into(),
+            })
+            .unwrap();
+
+        let (second_transport, second_state) = FakeTransport::new(status(11, 11, 2_000));
+        second_state.lock().unwrap().reply_modes.extend([
+            ReplyMode::Normal,
+            ReplyMode::Normal,
+            ReplyMode::Normal,
+            mode,
+        ]);
+        session
+            .reconnect(second_transport, status(11, 11, 2_000))
+            .unwrap();
+        assert!(matches!(
+            second_state.lock().unwrap().requests.last(),
+            Some(Message::TriggerInterrupt(TriggerInterrupt { token: 5, .. }))
+        ));
+        assert_eq!(session.try_recv_event().unwrap().event.sequence, 1);
+        assert_eq!(session.latest_config_revision(), 12);
+        assert_eq!(session.latest_data_revision(), 12);
+
+        let (third_transport, third_state) = FakeTransport::new(status(12, 12, 3_000));
+        session
+            .reconnect(third_transport, status(12, 12, 3_000))
+            .unwrap();
+        let replayed = third_state.lock().unwrap().requests.clone();
+        assert!(
+            !replayed
+                .iter()
+                .any(|request| matches!(request, Message::ApplyConfig(_) | Message::PushTimer(_))),
+            "acknowledged rebased revisions must not be resent"
+        );
+        replayed
     }
 
     #[test]

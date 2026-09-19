@@ -421,6 +421,12 @@ mod tests {
         .await;
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read response body")
+                .is_empty()
+        );
     }
 
     #[tokio::test]

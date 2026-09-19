@@ -9,7 +9,6 @@ use std::time::Instant;
 use axum::extract::FromRequestParts;
 use axum::http::StatusCode;
 use axum::http::request::Parts;
-use axum::response::{IntoResponse, Response};
 
 use crate::ServerState;
 use crate::registry::DeviceId;
@@ -54,28 +53,18 @@ impl UnknownAuthWarningLimiter {
     }
 }
 
-/// Rejection returned for any bearer-auth failure. Deliberately featureless:
-/// the caller learns nothing about *why* authentication failed beyond "try a
-/// real token", and the server never logs the token value that was tried.
-#[derive(Debug, thiserror::Error)]
-#[error("missing, malformed, or unrecognized bearer token")]
-pub(crate) struct AuthError;
-
-impl IntoResponse for AuthError {
-    fn into_response(self) -> Response {
-        StatusCode::UNAUTHORIZED.into_response()
-    }
-}
-
 /// A request whose `Authorization: Bearer <token>` header named a device the
 /// registry minted a token for.
+///
+/// Rejections are deliberately featureless: a bare 401 reveals nothing about
+/// why authentication failed, and the server never logs the token value tried.
 #[derive(Debug, Clone)]
 pub(crate) struct AuthenticatedDevice {
     pub device_id: DeviceId,
 }
 
 impl FromRequestParts<ServerState> for AuthenticatedDevice {
-    type Rejection = AuthError;
+    type Rejection = StatusCode;
 
     // axum's FromRequestParts declares `async fn`, so the signature is fixed by
     // the trait even though this body never awaits. Rewriting it to return
@@ -86,7 +75,7 @@ impl FromRequestParts<ServerState> for AuthenticatedDevice {
         parts: &mut Parts,
         state: &ServerState,
     ) -> Result<Self, Self::Rejection> {
-        let token = bearer_token(parts).ok_or(AuthError)?;
+        let token = bearer_token(parts).ok_or(StatusCode::UNAUTHORIZED)?;
         let Some(device_id) = state.registry().authenticate(token) else {
             // Never include the presented token. Keep exactly one rate-limited
             // warning, choosing static wording that distinguishes ordinary
@@ -101,7 +90,7 @@ impl FromRequestParts<ServerState> for AuthenticatedDevice {
                     tracing::warn!("device authentication failed: bearer token is not recognized");
                 }
             }
-            return Err(AuthError);
+            return Err(StatusCode::UNAUTHORIZED);
         };
         Ok(Self { device_id })
     }
@@ -127,25 +116,14 @@ pub(crate) fn bearer_token(parts: &Parts) -> Option<&str> {
     scheme.eq_ignore_ascii_case(SCHEME).then_some(token)
 }
 
-/// The one admin extractor. `admin.rs` and `images.rs` each grew their own
-/// copy because the first was private to its module; the management surface
-/// would have been the third, so they now share this.
+/// A request authenticated by the admin bearer token.
 ///
-/// Rejection is a bare 401 with no body -- which is what both copies already
-/// produced -- so an unauthenticated caller learns nothing about whether the
-/// route, the device, or the token was the problem.
+/// Rejection is a bare 401 with no body or logged credential, so a caller learns
+/// nothing about whether the route, the device, or the token was the problem.
 pub(crate) struct AdminAuthenticated;
 
-pub(crate) struct AdminUnauthorized;
-
-impl IntoResponse for AdminUnauthorized {
-    fn into_response(self) -> Response {
-        StatusCode::UNAUTHORIZED.into_response()
-    }
-}
-
 impl FromRequestParts<ServerState> for AdminAuthenticated {
-    type Rejection = AdminUnauthorized;
+    type Rejection = StatusCode;
 
     // axum's `FromRequestParts` declares `async fn`, so the signature is fixed
     // by the trait even though this body never awaits.
@@ -154,11 +132,11 @@ impl FromRequestParts<ServerState> for AdminAuthenticated {
         parts: &mut Parts,
         state: &ServerState,
     ) -> Result<Self, Self::Rejection> {
-        let presented = bearer_token(parts).ok_or(AdminUnauthorized)?;
+        let presented = bearer_token(parts).ok_or(StatusCode::UNAUTHORIZED)?;
         state
             .verify_admin_token(presented)
             .then_some(Self)
-            .ok_or(AdminUnauthorized)
+            .ok_or(StatusCode::UNAUTHORIZED)
     }
 }
 
@@ -177,6 +155,31 @@ mod tests {
                 .insert(AUTHORIZATION, HeaderValue::from_str(value).unwrap());
         }
         request.into_parts().0
+    }
+
+    #[tokio::test]
+    async fn firmware_check_rejects_an_unknown_token_with_a_bare_401() {
+        use axum::body::{Body, to_bytes};
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let response = crate::app(crate::ServerState::in_memory())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/device/firmware?current=1.0.0")
+                    .header(AUTHORIZATION, "Bearer not-a-real-token")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body")
+                .is_empty()
+        );
     }
 
     #[test]

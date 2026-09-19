@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
-use server::oauth::session::SessionSigner;
 use server::oauth::{GoogleOAuthConfig, IntegrationRuntime, TokenManager};
 use server::{ServerState, app};
 use tower::ServiceExt;
@@ -28,11 +27,7 @@ fn state_with_integrations() -> ServerState {
         Arc::new(server::oauth::transport::EgressTransport),
         GoogleOAuthConfig::default(),
     ));
-    let runtime = Arc::new(IntegrationRuntime::new(
-        token_manager,
-        SessionSigner::from_admin_token("in-memory-admin-token"),
-        GoogleOAuthConfig::default(),
-    ));
+    let runtime = Arc::new(IntegrationRuntime::new(token_manager));
     state.set_integrations(runtime);
     state
 }
@@ -108,12 +103,46 @@ async fn callback_and_revoke_also_reject_unauthenticated_callers_with_bare_401s(
 #[tokio::test]
 async fn callback_rejects_a_state_from_another_session_before_exchange() {
     let state = state_with_integrations();
-    let consent_url = state
-        .integrations()
-        .expect("integrations")
-        .start_consent("different-session", "google-primary")
-        .expect("under the pending limit");
-    let state_value = url::Url::parse(&consent_url)
+    let login = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/session/login")
+                .header(header::AUTHORIZATION, "Bearer in-memory-admin-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(login.status(), StatusCode::NO_CONTENT);
+    let cookie = login
+        .headers()
+        .get(header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let consent = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/integrations/google")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(consent.status(), StatusCode::SEE_OTHER);
+    let consent_url = consent
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let state_value = url::Url::parse(consent_url)
         .unwrap()
         .query_pairs()
         .find_map(|(key, value)| (key == "state").then(|| value.into_owned()))
@@ -139,13 +168,26 @@ async fn callback_rejects_a_state_from_another_session_before_exchange() {
             .unwrap()
             .is_empty()
     );
-    assert!(
-        state
-            .integrations()
-            .expect("integrations")
-            .take_pending(&state_value, chrono::Utc::now())
-            .is_none(),
+    let retry = app(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/integrations/google/callback?code=abc&state={state_value}"
+                ))
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        retry.status(),
+        StatusCode::BAD_REQUEST,
         "a callback attempt consumes the state even when the session does not match"
+    );
+    assert_eq!(
+        to_bytes(retry.into_body(), usize::MAX).await.unwrap(),
+        "unknown or expired state"
     );
 }
 
@@ -255,11 +297,7 @@ fn state_with_stored_grant(transport: Arc<FakeTransport>) -> ServerState {
         transport,
         GoogleOAuthConfig::default(),
     ));
-    let runtime = Arc::new(IntegrationRuntime::new(
-        token_manager,
-        SessionSigner::from_admin_token("in-memory-admin-token"),
-        GoogleOAuthConfig::default(),
-    ));
+    let runtime = Arc::new(IntegrationRuntime::new(token_manager));
     state.set_integrations(runtime);
     state
 }

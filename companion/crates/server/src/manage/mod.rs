@@ -116,7 +116,7 @@ async fn login_submit(State(state): State<ServerState>, Form(form): Form<LoginFo
         )
             .into_response();
     }
-    let Some(runtime) = state.integrations() else {
+    if state.integrations().is_none() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Html(view::render_login(Some(
@@ -124,9 +124,9 @@ async fn login_submit(State(state): State<ServerState>, Form(form): Form<LoginFo
             ))),
         )
             .into_response();
-    };
+    }
     let sid = SessionSigner::new_sid();
-    let cookie = runtime.sessions().mint(&sid, Utc::now(), SESSION_TTL);
+    let cookie = state.sessions().mint(&sid, Utc::now(), SESSION_TTL);
     let Ok(header_value) = HeaderValue::from_str(&set_cookie_header(&cookie, SESSION_TTL)) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };

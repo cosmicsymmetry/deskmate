@@ -138,6 +138,7 @@ async fn the_admin_token_buys_a_session_cookie_and_a_wrong_one_buys_nothing() {
     assert!(cookie.contains("HttpOnly"));
     assert!(cookie.contains("Secure"));
     assert!(cookie.contains("Path=/"));
+    assert!(cookie.ends_with("; Max-Age=2592000"));
     assert!(!cookie.to_ascii_lowercase().contains("domain="));
 }
 

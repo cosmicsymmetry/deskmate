@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderMap, Request, StatusCode, header};
-use server::oauth::session::SessionSigner;
 use server::oauth::{GoogleOAuthConfig, IntegrationRuntime, TokenManager};
 use server::secrets::{IntegrationSecret, IntegrationStore, SecretsKey};
 use server::{ServerState, app};
@@ -45,11 +44,7 @@ fn state() -> ServerState {
         Arc::new(NoTransport),
         GoogleOAuthConfig::default(),
     ));
-    let runtime = Arc::new(IntegrationRuntime::new(
-        token_manager,
-        SessionSigner::from_admin_token(ADMIN),
-        GoogleOAuthConfig::default(),
-    ));
+    let runtime = Arc::new(IntegrationRuntime::new(token_manager));
     state.set_integrations(runtime);
     state
 }
@@ -77,11 +72,7 @@ fn state_with_stored_grant() -> ServerState {
         Arc::new(NoTransport),
         GoogleOAuthConfig::default(),
     ));
-    let runtime = Arc::new(IntegrationRuntime::new(
-        token_manager,
-        SessionSigner::from_admin_token(ADMIN),
-        GoogleOAuthConfig::default(),
-    ));
+    let runtime = Arc::new(IntegrationRuntime::new(token_manager));
     state.set_integrations(runtime);
     state
 }
@@ -158,6 +149,37 @@ async fn a_wrong_token_does_not_mint_a_session() {
 }
 
 #[tokio::test]
+async fn login_without_integrations_checks_credentials_before_configuration() {
+    let state = ServerState::in_memory();
+    let (_, login_page) = get(&state, "/v1/manage/login", None).await;
+    for (token, status, message) in [
+        (
+            ADMIN,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "OAuth integrations are not configured on this server.",
+        ),
+        (
+            "wrong",
+            StatusCode::UNAUTHORIZED,
+            "That token was not accepted.",
+        ),
+    ] {
+        let (actual, headers, body) =
+            post_form(&state, "/v1/manage/login", &format!("token={token}"), None).await;
+        assert_eq!(actual, status);
+        assert!(!headers.contains_key(header::SET_COOKIE));
+        assert_eq!(
+            body,
+            login_page.replacen(
+                "<h1>Deskmate</h1>",
+                &format!("<h1>Deskmate</h1><p class=\"bad\">{message}</p>"),
+                1,
+            )
+        );
+    }
+}
+
+#[tokio::test]
 async fn the_right_token_mints_a_session_cookie_that_script_cannot_read() {
     let (status, headers, _) = post_form(
         &state(),
@@ -174,6 +196,10 @@ async fn the_right_token_mints_a_session_cookie_that_script_cannot_read() {
         .unwrap();
     assert!(cookie.contains("HttpOnly"));
     assert!(cookie.contains("Secure"));
+    assert!(cookie.starts_with("__Host-deskmate_session="));
+    assert!(cookie.ends_with("; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=43200"));
+    assert!(!cookie.to_ascii_lowercase().contains("domain="));
+    assert_eq!(headers.get(header::LOCATION).unwrap(), "/v1/manage");
 }
 
 #[tokio::test]

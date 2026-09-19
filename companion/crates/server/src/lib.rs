@@ -132,13 +132,10 @@ struct StateInner {
     /// `reconnect_interval` plus a two-second `status_interval` -- and four
     /// reconnects made one test 14 seconds, a third of the whole suite.
     runtime_options: app_core::RuntimeOptions,
-    /// Signs and verifies the operator session cookie. Keyed by the admin token,
-    /// exactly as `IntegrationRuntime`'s own signer is -- but held here, so a
-    /// deployment with no OAuth integrations configured still has sessions. The
-    /// browser companion is the reason that matters: it authenticates once with
-    /// the admin token and then carries a cookie, and gating that on Google
-    /// integrations being present would have made the whole UI unreachable on a
-    /// server that simply does not use them.
+    /// Signs and verifies the operator session cookie, keyed by the admin token.
+    /// Held here so deployments without OAuth integrations still have browser
+    /// sessions: the companion authenticates once with the admin token and then
+    /// carries a cookie, independently of any configured OAuth provider.
     sessions: oauth::session::SessionSigner,
     firmware: FirmwareCatalog,
     configs: store::DeviceConfigStores,

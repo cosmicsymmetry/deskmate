@@ -124,6 +124,10 @@ impl TokenManager {
         Self::with_clock(store, transport, oauth, Arc::new(Utc::now))
     }
 
+    pub(super) fn oauth_config(&self) -> &GoogleOAuthConfig {
+        &self.oauth
+    }
+
     fn with_clock(
         store: Arc<IntegrationStore>,
         transport: Arc<dyn OAuthTransport>,

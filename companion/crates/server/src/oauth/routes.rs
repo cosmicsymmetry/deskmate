@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use super::session::{OperatorAuthenticated, SessionSigner, set_cookie_header};
-use super::token::{GoogleOAuthConfig, TokenError, TokenManager};
+use super::token::{TokenError, TokenManager};
 use crate::ServerState;
 use crate::auth::bearer_token;
 use crate::registry::constant_time_eq;
@@ -35,10 +35,10 @@ const MAX_INTEGRATION_ID_LEN: usize = 64;
 /// not bound the map between sweeps.
 const MAX_PENDING_AUTHS: usize = 32;
 
-pub struct PendingAuth {
-    pub(crate) integration_id: String,
-    pub(crate) code_verifier: String,
-    pub(crate) sid: String,
+struct PendingAuth {
+    integration_id: String,
+    code_verifier: String,
+    sid: String,
 }
 
 struct StashedAuth {
@@ -48,22 +48,14 @@ struct StashedAuth {
 
 pub struct IntegrationRuntime {
     token_manager: Arc<TokenManager>,
-    sessions: SessionSigner,
-    oauth: GoogleOAuthConfig,
     pending: Mutex<HashMap<String, StashedAuth>>,
 }
 
 impl IntegrationRuntime {
     #[must_use]
-    pub fn new(
-        token_manager: Arc<TokenManager>,
-        sessions: SessionSigner,
-        oauth: GoogleOAuthConfig,
-    ) -> Self {
+    pub fn new(token_manager: Arc<TokenManager>) -> Self {
         Self {
             token_manager,
-            sessions,
-            oauth,
             pending: Mutex::new(HashMap::new()),
         }
     }
@@ -73,16 +65,11 @@ impl IntegrationRuntime {
         &self.token_manager
     }
 
-    #[must_use]
-    pub(crate) fn sessions(&self) -> &SessionSigner {
-        &self.sessions
-    }
-
     /// Generates `state` + PKCE, stashes them bound to `sid`, and returns the
     /// Google authorization URL to redirect the operator to.
     /// Returns `None` when too many consent flows are already pending, so the
     /// stash cannot be grown without bound by repeated calls.
-    pub fn start_consent(&self, sid: &str, integration_id: &str) -> Option<String> {
+    pub(crate) fn start_consent(&self, sid: &str, integration_id: &str) -> Option<String> {
         let state = super::pkce::generate_state();
         let pkce = super::pkce::generate_pkce();
         let now = Utc::now();
@@ -108,12 +95,13 @@ impl IntegrationRuntime {
         );
         drop(pending);
 
-        let mut url = Url::parse(&self.oauth.auth_uri).expect("auth_uri is a valid URL");
+        let oauth = self.token_manager.oauth_config();
+        let mut url = Url::parse(&oauth.auth_uri).expect("auth_uri is a valid URL");
         url.query_pairs_mut()
             .append_pair("response_type", "code")
-            .append_pair("client_id", &self.oauth.client_id)
-            .append_pair("redirect_uri", &self.oauth.redirect_uri)
-            .append_pair("scope", &self.oauth.scopes.join(" "))
+            .append_pair("client_id", &oauth.client_id)
+            .append_pair("redirect_uri", &oauth.redirect_uri)
+            .append_pair("scope", &oauth.scopes.join(" "))
             .append_pair("access_type", "offline")
             .append_pair("prompt", "consent")
             .append_pair("code_challenge", &pkce.challenge)
@@ -124,7 +112,7 @@ impl IntegrationRuntime {
 
     /// Removes and returns the stash for `state` if it exists and is unexpired.
     /// Single-use: a second call for the same `state` returns `None`.
-    pub fn take_pending(&self, state: &str, now: DateTime<Utc>) -> Option<PendingAuth> {
+    fn take_pending(&self, state: &str, now: DateTime<Utc>) -> Option<PendingAuth> {
         let mut pending = self
             .pending
             .lock()
@@ -328,15 +316,15 @@ async fn login(State(state): State<ServerState>, parts: Parts) -> Response {
         _ => return StatusCode::UNAUTHORIZED.into_response(),
     }
 
-    let Some(runtime) = state.integrations() else {
+    if state.integrations().is_none() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "OAuth integrations are not configured on this server",
         )
             .into_response();
-    };
+    }
     let sid = SessionSigner::new_sid();
-    let cookie = runtime.sessions().mint(&sid, Utc::now(), SESSION_TTL);
+    let cookie = state.sessions().mint(&sid, Utc::now(), SESSION_TTL);
     let Ok(header_value) = HeaderValue::from_str(&set_cookie_header(&cookie, SESSION_TTL)) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
@@ -485,6 +473,7 @@ pub(crate) async fn revoke_integration_action(
 mod tests {
     use super::*;
     use crate::egress::FetchResponse;
+    use crate::oauth::GoogleOAuthConfig;
     use crate::oauth::transport::{OAuthFuture, OAuthTransport, TransportError};
     use url::Url;
 
@@ -500,6 +489,10 @@ mod tests {
     }
 
     fn runtime() -> IntegrationRuntime {
+        runtime_with_config(GoogleOAuthConfig::default())
+    }
+
+    fn runtime_with_config(oauth: GoogleOAuthConfig) -> IntegrationRuntime {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.keep().join(crate::secrets::SECRETS_STORE_FILE);
         let store = Arc::new(
@@ -509,16 +502,52 @@ mod tests {
             )
             .expect("store"),
         );
-        let token_manager = Arc::new(TokenManager::new(
-            store,
-            Arc::new(NoTransport),
-            GoogleOAuthConfig::default(),
-        ));
-        IntegrationRuntime::new(
-            token_manager,
-            SessionSigner::from_admin_token("admin"),
-            GoogleOAuthConfig::default(),
-        )
+        let token_manager = Arc::new(TokenManager::new(store, Arc::new(NoTransport), oauth));
+        IntegrationRuntime::new(token_manager)
+    }
+
+    #[test]
+    fn consent_uses_the_configured_endpoint_client_redirect_and_scope_order() {
+        let oauth = GoogleOAuthConfig {
+            auth_uri: "https://identity.example/custom/authorize?existing=value".to_string(),
+            client_id: "custom-client".to_string(),
+            redirect_uri: "https://desk.example/custom/callback".to_string(),
+            scopes: vec!["scope-z".to_string(), "scope-a".to_string()],
+            ..GoogleOAuthConfig::default()
+        };
+        let runtime = runtime_with_config(oauth);
+        let consent = runtime
+            .start_consent("sid", "google-primary")
+            .expect("consent");
+        let url = Url::parse(&consent).expect("URL");
+        assert_eq!(
+            url.origin().ascii_serialization(),
+            "https://identity.example"
+        );
+        assert_eq!(url.path(), "/custom/authorize");
+        let query: Vec<_> = url.query_pairs().into_owned().collect();
+        assert_eq!(
+            query
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "existing",
+                "response_type",
+                "client_id",
+                "redirect_uri",
+                "scope",
+                "access_type",
+                "prompt",
+                "code_challenge",
+                "code_challenge_method",
+                "state",
+            ]
+        );
+        assert_eq!(query[0].1, "value");
+        assert_eq!(query[2].1, "custom-client");
+        assert_eq!(query[3].1, "https://desk.example/custom/callback");
+        assert_eq!(query[4].1, "scope-z scope-a");
     }
 
     #[test]

@@ -93,4 +93,5 @@ async fn firmware_check_refuses_an_unknown_token() {
         .await
         .unwrap();
     assert_eq!(response.status(), 401);
+    assert!(response.bytes().await.unwrap().is_empty());
 }

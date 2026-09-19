@@ -287,9 +287,6 @@ async fn main() {
     let admin_token = std::env::var("DESKMATE_ADMIN_TOKEN")
         .expect("DESKMATE_ADMIN_TOKEN must be set -- see deploy/README.md");
     let google_oauth = google_oauth_config_from_env();
-    let session_signer = google_oauth
-        .as_ref()
-        .map(|_| server::oauth::session::SessionSigner::from_admin_token(&admin_token));
 
     // `config_dir` is cloned because the integration store below opens against
     // it after the state has taken ownership.
@@ -309,13 +306,9 @@ async fn main() {
         let token_manager = Arc::new(server::oauth::TokenManager::new(
             Arc::new(store),
             Arc::new(server::oauth::transport::EgressTransport),
-            oauth.clone(),
-        ));
-        let runtime = Arc::new(server::oauth::IntegrationRuntime::new(
-            token_manager,
-            session_signer.expect("Google configuration and session signer are paired"),
             oauth,
         ));
+        let runtime = Arc::new(server::oauth::IntegrationRuntime::new(token_manager));
         state.set_integrations(runtime);
         tracing::info!("google oauth integration enabled");
     }

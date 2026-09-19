@@ -7,16 +7,17 @@ use chacha20poly1305::aead::{Aead, KeyInit, OsRng, Payload};
 use chacha20poly1305::{AeadCore, XChaCha20Poly1305, XNonce};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use zeroize::ZeroizeOnDrop;
 
 /// Environment variable naming a `0o600` keyfile that holds the base64 master key.
-pub const ENV_KEY_FILE: &str = "DESKMATE_SECRETS_KEY_FILE";
+const ENV_KEY_FILE: &str = "DESKMATE_SECRETS_KEY_FILE";
 /// Fallback environment variable carrying the base64 master key inline. Documented
 /// as second-choice: env values are visible in `ps`/`/proc`/`systemctl show` in a
 /// way a keyfile is not.
-pub const ENV_KEY: &str = "DESKMATE_SECRETS_KEY";
+const ENV_KEY: &str = "DESKMATE_SECRETS_KEY";
 
 const MAX_KEYFILE_BYTES: usize = 1_024;
 
@@ -282,7 +283,7 @@ fn open(key: &SecretsKey, file_bytes: &[u8]) -> Result<Vec<u8>, SecretsError> {
 
 impl SecretsKey {
     /// Decodes a base64 string into a 32-byte key.
-    pub fn from_base64(value: &str) -> Result<Self, KeyError> {
+    fn from_base64(value: &str) -> Result<Self, KeyError> {
         let decoded = BASE64_STANDARD
             .decode(value.trim())
             .map_err(|_| KeyError::InvalidBase64)?;
@@ -295,7 +296,7 @@ impl SecretsKey {
 
     /// Reads a base64 key from a keyfile after checking it is (a) not inside the
     /// config directory and (b) `0o600`.
-    pub fn from_keyfile(config_dir: &Path, keyfile: &Path) -> Result<Self, KeyError> {
+    fn from_keyfile(config_dir: &Path, keyfile: &Path) -> Result<Self, KeyError> {
         let canonical_keyfile = std::fs::canonicalize(keyfile)
             .map_err(|_| KeyError::KeyfileNotFound(keyfile.to_path_buf()))?;
 
@@ -323,10 +324,18 @@ impl SecretsKey {
             }
         }
 
-        let bytes = std::fs::read(&canonical_keyfile).map_err(|error| KeyError::Io {
+        let file = std::fs::File::open(&canonical_keyfile).map_err(|error| KeyError::Io {
             operation: "read the secrets keyfile".to_string(),
             detail: error.to_string(),
         })?;
+        let limit = u64::try_from(MAX_KEYFILE_BYTES + 1).expect("keyfile limit fits in u64");
+        let mut bytes = Vec::with_capacity(MAX_KEYFILE_BYTES + 1);
+        file.take(limit)
+            .read_to_end(&mut bytes)
+            .map_err(|error| KeyError::Io {
+                operation: "read the secrets keyfile".to_string(),
+                detail: error.to_string(),
+            })?;
         if bytes.len() > MAX_KEYFILE_BYTES {
             return Err(KeyError::Io {
                 operation: "read the secrets keyfile".to_string(),
@@ -340,7 +349,7 @@ impl SecretsKey {
 
 /// Resolves the master key from injected sources: keyfile wins over inline base64;
 /// neither present is [`KeyError::NotConfigured`].
-pub fn acquire_key(
+fn acquire_key(
     config_dir: &Path,
     keyfile: Option<&Path>,
     inline_base64: Option<&str>,
@@ -384,7 +393,7 @@ pub enum StartupError {
 /// already exists is the emphatic refusal; a missing key with no file yet is
 /// still an error, because integrations cannot function without one and a
 /// "works until you connect an account" failure is worse.
-pub fn open_integration_store_with(
+fn open_integration_store_with(
     config_dir: &Path,
     key: Result<SecretsKey, KeyError>,
 ) -> Result<IntegrationStore, StartupError> {
@@ -523,6 +532,51 @@ mod tests {
         assert!(matches!(
             acquire_key(config.path(), Some(&missing), None),
             Err(KeyError::KeyfileNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn acquire_key_accepts_a_keyfile_at_the_size_limit() {
+        let config = tempfile::tempdir().expect("config dir");
+        let keydir = tempfile::tempdir().expect("key dir");
+        let keyfile = keydir.path().join("secrets.key");
+        let contents = format!("{:width$}", valid_key_base64(), width = 1024);
+        assert_eq!(contents.len(), 1024);
+        write_keyfile(&keyfile, &contents, 0o600);
+
+        let key = acquire_key(config.path(), Some(&keyfile), None).expect("key loads");
+        assert_eq!(key.bytes(), &[42u8; 32]);
+    }
+
+    #[test]
+    fn acquire_key_rejects_an_oversized_keyfile_without_inline_fallback() {
+        let config = tempfile::tempdir().expect("config dir");
+        let keydir = tempfile::tempdir().expect("key dir");
+        let keyfile = keydir.path().join("secrets.key");
+        let contents = format!("{:width$}", valid_key_base64(), width = 1025);
+        assert_eq!(contents.len(), 1025);
+        write_keyfile(&keyfile, &contents, 0o600);
+
+        let error = acquire_key(config.path(), Some(&keyfile), Some(&valid_key_base64()))
+            .expect_err("oversized file must not fall back to the inline key");
+        assert!(matches!(
+            error,
+            KeyError::Io { operation, detail }
+                if operation == "read the secrets keyfile" && detail == "keyfile exceeds 1024 bytes"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn acquire_key_checks_permissions_before_keyfile_size() {
+        let config = tempfile::tempdir().expect("config dir");
+        let keydir = tempfile::tempdir().expect("key dir");
+        let keyfile = keydir.path().join("secrets.key");
+        write_keyfile(&keyfile, &"x".repeat(1025), 0o644);
+
+        assert!(matches!(
+            acquire_key(config.path(), Some(&keyfile), Some(&valid_key_base64())),
+            Err(KeyError::KeyfileWorldReadable { mode: 0o644 })
         ));
     }
 

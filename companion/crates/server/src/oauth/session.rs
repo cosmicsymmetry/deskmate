@@ -5,7 +5,6 @@
 use axum::extract::FromRequestParts;
 use axum::http::StatusCode;
 use axum::http::request::Parts;
-use axum::response::{IntoResponse, Response};
 use base64::prelude::{BASE64_URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Duration, Utc};
 use hmac::{Hmac, Mac};
@@ -119,24 +118,15 @@ fn session_cookie_value(parts: &Parts) -> Option<String> {
     })
 }
 
-/// Bare 401, matching `auth.rs`: no body, no logged credential.
-#[derive(Debug)]
-pub(crate) struct OperatorAuthError;
-
-impl IntoResponse for OperatorAuthError {
-    fn into_response(self) -> Response {
-        StatusCode::UNAUTHORIZED.into_response()
-    }
-}
-
 /// An operator request: authenticated either by the admin bearer token (the
 /// `sid` is then the fixed `"bearer-admin"`) or by a valid session cookie.
+/// Rejections are bare 401s: no body, no logged credential.
 pub(crate) struct OperatorAuthenticated {
     pub(crate) sid: String,
 }
 
 impl FromRequestParts<ServerState> for OperatorAuthenticated {
-    type Rejection = OperatorAuthError;
+    type Rejection = StatusCode;
 
     #[allow(clippy::unused_async_trait_impl)]
     async fn from_request_parts(
@@ -150,17 +140,15 @@ impl FromRequestParts<ServerState> for OperatorAuthenticated {
                 sid: "bearer-admin".to_string(),
             });
         }
-        // The state's own signer, not `integrations().sessions()`. Both are keyed
-        // by the admin token and mint identical values, but the integration
-        // runtime is absent on a deployment that configures no OAuth provider --
-        // and reading the cookie through it meant no cookie was ever accepted
-        // there, which would leave the browser companion permanently logged out.
+        // Browser sessions remain available without an OAuth integration runtime.
+        // The browser companion authenticates with this cookie even on servers
+        // that configure no OAuth provider.
         if let Some(value) = session_cookie_value(parts)
             && let Some(claims) = state.sessions().verify(&value, Utc::now())
         {
             return Ok(Self { sid: claims.sid });
         }
-        Err(OperatorAuthError)
+        Err(StatusCode::UNAUTHORIZED)
     }
 }
 
@@ -199,11 +187,7 @@ mod tests {
             Arc::new(EgressTransport),
             GoogleOAuthConfig::default(),
         ));
-        state.set_integrations(Arc::new(IntegrationRuntime::new(
-            token_manager,
-            SessionSigner::from_admin_token("in-memory-admin-token"),
-            GoogleOAuthConfig::default(),
-        )));
+        state.set_integrations(Arc::new(IntegrationRuntime::new(token_manager)));
         state
     }
 
@@ -299,11 +283,9 @@ mod tests {
     #[tokio::test]
     async fn operator_gate_accepts_a_valid_session_cookie() {
         let state = state_with_integrations();
-        let cookie = state.integrations().expect("integrations").sessions().mint(
-            "cookie-sid",
-            Utc::now(),
-            Duration::hours(1),
-        );
+        let cookie = state
+            .sessions()
+            .mint("cookie-sid", Utc::now(), Duration::hours(1));
         let response = protected_app(state)
             .oneshot(
                 Request::builder()
@@ -392,6 +374,74 @@ mod tests {
                 .verify(value, Utc::now())
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn browser_login_without_integrations_mints_a_thirty_day_operator_cookie() {
+        let state = ServerState::in_memory();
+        let response = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/app/session")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"token":"in-memory-admin-token"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let set_cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .expect("cookie")
+            .to_str()
+            .expect("ASCII cookie");
+        assert!(set_cookie.ends_with("; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000"));
+        let cookie = set_cookie.split(';').next().expect("cookie value");
+        let response = protected_app(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/operator-test")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn login_without_integrations_checks_credentials_before_configuration() {
+        for (token, status, body) in [
+            (
+                "in-memory-admin-token",
+                StatusCode::SERVICE_UNAVAILABLE,
+                "OAuth integrations are not configured on this server",
+            ),
+            ("wrong-admin-token", StatusCode::UNAUTHORIZED, ""),
+        ] {
+            let response = app(ServerState::in_memory())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/session/login")
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), status);
+            assert!(!response.headers().contains_key(header::SET_COOKIE));
+            assert_eq!(
+                to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("body"),
+                body
+            );
+        }
     }
 
     #[tokio::test]

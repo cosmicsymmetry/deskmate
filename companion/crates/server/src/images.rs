@@ -1,9 +1,7 @@
 //! Producer-facing picture ingest and admin image-source lifecycle routes.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
-use app_core::RuntimeError;
 use axum::body::Bytes;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Path, Request, State};
@@ -15,7 +13,7 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use crate::ServerState;
+use crate::{ImageNotificationOrigin, ServerState};
 // These operator routes accept either the browser's session cookie or the raw
 // admin bearer used by scripts. Both carriers represent the same privilege.
 //
@@ -345,17 +343,11 @@ async fn push_image(
         // A failure here is not lost: it surfaces as a card error on the
         // device's own snapshot, which is where a device-delivery problem
         // belongs, and the next full synchronize reconciles the frame anyway.
-        let runtimes = live_runtimes(&state);
-        let notified_source_id = source_id.clone();
-        tokio::task::spawn_blocking(move || {
-            if let Err(error) = notify_runtimes(runtimes, &notified_source_id, digest) {
-                tracing::warn!(
-                    source_id = %notified_source_id,
-                    %error,
-                    "image source stored but the device was not notified; the next                      synchronize will reconcile it"
-                );
-            }
-        });
+        state.notify_image_source_changed(
+            source_id,
+            digest,
+            ImageNotificationOrigin::ExternalProducerPush,
+        );
     }
 
     Ok(StatusCode::OK)
@@ -371,38 +363,6 @@ fn authenticate_producer(
         .image_sources()
         .authenticate(header_token.unwrap_or(path_token))
         .ok_or(ImageRouteError::ProducerUnauthorized)
-}
-
-/// Snapshot live handles without holding the server's link-map lock while a
-/// runtime command waits for its worker reply. Every device gets the update:
-/// image sources are reusable across devices and the runtime itself decides
-/// whether the visible card subscribes to this source.
-pub(crate) fn live_runtimes(state: &ServerState) -> Vec<Arc<app_core::RuntimeHandle>> {
-    state
-        .inner
-        .device_links
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .values()
-        .filter(|link| link.is_live())
-        .filter_map(|link| link.runtime())
-        .collect()
-}
-
-pub(crate) fn notify_runtimes(
-    runtimes: Vec<Arc<app_core::RuntimeHandle>>,
-    source_id: &str,
-    digest: [u8; protocol::ASSET_DIGEST_LEN],
-) -> Result<(), RuntimeError> {
-    let mut first_error = None;
-    for runtime in runtimes {
-        if let Err(error) = runtime.image_source_updated(source_id, digest)
-            && first_error.is_none()
-        {
-            first_error = Some(error);
-        }
-    }
-    first_error.map_or(Ok(()), Err)
 }
 
 fn map_ingest_error(error: ImageIngestError) -> ImageRouteError {

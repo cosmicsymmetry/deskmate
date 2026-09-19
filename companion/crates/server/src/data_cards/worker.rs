@@ -8,11 +8,11 @@ use providers::weather::{WeatherOptions, WeatherProvider, WeatherUnits};
 use tokio::task::JoinHandle;
 
 use super::{DataCardSpec, FaceSpec, Units};
-use crate::ServerState;
 use crate::egress_client::EgressHttpClient;
 use crate::face_render::frame_from_svg;
 use crate::faces::{adapt, rss, token, weather};
 use crate::image_sources::AcceptOutcome;
+use crate::{ImageNotificationOrigin, ServerState};
 
 /// A refresh no faster than this, whatever a spec asks for, for every provider.
 const MIN_REFRESH: Duration = Duration::from_secs(60);
@@ -235,22 +235,10 @@ async fn refresh_loop(state: ServerState, spec: DataCardSpec, refresh: Duration)
         .await;
 
         match accepted {
-            Ok(Ok(AcceptOutcome::Changed { digest })) => {
-                let runtimes = crate::images::live_runtimes(&state);
-                let notified = source_id.clone();
-                tokio::task::spawn_blocking(move || {
-                    if let Err(error) = crate::images::notify_runtimes(runtimes, &notified, digest)
-                    {
-                        tracing::warn!(target: "server::data_cards",
-                            source_id = %notified,
-                            %error,
-                            "the frame is stored but the device was not notified; the next synchronize reconciles it"
-                        );
-                    }
-                });
-            }
-            Ok(Ok(AcceptOutcome::Unchanged)) => {
-                tracing::debug!(target: "server::data_cards", source_id = %source_id, kind, "the face is unchanged");
+            Ok(Ok(outcome)) => {
+                if !notify_image_source_outcome(&state, &source_id, &outcome) {
+                    tracing::debug!(target: "server::data_cards", source_id = %source_id, kind, "the face is unchanged");
+                }
             }
             Ok(Err(error)) => {
                 tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error, "the frame was not stored");
@@ -260,6 +248,24 @@ async fn refresh_loop(state: ServerState, spec: DataCardSpec, refresh: Duration)
                 return;
             }
         }
+    }
+}
+
+fn notify_image_source_outcome(
+    state: &ServerState,
+    source_id: &str,
+    outcome: &AcceptOutcome,
+) -> bool {
+    match outcome {
+        AcceptOutcome::Changed { digest } => {
+            state.notify_image_source_changed(
+                source_id.to_owned(),
+                *digest,
+                ImageNotificationOrigin::ServerRenderedRefresh,
+            );
+            true
+        }
+        AcceptOutcome::Unchanged => false,
     }
 }
 
@@ -419,5 +425,32 @@ mod tests {
             .expect("the blocking refresh runs");
             assert_eq!(result, Err(expected.to_owned()));
         }
+    }
+
+    #[tokio::test]
+    async fn changed_outcomes_notify_devices_and_unchanged_outcomes_do_not() {
+        let state = ServerState::in_memory();
+        let digest = [0x5a; protocol::ASSET_DIGEST_LEN];
+
+        assert!(notify_image_source_outcome(
+            &state,
+            "server-face",
+            &AcceptOutcome::Changed { digest },
+        ));
+        assert_eq!(
+            state.image_notifications_for_test(),
+            [(
+                "server-face".to_owned(),
+                digest,
+                ImageNotificationOrigin::ServerRenderedRefresh,
+            )]
+        );
+
+        assert!(!notify_image_source_outcome(
+            &state,
+            "server-face",
+            &AcceptOutcome::Unchanged,
+        ));
+        assert_eq!(state.image_notifications_for_test().len(), 1);
     }
 }

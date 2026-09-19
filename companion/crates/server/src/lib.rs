@@ -153,6 +153,20 @@ struct StateInner {
     /// needs an owned `Arc<Semaphore>` to hand a `'static` permit to the
     /// socket task that outlives the handler which acquired it.
     link_slots: Arc<tokio::sync::Semaphore>,
+    #[cfg(test)]
+    image_notifications: Mutex<
+        Vec<(
+            String,
+            [u8; protocol::ASSET_DIGEST_LEN],
+            ImageNotificationOrigin,
+        )>,
+    >,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImageNotificationOrigin {
+    ExternalProducerPush,
+    ServerRenderedRefresh,
 }
 
 impl ServerState {
@@ -200,6 +214,8 @@ impl ServerState {
                 link_slots: Arc::new(tokio::sync::Semaphore::new(
                     device_link::MAX_CONCURRENT_LINKS,
                 )),
+                #[cfg(test)]
+                image_notifications: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -310,6 +326,58 @@ impl ServerState {
         let _ = self.inner.integrations.set(runtime);
     }
 
+    /// Snapshot live handles without holding the server's link-map lock while a
+    /// runtime command waits for its worker reply. Every device gets the update:
+    /// image sources are reusable across devices and the runtime itself decides
+    /// whether the visible card subscribes to this source.
+    pub(crate) fn notify_image_source_changed(
+        &self,
+        source_id: String,
+        digest: [u8; protocol::ASSET_DIGEST_LEN],
+        origin: ImageNotificationOrigin,
+    ) {
+        #[cfg(test)]
+        self.inner
+            .image_notifications
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((source_id.clone(), digest, origin));
+        let runtimes: Vec<_> = {
+            let links = self
+                .inner
+                .device_links
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            links
+                .values()
+                .filter(|link| link.is_live())
+                .filter_map(|link| link.runtime())
+                .collect()
+        };
+        tokio::task::spawn_blocking(move || {
+            if let Err(error) = notify_runtimes(runtimes, |runtime| {
+                runtime.image_source_updated(&source_id, digest)
+            }) {
+                warn_image_notification_failure(origin, &source_id, &error);
+            }
+        });
+    }
+
+    #[cfg(test)]
+    fn image_notifications_for_test(
+        &self,
+    ) -> Vec<(
+        String,
+        [u8; protocol::ASSET_DIGEST_LEN],
+        ImageNotificationOrigin,
+    )> {
+        self.inner
+            .image_notifications
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// Atomically reserves the one live ownership slot for `device_id`.
     /// The reservation happens before the 101 response, so two simultaneous
     /// upgrades cannot both believe they won.
@@ -357,6 +425,44 @@ impl ServerState {
             if let Err(error) = runtime.handle.shutdown() {
                 tracing::warn!(%error, "device runtime shutdown failed");
             }
+        }
+    }
+}
+
+fn notify_runtimes<T>(
+    runtimes: impl IntoIterator<Item = T>,
+    mut notify: impl FnMut(T) -> Result<(), app_core::RuntimeError>,
+) -> Result<(), app_core::RuntimeError> {
+    let mut first_error = None;
+    for runtime in runtimes {
+        if let Err(error) = notify(runtime)
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+fn warn_image_notification_failure(
+    origin: ImageNotificationOrigin,
+    source_id: &str,
+    error: &app_core::RuntimeError,
+) {
+    match origin {
+        ImageNotificationOrigin::ExternalProducerPush => {
+            tracing::warn!(target: "server::images",
+                source_id = %source_id,
+                %error,
+                "image source stored but the device was not notified; the next                      synchronize will reconcile it"
+            );
+        }
+        ImageNotificationOrigin::ServerRenderedRefresh => {
+            tracing::warn!(target: "server::data_cards",
+                source_id = %source_id,
+                %error,
+                "the frame is stored but the device was not notified; the next synchronize reconciles it"
+            );
         }
     }
 }
@@ -524,7 +630,105 @@ async fn handle_middleware_error(error: axum::BoxError) -> StatusCode {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::{Context, SubscriberExt as _};
+    use tracing_subscriber::{Layer, Registry};
+
     use super::*;
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct CapturedEvent {
+        target: String,
+        level: String,
+        fields: BTreeMap<String, String>,
+    }
+
+    #[derive(Clone, Default)]
+    struct EventCollector(Arc<Mutex<Vec<CapturedEvent>>>);
+
+    #[derive(Default)]
+    struct FieldVisitor {
+        fields: BTreeMap<String, String>,
+    }
+
+    impl Visit for FieldVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .insert(field.name().to_owned(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.fields
+                .insert(field.name().to_owned(), value.to_owned());
+        }
+    }
+
+    impl Layer<Registry> for EventCollector {
+        fn on_event(&self, event: &tracing::Event<'_>, _context: Context<'_, Registry>) {
+            let mut visitor = FieldVisitor::default();
+            event.record(&mut visitor);
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(CapturedEvent {
+                    target: event.metadata().target().to_owned(),
+                    level: event.metadata().level().to_string(),
+                    fields: visitor.fields,
+                });
+        }
+    }
+
+    #[test]
+    fn notification_fanout_visits_later_runtimes_after_an_error() {
+        let mut visited = Vec::new();
+
+        let result = notify_runtimes([0, 1, 2], |runtime| {
+            visited.push(runtime);
+            match runtime {
+                0 => Err(app_core::RuntimeError::WorkerStopped),
+                1 => Err(app_core::RuntimeError::ResponseTimeout),
+                _ => Ok(()),
+            }
+        });
+
+        assert_eq!(visited, [0, 1, 2]);
+        assert_eq!(result, Err(app_core::RuntimeError::WorkerStopped));
+    }
+
+    #[test]
+    fn external_notification_warning_keeps_its_operator_facing_contract() {
+        let events = EventCollector::default();
+        let captured = Arc::clone(&events.0);
+        let subscriber = tracing_subscriber::registry().with(events);
+
+        tracing::subscriber::with_default(subscriber, || {
+            warn_image_notification_failure(
+                ImageNotificationOrigin::ExternalProducerPush,
+                "source-1",
+                &app_core::RuntimeError::WorkerStopped,
+            );
+        });
+
+        assert_eq!(
+            *captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            [CapturedEvent {
+                target: "server::images".into(),
+                level: "WARN".into(),
+                fields: BTreeMap::from([
+                    ("error".into(), "runtime worker has stopped".into()),
+                    (
+                        "message".into(),
+                        "image source stored but the device was not notified; the next                      synchronize will reconcile it".into(),
+                    ),
+                    ("source_id".into(), "source-1".into()),
+                ]),
+            }]
+        );
+    }
 
     #[test]
     fn verify_admin_token_accepts_the_real_token() {

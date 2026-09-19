@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use app_core::{ConfigOrigin, ConfigStore};
+use app_core::{AppConfig, ConfigOrigin, ConfigStore, SaveReceipt, StoreError};
 use serde::Serialize;
 
 use crate::registry::DeviceId;
@@ -41,6 +41,13 @@ pub(crate) enum ConfigFallbackReason {
 }
 
 impl DeviceConfig {
+    pub fn compile_and_save(&self, config: &AppConfig) -> Result<SaveReceipt, StoreError> {
+        config.compile(1).map_err(|error| StoreError::Validation {
+            issues: error.issues,
+        })?;
+        self.store.save(config)
+    }
+
     pub fn record_load(&self, origin: ConfigOrigin, fallback_reason: Option<ConfigFallbackReason>) {
         *self
             .status

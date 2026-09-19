@@ -8,18 +8,16 @@
 //! `ApiError` union, plus the corresponding status. The web client switches on
 //! the same category that non-browser callers can infer from the status.
 //!
-//! Every route is behind [`OperatorAuthenticated`]. That is the real gate. The
-//! Caddy `basic_auth` in front of these paths is the edge gate the owner asked
-//! for, but it cannot be the only one -- the server binds a LAN address because
-//! Caddy is a bridge-network container and cannot reach loopback, so anything
-//! trusting only the edge would be open to the LAN.
+//! Protected data routes use [`OperatorAuthenticated`]. `POST /v1/app/session`
+//! trades the admin token for that session cookie, while `DELETE /v1/app/session`
+//! merely expires the caller's cookie. No edge gate currently exists.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use app_core::{
     AppConfig, AppSnapshot, CardField, CardFieldValue, CardSettings, ConnectionState,
-    DeviceSnapshot, DisplayOrientation, PomodoroAction, RuntimeError, RuntimeHandle, SaveReceipt,
+    DeviceSnapshot, PomodoroAction, RuntimeError, RuntimeHandle, SaveReceipt, StoreError,
     ValidationIssue,
 };
 use axum::Json;
@@ -356,8 +354,8 @@ fn known_device(state: &ServerState, device_id: &str) -> Result<(), AppApiError>
 
 /// An SSE snapshot stream using the `app-state` event consumed by the web companion.
 ///
-/// Sends only on change: an idle panel produces SSE keep-alive comments and no
-/// payloads, so an open tab costs nothing to hold.
+/// Sends on meaningful state changes and with a 30-second payload heartbeat;
+/// between those, an idle panel produces only SSE keep-alive comments.
 async fn events(
     State(state): State<ServerState>,
     _operator: OperatorAuthenticated,
@@ -532,12 +530,13 @@ fn describe_capabilities(bits: u64) -> String {
 
 /// Saves the configuration and applies it to the board if it is linked.
 ///
-/// The body is `admin::put_config`'s, reached through a different gate: that
-/// route authenticates a machine holding the admin bearer, this one an operator
-/// holding a session. Both must serialize against a socket's load/start
-/// transition, which is what `device_config.update` is for -- without it a save
-/// can land after the socket has loaded but before its runtime is visible, and
-/// the new configuration sits persisted-but-unapplied until the next reconnect.
+/// Compilation and atomic persistence use the same `DeviceConfig` primitive as
+/// `admin::put_config`; this route then performs its browser-only source
+/// reconciliation before applying the config. Both routes must serialize
+/// against a socket's load/start transition, which is what
+/// `device_config.update` is for -- without it a save can land after the socket
+/// has loaded but before its runtime is visible, and the new configuration sits
+/// persisted-but-unapplied until the next reconnect.
 async fn save_config(
     State(state): State<ServerState>,
     _operator: OperatorAuthenticated,
@@ -552,20 +551,18 @@ async fn save_config(
 
     let saved = config.clone();
     let store = Arc::clone(&device_config);
-    let save = tokio::task::spawn_blocking(move || {
-        saved.compile(1).map_err(|error| AppApiError::Validation {
-            message: "the configuration is not valid".into(),
-            issues: error.issues,
-        })?;
-        store
-            .store
-            .save(&saved)
-            .map_err(|error| AppApiError::Persistence {
+    let save = tokio::task::spawn_blocking(move || store.compile_and_save(&saved))
+        .await
+        .map_err(|_| worker_failed())?
+        .map_err(|error| match error {
+            StoreError::Validation { issues } => AppApiError::Validation {
+                message: "the configuration is not valid".into(),
+                issues,
+            },
+            error => AppApiError::Persistence {
                 message: error.to_string(),
-            })
-    })
-    .await
-    .map_err(|_| worker_failed())??;
+            },
+        })?;
 
     reconcile_image_sources(&state, &config).await?;
 
@@ -747,12 +744,12 @@ async fn preview(
         .card_data
         .iter()
         .find(|data| data.card_id == card_id);
-    let (fields, sample) = match data {
-        Some(data) if !data.fields.is_empty() => (data.fields.clone(), false),
-        _ => (Vec::new(), true),
+    let (fields, sample): (&[CardField], bool) = match data {
+        Some(data) if !data.fields.is_empty() => (data.fields.as_slice(), false),
+        _ => (&[], true),
     };
 
-    let scene = app_core::preview_card_scene(&snapshot.config, &card_id, &fields)
+    let scene = app_core::preview_card_scene(&snapshot.config, &card_id, fields)
         .map_err(AppApiError::internal)?;
     let now = Utc::now();
     let utc_offset_minutes =
@@ -764,8 +761,9 @@ async fn preview(
         assets: Vec::new(),
         utc_offset_minutes,
         now_unix_seconds: now.timestamp(),
-        timer: preview_timer(&fields),
-        orientation: preview_orientation(snapshot.config.preferences.orientation),
+        timer: preview_timer(fields),
+        // Browser previews show the person's upright view at either physical mounting.
+        orientation: lvgl_sim::SimOrientation::Landscape,
     };
     let png = tokio::task::spawn_blocking(move || crate::preview_handle().render(request))
         .await
@@ -785,26 +783,10 @@ async fn preview(
     }))
 }
 
-/// The orientation the preview renders at.
-///
-/// Deliberately NOT the configured mounting. `LandscapeFlipped` is the 180 degree
-/// mount, and the simulator reproduces it by reversing the finished frame exactly
-/// as the firmware's `LV_DISPLAY_ROTATION_270` does. On the panel that flip is
-/// cancelled by the physical mounting, so a person always sees an upright face;
-/// rendered in a browser that is not itself upside down, it is just upside down.
-/// The preview's job is to show what the person will see.
-fn preview_orientation(configured: DisplayOrientation) -> lvgl_sim::SimOrientation {
-    match configured {
-        DisplayOrientation::Landscape | DisplayOrientation::LandscapeFlipped => {
-            lvgl_sim::SimOrientation::Landscape
-        }
-    }
-}
-
-/// The timer a pomodoro scene's `timer.*` bindings resolve against. `None` for a
-/// card that pushes no timer fields. The three keys are the ones
-/// `firmware/main/link/protocol_task.c` reads by name, so the preview and the
-/// panel derive the timer from the same inputs.
+/// Builds the simulator's `SceneTimer` from the host-side `CardField` inputs a
+/// pomodoro preview has available. The panel receives the corresponding typed
+/// `PushTimer` state rather than reading these strings. `None` for a card that
+/// supplies no timer fields.
 fn preview_timer(fields: &[CardField]) -> Option<lvgl_sim::scene::SceneTimer> {
     let total = preview_field_integer(fields, "duration_seconds")?;
     let remaining = preview_field_integer(fields, "remaining_seconds").unwrap_or(total);

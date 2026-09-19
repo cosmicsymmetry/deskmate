@@ -57,11 +57,9 @@ async fn asset(State(root): State<WebRoot>, uri: Uri) -> Response {
 /// Resolves a request path inside the web root, refusing anything that would
 /// escape it.
 ///
-/// The check is structural rather than a string scan: the path is rebuilt from
-/// its components and any `..`, root or prefix component makes it `None`. A
-/// percent-encoded traversal cannot survive that, because axum has already
-/// decoded the path by the time it is seen here -- which is exactly why scanning
-/// the raw string for `".."` would not have been enough.
+/// The check is structural rather than a string scan: decoded parent components
+/// are rejected when the path is rebuilt, while `http::Uri::path` preserves
+/// percent encodings, so encoded separators remain literal path-component bytes.
 fn safe_join(root: &Path, request_path: &str) -> Option<PathBuf> {
     let mut resolved = root.to_path_buf();
     for component in Path::new(request_path.trim_start_matches('/')).components() {
@@ -142,8 +140,8 @@ mod tests {
 
     #[test]
     fn an_absolute_looking_segment_cannot_reset_the_root() {
-        // axum hands over an already-decoded path, so this is the shape a
-        // percent-encoded attempt arrives in.
+        // Repeated literal separators are normalized by Path components; they
+        // cannot turn a relative join into a filesystem-rooted path.
         assert!(safe_join(Path::new("/srv/web"), "//etc/passwd").is_some());
         assert_eq!(
             safe_join(Path::new("/srv/web"), "//etc/passwd").as_deref(),

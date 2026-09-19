@@ -41,37 +41,36 @@ here and gets its own spec if wanted.
 ## 3. Architecture
 
 ```
-Browser (Chrome)                    Caddy (docker-vm:80)        deskmate-server (:8443)
-  SPA  ──fetch/SSE──►  /            ──basic_auth──►             static  ← DESKMATE_WEB_DIR
-                       /assets/*    ──basic_auth──►
-                       /v1/app/*    ──basic_auth──►             app_api  ← operator cookie
-                       /v1/manage/* ──basic_auth──►             manage
-  board ──wss────────► /v1/device/* ──NO edge auth──►           device bearer
-  producer ─POST─────► /v1/images/* ──NO edge auth──►           producer bearer
-  OTA  ──GET─────────► /v1/firmware/* ─NO edge auth──►          unauthenticated by design
+Browser (Chrome)              Cloudflare → Caddy               deskmate-server (:8443)
+  SPA  ──fetch/SSE──►  /             ──no edge auth──►          static  ← DESKMATE_WEB_DIR
+                       /assets/*     ──no edge auth──►
+                       /v1/app/*     ──no edge auth──►          app_api  ← operator cookie
+                       /v1/manage/*  ──no edge auth──►          manage   ← operator cookie
+  board ──wss────────► /v1/device/*  ──no edge auth──►          device bearer
+  producer ─POST─────► /v1/images/*  ──no edge auth──►          producer bearer
+  OTA  ──GET─────────► /v1/firmware/* ─no edge auth──►          unauthenticated by design
 ```
 
-The split by path is not cosmetic. `~/homelab/CLAUDE.md` records that this host runs
-**deliberately without edge auth** because the board and the producers send their own
-`Authorization` header, which `basic_auth` would consume. Gating the whole host breaks
-the device link. Gating only the browser-facing paths is what makes the owner's
-requested Caddy auth compatible with the existing wire.
+The owner removed the short-lived Caddy `basic_auth` gate on 2026-09-18: the app's
+operator session is the only browser gate, and the login form and JS bundle are public.
+The split by path still matters if an edge gate is ever restored. The board and producers
+send their own `Authorization` header, which `basic_auth` would consume, so a host-wide
+gate breaks the device link. Any future edge gate must cover only `/`, `/assets/*`,
+`/v1/app/*`, and `/v1/manage/*`; device, image, and firmware authentication stays as
+shown above.
 
-### 3.1 Two gates, and why they do not contend
+### 3.1 The server gate and any future edge gate
 
-`~/homelab/CLAUDE.md` warns (books-webdav) that two auth gates collide when both want the
-same header. These two do not: **Caddy uses `Authorization: Basic`, the server uses a
-`Cookie`.** They are independent, and both are needed:
+The current deployment has no Caddy authentication gate. Protected browser data routes
+use the server's `OperatorAuthenticated` session because the server binds
+`192.168.8.20:8443` and is reachable on the LAN around Caddy (`~/homelab/CLAUDE.md:110`
+-- it cannot bind loopback, Caddy is a bridge container). Trusting a Caddy-set header
+instead would be trusting a header any LAN client can set.
 
-- Caddy's gate is the edge gate the owner asked for, and is what a request arriving
-  through Cloudflare must pass.
-- The server's `OperatorAuthenticated` session is the real gate, because the server
-  binds `192.168.8.20:8443` and is therefore reachable on the LAN *around* Caddy
-  (`~/homelab/CLAUDE.md:110` -- it cannot bind loopback, Caddy is a bridge container).
-  Trusting a Caddy-set header instead would be trusting a header any LAN client can set.
-
-`SESSION_TTL` moves from 12 h to 30 days so the app login is not a daily ritual; the
-basic-auth credential is remembered by the browser per origin.
+If path-scoped Caddy auth returns, it can coexist with the server gate because Caddy
+would use `Authorization: Basic` while the server uses a cookie. It must not expand to
+the host-wide paths named above. `SESSION_TTL` is 30 days so the app login is not a
+daily ritual.
 
 ### 3.2 The snapshot, online and offline
 
@@ -92,8 +91,9 @@ scenario the mock harness has had all along.
 
 ## 4. Server: the `app_api` module
 
-`crates/server/src/app_api/`, mounted under `/v1/app`, keeps every route behind
-`OperatorAuthenticated`.
+`crates/server/src/app_api/`, mounted under `/v1/app`, keeps protected data routes behind
+`OperatorAuthenticated`. `POST /v1/app/session` trades the admin token for the cookie,
+and `DELETE /v1/app/session` only expires the caller's cookie.
 
 | Route | SPA operation | Notes |
 |---|---|---|
@@ -106,8 +106,9 @@ scenario the mock harness has had all along.
 | `POST /v1/app/{id}/pomodoro` | Control pomodoro | live runtime only |
 
 Image sources and faces are **not** duplicated here: `/v1/images` and `/v1/faces` already
-exist and already carry the shapes the app wants. They keep admin/producer bearer auth;
-the SPA calls them with the admin token it holds after login.
+exist and already carry the shapes the app wants. Browser lifecycle calls use the same
+operator session; producer frame ingestion keeps its producer bearer. The SPA does not
+retain the admin token after exchanging it for the cookie.
 
 Provisioning and factory reset remain cable operations handled by `crates/deskmate-cli`;
 the SPA has no local-ownership or autostart controls. Resuming delivery is a config write
@@ -176,10 +177,9 @@ milestone.
 3. `DESKMATE_WEB_DIR=/var/lib/deskmate/web` in `/etc/deskmate/server.env`.
 4. Rebuild and install the server binary by the existing runbook (rsync to
    `~/deskmate-build`, throwaway `rust:1.98-bookworm`, `sudo install`, restart).
-5. Caddy: path-scoped `basic_auth` per §3, then
-   `sudo docker compose up -d --force-recreate caddy` -- a plain reload reads the stale
-   inode (`~/homelab/CLAUDE.md:288`).
+5. Leave Caddy without an authentication gate, per the owner's 2026-09-18 decision. If
+   that decision changes, the prerequisite is the path-scoped design in §3; never add a
+   host-wide `basic_auth` block.
 
 Order matters once: the binary must be installed before `DESKMATE_WEB_DIR` means
-anything, and the Caddy change must not land before the server serves the UI paths, or
-the owner gets an auth prompt in front of a 404.
+anything. No Caddy change is part of the current deploy.

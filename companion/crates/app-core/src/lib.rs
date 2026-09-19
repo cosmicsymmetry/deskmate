@@ -1,4 +1,3 @@
-pub mod admin;
 pub mod asset_sync;
 pub mod config;
 mod interrupts;
@@ -12,7 +11,6 @@ pub mod secure_file;
 pub mod state;
 pub mod store;
 
-pub use admin::AdminConfigErrorBody;
 pub use asset_sync::DesiredAsset;
 pub use config::{
     AlertHold, AppConfig, AppPreferences, AssetKind, AssetSettings, AssetSource,

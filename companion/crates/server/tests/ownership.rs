@@ -1127,6 +1127,76 @@ async fn invalid_config_is_typed_and_does_not_replace_last_good() {
 }
 
 #[tokio::test]
+async fn config_without_a_wire_lowering_is_typed_and_does_not_replace_last_good() {
+    let (host, identity, admin_token) = spawn().await;
+    let client = reqwest::Client::new();
+    let valid = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/one-clock-card.json"
+    ))
+    .expect("fixture");
+    let saved = client
+        .put(format!(
+            "http://{host}/v1/devices/{}/config",
+            identity.device_id
+        ))
+        .bearer_auth(&admin_token)
+        .header("Content-Type", "application/json")
+        .body(valid.clone())
+        .send()
+        .await
+        .expect("valid write");
+    assert_eq!(saved.status(), 200);
+
+    let mut unsupported: serde_json::Value = serde_json::from_str(&valid).unwrap();
+    unsupported["cards"][0]["id"] = "not-last-good".into();
+    unsupported["cards"][0]["tap_action"] = serde_json::json!({
+        "kind": "open-url",
+        "url": "https://example.test/action",
+    });
+    let parsed: app_core::AppConfig =
+        serde_json::from_value(unsupported.clone()).expect("deserializable configuration");
+    parsed
+        .validate()
+        .expect("host action passes ordinary validation");
+
+    let rejected = client
+        .put(format!(
+            "http://{host}/v1/devices/{}/config",
+            identity.device_id
+        ))
+        .bearer_auth(&admin_token)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_vec(&unsupported).unwrap())
+        .send()
+        .await
+        .expect("compile-only invalid write");
+    assert_eq!(rejected.status(), 422);
+    let error: serde_json::Value =
+        serde_json::from_str(&rejected.text().await.expect("typed validation body"))
+            .expect("typed validation JSON");
+    assert_eq!(error["kind"], "invalid-config");
+    assert!(error["issues"].as_array().is_some_and(|issues| {
+        issues
+            .iter()
+            .any(|issue| issue["path"] == "cards[0]" && issue["code"] == "requires-capability")
+    }));
+
+    let mut socket = connect_device(&host, &identity.token)
+        .await
+        .expect("connect after compile-only invalid write");
+    let applied = support::drive_until_config(&mut socket, "clock-1").await;
+    assert_eq!(applied.cards[0].card_id, "clock-1");
+    assert!(
+        applied
+            .cards
+            .iter()
+            .all(|card| card.card_id != "not-last-good"),
+        "the compile-only invalid config displaced the genuine last-good config"
+    );
+}
+
+#[tokio::test]
 async fn config_request_body_is_bounded_before_json_parsing() {
     // Catches deletion of the route-level body limit; ConfigStore's on-disk
     // limit is too late to stop Axum buffering an attacker-sized request.

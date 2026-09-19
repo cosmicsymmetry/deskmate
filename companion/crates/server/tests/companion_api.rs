@@ -243,6 +243,48 @@ async fn an_invalid_draft_is_refused_with_the_issues_that_explain_it() {
 }
 
 #[tokio::test]
+async fn a_draft_without_a_wire_lowering_is_refused_and_remains_unsaved() {
+    let (server, _state) = spawn().await;
+    let client = Client::new();
+    let device = mint_device(&client, &server).await;
+    let before = snapshot(&client, &server, &device.device_id).await;
+    let mut config = before["config"].clone();
+    config["cards"][0]["tap_action"] = serde_json::json!({
+        "kind": "open-url",
+        "url": "https://example.test/action",
+    });
+    let parsed: app_core::AppConfig =
+        serde_json::from_value(config.clone()).expect("deserializable configuration");
+    parsed
+        .validate()
+        .expect("host action passes ordinary validation");
+
+    let response = client
+        .put(format!(
+            "{}/v1/app/{}/config",
+            server.base_url, device.device_id
+        ))
+        .bearer_auth(ADMIN_TOKEN)
+        .header("content-type", "application/json")
+        .body(serde_json::json!({ "json": config.to_string() }).to_string())
+        .send()
+        .await
+        .expect("save config");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = json_body(response).await;
+    assert_eq!(body["category"], "validation");
+    assert!(body["issues"].as_array().is_some_and(|issues| {
+        issues
+            .iter()
+            .any(|issue| issue["path"] == "cards[0]" && issue["code"] == "requires-capability")
+    }));
+
+    let after = snapshot(&client, &server, &device.device_id).await;
+    assert_eq!(after["has_saved_config"], false);
+    assert_eq!(after["config"], before["config"]);
+}
+
+#[tokio::test]
 async fn a_draft_over_the_size_limit_is_refused_before_it_is_parsed() {
     let (server, _state) = spawn().await;
     let client = Client::new();
@@ -391,8 +433,8 @@ async fn a_traversal_out_of_the_web_root_is_refused_rather_than_served() {
 
 #[tokio::test]
 async fn the_device_and_firmware_surfaces_are_untouched_by_the_companion_routes() {
-    // The board and the OTA path must keep their own auth, because the edge gate
-    // that fronts the UI deliberately does not cover them.
+    // Browser sessions must not change the board's bearer gate or the firmware
+    // download's deliberately unauthenticated contract. No edge gate exists.
     let state = ServerState::in_memory();
     let server = spawn_with(state, None).await;
     let client = Client::new();
@@ -549,6 +591,67 @@ async fn the_device_list_says_which_identities_have_ever_been_configured() {
     assert!(
         row(&second.device_id)["configured_at"].as_i64().is_some(),
         "a written configuration must carry when it was written"
+    );
+}
+
+#[tokio::test]
+async fn preview_stays_upright_for_both_physical_mountings() {
+    let (server, _state) = spawn().await;
+    let client = Client::new();
+    let device = mint_device(&client, &server).await;
+    let fixture = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/one-pomodoro-card.json"
+    ))
+    .expect("fixture");
+    let mut config: serde_json::Value = serde_json::from_str(&fixture).expect("fixture JSON");
+    let mut previews = Vec::new();
+
+    for orientation in ["landscape", "landscape-flipped"] {
+        config["preferences"]["orientation"] = serde_json::json!(orientation);
+        let saved = client
+            .put(format!(
+                "{}/v1/app/{}/config",
+                server.base_url, device.device_id
+            ))
+            .bearer_auth(ADMIN_TOKEN)
+            .header("content-type", "application/json")
+            .body(serde_json::json!({ "json": config.to_string() }).to_string())
+            .send()
+            .await
+            .expect("save config");
+        assert_eq!(saved.status(), StatusCode::OK);
+
+        let stored = snapshot(&client, &server, &device.device_id).await;
+        assert_eq!(stored["config"]["preferences"]["orientation"], orientation);
+
+        let response = client
+            .post(format!(
+                "{}/v1/app/{}/preview",
+                server.base_url, device.device_id
+            ))
+            .bearer_auth(ADMIN_TOKEN)
+            .header("content-type", "application/json")
+            .body(serde_json::json!({ "card_id": "pomodoro" }).to_string())
+            .send()
+            .await
+            .expect("preview");
+        assert_eq!(response.status(), StatusCode::OK);
+        let frame = json_body(response).await;
+        assert!(
+            frame["png_base64"]
+                .as_str()
+                .is_some_and(|png| !png.is_empty()),
+            "preview returned no PNG: {frame}"
+        );
+        assert_eq!(frame["sample"], true);
+        assert!(frame["state"].is_null());
+        previews.push(frame["png_base64"].clone());
+    }
+
+    assert_eq!(
+        previews[0], previews[1],
+        "physical mounting changed the person's upright preview"
     );
 }
 

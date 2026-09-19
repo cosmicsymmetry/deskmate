@@ -71,9 +71,9 @@ fn contract_card_kind(card: &CardSettings) -> &'static str {
 #[allow(clippy::too_many_lines)]
 fn contract_fixtures() -> ContractFixtures {
     let issue = ValidationIssue {
-        path: "active_playlist_id".into(),
+        path: "cards[2].source_id".into(),
         code: ValidationCode::MissingReference,
-        message: "active playlist does not exist".into(),
+        message: "image source \"limits\" does not exist".into(),
     };
     let cards = vec![
         CardSettings::Clock {

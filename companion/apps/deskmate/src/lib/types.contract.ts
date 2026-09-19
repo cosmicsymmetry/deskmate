@@ -170,9 +170,9 @@ export const apiContractFixtures = {
       "message": "Your saved settings failed validation and were not applied",
       "issues": [
         {
-          "path": "active_playlist_id",
+          "path": "cards[2].source_id",
           "code": "missing-reference",
-          "message": "active playlist does not exist"
+          "message": "image source \"limits\" does not exist"
         }
       ]
     },
@@ -520,9 +520,9 @@ export const apiContractFixtures = {
       "message": "Your saved settings failed validation and were not applied",
       "issues": [
         {
-          "path": "active_playlist_id",
+          "path": "cards[2].source_id",
           "code": "missing-reference",
-          "message": "active playlist does not exist"
+          "message": "image source \"limits\" does not exist"
         }
       ]
     }
@@ -562,9 +562,9 @@ export const apiContractFixtures = {
       "message": "validation",
       "issues": [
         {
-          "path": "active_playlist_id",
+          "path": "cards[2].source_id",
           "code": "missing-reference",
-          "message": "active playlist does not exist"
+          "message": "image source \"limits\" does not exist"
         }
       ]
     },
@@ -593,9 +593,9 @@ export const apiContractFixtures = {
     "valid": false,
     "issues": [
       {
-        "path": "active_playlist_id",
+        "path": "cards[2].source_id",
         "code": "missing-reference",
-        "message": "active playlist does not exist"
+        "message": "image source \"limits\" does not exist"
       }
     ]
   },

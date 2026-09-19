@@ -1,9 +1,9 @@
-//! Admin-token-protected provisioning, configuration, and status routes.
+//! Admin-token-protected device-identity minting, configuration, diagnostics,
+//! and status routes.
 
 use app_core::{
-    AdminConfigErrorBody, AppConfig, AppSnapshot, BakedFontMetrics, ClockCard,
-    MAX_CONFIG_FILE_BYTES, RuntimeError, SaveReceipt, StoreError, ValidationIssue,
-    build_digital_clock_scene,
+    AppConfig, AppSnapshot, BakedFontMetrics, ClockCard, MAX_CONFIG_FILE_BYTES, RuntimeError,
+    SaveReceipt, StoreError, ValidationIssue, build_digital_clock_scene,
 };
 use axum::Json;
 use axum::Router;
@@ -73,18 +73,10 @@ async fn put_config(
 
     let saved_config = config.clone();
     let store = std::sync::Arc::clone(&device_config);
-    let receipt = tokio::task::spawn_blocking(move || {
-        saved_config
-            .compile(1)
-            .map_err(|error| SaveConfigError::Invalid(error.issues))?;
-        store
-            .store
-            .save(&saved_config)
-            .map_err(SaveConfigError::Store)
-    })
-    .await
-    .map_err(|_| AdminError::WorkerFailed)?
-    .map_err(AdminError::from)?;
+    let receipt = tokio::task::spawn_blocking(move || store.compile_and_save(&saved_config))
+        .await
+        .map_err(|_| AdminError::WorkerFailed)?
+        .map_err(AdminError::from)?;
 
     if let Some(runtime) = state
         .device_link(&device_id)
@@ -261,47 +253,27 @@ fn observed_age_seconds(last_seen_unix_ms: Option<u64>, now_unix_ms: u64) -> Opt
     last_seen_unix_ms.map(|last_seen| now_unix_ms.saturating_sub(last_seen) / 1000)
 }
 
-fn insert_last_ota_error(
-    snapshot: &mut serde_json::Value,
-    last_ota_error: Option<&str>,
-) -> Result<(), &'static str> {
-    let device = snapshot
-        .get_mut("device")
-        .and_then(serde_json::Value::as_object_mut)
-        .ok_or("snapshot device is not an object")?;
-    device.insert(
-        "last_ota_error".to_owned(),
-        serde_json::to_value(last_ota_error).map_err(|_| "last OTA error is not serializable")?,
-    );
-    Ok(())
-}
-
-fn insert_observed_age_seconds(
-    snapshot: &mut serde_json::Value,
-    observed_age_seconds: Option<u64>,
-) -> Result<(), &'static str> {
-    let device = snapshot
-        .get_mut("device")
-        .and_then(serde_json::Value::as_object_mut)
-        .ok_or("snapshot device is not an object")?;
-    device.insert(
-        "observed_age_seconds".to_owned(),
-        serde_json::to_value(observed_age_seconds)
-            .map_err(|_| "observed age is not serializable")?,
-    );
-    Ok(())
-}
-
 impl Serialize for AdminSnapshot {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         let mut value = serde_json::to_value(&self.snapshot).map_err(serde::ser::Error::custom)?;
-        insert_last_ota_error(&mut value, self.last_ota_error.as_deref())
-            .map_err(serde::ser::Error::custom)?;
-        insert_observed_age_seconds(&mut value, self.observed_age_seconds)
-            .map_err(serde::ser::Error::custom)?;
+        let device = value
+            .get_mut("device")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| serde::ser::Error::custom("snapshot device is not an object"))?;
+        device.insert(
+            "last_ota_error".to_owned(),
+            self.last_ota_error
+                .as_deref()
+                .map_or(serde_json::Value::Null, Into::into),
+        );
+        device.insert(
+            "observed_age_seconds".to_owned(),
+            self.observed_age_seconds
+                .map_or(serde_json::Value::Null, Into::into),
+        );
         value.serialize(serializer)
     }
 }
@@ -313,10 +285,7 @@ mod tests {
     use axum::response::Response;
     use tower::ServiceExt as _;
 
-    use super::{
-        PushSceneRequest, build_operator_scene, insert_last_ota_error, insert_observed_age_seconds,
-        observed_age_seconds,
-    };
+    use super::{AdminSnapshot, ErrorBody, PushSceneRequest, build_operator_scene};
 
     fn request(value: serde_json::Value) -> PushSceneRequest {
         serde_json::from_value(value).expect("valid scene request fixture")
@@ -346,34 +315,62 @@ mod tests {
     }
 
     #[test]
-    fn observed_age_is_inserted_beside_the_values_it_qualifies() {
-        let mut snapshot = serde_json::json!({"device": {"uptime_ms": 66761}});
-        insert_observed_age_seconds(&mut snapshot, Some(412)).unwrap();
-        assert_eq!(snapshot["device"]["observed_age_seconds"], 412);
-        assert_eq!(snapshot["device"]["uptime_ms"], 66761);
+    fn admin_snapshot_serialization_enriches_the_real_snapshot_device() {
+        let config = app_core::AppConfig::default();
+        let snapshot = AdminSnapshot {
+            snapshot: app_core::initial_snapshot(&config, app_core::RuntimeDiagnostics::default()),
+            last_ota_error: Some("download: ESP_ERR_NO_MEM".into()),
+            observed_age_seconds: Some(412),
+        };
+        let value = serde_json::to_value(snapshot).expect("serialize admin snapshot");
+
+        assert_eq!(
+            value["device"]["last_ota_error"],
+            "download: ESP_ERR_NO_MEM"
+        );
+        assert_eq!(value["device"]["observed_age_seconds"], 412);
+        assert_eq!(
+            value["device"]["connection"]["kind"], "connecting",
+            "an existing device member was lost during enrichment"
+        );
     }
 
     #[test]
-    fn a_device_never_heard_from_has_no_age_rather_than_a_zero_one() {
-        assert_eq!(observed_age_seconds(None, 1_000_000), None);
-        let mut snapshot = serde_json::json!({"device": {}});
-        insert_observed_age_seconds(&mut snapshot, None).unwrap();
-        assert!(snapshot["device"]["observed_age_seconds"].is_null());
+    fn admin_snapshot_serialization_keeps_absent_enrichment_as_null() {
+        let config = app_core::AppConfig::default();
+        let snapshot = AdminSnapshot {
+            snapshot: app_core::initial_snapshot(&config, app_core::RuntimeDiagnostics::default()),
+            last_ota_error: None,
+            observed_age_seconds: None,
+        };
+        let value = serde_json::to_value(snapshot).expect("serialize admin snapshot");
+        let device = value["device"].as_object().expect("snapshot device object");
+
+        assert_eq!(device.get("last_ota_error"), Some(&serde_json::Value::Null));
+        assert_eq!(
+            device.get("observed_age_seconds"),
+            Some(&serde_json::Value::Null)
+        );
     }
 
     #[test]
     fn observed_age_saturates_rather_than_wrapping_on_a_backwards_clock() {
-        assert_eq!(observed_age_seconds(Some(2_000), 1_000), Some(0));
-        assert_eq!(observed_age_seconds(Some(1_000), 413_000), Some(412));
+        assert_eq!(super::observed_age_seconds(None, 1_000_000), None);
+        assert_eq!(super::observed_age_seconds(Some(2_000), 1_000), Some(0));
+        assert_eq!(super::observed_age_seconds(Some(1_000), 413_000), Some(412));
     }
 
     #[test]
-    fn ota_error_is_inserted_inside_snapshot_device() {
-        let mut snapshot = serde_json::json!({"device": {"ota_state": "failed"}});
-        insert_last_ota_error(&mut snapshot, Some("download: ESP_ERR_NO_MEM")).unwrap();
+    fn invalid_config_body_keeps_the_exact_http_json() {
+        let issues = [app_core::ValidationIssue {
+            path: "cards[0].title".into(),
+            code: app_core::ValidationCode::Empty,
+            message: "Choose a title.".into(),
+        }];
+        let json = serde_json::to_string(&ErrorBody::InvalidConfig { issues: &issues }).unwrap();
         assert_eq!(
-            snapshot["device"]["last_ota_error"],
-            "download: ESP_ERR_NO_MEM"
+            json,
+            r#"{"kind":"invalid-config","issues":[{"path":"cards[0].title","code":"empty","message":"Choose a title."}]}"#
         );
     }
 
@@ -458,11 +455,6 @@ mod tests {
     }
 }
 
-enum SaveConfigError {
-    Invalid(Vec<ValidationIssue>),
-    Store(StoreError),
-}
-
 #[derive(Debug)]
 enum AdminError {
     NotFound,
@@ -474,14 +466,11 @@ enum AdminError {
     WorkerFailed,
 }
 
-impl From<SaveConfigError> for AdminError {
-    fn from(error: SaveConfigError) -> Self {
+impl From<StoreError> for AdminError {
+    fn from(error: StoreError) -> Self {
         match error {
-            SaveConfigError::Invalid(issues) => Self::InvalidConfig { issues },
-            SaveConfigError::Store(StoreError::Validation { issues }) => {
-                Self::InvalidConfig { issues }
-            }
-            SaveConfigError::Store(error) => Self::Store {
+            StoreError::Validation { issues } => Self::InvalidConfig { issues },
+            error => Self::Store {
                 message: error.to_string(),
             },
         }
@@ -519,6 +508,7 @@ impl From<RuntimeError> for AdminError {
 enum ErrorBody<'a> {
     InvalidJson { message: &'a str },
     InvalidScene { message: &'a str },
+    InvalidConfig { issues: &'a [ValidationIssue] },
     Store { message: &'a str },
     Runtime { message: &'a str },
     Internal,
@@ -538,7 +528,7 @@ impl IntoResponse for AdminError {
                 .into_response(),
             Self::InvalidConfig { issues } => (
                 StatusCode::UNPROCESSABLE_ENTITY,
-                Json(AdminConfigErrorBody::InvalidConfig { issues }),
+                Json(ErrorBody::InvalidConfig { issues: &issues }),
             )
                 .into_response(),
             Self::Store { message } => (

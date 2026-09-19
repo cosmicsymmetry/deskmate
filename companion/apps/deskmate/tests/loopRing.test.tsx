@@ -7,7 +7,7 @@ import { LoopRing } from "../src/components/LoopRing";
 import type { AppConfig } from "../src/lib/types";
 
 import { resetBackendMocks } from "./support/backendMock";
-import { snapshot, pomodoroCard } from "./support/fixtures";
+import { cardListConfig, pomodoroCard } from "./support/fixtures";
 import { installDomLifecycle, buttonWithText } from "./support/dom";
 import { installHttpLifecycle } from "./support/http";
 
@@ -17,22 +17,14 @@ installHttpLifecycle(cleanupMountedRoots);
 afterEach(resetBackendMocks);
 
 function loopConfig(): AppConfig {
-  return {
-    schema_version: snapshot.config.schema_version,
-    preferences: { timezone: "UTC", autostart: false, paused: false, orientation: "landscape" },
-    // Three cards the loop can actually tell apart. Three clocks would all
-    // read "Clock" now, which is true of the product and useless in a test
-    // about which entry is which.
-    cards: [
-      { ...pomodoroCard("first", "Desk"), dwell_seconds: 45 },
-      pomodoroCard("second", "Up next"),
-      pomodoroCard("third", "Focus"),
-    ],
-    image_sources: [],
-    assets: [],
-    advance: { kind: "timed", default_dwell_seconds: 20 },
-    updater: { channel: "stable", checks: "notify" },
-  };
+  // Three cards the loop can actually tell apart. Three clocks would all
+  // read "Clock" now, which is true of the product and useless in a test
+  // about which entry is which.
+  return cardListConfig([
+    { ...pomodoroCard("first", "Desk"), dwell_seconds: 45 },
+    pomodoroCard("second", "Up next"),
+    pomodoroCard("third", "Focus"),
+  ]);
 }
 
 function renderLoopRing(config: AppConfig): string {

@@ -651,39 +651,31 @@ test("a protocol the server cannot speak is stated in the work column and flags 
   }
 });
 
-test("the global card banner does not blame the display for a host-side scene failure", async () => {
-  backendMocks.snapshotImpl = async () => ({
-    ...(structuredClone(snapshot) as AppSnapshot),
-    card_errors: [
+test.each([
+  {
+    name: "the global card banner does not blame the display for a host-side scene failure",
+    cardErrors: [
       {
-        kind: "scene-refused",
+        kind: "scene-refused" as const,
         card_id: "clock",
         message: "the configured timezone is not recognized",
       },
     ],
-  });
-  backendMocks.previewImpl = async () => ({
-    png_base64: "cHJldmlldw==",
-    sample: false,
-    state: null,
-  });
-
-  const { container, root, cleanup } = await mount();
-  try {
-    await act(async () => root.render(<App />));
-    await waitFor(() => expect(container.textContent).toContain("One card could not be rendered"));
-    expect(container.textContent).toContain("the configured timezone is not recognized");
-    expect(container.textContent).not.toContain("The display refused one card update");
-  } finally {
-    await cleanup();
-    backendMocks.snapshotImpl = async () => snapshot;
-  }
-});
-
-test("the global card banner names the display only for a typed data refusal", async () => {
+    heading: "One card could not be rendered",
+    message: "the configured timezone is not recognized",
+    absent: "The display refused one card update",
+  },
+  {
+    name: "the global card banner names the display only for a typed data refusal",
+    cardErrors: structuredClone(apiContractFixtures.snapshot.card_errors),
+    heading: "The display refused one card update",
+    message: apiContractFixtures.snapshot.card_errors[0].message,
+    absent: "One card could not be rendered",
+  },
+])("$name", async ({ cardErrors, heading, message, absent }) => {
   backendMocks.snapshotImpl = async () => ({
     ...(structuredClone(snapshot) as AppSnapshot),
-    card_errors: structuredClone(apiContractFixtures.snapshot.card_errors),
+    card_errors: structuredClone([...cardErrors]),
   });
   backendMocks.previewImpl = async () => ({
     png_base64: "cHJldmlldw==",
@@ -694,11 +686,9 @@ test("the global card banner names the display only for a typed data refusal", a
   const { container, root, cleanup } = await mount();
   try {
     await act(async () => root.render(<App />));
-    await waitFor(() =>
-      expect(container.textContent).toContain("The display refused one card update"),
-    );
-    expect(container.textContent).toContain(apiContractFixtures.snapshot.card_errors[0].message);
-    expect(container.textContent).not.toContain("One card could not be rendered");
+    await waitFor(() => expect(container.textContent).toContain(heading));
+    expect(container.textContent).toContain(message);
+    expect(container.textContent).not.toContain(absent);
   } finally {
     await cleanup();
     backendMocks.snapshotImpl = async () => snapshot;

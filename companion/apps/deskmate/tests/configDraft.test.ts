@@ -32,30 +32,8 @@ import { apiContractFixtures } from "../src/lib/types.contract";
 
 function initialConfig(): AppConfig {
   return {
-    schema_version: apiContractFixtures.snapshot.config.schema_version,
-    preferences: {
-      timezone: "UTC",
-      autostart: false,
-      paused: false,
-      orientation: "landscape",
-    },
-    cards: [
-      {
-        kind: "clock",
-        id: "clock",
-        title: "Desk",
-        show_seconds: true,
-        template: { kind: "digital-clock" },
-        tap_action: { kind: "none" },
-        refresh: { kind: "device-local" },
-        alert: { kind: "none" },
-        dwell_seconds: null,
-      },
-    ],
-    image_sources: [],
-    assets: [],
+    ...cardListConfig([clockCard("clock", "Desk")]),
     advance: { kind: "manual" },
-    updater: { channel: "stable", checks: "notify" },
   };
 }
 
@@ -479,43 +457,34 @@ describe("configuration draft helpers", () => {
 });
 
 describe("moveEntry", () => {
-  test("moves a card down", () => {
+  test.each([
+    { name: "moves a card down", from: 0, to: 1, expected: ["b", "a", "c"] },
+    { name: "moves a card up", from: 2, to: 1, expected: ["a", "c", "b"] },
+    { name: "moves a card to index 0", from: 2, to: 0, expected: ["c", "a", "b"] },
+    {
+      name: "clamps a target index beyond the end to the last position",
+      from: 0,
+      to: 99,
+      expected: ["b", "c", "a"],
+    },
+  ])("$name", ({ from, to, expected }) => {
     const config = cardsConfig(["a", "b", "c"]);
-    const next = moveEntry(config, 0, 1);
-    expect(next.cards.map((card) => card.id)).toEqual(["b", "a", "c"]);
+    const next = moveEntry(config, from, to);
+    expect(next.cards.map((card) => card.id)).toEqual([...expected]);
   });
 
-  test("moves a card up", () => {
-    const config = cardsConfig(["a", "b", "c"]);
-    const next = moveEntry(config, 2, 1);
-    expect(next.cards.map((card) => card.id)).toEqual(["a", "c", "b"]);
-  });
-
-  test("moves a card to index 0", () => {
-    const config = cardsConfig(["a", "b", "c"]);
-    const next = moveEntry(config, 2, 0);
-    expect(next.cards.map((card) => card.id)).toEqual(["c", "a", "b"]);
-  });
-
-  test("clamps a target index beyond the end to the last position", () => {
-    const config = cardsConfig(["a", "b", "c"]);
-    const next = moveEntry(config, 0, 99);
-    expect(next.cards.map((card) => card.id)).toEqual(["b", "c", "a"]);
-  });
-
-  test("is a no-op with a single card", () => {
-    const config = cardsConfig(["only"]);
-    expect(moveEntry(config, 0, 5)).toBe(config);
-  });
-
-  test("is a no-op when the target index matches the source index", () => {
-    const config = cardsConfig(["a", "b", "c"]);
-    expect(moveEntry(config, 1, 1)).toBe(config);
-  });
-
-  test("is a no-op for an invalid source index", () => {
-    const config = cardsConfig(["a", "b", "c"]);
-    expect(moveEntry(config, -1, 0)).toBe(config);
+  test.each([
+    { name: "is a no-op with a single card", ids: ["only"], from: 0, to: 5 },
+    {
+      name: "is a no-op when the target index matches the source index",
+      ids: ["a", "b", "c"],
+      from: 1,
+      to: 1,
+    },
+    { name: "is a no-op for an invalid source index", ids: ["a", "b", "c"], from: -1, to: 0 },
+  ])("$name", ({ ids, from, to }) => {
+    const config = cardsConfig([...ids]);
+    expect(moveEntry(config, from, to)).toBe(config);
   });
 });
 

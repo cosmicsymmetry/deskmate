@@ -48,6 +48,20 @@ async function finish<T>(pending: Promise<T>, ms = 90): Promise<T> {
   return pending;
 }
 
+function twoPomodoroConfig() {
+  const draft = mockConfig();
+  const first = draft.cards.find((card) => card.kind === "pomodoro");
+  if (first?.kind !== "pomodoro") throw new Error("missing timer fixture");
+  const second = {
+    ...first,
+    id: "pomodoro-two",
+    label: "Second timer",
+    duration_seconds: 600,
+  };
+  draft.cards.push(second);
+  return { draft, first, second };
+}
+
 describe("mock backend contract", () => {
   test("requires sign-in and selects a device only after sign-in succeeds", async () => {
     await expect(backend.getAppSnapshot()).rejects.toMatchObject({
@@ -447,16 +461,7 @@ describe("mock backend contract", () => {
 
   test("targets pomodoro actions by card id with exhaustive state semantics", async () => {
     await backend.signIn("token");
-    const draft = mockConfig();
-    const first = draft.cards.find((card) => card.kind === "pomodoro");
-    if (first?.kind !== "pomodoro") throw new Error("missing timer fixture");
-    const second = {
-      ...first,
-      id: "pomodoro-two",
-      label: "Second timer",
-      duration_seconds: 600,
-    };
-    draft.cards.push(second);
+    const { draft } = twoPomodoroConfig();
     await finish(backend.saveConfig(draft), 350);
     const firstState = (await finish(backend.getAppSnapshot())).pomodoros.find(
       (timer) => timer.card_id === "pomodoro",
@@ -501,16 +506,7 @@ describe("mock backend contract", () => {
 
   test("reconciles pomodoros across unchanged, edited, added, and removed cards", async () => {
     await backend.signIn("token");
-    const draft = mockConfig();
-    const first = draft.cards.find((card) => card.kind === "pomodoro");
-    if (first?.kind !== "pomodoro") throw new Error("missing timer fixture");
-    const second = {
-      ...first,
-      id: "pomodoro-two",
-      label: "Second timer",
-      duration_seconds: 600,
-    };
-    draft.cards.push(second);
+    const { draft, first, second } = twoPomodoroConfig();
     await finish(backend.saveConfig(draft), 350);
     await finish(backend.controlPomodoro("pomodoro-two", "start"));
     await finish(backend.controlPomodoro("pomodoro", "pause"));

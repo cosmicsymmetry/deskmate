@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { act, useState } from "react";
+import { act, useState, type ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { CardList } from "../src/components/CardList";
@@ -17,22 +17,23 @@ const { mount, cleanupMountedRoots } = installDomLifecycle();
 installHttpLifecycle(cleanupMountedRoots);
 afterEach(resetBackendMocks);
 
+function cardListDefaults(): Omit<ComponentProps<typeof CardList>, "config"> {
+  return {
+    issues: [],
+    pomodoros: [],
+    selectedCardId: null,
+    onSelect: () => {},
+    onAdd: () => {},
+    onChange: () => {},
+    onRemove: () => {},
+  };
+}
+
 test("an untitled card is not labelled with its template twice", () => {
   // The quiet line is the owner's words, so it is absent rather than a repeat of
   // the label sitting directly above it.
   const config = cardListConfig([clockCard("internal-uuid-0002", "")]);
-  const library = renderToStaticMarkup(
-    <CardList
-      config={config}
-      issues={[]}
-      pomodoros={[]}
-      selectedCardId={null}
-      onSelect={() => {}}
-      onAdd={() => {}}
-      onChange={() => {}}
-      onRemove={() => {}}
-    />,
-  );
+  const library = renderToStaticMarkup(<CardList {...cardListDefaults()} config={config} />);
   expect(library).toContain("Digital clock");
   expect(library).not.toContain("card-tile__name");
 });
@@ -41,14 +42,9 @@ test("a picture tile leads with its source and names every entry control", () =>
   const picture = pictureCard();
   const html = renderToStaticMarkup(
     <CardList
+      {...cardListDefaults()}
       config={cardListConfig([picture])}
-      issues={[]}
-      pomodoros={[]}
       selectedCardId={picture.id}
-      onSelect={() => {}}
-      onAdd={() => {}}
-      onChange={() => {}}
-      onRemove={() => {}}
     />,
   );
 
@@ -67,14 +63,8 @@ test("picture tiles preserve missing and empty source identities", () => {
   const missing = { ...pictureCard("missing-picture"), source_id: "missing-source" };
   const missingHtml = renderToStaticMarkup(
     <CardList
+      {...cardListDefaults()}
       config={{ ...cardListConfig([missing]), image_sources: [] }}
-      issues={[]}
-      pomodoros={[]}
-      selectedCardId={null}
-      onSelect={() => {}}
-      onAdd={() => {}}
-      onChange={() => {}}
-      onRemove={() => {}}
     />,
   );
   expect(missingHtml).toContain('<strong class="card-tile__value numeral">Missing source</strong>');
@@ -82,17 +72,11 @@ test("picture tiles preserve missing and empty source identities", () => {
   const empty = pictureCard("empty-source-name");
   const emptyHtml = renderToStaticMarkup(
     <CardList
+      {...cardListDefaults()}
       config={{
         ...cardListConfig([empty]),
         image_sources: [{ id: empty.source_id, name: "" }],
       }}
-      issues={[]}
-      pomodoros={[]}
-      selectedCardId={null}
-      onSelect={() => {}}
-      onAdd={() => {}}
-      onChange={() => {}}
-      onRemove={() => {}}
     />,
   );
   expect(emptyHtml).toContain('<strong class="card-tile__value numeral"></strong>');
@@ -105,17 +89,12 @@ test("pomodoro tiles use duration fallback and floor live remaining time, includ
   const zero = pomodoroCard("zero", "Zero");
   const html = renderToStaticMarkup(
     <CardList
+      {...cardListDefaults()}
       config={cardListConfig([fallback, live, zero])}
-      issues={[]}
       pomodoros={[
         { card_id: live.id, state: "running", duration_seconds: 1500, remaining_seconds: 61.9 },
         { card_id: zero.id, state: "completed", duration_seconds: 1500, remaining_seconds: 0 },
       ]}
-      selectedCardId={null}
-      onSelect={() => {}}
-      onAdd={() => {}}
-      onChange={() => {}}
-      onRemove={() => {}}
     />,
   );
 
@@ -128,16 +107,7 @@ test("pomodoro tiles suppress blank labels and labels equal to the countdown", (
   const blank = pomodoroCard("blank", "");
   const repeated = pomodoroCard("repeated", "25:00");
   const html = renderToStaticMarkup(
-    <CardList
-      config={cardListConfig([blank, repeated])}
-      issues={[]}
-      pomodoros={[]}
-      selectedCardId={null}
-      onSelect={() => {}}
-      onAdd={() => {}}
-      onChange={() => {}}
-      onRemove={() => {}}
-    />,
+    <CardList {...cardListDefaults()} config={cardListConfig([blank, repeated])} />,
   );
 
   expect(html.match(/class="card-tile__value numeral">25:00<\/strong>/g)).toHaveLength(2);
@@ -147,16 +117,7 @@ test("pomodoro tiles suppress blank labels and labels equal to the countdown", (
 test("a tile does not print the source name twice when the title repeats it", () => {
   const named = { ...pictureCard(), title: "Claude limits" };
   const html = renderToStaticMarkup(
-    <CardList
-      config={cardListConfig([named])}
-      issues={[]}
-      pomodoros={[]}
-      selectedCardId={named.id}
-      onSelect={() => {}}
-      onAdd={() => {}}
-      onChange={() => {}}
-      onRemove={() => {}}
-    />,
+    <CardList {...cardListDefaults()} config={cardListConfig([named])} selectedCardId={named.id} />,
   );
 
   expect(html).toContain('numeral">Claude limits</strong>');
@@ -170,17 +131,11 @@ test("the add menu creates a picture through its own server action", async () =>
     await act(async () =>
       root.render(
         <CardList
+          {...cardListDefaults()}
           config={cardListConfig([clockCard("clock", "Desk")])}
-          issues={[]}
-          pomodoros={[]}
-          selectedCardId={null}
-          onSelect={() => {}}
-          onAdd={() => {}}
           onAddPicture={() => {
             pictureAdds += 1;
           }}
-          onChange={() => {}}
-          onRemove={() => {}}
         />,
       ),
     );
@@ -215,14 +170,8 @@ test("a server-drawn face is not filed under Built in", async () => {
     await act(async () =>
       root.render(
         <CardList
+          {...cardListDefaults()}
           config={cardListConfig([])}
-          issues={[]}
-          pomodoros={[]}
-          selectedCardId={null}
-          onSelect={() => {}}
-          onAdd={() => {}}
-          onChange={() => {}}
-          onRemove={() => {}}
           creatableFaces={[{ kind: "weather", label: "Weather", fields: [] }]}
           onAddFace={() => {}}
         />,
@@ -258,14 +207,8 @@ test("the add menu offers the faces the server says it can draw", async () => {
     await act(async () =>
       root.render(
         <CardList
+          {...cardListDefaults()}
           config={cardListConfig([])}
-          issues={[]}
-          pomodoros={[]}
-          selectedCardId={null}
-          onSelect={() => {}}
-          onAdd={() => {}}
-          onChange={() => {}}
-          onRemove={() => {}}
           creatableFaces={[
             { kind: "weather", label: "Weather", fields: [] },
             { kind: "sunrise", label: "Sunrise", fields: [] },
@@ -309,17 +252,11 @@ test("the add menu offers an unused picture source and omits one already in the 
     await act(async () =>
       root.render(
         <CardList
+          {...cardListDefaults()}
           config={config}
-          issues={[]}
-          pomodoros={[]}
-          selectedCardId={null}
-          onSelect={() => {}}
-          onAdd={() => {}}
           onAddPicture={(source) => {
             chosenSource = source?.id ?? null;
           }}
-          onChange={() => {}}
-          onRemove={() => {}}
         />,
       ),
     );
@@ -353,16 +290,10 @@ test("add-menu keyboard navigation crosses groups, wraps, and skips a disabled s
     await act(async () =>
       root.render(
         <CardList
+          {...cardListDefaults()}
           config={config}
-          issues={[]}
-          pomodoros={[]}
-          selectedCardId={null}
-          onSelect={() => {}}
-          onAdd={() => {}}
           creatableFaces={[{ kind: "weather", label: "Weather", fields: [] }]}
           onAddFace={() => {}}
-          onChange={() => {}}
-          onRemove={() => {}}
         />,
       ),
     );
@@ -425,14 +356,9 @@ test("the grid renders container issues and scopes a card's own issues to its ti
   const container = document.createElement("div");
   container.innerHTML = renderToStaticMarkup(
     <CardList
+      {...cardListDefaults()}
       config={config}
       issues={[containerIssue, secondDwellIssue]}
-      pomodoros={[]}
-      selectedCardId={null}
-      onSelect={() => {}}
-      onAdd={() => {}}
-      onChange={() => {}}
-      onRemove={() => {}}
     />,
   );
 
@@ -453,18 +379,7 @@ test("the add slot is disabled at capacity and names the limiting contract", () 
   const config = cardListConfig(
     Array.from({ length: 8 }, (_, index) => clockCard(`card-${index}`)),
   );
-  const html = renderToStaticMarkup(
-    <CardList
-      config={config}
-      issues={[]}
-      pomodoros={[]}
-      selectedCardId={null}
-      onSelect={() => {}}
-      onAdd={() => {}}
-      onChange={() => {}}
-      onRemove={() => {}}
-    />,
-  );
+  const html = renderToStaticMarkup(<CardList {...cardListDefaults()} config={config} />);
   expect(html).toContain('class="card-tile__add"');
   expect(html).toContain('aria-describedby="add-card-capacity"');
   expect(html).toContain('disabled=""');
@@ -487,20 +402,7 @@ test("the add menu aligns to the slot end only when it would overflow the viewpo
   });
 
   try {
-    await act(async () =>
-      root.render(
-        <CardList
-          config={config}
-          issues={[]}
-          pomodoros={[]}
-          selectedCardId={null}
-          onSelect={() => {}}
-          onAdd={() => {}}
-          onChange={() => {}}
-          onRemove={() => {}}
-        />,
-      ),
-    );
+    await act(async () => root.render(<CardList {...cardListDefaults()} config={config} />));
     const slotRoot = container.querySelector<HTMLLIElement>(".card-tile--add");
     const slot = container.querySelector<HTMLButtonElement>(".card-tile__add");
     if (!slotRoot) {
@@ -557,16 +459,7 @@ test("a click inside the menu is not mistaken for focus leaving it", async () =>
   try {
     await act(async () =>
       root.render(
-        <CardList
-          config={config}
-          issues={[]}
-          pomodoros={[]}
-          selectedCardId={null}
-          onSelect={() => {}}
-          onAdd={(kind) => added.push(kind)}
-          onChange={() => {}}
-          onRemove={() => {}}
-        />,
+        <CardList {...cardListDefaults()} config={config} onAdd={(kind) => added.push(kind)} />,
       ),
     );
     const slot = container.querySelector<HTMLButtonElement>(".card-tile__add");
@@ -596,20 +489,7 @@ test("the add menu survives the scroll that opening it causes", async () => {
   container.className = "face__work";
 
   try {
-    await act(async () =>
-      root.render(
-        <CardList
-          config={config}
-          issues={[]}
-          pomodoros={[]}
-          selectedCardId={null}
-          onSelect={() => {}}
-          onAdd={() => {}}
-          onChange={() => {}}
-          onRemove={() => {}}
-        />,
-      ),
-    );
+    await act(async () => root.render(<CardList {...cardListDefaults()} config={config} />));
     const slot = container.querySelector<HTMLButtonElement>(".card-tile__add");
     await act(async () => slot?.click());
     expect(container.querySelector(".menu")).not.toBeNull();
@@ -637,9 +517,8 @@ test("the add slot menu restores focus on Escape and a picked kind enrols and se
     selected = selectedCardId;
     return (
       <CardList
+        {...cardListDefaults()}
         config={config}
-        issues={[]}
-        pomodoros={[]}
         selectedCardId={selectedCardId}
         onSelect={setSelectedCardId}
         onAdd={(kind) => {
@@ -648,7 +527,6 @@ test("the add slot menu restores focus on Escape and a picked kind enrols and se
           setSelectedCardId(result.cardId);
         }}
         onChange={setConfig}
-        onRemove={() => {}}
       />
     );
   }
@@ -711,20 +589,7 @@ test("tabbing focus outside the add slot closes its menu", async () => {
   document.body.append(container, outside);
 
   try {
-    await act(async () =>
-      root.render(
-        <CardList
-          config={config}
-          issues={[]}
-          pomodoros={[]}
-          selectedCardId={null}
-          onSelect={() => {}}
-          onAdd={() => {}}
-          onChange={() => {}}
-          onRemove={() => {}}
-        />,
-      ),
-    );
+    await act(async () => root.render(<CardList {...cardListDefaults()} config={config} />));
     const slot = container.querySelector<HTMLButtonElement>(".card-tile__add");
     await act(async () => slot?.click());
     container.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
@@ -746,18 +611,7 @@ test("grid move buttons and Alt arrows update active-loop order", async () => {
   function Harness() {
     const [value, setValue] = useState(config);
     latest = value;
-    return (
-      <CardList
-        config={value}
-        issues={[]}
-        pomodoros={[]}
-        selectedCardId={null}
-        onSelect={() => {}}
-        onAdd={() => {}}
-        onChange={setValue}
-        onRemove={() => {}}
-      />
-    );
+    return <CardList {...cardListDefaults()} config={value} onChange={setValue} />;
   }
 
   try {
@@ -818,17 +672,12 @@ test("keyboard reorder restores focus to the moved tile body", async () => {
     const [value, setValue] = useState(config);
     return (
       <CardList
+        {...cardListDefaults()}
         config={value}
-        issues={[]}
-        pomodoros={[]}
-        selectedCardId={null}
-        onSelect={() => {}}
-        onAdd={() => {}}
         onChange={(next) => {
           (document.activeElement as HTMLElement | null)?.blur();
           setValue(next);
         }}
-        onRemove={() => {}}
       />
     );
   }
@@ -863,14 +712,9 @@ test("dropping a loop tile on itself does not emit a draft change", async () => 
     await act(async () =>
       root.render(
         <CardList
+          {...cardListDefaults()}
           config={config}
-          issues={[]}
-          pomodoros={[]}
-          selectedCardId={null}
-          onSelect={() => {}}
-          onAdd={() => {}}
           onChange={(next) => changes.push(next)}
-          onRemove={() => {}}
         />,
       ),
     );
@@ -905,14 +749,8 @@ for (const activation of ["click", "Enter", " "]) {
     const choices: string[] = [];
     const { container } = await mount(
       <CardList
+        {...cardListDefaults()}
         config={cardListConfig([])}
-        issues={[]}
-        pomodoros={[]}
-        selectedCardId={null}
-        onSelect={() => {}}
-        onAdd={() => {}}
-        onChange={() => {}}
-        onRemove={() => {}}
         creatableFaces={[{ kind: "sunrise", label: "Sunrise", fields: [] }]}
         onAddFace={(kind) => choices.push(kind)}
       />,
@@ -954,14 +792,8 @@ for (const operation of ["mint", "save"]) {
     const choices: string[] = [];
     const renderList = (busy: boolean) => (
       <CardList
+        {...cardListDefaults()}
         config={cardListConfig([])}
-        issues={[]}
-        pomodoros={[]}
-        selectedCardId={null}
-        onSelect={() => {}}
-        onAdd={() => {}}
-        onChange={() => {}}
-        onRemove={() => {}}
         pictureBusy={busy && operation === "mint"}
         saving={busy && operation === "save"}
         creatableFaces={[{ kind: "weather", label: "Weather", fields: [] }]}

@@ -170,7 +170,11 @@ def main():
             print(f"pushed {len(body)} bytes -> {response.status}")
     except urllib.error.HTTPError as error:
         # The server writes these for the producer: one line, no internals.
-        print(f"push refused {error.code}: {error.read().decode(errors=chr(39)+chr(39))}", file=sys.stderr)
+        print(
+            f"push refused {error.code}: "
+            f'{error.read().decode("utf-8", errors="replace")}',
+            file=sys.stderr,
+        )
         return 1
     return 0
 

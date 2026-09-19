@@ -63,10 +63,11 @@
 //! exhaustive against the IANA IPv4 Special-Purpose Address Registry.
 //! `deny_reason_v6` checks a substantially wider set than its first version
 //! (loopback, unspecified, link-local, unique-local, the deprecated
-//! site-local range, multicast, the documentation range, the well-known and
-//! local-use NAT64 prefixes, the `2001::/23` IETF protocol assignment block
-//! -- Teredo, benchmarking, `ORCHIDv2` -- 6to4, the discard-only range, the
-//! `SRv6` SID space, and both legacy IPv4-in-IPv6 encodings), but has **not**
+//! site-local range, multicast, the documentation ranges (`2001:db8::/32` and
+//! `3fff::/20`), the well-known and local-use NAT64 prefixes, the `2001::/23`
+//! IETF protocol assignment block -- Teredo, benchmarking, `ORCHIDv2` -- 6to4,
+//! the discard-only range, the `SRv6` SID space, and both legacy IPv4-in-IPv6
+//! encodings), but has **not**
 //! been independently audited against the full IANA IPv6 Special-Purpose
 //! Address Registry the way the IPv4 side has, so it should not be trusted
 //! as proven exhaustive. Everything in it embeds or is adjacent to an
@@ -178,8 +179,8 @@ pub(crate) enum DenyReason {
     /// `192.0.0.0/24` (RFC 6890) -- IETF protocol assignments.
     IetfProtocolAssignment,
     /// The IPv4 TEST-NET ranges (`192.0.2.0/24`, `198.51.100.0/24`,
-    /// `203.0.113.0/24`, RFC 5737) or the IPv6 documentation range
-    /// (`2001:db8::/32`, RFC 3849).
+    /// `203.0.113.0/24`, RFC 5737) or the IPv6 documentation ranges
+    /// (`2001:db8::/32`, RFC 3849; `3fff::/20`, RFC 9637).
     Documentation,
     /// `198.18.0.0/15` (RFC 2544) -- reserved for network benchmarking.
     Benchmarking,
@@ -407,6 +408,10 @@ fn deny_reason_v6(ip: Ipv6Addr) -> Option<DenyReason> {
     }
     // 2001:db8::/32 -- documentation (RFC 3849).
     if segments[0] == 0x2001 && segments[1] == 0x0db8 {
+        return Some(DenyReason::Documentation);
+    }
+    // 3fff::/20 -- documentation (RFC 9637).
+    if segments[0] == 0x3fff && (segments[1] & 0xf000) == 0 {
         return Some(DenyReason::Documentation);
     }
     // 64:ff9b::/96 -- the well-known NAT64 prefix (RFC 6052): its low 32
@@ -662,9 +667,10 @@ pub struct FetchResponse {
 /// "error sending request for url (...)"); the actually useful cause lives
 /// in its `source()` chain. Walk it so `EgressError::Request` messages are
 /// diagnosable rather than generic.
-fn describe_reqwest_error(error: &reqwest::Error) -> String {
+fn describe_reqwest_error(error: reqwest::Error) -> String {
+    let error = error.without_url();
     let mut message = error.to_string();
-    let mut source = std::error::Error::source(error);
+    let mut source = std::error::Error::source(&error);
     while let Some(inner) = source {
         message.push_str(": ");
         message.push_str(&inner.to_string());
@@ -693,7 +699,7 @@ fn build_pinned_client(
         .timeout(REQUEST_TIMEOUT)
         .no_proxy()
         .build()
-        .map_err(|error| EgressError::Request(describe_reqwest_error(&error)))
+        .map_err(|error| EgressError::Request(describe_reqwest_error(error)))
 }
 
 /// Fetches `url` under the egress guard: scheme/deny-list checks, DNS
@@ -761,13 +767,13 @@ async fn fetch_inner(url: &str, resolver: &impl HopResolver) -> Result<FetchResp
             // configured proxy and disables that environment lookup.
             .no_proxy()
             .build()
-            .map_err(|error| EgressError::Request(describe_reqwest_error(&error)))?;
+            .map_err(|error| EgressError::Request(describe_reqwest_error(error)))?;
 
         let response = client
             .get(current.clone())
             .send()
             .await
-            .map_err(|error| EgressError::Request(describe_reqwest_error(&error)))?;
+            .map_err(|error| EgressError::Request(describe_reqwest_error(error)))?;
 
         if response.status().is_redirection() {
             redirects.consume()?;
@@ -885,7 +891,7 @@ async fn post_form_inner(
         .form(form)
         .send()
         .await
-        .map_err(|error| EgressError::Request(describe_reqwest_error(&error)))?;
+        .map_err(|error| EgressError::Request(describe_reqwest_error(error)))?;
     let status = response.status().as_u16();
     let body = read_capped_body(response).await?;
     Ok(FetchResponse { status, body })
@@ -905,7 +911,7 @@ async fn read_capped_body(mut response: reqwest::Response) -> Result<Vec<u8>, Eg
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|error| EgressError::Request(describe_reqwest_error(&error)))?
+        .map_err(|error| EgressError::Request(describe_reqwest_error(error)))?
     {
         limiter.push(chunk.len())?;
         body.extend_from_slice(&chunk);

@@ -370,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn an_api_key_rides_in_the_query_and_is_not_echoed_by_errors() {
+    fn an_api_key_rides_in_the_query() {
         let mut client = FakeClient::new(vec![Ok(MARKETS.into()), Ok(CHART.into())]);
         let mut keyed = options();
         keyed.api_key = Some("secret-key".to_owned());

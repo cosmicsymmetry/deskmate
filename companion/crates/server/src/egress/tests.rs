@@ -90,6 +90,28 @@ fn every_special_purpose_range_is_classified_by_name() {
         denied!("0/8 reserved", Url("http://0.1.2.3/"), Reserved),
         denied!("IPv6 site-local", Ip("fec0::1"), SiteLocalV6),
         denied!("IPv6 documentation", Ip("2001:db8::1"), Documentation),
+        denied!("IPv6 documentation 3fff start", Ip("3fff::"), Documentation),
+        denied!(
+            "IPv6 documentation 3fff first",
+            Url("http://[3fff::1]/"),
+            Documentation
+        ),
+        denied!(
+            "IPv6 documentation 3fff interior",
+            Ip("3fff:abc:1234::1"),
+            Documentation
+        ),
+        denied!(
+            "IPv6 documentation 3fff end",
+            Ip("3fff:fff:ffff:ffff:ffff:ffff:ffff:ffff"),
+            Documentation
+        ),
+        (
+            "before IPv6 documentation 3fff",
+            Ip("3ffe:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+            None,
+        ),
+        ("after IPv6 documentation 3fff", Ip("3fff:1000::"), None),
         denied!("NAT64 well-known", Ip("64:ff9b::102:304"), Nat64V6),
         denied!("IPv4-compatible IPv6", Ip("::0.1.2.3"), Ipv4CompatibleV6),
         denied!("NAT64 local-use", Ip("64:ff9b:1::102:304"), Nat64LocalUseV6),
@@ -260,6 +282,21 @@ fn select_pinned_address_denies_if_any_candidate_is_denied() {
 }
 
 #[test]
+fn select_pinned_address_denies_3fff_documentation_in_either_order() {
+    let public: IpAddr = "2606:4700:4700::1111".parse().unwrap();
+    let documentation: IpAddr = "3fff::1".parse().unwrap();
+    for candidates in [[public, documentation], [documentation, public]] {
+        assert!(matches!(
+            select_pinned_address("docs.example", &candidates),
+            Err(EgressError::Denied {
+                reason: DenyReason::Documentation,
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
 fn select_pinned_address_denies_empty_candidate_list() {
     assert!(matches!(
         select_pinned_address("nowhere.example", &[]),
@@ -321,6 +358,30 @@ impl HopResolver for FixedAddrResolver {
         let host = url.host_str().ok_or(EgressError::MissingHost)?.to_string();
         Ok((host, self.0))
     }
+}
+
+#[tokio::test]
+async fn fetch_inner_strips_path_and_query_secrets_from_request_errors() {
+    let addr = SocketAddr::from(([127, 0, 0, 1], 0));
+
+    let url = "http://failure.invalid:0/path-secret?query-secret-key=query-secret-value";
+    let error = fetch_inner(url, &FixedAddrResolver(addr))
+        .await
+        .expect_err("the closed listener must refuse the connection");
+    let EgressError::Request(detail) = error else {
+        panic!("expected a request error, got {error:?}");
+    };
+
+    for secret in ["path-secret", "query-secret-key", "query-secret-value"] {
+        assert!(
+            !detail.contains(secret),
+            "request error leaked {secret}: {detail}"
+        );
+    }
+    assert!(
+        detail.contains("client error (Connect)") && detail.contains("tcp connect error"),
+        "the underlying connection diagnostic was lost: {detail}"
+    );
 }
 
 #[tokio::test]

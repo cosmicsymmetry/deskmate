@@ -160,6 +160,8 @@ fn parse_forecast(body: &str, location: &str) -> Result<WeatherReading, Provider
     // today. A forecast that omits them is not an error: the face falls back
     // to the current reading for both, which is true if uninformative.
     let (high, low) = daily_extremes(&document).unwrap_or((temperature, temperature));
+    let high = bounded_temperature(high)?;
+    let low = bounded_temperature(low)?;
     let temperature_tenths = to_tenths(temperature)?;
     // Apparent temperature still validates the forecast even though the face
     // does not display it; malformed data must retain the last good reading.
@@ -242,15 +244,16 @@ fn hourly_series(document: &Value, current_time: Option<&str>) -> Vec<WeatherHou
     };
     let days = hourly.get("is_day").and_then(Value::as_array);
 
-    let start = current_time
-        .and_then(|now| {
-            let hour_of_now = now.get(..13)?;
-            times.iter().position(|time| {
-                time.as_str()
-                    .is_some_and(|time| time.starts_with(hour_of_now))
-            })
+    let Some(start) = current_time.and_then(|now| {
+        hour_of(now)?;
+        let hour_of_now = now.get(..13)?;
+        times.iter().position(|time| {
+            time.as_str()
+                .is_some_and(|time| time.starts_with(hour_of_now))
         })
-        .unwrap_or(0);
+    }) else {
+        return Vec::new();
+    };
 
     times
         .iter()
@@ -460,5 +463,139 @@ mod tests {
                 .expect("a valid apparent temperature is accepted");
             assert_eq!(reading.temperature_tenths, 200);
         }
+    }
+
+    fn forecast_with_daily(high: f64, low: f64) -> String {
+        serde_json::json!({
+            "current": {
+                "temperature_2m": 12.3,
+                "apparent_temperature": 11.0,
+                "weather_code": 3,
+                "is_day": 1
+            },
+            "daily": {
+                "temperature_2m_max": [high],
+                "temperature_2m_min": [low]
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn complete_daily_extrema_must_each_be_within_temperature_bounds() {
+        for (high, low) in [(200.1, 0.0), (0.0, -200.1)] {
+            let error = parse_forecast(&forecast_with_daily(high, low), "Nowhere")
+                .expect_err("an out-of-bounds daily extreme must fail the reading");
+            assert_eq!(
+                error,
+                ProviderError::MalformedFeed(
+                    "weather temperature is outside supported bounds".into()
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn daily_extrema_accept_boundaries_and_sort_reversed_values() {
+        let boundaries = parse_forecast(&forecast_with_daily(200.0, -200.0), "Nowhere")
+            .expect("inclusive temperature bounds are accepted");
+        assert_eq!(boundaries.high_tenths, 2000);
+        assert_eq!(boundaries.low_tenths, -2000);
+
+        let reversed = parse_forecast(&forecast_with_daily(-10.0, 25.0), "Nowhere")
+            .expect("valid reversed extrema are sorted");
+        assert_eq!(reversed.high_tenths, 250);
+        assert_eq!(reversed.low_tenths, -100);
+    }
+
+    #[test]
+    fn incomplete_or_malformed_daily_data_still_falls_back_to_current() {
+        let current = serde_json::json!({
+            "temperature_2m": 12.3,
+            "apparent_temperature": 11.0,
+            "weather_code": 3,
+            "is_day": 1
+        });
+        let daily_values = [
+            None,
+            Some(serde_json::json!({"temperature_2m_max": [20.0]})),
+            Some(serde_json::json!({
+                "temperature_2m_max": [],
+                "temperature_2m_min": []
+            })),
+            Some(serde_json::json!({
+                "temperature_2m_max": ["warm"],
+                "temperature_2m_min": [5.0]
+            })),
+        ];
+        for daily in daily_values {
+            let mut document = serde_json::json!({"current": current});
+            if let Some(daily) = daily {
+                document["daily"] = daily;
+            }
+            let reading = parse_forecast(&document.to_string(), "Nowhere")
+                .expect("optional malformed daily data falls back to current");
+            assert_eq!((reading.high_tenths, reading.low_tenths), (123, 123));
+        }
+    }
+
+    #[test]
+    fn invalid_complete_daily_extrema_keep_the_last_good_reading() {
+        let location = include_str!("../tests/fixtures/weather-location.json");
+        let client = FakeClient {
+            responses: VecDeque::from([
+                Ok(location.into()),
+                Ok(forecast_with_daily(20.0, 5.0)),
+                Ok(location.into()),
+                Ok(forecast_with_daily(200.1, 5.0)),
+            ]),
+            urls: Vec::new(),
+        };
+        let mut provider = WeatherProvider::new(client, options(WeatherUnits::Metric));
+        let first = provider.refresh();
+        assert!(first.error.is_none());
+        let second = provider.refresh();
+        assert_eq!(second.value, first.value);
+        assert_eq!(
+            second.error.as_deref(),
+            Some("malformed provider data: weather temperature is outside supported bounds")
+        );
+    }
+
+    fn hourly_document() -> Value {
+        serde_json::json!({
+            "hourly": {
+                "time": [
+                    "2026-09-12T22:00",
+                    "2026-09-12T23:00",
+                    "2026-09-13T00:00",
+                    "2026-09-13T01:00"
+                ],
+                "temperature_2m": [18.0, 17.0, 16.0, 15.0],
+                "weather_code": [1, 2, 3, 45],
+                "is_day": [1, 0, 0, 0]
+            }
+        })
+    }
+
+    #[test]
+    fn hourly_series_requires_current_time_to_match() {
+        let document = hourly_document();
+        for current_time in [None, Some("not-a-time"), Some("2026-09-12T21:30")] {
+            assert!(
+                hourly_series(&document, current_time).is_empty(),
+                "{current_time:?} must not fall back to the first hourly entry"
+            );
+        }
+    }
+
+    #[test]
+    fn hourly_series_starts_at_current_local_hour_and_crosses_midnight() {
+        let hours = hourly_series(&hourly_document(), Some("2026-09-12T23:45"));
+        assert_eq!(hours.first().map(|hour| hour.hour), Some(23));
+        assert_eq!(
+            hours.iter().map(|hour| hour.hour).collect::<Vec<_>>(),
+            vec![23, 0, 1]
+        );
     }
 }

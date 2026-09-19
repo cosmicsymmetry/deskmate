@@ -48,6 +48,12 @@ pub struct FeedItem {
     pub published: Option<String>,
 }
 
+#[derive(Default)]
+struct FeedItemAccumulator {
+    item: FeedItem,
+    updated: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RssFeed {
     pub items: Vec<FeedItem>,
@@ -86,7 +92,7 @@ fn parse_rss(body: &str, maximum_items: usize) -> Result<RssFeed, ProviderError>
     }
     let mut reader = Reader::from_str(body);
     let mut stack = Vec::<String>::new();
-    let mut current = None::<FeedItem>;
+    let mut current = None::<FeedItemAccumulator>;
     let mut items = Vec::with_capacity(maximum_items);
     let mut saw_root = false;
     let mut events = 0_usize;
@@ -116,13 +122,13 @@ fn parse_rss(body: &str, maximum_items: usize) -> Result<RssFeed, ProviderError>
                     if current.is_some() {
                         return Err(ProviderError::MalformedFeed("nested RSS item".into()));
                     }
-                    current = Some(FeedItem::default());
+                    current = Some(FeedItemAccumulator::default());
                 }
                 if name == "link"
                     && current.is_some()
                     && let Some(href) = attribute(&start, b"href")?
                 {
-                    assign_link(current.as_mut().expect("checked above"), &href)?;
+                    assign_link(&mut current.as_mut().expect("checked above").item, &href)?;
                 }
             }
             Ok(Event::Empty(start)) => {
@@ -133,7 +139,7 @@ fn parse_rss(body: &str, maximum_items: usize) -> Result<RssFeed, ProviderError>
                     && let Some(item) = current.as_mut()
                     && let Some(href) = attribute(&start, b"href")?
                 {
-                    assign_link(item, &href)?;
+                    assign_link(&mut item.item, &href)?;
                 }
             }
             Ok(Event::End(end)) => {
@@ -147,24 +153,32 @@ fn parse_rss(body: &str, maximum_items: usize) -> Result<RssFeed, ProviderError>
                     ));
                 }
                 if matches!(name.as_str(), "item" | "entry") {
-                    let mut item = current.take().ok_or_else(|| {
+                    let item = current.take().ok_or_else(|| {
                         ProviderError::MalformedFeed("RSS item boundary is invalid".into())
                     })?;
-                    item.title = plain_text(&item.title)?;
-                    if item.title.is_empty() {
-                        item.title = "(Untitled)".into();
+                    let mut feed_item = item.item;
+                    feed_item.title = plain_text(&feed_item.title)?;
+                    if feed_item.title.is_empty() {
+                        feed_item.title = "(Untitled)".into();
                     }
-                    if let Some(link) = item.link.take() {
-                        assign_link(&mut item, &link)?;
+                    if let Some(link) = feed_item.link.take() {
+                        assign_link(&mut feed_item, &link)?;
                     }
-                    item.published = item
+                    let published = feed_item
                         .published
                         .as_deref()
                         .map(plain_text)
                         .transpose()?
                         .filter(|value| !value.is_empty());
+                    let updated = item
+                        .updated
+                        .as_deref()
+                        .map(plain_text)
+                        .transpose()?
+                        .filter(|value| !value.is_empty());
+                    feed_item.published = published.or(updated);
                     if items.len() < maximum_items {
-                        items.push(item);
+                        items.push(feed_item);
                     }
                 }
             }
@@ -214,7 +228,7 @@ fn parse_rss(body: &str, maximum_items: usize) -> Result<RssFeed, ProviderError>
 
 fn append_item_text(
     stack: &[String],
-    current: Option<&mut FeedItem>,
+    current: Option<&mut FeedItemAccumulator>,
     text: &str,
 ) -> Result<(), ProviderError> {
     let Some(item) = current else {
@@ -223,13 +237,25 @@ fn append_item_text(
     let Some(element) = stack.last().map(String::as_str) else {
         return Ok(());
     };
+    let date_bytes = item
+        .item
+        .published
+        .as_ref()
+        .map_or(0, String::len)
+        .saturating_add(item.updated.as_ref().map_or(0, String::len));
     let target = match element {
-        "title" => &mut item.title,
-        "link" => item.link.get_or_insert_with(String::new),
-        "pubdate" | "published" | "updated" => item.published.get_or_insert_with(String::new),
+        "title" => &mut item.item.title,
+        "link" => item.item.link.get_or_insert_with(String::new),
+        "pubdate" | "published" => item.item.published.get_or_insert_with(String::new),
+        "updated" => item.updated.get_or_insert_with(String::new),
         _ => return Ok(()),
     };
-    if target.len().saturating_add(text.len()) > MAX_ITEM_TEXT_BYTES {
+    let existing_bytes = if matches!(element, "pubdate" | "published" | "updated") {
+        date_bytes
+    } else {
+        target.len()
+    };
+    if existing_bytes.saturating_add(text.len()) > MAX_ITEM_TEXT_BYTES {
         return Err(ProviderError::MalformedFeed(
             "RSS item text is too long".into(),
         ));
@@ -350,6 +376,10 @@ mod tests {
             rss.items[0].link.as_deref(),
             Some("https://example.test/releases/1")
         );
+        assert_eq!(
+            rss.items[0].published.as_deref(),
+            Some("Wed, 05 Aug 2026 10:00:00 GMT")
+        );
 
         let atom = parse_rss(include_str!("../tests/fixtures/feed.atom"), 1).unwrap();
         assert_eq!(atom.items.len(), 1);
@@ -358,6 +388,68 @@ mod tests {
             atom.items[0].link.as_deref(),
             Some("https://example.test/atom/1")
         );
+        assert_eq!(
+            atom.items[0].published.as_deref(),
+            Some("2026-08-05T10:00:00Z")
+        );
+    }
+
+    #[test]
+    fn atom_published_wins_over_updated_in_either_xml_order() {
+        for date_elements in [
+            "<published>2026-08-05T10:00:00Z</published><updated>2026-08-05T11:00:00Z</updated>",
+            "<updated>2026-08-05T11:00:00Z</updated><published>2026-08-05T10:00:00Z</published>",
+        ] {
+            let feed = format!("<feed><entry><title>News</title>{date_elements}</entry></feed>");
+            let parsed = parse_rss(&feed, 1).expect("the Atom entry parses");
+            assert_eq!(
+                parsed.items[0].published.as_deref(),
+                Some("2026-08-05T10:00:00Z")
+            );
+        }
+    }
+
+    #[test]
+    fn empty_published_falls_back_to_updated() {
+        let feed = "<feed><entry><title>News</title><published> \n </published><updated>2026-08-05T11:00:00Z</updated></entry></feed>";
+        let parsed = parse_rss(feed, 1).expect("the Atom entry parses");
+        assert_eq!(
+            parsed.items[0].published.as_deref(),
+            Some("2026-08-05T11:00:00Z")
+        );
+    }
+
+    #[test]
+    fn date_text_accumulates_across_entity_and_cdata_events() {
+        let feed = "<feed><entry><title>Entity</title><published>2026-08-05T10:&#48;0:00Z</published></entry><entry><title>CDATA</title><updated>2026-08-05T<![CDATA[11:00:00Z]]></updated></entry></feed>";
+        let parsed = parse_rss(feed, 2).expect("the Atom entries parse");
+        assert_eq!(
+            parsed.items[0].published.as_deref(),
+            Some("2026-08-05T10:00:00Z")
+        );
+        assert_eq!(
+            parsed.items[1].published.as_deref(),
+            Some("2026-08-05T11:00:00Z")
+        );
+    }
+
+    #[test]
+    fn unsafe_unselected_updated_text_is_rejected() {
+        let feed = "<feed><entry><title>News</title><published>2026-08-05T10:00:00Z</published><updated>&lt;script&gt;bad()&lt;/script&gt;</updated></entry></feed>";
+        assert_eq!(parse_rss(feed, 1), Err(ProviderError::UnsafeContent));
+    }
+
+    #[test]
+    fn published_and_updated_share_the_item_text_ceiling() {
+        let published = "p".repeat(MAX_ITEM_TEXT_BYTES / 2);
+        let updated = "u".repeat(MAX_ITEM_TEXT_BYTES / 2 + 1);
+        let feed = format!(
+            "<feed><entry><title>News</title><published>{published}</published><updated>{updated}</updated></entry></feed>"
+        );
+        assert!(matches!(
+            parse_rss(&feed, 1),
+            Err(ProviderError::MalformedFeed(detail)) if detail == "RSS item text is too long"
+        ));
     }
 
     #[test]

@@ -42,7 +42,7 @@ mod manage;
 pub mod oauth;
 // The one LVGL simulator this process owns, and the card previews it renders.
 mod preview;
-pub mod producer_credentials;
+mod producer_credentials;
 pub mod registry;
 mod runtime_device;
 pub mod secrets;

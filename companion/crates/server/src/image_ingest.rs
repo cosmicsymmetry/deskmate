@@ -94,8 +94,13 @@ pub(crate) fn canonical_frame_from_png(bytes: &[u8]) -> Result<CanonicalFrame, I
         .map_err(|_| ImageIngestError::Decode)?;
     let pixels = &buffer[..frame.buffer_size()];
 
-    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-    for chunk in pixels.chunks_exact(samples) {
+    let pixel_count = usize::try_from(width * height).expect("fixed canvas fits usize");
+    let chunks = pixels.chunks_exact(samples);
+    if chunks.len() != pixel_count {
+        return Err(ImageIngestError::Decode);
+    }
+    let mut canonical_bytes = rgb565_buffer(width, height);
+    for chunk in chunks {
         // The panel has no alpha. Composite over black, matching the
         // established `pixmap.fill(Color::BLACK)` behavior, so a transparent
         // producer pixel lands on the panel's black ground.
@@ -107,17 +112,15 @@ pub(crate) fn canonical_frame_from_png(bytes: &[u8]) -> Result<CanonicalFrame, I
         let over_black = |channel: u8| -> u8 {
             u8::try_from(u32::from(channel) * alpha / 255).expect("scaled by <= 1")
         };
-        rgba.extend_from_slice(&[
-            over_black(chunk[0]),
-            over_black(chunk[1]),
-            over_black(chunk[2]),
-            255,
-        ]);
+        canonical_bytes.extend_from_slice(
+            &pack_rgb565(
+                over_black(chunk[0]),
+                over_black(chunk[1]),
+                over_black(chunk[2]),
+            )
+            .to_le_bytes(),
+        );
     }
-
-    let size = tiny_skia::IntSize::from_wh(width, height).expect("fixed canvas");
-    let pixmap = tiny_skia::Pixmap::from_vec(rgba, size).ok_or(ImageIngestError::Decode)?;
-    let canonical_bytes = encode_rgb565(width, height, &pixmap);
     let digest = Sha256::digest(&canonical_bytes).into();
 
     Ok(CanonicalFrame {
@@ -126,11 +129,19 @@ pub(crate) fn canonical_frame_from_png(bytes: &[u8]) -> Result<CanonicalFrame, I
     })
 }
 
-/// Shared with [`crate::face_render`], which rasterizes a server-authored
-/// face into the very same canonical blob. One encoder means a face drawn
-/// here and a PNG pushed by an external producer are byte-identical assets
-/// for the same picture, so they share a digest.
+/// Shared with [`crate::face_render`], which rasterizes a server-authored face.
+/// Both paths use the same canonical header and RGB565 quantization.
 pub(crate) fn encode_rgb565(width: u32, height: u32, pixmap: &tiny_skia::Pixmap) -> Vec<u8> {
+    let mut bytes = rgb565_buffer(width, height);
+    for pixel in pixmap.pixels() {
+        bytes.extend_from_slice(
+            &pack_rgb565(pixel.red(), pixel.green(), pixel.blue()).to_le_bytes(),
+        );
+    }
+    bytes
+}
+
+fn rgb565_buffer(width: u32, height: u32) -> Vec<u8> {
     let pixel_count = usize::try_from(width * height).expect("fixed canvas fits usize");
     let mut bytes = Vec::with_capacity(LVGL_IMAGE_HEADER_BYTES + pixel_count * 2);
     let stride = width * 2;
@@ -140,11 +151,6 @@ pub(crate) fn encode_rgb565(width: u32, height: u32, pixmap: &tiny_skia::Pixmap)
     bytes.extend_from_slice(&word0.to_le_bytes());
     bytes.extend_from_slice(&word1.to_le_bytes());
     bytes.extend_from_slice(&word2.to_le_bytes());
-    for pixel in pixmap.pixels() {
-        bytes.extend_from_slice(
-            &pack_rgb565(pixel.red(), pixel.green(), pixel.blue()).to_le_bytes(),
-        );
-    }
     bytes
 }
 
@@ -184,6 +190,43 @@ mod tests {
         out
     }
 
+    fn png_with_pixels(color: png::ColorType, pixels: &[[u8; 4]]) -> Vec<u8> {
+        let samples = match color {
+            png::ColorType::Rgb => 3,
+            png::ColorType::Rgba => 4,
+            _ => unreachable!("tests use rgb or rgba only"),
+        };
+        let mut data = vec![0u8; (W * H) as usize * samples];
+        for (target, source) in data.chunks_exact_mut(samples).zip(pixels) {
+            target.copy_from_slice(&source[..samples]);
+        }
+        let mut out = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut out, W, H);
+            encoder.set_color(color);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().expect("header");
+            writer.write_image_data(&data).expect("data");
+        }
+        out
+    }
+
+    fn png_with_smaller_first_animation_frame() -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut out, W, H);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_animated(1, 0).expect("animation metadata");
+            let mut writer = encoder.write_header().expect("header");
+            writer.set_frame_dimension(W - 1, H).expect("smaller frame");
+            writer
+                .write_image_data(&vec![0u8; ((W - 1) * H * 3) as usize])
+                .expect("animation frame");
+        }
+        out
+    }
+
     const W: u32 = 448;
     const H: u32 = 368;
 
@@ -215,6 +258,59 @@ mod tests {
         let frame = canonical_frame_from_png(&out).expect("accepted");
         let first_pixel = u16::from_le_bytes([frame.bytes[12], frame.bytes[13]]);
         assert_eq!(first_pixel, 0, "alpha zero must composite to black");
+    }
+
+    #[test]
+    fn colored_rgb_pixels_pin_channel_order_and_quantization_boundaries() {
+        let png = png_with_pixels(
+            png::ColorType::Rgb,
+            &[
+                [255, 0, 0, 255],
+                [0, 255, 0, 255],
+                [0, 0, 255, 255],
+                [4, 2, 4, 255],
+                [5, 3, 5, 255],
+                [17, 129, 250, 255],
+            ],
+        );
+        let frame = canonical_frame_from_png(&png).expect("colored PNG");
+
+        assert_eq!(frame.bytes.len(), 12 + (W * H * 2) as usize);
+        assert_eq!(&frame.bytes[..4], &0x0000_1219u32.to_le_bytes());
+        assert_eq!(&frame.bytes[4..8], &(W | (H << 16)).to_le_bytes());
+        assert_eq!(&frame.bytes[8..12], &(W * 2).to_le_bytes());
+        assert_eq!(
+            &frame.bytes[12..24],
+            &[
+                0x00, 0xf8, 0xe0, 0x07, 0x1f, 0x00, 0x00, 0x00, 0x21, 0x08, 0x1e, 0x14
+            ]
+        );
+    }
+
+    #[test]
+    fn rgba_pixels_pin_opaque_and_partial_alpha_truncation() {
+        let png = png_with_pixels(
+            png::ColorType::Rgba,
+            &[
+                [17, 129, 250, 255],
+                [255, 128, 64, 128],
+                [17, 129, 250, 77],
+                [1, 254, 127, 254],
+            ],
+        );
+        let frame = canonical_frame_from_png(&png).expect("RGBA PNG");
+
+        assert_eq!(
+            &frame.bytes[12..20],
+            &[0x1e, 0x14, 0x04, 0x82, 0x29, 0x09, 0xef, 0x07]
+        );
+    }
+
+    #[test]
+    fn a_smaller_first_apng_frame_is_rejected_after_its_full_size_header() {
+        let error = canonical_frame_from_png(&png_with_smaller_first_animation_frame())
+            .expect_err("a subframe cannot fill the canonical canvas");
+        assert_eq!(error, ImageIngestError::Decode);
     }
 
     #[test]

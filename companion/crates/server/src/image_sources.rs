@@ -35,6 +35,7 @@ const LVGL_IMAGE_HEADER_BYTES: usize = 12;
 const CANONICAL_FRAME_BYTES: usize = LVGL_IMAGE_HEADER_BYTES
     + protocol::SCENE_CANVAS_WIDTH as usize * protocol::SCENE_CANVAS_HEIGHT as usize * 2;
 const SOURCE_ID_RANDOM_HEX_LEN: usize = 24;
+const _: () = assert!(MAX_IMAGE_SOURCES <= protocol::MAX_ASSET_DIGESTS);
 
 pub(crate) struct ImageSourceStore {
     root: PathBuf,
@@ -56,30 +57,11 @@ impl ServerImageSourceHost {
 
 impl app_core::ImageSourceHost for ServerImageSourceHost {
     fn desired_assets(&mut self) -> Vec<app_core::DesiredAsset> {
-        let mut desired = Vec::new();
-        for (_, frame) in self.store.all_frames(Utc::now()) {
-            if desired
-                .iter()
-                .any(|asset: &app_core::DesiredAsset| asset.digest == frame.digest)
-            {
-                continue;
-            }
-            desired.push(app_core::DesiredAsset {
-                digest: frame.digest,
-                kind: protocol::AssetKind::Image,
-                bytes: frame.bytes,
-            });
-        }
-        desired
+        self.store.desired_assets()
     }
 
     fn image_source_frame(&mut self, source_id: &str) -> Option<app_core::ImageSourceFrame> {
-        let frame = self.store.frame(source_id, Utc::now())?;
-        Some(app_core::ImageSourceFrame {
-            digest: frame.digest,
-            bytes: frame.bytes,
-            stale: frame.stale,
-        })
+        self.store.frame(source_id, Utc::now())
     }
 }
 
@@ -131,13 +113,6 @@ impl fmt::Debug for MintedSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SourceFrame {
-    pub digest: [u8; 32],
-    pub bytes: Arc<[u8]>,
-    pub stale: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AcceptOutcome {
     Changed { digest: [u8; 32] },
     Unchanged,
@@ -153,8 +128,6 @@ pub(crate) enum ImageSourceError {
     Io { message: String },
     #[error("the image source was pushed too recently")]
     TooSoon,
-    #[error("the display has room for {available} more picture frames")]
-    DigestBudget { available: usize },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -184,30 +157,10 @@ impl ImageSourceStore {
 
     /// Mints a source id and a random 32-byte bearer token. The token's digest
     /// is committed before the one plaintext copy is returned.
-    ///
-    /// `durable_digests_available` is the device's durable asset ceiling. Two
-    /// ceilings therefore apply: this store's own `MAX_IMAGE_SOURCES`, and the
-    /// wire's digest budget. Checking the second one HERE is deliberate -- the wire's copy
-    /// of the rule lives in `compose_asset_keep_set` and refuses an
-    /// over-ceiling set by name, but that fires during a device sync, long
-    /// after the person who minted one source too many has walked away. This is
-    /// the guard that tells them at the moment they act.
-    pub(crate) fn mint(
-        &self,
-        name: &str,
-        durable_digests_available: usize,
-    ) -> Result<MintedSource, ImageSourceError> {
+    pub(crate) fn mint(&self, name: &str) -> Result<MintedSource, ImageSourceError> {
         let mut state = self.lock();
         if state.sources.len() >= MAX_IMAGE_SOURCES {
             return Err(ImageSourceError::Capacity);
-        }
-        // Sources that have never been pushed to hold no frame and so occupy no
-        // digest yet, but they will the moment a producer reaches them; budget
-        // for every source rather than only the ones already carrying bytes.
-        if state.sources.len() >= durable_digests_available {
-            return Err(ImageSourceError::DigestBudget {
-                available: durable_digests_available,
-            });
         }
 
         let id = loop {
@@ -312,19 +265,22 @@ impl ImageSourceStore {
         Ok(AcceptOutcome::Changed { digest })
     }
 
-    pub(crate) fn frame(&self, id: &str, now: DateTime<Utc>) -> Option<SourceFrame> {
+    pub(crate) fn frame(&self, id: &str, now: DateTime<Utc>) -> Option<app_core::ImageSourceFrame> {
         let state = self.lock();
         let source = state.sources.iter().find(|source| source.id == id)?;
-        source.frame.as_ref().map(|frame| SourceFrame {
-            digest: frame.digest,
-            bytes: Arc::clone(&frame.bytes),
-            stale: is_stale(&source.recent_push_times, now),
-        })
+        source
+            .frame
+            .as_ref()
+            .map(|frame| app_core::ImageSourceFrame {
+                digest: frame.digest,
+                bytes: Arc::clone(&frame.bytes),
+                stale: is_stale(&source.recent_push_times, now),
+            })
     }
 
     /// Liveness metadata for the management surface.
     ///
-    /// Deliberately separate from [`ImageSourceStore::all_frames`], which
+    /// Deliberately separate from [`ImageSourceStore::desired_assets`], which
     /// clones an `Arc` per frame for the push path: a dashboard that listed
     /// sources through it would hold every canonical frame alive to render a
     /// table of names.
@@ -342,23 +298,27 @@ impl ImageSourceStore {
             .collect()
     }
 
-    pub(crate) fn all_frames(&self, now: DateTime<Utc>) -> Vec<(String, SourceFrame)> {
-        self.lock()
+    fn desired_assets(&self) -> Vec<app_core::DesiredAsset> {
+        let state = self.lock();
+        let mut desired = Vec::new();
+        for frame in state
             .sources
             .iter()
-            .filter_map(|source| {
-                source.frame.as_ref().map(|frame| {
-                    (
-                        source.id.clone(),
-                        SourceFrame {
-                            digest: frame.digest,
-                            bytes: Arc::clone(&frame.bytes),
-                            stale: is_stale(&source.recent_push_times, now),
-                        },
-                    )
-                })
-            })
-            .collect()
+            .filter_map(|source| source.frame.as_ref())
+        {
+            if desired
+                .iter()
+                .any(|asset: &app_core::DesiredAsset| asset.digest == frame.digest)
+            {
+                continue;
+            }
+            desired.push(app_core::DesiredAsset {
+                digest: frame.digest,
+                kind: protocol::AssetKind::Image,
+                bytes: Arc::clone(&frame.bytes),
+            });
+        }
+        desired
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, ImageSourceState> {
@@ -595,7 +555,7 @@ mod tests {
     fn summaries_report_liveness_without_carrying_frame_bytes() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = ImageSourceStore::new(dir.path().to_path_buf()).expect("store");
-        let minted = store.mint("kitchen", 8).expect("mint");
+        let minted = store.mint("kitchen").expect("mint");
 
         let summaries = store.summaries(Utc::now());
 
@@ -611,6 +571,7 @@ mod tests {
     }
     use std::fs;
 
+    use app_core::ImageSourceHost as _;
     use app_core::config::MAX_IMAGE_SOURCES;
     use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
     use sha2::{Digest, Sha256};
@@ -650,9 +611,7 @@ mod tests {
     fn a_minted_token_authenticates_and_a_wrong_one_does_not() {
         let temp = tempfile::tempdir().expect("temp dir");
         let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("store");
-        let source = store
-            .mint("Status panel", MAX_IMAGE_SOURCES)
-            .expect("mint source");
+        let source = store.mint("Status panel").expect("mint source");
 
         assert_eq!(store.authenticate(&source.token), Some(source.id));
         assert_eq!(store.authenticate(&"00".repeat(32)), None);
@@ -662,9 +621,7 @@ mod tests {
     fn a_revoked_token_stops_authenticating() {
         let temp = tempfile::tempdir().expect("temp dir");
         let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("store");
-        let source = store
-            .mint("Status panel", MAX_IMAGE_SOURCES)
-            .expect("mint source");
+        let source = store.mint("Status panel").expect("mint source");
 
         store.revoke(&source.id).expect("revoke source");
 
@@ -675,9 +632,7 @@ mod tests {
     fn the_plaintext_token_never_appears_in_the_store_file() {
         let temp = tempfile::tempdir().expect("temp dir");
         let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("store");
-        let source = store
-            .mint("Status panel", MAX_IMAGE_SOURCES)
-            .expect("mint source");
+        let source = store.mint("Status panel").expect("mint source");
 
         let persisted = fs::read_to_string(temp.path().join(IMAGE_SOURCE_STORE_FILE))
             .expect("read image source store");
@@ -689,9 +644,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let source = {
             let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("first store");
-            store
-                .mint("Status panel", MAX_IMAGE_SOURCES)
-                .expect("mint source")
+            store.mint("Status panel").expect("mint source")
         };
 
         let reloaded = ImageSourceStore::new(temp.path().to_path_buf()).expect("reloaded store");
@@ -702,9 +655,7 @@ mod tests {
     fn the_same_picture_twice_is_accepted_once_but_counted_twice() {
         let temp = tempfile::tempdir().expect("temp dir");
         let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("store");
-        let source = store
-            .mint("Status panel", MAX_IMAGE_SOURCES)
-            .expect("mint source");
+        let source = store.mint("Status panel").expect("mint source");
         let frame = canonical_frame(0x2a);
 
         assert!(matches!(
@@ -722,9 +673,7 @@ mod tests {
     fn a_second_push_inside_the_minimum_interval_is_refused() {
         let temp = tempfile::tempdir().expect("temp dir");
         let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("store");
-        let source = store
-            .mint("Status panel", MAX_IMAGE_SOURCES)
-            .expect("mint source");
+        let source = store.mint("Status panel").expect("mint source");
 
         store
             .accept(&source.id, canonical_frame(1), at(0))
@@ -743,50 +692,12 @@ mod tests {
 
         for index in 0..MAX_IMAGE_SOURCES {
             store
-                .mint(&format!("Source {index}"), MAX_IMAGE_SOURCES)
+                .mint(&format!("Source {index}"))
                 .expect("mint within capacity");
         }
         assert!(matches!(
-            store.mint("One too many", MAX_IMAGE_SOURCES),
+            store.mint("One too many"),
             Err(ImageSourceError::Capacity)
-        ));
-    }
-
-    #[test]
-    fn minting_past_the_devices_shared_digest_budget_is_refused_by_name() {
-        // Picture frames draw from the device-wide digest budget. This ceiling is
-        // separate from `MAX_IMAGE_SOURCES`, so it gets its own error rather than being folded
-        // into `Capacity` -- a person told "capacity reached" after minting two
-        // of eight sources would reasonably think the store was broken.
-        let temp = tempfile::tempdir().expect("temp dir");
-        let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("store");
-        let budget = 2;
-
-        store.mint("First", budget).expect("within budget");
-        store.mint("Second", budget).expect("within budget");
-
-        let error = store
-            .mint("Third", budget)
-            .expect_err("over the digest budget");
-        assert!(
-            matches!(error, ImageSourceError::DigestBudget { available } if available == budget),
-            "expected a named digest-budget refusal, got {error:?}"
-        );
-        // And it must not masquerade as the store's own capacity, which is
-        // nowhere near reached.
-        assert!(!matches!(error, ImageSourceError::Capacity));
-    }
-
-    #[test]
-    fn a_zero_digest_budget_refuses_the_very_first_source() {
-        // A registry that has spent every durable slot leaves no room at all,
-        // and `saturating_sub` can hand this function a zero.
-        let temp = tempfile::tempdir().expect("temp dir");
-        let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("store");
-
-        assert!(matches!(
-            store.mint("First", 0),
-            Err(ImageSourceError::DigestBudget { available: 0 })
         ));
     }
 
@@ -795,9 +706,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let source = {
             let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("first store");
-            let source = store
-                .mint("Status panel", MAX_IMAGE_SOURCES)
-                .expect("mint source");
+            let source = store.mint("Status panel").expect("mint source");
             for index in 0..PUSH_TIME_RING + 3 {
                 let fill = u8::try_from(index).expect("small bounded ring index");
                 let seconds = i64::try_from(index).expect("small bounded ring index") * 5;
@@ -821,9 +730,7 @@ mod tests {
         let expected = canonical_frame(0xa5);
         let source = {
             let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("first store");
-            let source = store
-                .mint("Status panel", MAX_IMAGE_SOURCES)
-                .expect("mint source");
+            let source = store.mint("Status panel").expect("mint source");
             store
                 .accept(&source.id, expected.clone(), at(0))
                 .expect("accept frame");
@@ -841,9 +748,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let source = {
             let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("first store");
-            let source = store
-                .mint("Status panel", MAX_IMAGE_SOURCES)
-                .expect("mint source");
+            let source = store.mint("Status panel").expect("mint source");
             for index in 0..4 {
                 store
                     .accept(
@@ -867,9 +772,7 @@ mod tests {
     fn revoking_a_source_drops_its_frame_from_the_desired_set() {
         let temp = tempfile::tempdir().expect("temp dir");
         let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("store");
-        let source = store
-            .mint("Status panel", MAX_IMAGE_SOURCES)
-            .expect("mint source");
+        let source = store.mint("Status panel").expect("mint source");
         store
             .accept(&source.id, canonical_frame(0x5a), at(0))
             .expect("accept frame");
@@ -881,7 +784,76 @@ mod tests {
 
         store.revoke(&source.id).expect("revoke source");
 
-        assert!(store.all_frames(at(1)).is_empty());
+        assert!(store.desired_assets().is_empty());
         assert!(!frame_path.exists());
+    }
+
+    #[test]
+    fn host_desired_assets_keep_first_digest_order_bytes_and_arcs_including_stale_frames() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = Arc::new(ImageSourceStore::new(temp.path().to_path_buf()).expect("store"));
+        let first = store.mint("First").expect("mint first");
+        let duplicate = store.mint("Duplicate").expect("mint duplicate");
+        let distinct = store.mint("Distinct").expect("mint distinct");
+        let _unpushed = store.mint("Unpushed").expect("mint unpushed");
+        let shared = canonical_frame(0x31);
+        for second in [0, 5, 10, 15] {
+            store
+                .accept(&first.id, shared.clone(), at(second))
+                .expect("record first-source cadence");
+        }
+        store
+            .accept(&duplicate.id, shared.clone(), at(0))
+            .expect("accept duplicate");
+        let other = canonical_frame(0xa7);
+        store
+            .accept(&distinct.id, other.clone(), at(0))
+            .expect("accept distinct");
+
+        let retained = store.frame(&first.id, at(3_600)).expect("first frame");
+        assert!(
+            retained.stale,
+            "the stale frame must remain in the keep-set"
+        );
+        let mut host = ServerImageSourceHost::new(Arc::clone(&store));
+        let desired = host.desired_assets();
+
+        assert_eq!(
+            desired.len(),
+            2,
+            "duplicate and unpushed sources add nothing"
+        );
+        assert_eq!(desired[0].digest, shared.digest);
+        assert_eq!(desired[0].kind, protocol::AssetKind::Image);
+        assert_eq!(desired[0].bytes.as_ref(), shared.bytes.as_slice());
+        assert!(Arc::ptr_eq(&desired[0].bytes, &retained.bytes));
+        assert_eq!(desired[1].digest, other.digest);
+        assert_eq!(desired[1].kind, protocol::AssetKind::Image);
+        assert_eq!(desired[1].bytes.as_ref(), other.bytes.as_slice());
+    }
+
+    #[test]
+    fn revoking_the_first_duplicate_keeps_the_surviving_digest_desired() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = Arc::new(ImageSourceStore::new(temp.path().to_path_buf()).expect("store"));
+        let first = store.mint("First").expect("mint first");
+        let duplicate = store.mint("Duplicate").expect("mint duplicate");
+        let shared = canonical_frame(0x42);
+        store
+            .accept(&first.id, shared.clone(), at(0))
+            .expect("accept first");
+        store
+            .accept(&duplicate.id, shared.clone(), at(0))
+            .expect("accept duplicate");
+        let surviving = store.frame(&duplicate.id, at(1)).expect("duplicate frame");
+
+        store.revoke(&first.id).expect("revoke first duplicate");
+
+        let mut host = ServerImageSourceHost::new(store);
+        let desired = host.desired_assets();
+        assert_eq!(desired.len(), 1);
+        assert_eq!(desired[0].digest, shared.digest);
+        assert_eq!(desired[0].bytes.as_ref(), shared.bytes.as_slice());
+        assert!(Arc::ptr_eq(&desired[0].bytes, &surviving.bytes));
     }
 }

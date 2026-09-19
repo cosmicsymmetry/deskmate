@@ -32,7 +32,7 @@ pub struct FirmwareCatalog {
 
 /// The result of comparing a device's reported version against the catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FirmwareCheck {
+enum FirmwareCheck {
     UpToDate,
     UpdateAvailable { version: String, url: String },
 }
@@ -85,7 +85,7 @@ impl FirmwareCatalog {
 
     /// Compares `requested` against the newest available version.
     #[must_use]
-    pub fn check(&self, requested: &str) -> FirmwareCheck {
+    fn check(&self, requested: &str) -> FirmwareCheck {
         if requested == self.current_version {
             return FirmwareCheck::UpToDate;
         }
@@ -103,7 +103,7 @@ impl FirmwareCatalog {
     /// for path-traversal and other unsafe characters before being joined
     /// onto the directory; a rejected version reads as "not found" like any
     /// other bad request.
-    pub async fn open_image(&self, version: &str) -> std::io::Result<(tokio::fs::File, u64)> {
+    async fn open_image(&self, version: &str) -> std::io::Result<(tokio::fs::File, u64)> {
         let path = self.image_path(version).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid firmware version")
         })?;
@@ -135,7 +135,7 @@ impl FirmwareCatalog {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct FirmwareQuery {
+pub(crate) struct FirmwareQuery {
     current: String,
 }
 
@@ -253,10 +253,16 @@ mod tests {
     }
 
     #[test]
-    fn loggable_truncates_and_strips_control_characters() {
-        let attack = format!("{}\nSMUGGLED LOG LINE", "a".repeat(200));
-        let logged = loggable(&attack);
-        assert_eq!(logged.chars().count(), 64);
-        assert!(!logged.contains('\n'));
+    fn loggable_truncates_to_exactly_sixty_four_characters() {
+        let attack = "a".repeat(200);
+        assert_eq!(loggable(&attack), "a".repeat(64));
+    }
+
+    #[test]
+    fn loggable_replaces_every_control_character() {
+        assert_eq!(
+            loggable("release\nnext\rcolumn\tdelete\u{7f}done"),
+            "release�next�column�delete�done"
+        );
     }
 }

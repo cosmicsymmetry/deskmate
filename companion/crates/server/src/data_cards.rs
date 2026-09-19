@@ -277,6 +277,25 @@ impl DataCardState {
             tasks: HashMap::new(),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn insert_task_for_test(
+        &mut self,
+        source_id: String,
+        task: tokio::task::JoinHandle<()>,
+    ) {
+        self.tasks.insert(source_id, task);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spec_source_ids_for_test(&self) -> impl Iterator<Item = &str> {
+        self.specs.iter().map(|spec| spec.source_id.as_str())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_task_for_test(&self, source_id: &str) -> bool {
+        self.tasks.contains_key(source_id)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

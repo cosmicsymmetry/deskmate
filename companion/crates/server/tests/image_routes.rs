@@ -2,6 +2,7 @@
 
 use reqwest::{Client, Response, StatusCode};
 use serde::Deserialize;
+use server::firmware::FirmwareCatalog;
 use server::{ServerState, app};
 
 const ADMIN_TOKEN: &str = "in-memory-admin-token";
@@ -14,6 +15,10 @@ struct TestServer {
 /// A loopback HTTP harness for producer and admin image routes.
 async fn spawn() -> TestServer {
     let state = ServerState::in_memory();
+    spawn_with(state).await
+}
+
+async fn spawn_with(state: ServerState) -> TestServer {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test server");
@@ -35,11 +40,20 @@ struct MintedSource {
 }
 
 async fn mint(client: &Client, server: &TestServer, name: &str) -> MintedSource {
+    mint_with_face(client, server, name, None).await
+}
+
+async fn mint_with_face(
+    client: &Client,
+    server: &TestServer,
+    name: &str,
+    face_kind: Option<&str>,
+) -> MintedSource {
     let response = client
         .post(format!("{}/v1/images", server.base_url))
         .bearer_auth(ADMIN_TOKEN)
         .header("content-type", "application/json")
-        .body(serde_json::json!({ "name": name }).to_string())
+        .body(serde_json::json!({ "name": name, "face_kind": face_kind }).to_string())
         .send()
         .await
         .expect("mint image source");
@@ -83,6 +97,11 @@ fn png_of(width: u32, height: u32) -> Vec<u8> {
 
 fn exact_png() -> Vec<u8> {
     png_of(448, 368)
+}
+
+fn replace_file_with_directory(path: &std::path::Path) {
+    std::fs::rename(path, path.with_extension("backup")).expect("preserve original file");
+    std::fs::create_dir(path).expect("blocking directory");
 }
 
 #[tokio::test]
@@ -163,6 +182,128 @@ async fn a_revoked_token_is_unauthorized() {
     .await;
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn deleting_a_source_removes_its_face_preserves_others_and_revokes_its_token() {
+    let root = tempfile::tempdir().expect("config root");
+    let state = ServerState::new(
+        ADMIN_TOKEN.to_owned(),
+        FirmwareCatalog::in_memory(),
+        root.path().to_path_buf(),
+    );
+    let server = spawn_with(state).await;
+    let client = Client::new();
+    let removed = mint_with_face(&client, &server, "Weather", Some("weather")).await;
+    let retained = mint_with_face(&client, &server, "News", Some("rss")).await;
+
+    let response = client
+        .delete(format!("{}/v1/images/{}", server.base_url, removed.id))
+        .bearer_auth(ADMIN_TOKEN)
+        .send()
+        .await
+        .expect("delete image source");
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let bytes = std::fs::read(root.path().join("data-cards.json")).expect("persisted face specs");
+    let persisted: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("persisted face specs parse");
+    let specs = persisted.as_array().expect("persisted face spec list");
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0]["source_id"].as_str(), Some(retained.id.as_str()));
+    let rejected = push(
+        &client,
+        &server,
+        &removed.token,
+        None,
+        "image/png",
+        exact_png(),
+    )
+    .await;
+    assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn delete_source_persistence_failure_is_internal_and_leaves_the_face_untouched() {
+    let root = tempfile::tempdir().expect("config root");
+    let state = ServerState::new(
+        ADMIN_TOKEN.to_owned(),
+        FirmwareCatalog::in_memory(),
+        root.path().to_path_buf(),
+    );
+    let server = spawn_with(state).await;
+    let client = Client::new();
+    let source = mint_with_face(&client, &server, "Weather", Some("weather")).await;
+    let spec_path = root.path().join("data-cards.json");
+    let before = std::fs::read(&spec_path).expect("face specs");
+    replace_file_with_directory(&root.path().join("image-sources.json"));
+
+    let response = client
+        .delete(format!("{}/v1/images/{}", server.base_url, source.id))
+        .bearer_auth(ADMIN_TOKEN)
+        .send()
+        .await
+        .expect("delete image source");
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        json_body(response).await,
+        serde_json::json!({ "kind": "internal" })
+    );
+    assert_eq!(std::fs::read(spec_path).expect("unchanged specs"), before);
+    let listed = client
+        .get(format!("{}/v1/images", server.base_url))
+        .bearer_auth(ADMIN_TOKEN)
+        .send()
+        .await
+        .expect("list sources");
+    assert!(
+        json_body(listed)
+            .await
+            .as_array()
+            .expect("source rows")
+            .iter()
+            .any(|row| row["id"] == source.id && row["face"]["kind"] == "weather")
+    );
+}
+
+#[tokio::test]
+async fn delete_face_persistence_failure_is_internal_after_the_token_is_revoked() {
+    let root = tempfile::tempdir().expect("config root");
+    let state = ServerState::new(
+        ADMIN_TOKEN.to_owned(),
+        FirmwareCatalog::in_memory(),
+        root.path().to_path_buf(),
+    );
+    let server = spawn_with(state).await;
+    let client = Client::new();
+    let source = mint_with_face(&client, &server, "Weather", Some("weather")).await;
+    let spec_path = root.path().join("data-cards.json");
+    replace_file_with_directory(&spec_path);
+
+    let response = client
+        .delete(format!("{}/v1/images/{}", server.base_url, source.id))
+        .bearer_auth(ADMIN_TOKEN)
+        .send()
+        .await
+        .expect("delete image source");
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        json_body(response).await,
+        serde_json::json!({ "kind": "internal" })
+    );
+    assert!(spec_path.is_dir(), "the failing face target was replaced");
+    let rejected = push(
+        &client,
+        &server,
+        &source.token,
+        None,
+        "image/png",
+        exact_png(),
+    )
+    .await;
+    assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -314,6 +455,39 @@ async fn minting_returns_the_plaintext_exactly_once() {
         .expect("delete image source");
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert!(response.text().await.expect("delete body").is_empty());
+}
+
+#[tokio::test]
+async fn minting_a_ninth_source_preserves_the_capacity_response() {
+    let server = spawn().await;
+    let client = Client::new();
+
+    for index in 0..8 {
+        mint(&client, &server, &format!("Source {index}")).await;
+    }
+
+    let response = client
+        .post(format!("{}/v1/images", server.base_url))
+        .bearer_auth(ADMIN_TOKEN)
+        .header("content-type", "application/json")
+        .body(serde_json::json!({ "name": "One too many" }).to_string())
+        .send()
+        .await
+        .expect("mint beyond capacity");
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        json_body(response).await,
+        serde_json::json!({
+            "kind": "capacity",
+            "message": "the image-source capacity has been reached",
+        })
+    );
+}
+
+async fn json_body(response: Response) -> serde_json::Value {
+    let body = response.text().await.expect("response body");
+    serde_json::from_str(&body).unwrap_or_else(|error| panic!("invalid JSON ({error}): {body}"))
 }
 
 #[tokio::test]

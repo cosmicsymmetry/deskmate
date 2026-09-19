@@ -618,20 +618,21 @@ async fn reconcile_image_sources(
     }
 
     for source_id in undeclared {
-        let revoking = state.clone();
-        let id = source_id.clone();
-        let revoked = tokio::task::spawn_blocking(move || revoking.image_sources().revoke(&id))
-            .await
-            .map_err(|_| worker_failed())?;
-        if let Err(error) = revoked {
-            // One source failing to revoke must not fail the save: the
-            // configuration is already stored and is what the owner asked for.
-            // Say so and carry on -- the next save reconciles again.
-            tracing::warn!(source_id, %error, "could not revoke an undeclared image source");
-            continue;
-        }
-        if let Err(error) = crate::data_cards::remove_face(state, &source_id) {
-            tracing::warn!(source_id, %error, "could not drop the face of a revoked source");
+        match crate::images::revoke_image_source(state.clone(), source_id.clone()).await {
+            Ok(()) => {}
+            Err(crate::images::RevokeImageSourceError::WorkerFailed) => {
+                return Err(worker_failed());
+            }
+            Err(crate::images::RevokeImageSourceError::Source(error)) => {
+                // One source failing to revoke must not fail the save: the
+                // configuration is already stored and is what the owner asked for.
+                // Say so and carry on -- the next save reconciles again.
+                tracing::warn!(source_id, %error, "could not revoke an undeclared image source");
+                continue;
+            }
+            Err(crate::images::RevokeImageSourceError::Face(error)) => {
+                tracing::warn!(source_id, %error, "could not drop the face of a revoked source");
+            }
         }
         tracing::info!(
             source_id,
@@ -836,7 +837,15 @@ fn preview_seconds_to_ms(seconds: i64) -> u32 {
 }
 
 #[cfg(test)]
+mod contract;
+
+#[cfg(test)]
 mod tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::firmware::FirmwareCatalog;
+
     #[test]
     fn the_event_stream_stays_quiet_while_only_telemetry_moves() {
         // A linked board reports uptime, signal strength and frame counters
@@ -864,24 +873,24 @@ mod tests {
         ticked["device"]["counters"]["valid_frames"] = serde_json::json!(11);
         ticked["diagnostics"]["commands_processed"] = serde_json::json!(4);
         assert_eq!(
-            super::change_key(&base),
-            super::change_key(&ticked),
+            change_key(&base),
+            change_key(&ticked),
             "telemetry moving is not a reason to update the page"
         );
 
         let mut meaningful = base.clone();
         meaningful["config"]["schema_version"] = serde_json::json!(11);
         assert_ne!(
-            super::change_key(&base),
-            super::change_key(&meaningful),
+            change_key(&base),
+            change_key(&meaningful),
             "a configuration change must still reach the page"
         );
 
         let mut went_offline = base.clone();
         went_offline["device"]["connection"] = serde_json::json!({ "kind": "disconnected" });
         assert_ne!(
-            super::change_key(&base),
-            super::change_key(&went_offline),
+            change_key(&base),
+            change_key(&went_offline),
             "the display appearing or disappearing is the whole point of the stream"
         );
 
@@ -892,12 +901,72 @@ mod tests {
             .expect("device object")
             .remove("wifi_rssi");
         assert_ne!(
-            super::change_key(&base),
-            super::change_key(&lost_rssi),
+            change_key(&base),
+            change_key(&lost_rssi),
             "a field disappearing is a change even when its value is ignored"
         );
     }
-}
 
-#[cfg(test)]
-mod contract;
+    fn state() -> (tempfile::TempDir, ServerState) {
+        let root = tempfile::tempdir().expect("config root");
+        let state = ServerState::new(
+            "admin token".into(),
+            FirmwareCatalog::in_memory(),
+            root.path().to_path_buf(),
+        );
+        (root, state)
+    }
+
+    fn mint_face(state: &ServerState) -> crate::image_sources::MintedSource {
+        let source = state.image_sources().mint("Weather").expect("mint source");
+        crate::data_cards::create_face(
+            state,
+            &tokio::runtime::Handle::current(),
+            &source.id,
+            "weather",
+        )
+        .expect("create face");
+        source
+    }
+
+    fn replace_file_with_directory(path: &Path) {
+        let backup = path.with_extension("backup");
+        std::fs::rename(path, backup).expect("preserve original file");
+        std::fs::create_dir(path).expect("blocking directory");
+    }
+
+    #[tokio::test]
+    async fn reconciliation_tolerates_source_failure_and_skips_its_face() {
+        let (root, state) = state();
+        let source = mint_face(&state);
+        replace_file_with_directory(
+            &root
+                .path()
+                .join(crate::image_sources::IMAGE_SOURCE_STORE_FILE),
+        );
+
+        reconcile_image_sources(&state, &AppConfig::default())
+            .await
+            .expect("ordinary source storage failure does not fail a saved config");
+
+        assert_eq!(
+            state.image_sources().authenticate(&source.token),
+            Some(source.id.clone())
+        );
+        assert!(crate::data_cards::descriptor_for_source(&state, &source.id).is_some());
+    }
+
+    #[tokio::test]
+    async fn reconciliation_tolerates_face_failure_after_revoking_the_source() {
+        let (root, state) = state();
+        let source = mint_face(&state);
+        replace_file_with_directory(&root.path().join("data-cards.json"));
+
+        reconcile_image_sources(&state, &AppConfig::default())
+            .await
+            .expect("ordinary face storage failure does not fail a saved config");
+
+        assert_eq!(state.image_sources().authenticate(&source.token), None);
+        assert!(crate::data_cards::descriptor_for_source(&state, &source.id).is_some());
+    }
+}

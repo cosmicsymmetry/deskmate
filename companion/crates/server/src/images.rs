@@ -193,18 +193,13 @@ async fn mint_source(
         status: rejection.status(),
         message: rejection.body_text(),
     })?;
-    // Every source reserves one place in the device-wide durable keep-set.
-    // The store's smaller source ceiling remains the ordinary limiting factor,
-    // but passing the wire ceiling keeps the two independent bounds explicit.
-    let available = protocol::MAX_ASSET_DIGESTS;
     let face_kind = request.face_kind.clone();
     let mint_state = state.clone();
-    let minted = tokio::task::spawn_blocking(move || {
-        mint_state.image_sources().mint(&request.name, available)
-    })
-    .await
-    .map_err(|_| ImageRouteError::WorkerFailed)?
-    .map_err(|error| map_mint_error(&error))?;
+    let minted =
+        tokio::task::spawn_blocking(move || mint_state.image_sources().mint(&request.name))
+            .await
+            .map_err(|_| ImageRouteError::WorkerFailed)?
+            .map_err(|error| map_mint_error(&error))?;
 
     // A server-drawn face is attached in the same request. If attaching fails the
     // source is revoked rather than left behind: a half-made source shows up in
@@ -239,17 +234,43 @@ async fn revoke_source(
     _operator: OperatorAuthenticated,
     Path(source_id): Path<String>,
 ) -> Result<StatusCode, ImageRouteError> {
+    revoke_image_source(state, source_id)
+        .await
+        .map_err(|error| match error {
+            RevokeImageSourceError::WorkerFailed => ImageRouteError::WorkerFailed,
+            RevokeImageSourceError::Source(error) => map_revoke_error(&error),
+            RevokeImageSourceError::Face(error) => map_face_update_error(&error),
+        })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RevokeImageSourceError {
+    #[error("a worker task failed")]
+    WorkerFailed,
+    #[error(transparent)]
+    Source(ImageSourceError),
+    #[error(transparent)]
+    Face(crate::data_cards::FaceUpdateError),
+}
+
+pub(crate) async fn revoke_image_source(
+    state: ServerState,
+    source_id: String,
+) -> Result<(), RevokeImageSourceError> {
     let revoking = state.clone();
     let id = source_id.clone();
     tokio::task::spawn_blocking(move || revoking.image_sources().revoke(&id))
         .await
-        .map_err(|_| ImageRouteError::WorkerFailed)?
-        .map_err(|error| map_revoke_error(&error))?;
-    // The face goes with the source. Leaving it behind kept a refresher fetching
-    // on schedule for a source that no longer existed; see `remove_face`.
-    crate::data_cards::remove_face(&state, &source_id)
-        .map_err(|error| map_face_update_error(&error))?;
-    Ok(StatusCode::NO_CONTENT)
+        .map_err(|_| RevokeImageSourceError::WorkerFailed)?
+        .map_err(RevokeImageSourceError::Source)?;
+
+    // Keep face removal in its own awaited phase. If the request is cancelled
+    // while source persistence is pending, this write must never begin.
+    tokio::task::spawn_blocking(move || crate::data_cards::remove_face(&state, &source_id))
+        .await
+        .map_err(|_| RevokeImageSourceError::WorkerFailed)?
+        .map_err(RevokeImageSourceError::Face)
 }
 
 async fn push_image(
@@ -359,12 +380,7 @@ fn map_ingest_error(error: ImageIngestError) -> ImageRouteError {
 
 fn map_mint_error(error: &ImageSourceError) -> ImageRouteError {
     match error {
-        // Both ceilings read the same way to the caller -- there is no room for
-        // another source -- and differ only in which budget ran out, which the
-        // error's own message says.
-        ImageSourceError::Capacity | ImageSourceError::DigestBudget { .. } => {
-            ImageRouteError::Capacity
-        }
+        ImageSourceError::Capacity => ImageRouteError::Capacity,
         // Neither of these can reach a mint; they are folded in so the match
         // stays exhaustive without a wildcard that would hide a new variant.
         ImageSourceError::Io { .. }
@@ -376,10 +392,9 @@ fn map_mint_error(error: &ImageSourceError) -> ImageRouteError {
 fn map_revoke_error(error: &ImageSourceError) -> ImageRouteError {
     match error {
         ImageSourceError::UnknownToken => ImageRouteError::NotFound,
-        ImageSourceError::Io { .. }
-        | ImageSourceError::Capacity
-        | ImageSourceError::DigestBudget { .. }
-        | ImageSourceError::TooSoon => ImageRouteError::Internal,
+        ImageSourceError::Io { .. } | ImageSourceError::Capacity | ImageSourceError::TooSoon => {
+            ImageRouteError::Internal
+        }
     }
 }
 
@@ -387,11 +402,9 @@ fn map_accept_error(error: &ImageSourceError) -> ImageRouteError {
     match error {
         ImageSourceError::UnknownToken => ImageRouteError::ProducerUnauthorized,
         ImageSourceError::TooSoon => ImageRouteError::RateLimited,
-        // Neither ceiling is reachable on an accept: minting already refused
-        // the source that would have exceeded one.
-        ImageSourceError::Io { .. }
-        | ImageSourceError::Capacity
-        | ImageSourceError::DigestBudget { .. } => ImageRouteError::Internal,
+        // The source ceiling is unreachable on an accept: minting already
+        // refused the source that would have exceeded it.
+        ImageSourceError::Io { .. } | ImageSourceError::Capacity => ImageRouteError::Internal,
     }
 }
 
@@ -518,5 +531,179 @@ impl IntoResponse for ImageRouteError {
                 (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorBody::Internal)).into_response()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future;
+    use std::path::Path;
+
+    use futures_util::FutureExt as _;
+
+    use super::*;
+    use crate::firmware::FirmwareCatalog;
+
+    fn state() -> (tempfile::TempDir, ServerState) {
+        let root = tempfile::tempdir().expect("config root");
+        let state = ServerState::new(
+            "admin token".into(),
+            FirmwareCatalog::in_memory(),
+            root.path().to_path_buf(),
+        );
+        (root, state)
+    }
+
+    fn mint_face(
+        state: &ServerState,
+        name: &str,
+        kind: &str,
+    ) -> crate::image_sources::MintedSource {
+        let source = state.image_sources().mint(name).expect("mint source");
+        crate::data_cards::create_face(state, &tokio::runtime::Handle::current(), &source.id, kind)
+            .expect("create face");
+        source
+    }
+
+    fn replace_file_with_directory(path: &Path) -> std::path::PathBuf {
+        let backup = path.with_extension("backup");
+        std::fs::rename(path, &backup).expect("preserve original file");
+        std::fs::create_dir(path).expect("blocking directory");
+        backup
+    }
+
+    struct NotifyOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl Drop for NotifyOnDrop {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn helper_revokes_the_source_removes_only_its_face_and_cancels_its_task() {
+        let (_root, state) = state();
+        let removed = mint_face(&state, "Weather", "weather");
+        let retained = mint_face(&state, "News", "rss");
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _notify = NotifyOnDrop(Some(dropped_tx));
+            future::pending::<()>().await;
+        });
+        state
+            .inner
+            .data_cards
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert_task_for_test(removed.id.clone(), task);
+
+        revoke_image_source(state.clone(), removed.id.clone())
+            .await
+            .expect("revoke source and face");
+
+        assert_eq!(state.image_sources().authenticate(&removed.token), None);
+        {
+            let data_cards = state
+                .inner
+                .data_cards
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(
+                data_cards.spec_source_ids_for_test().collect::<Vec<_>>(),
+                [retained.id.as_str()]
+            );
+            assert!(!data_cards.has_task_for_test(&removed.id));
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("removed refresher was cancelled")
+            .expect("drop notification");
+    }
+
+    #[tokio::test]
+    async fn source_persistence_failure_skips_face_removal() {
+        let (root, state) = state();
+        let source = mint_face(&state, "Weather", "weather");
+        let spec_path = root.path().join("data-cards.json");
+        let before = std::fs::read(&spec_path).expect("face specs");
+        replace_file_with_directory(
+            &root
+                .path()
+                .join(crate::image_sources::IMAGE_SOURCE_STORE_FILE),
+        );
+
+        let error = revoke_image_source(state.clone(), source.id.clone())
+            .await
+            .expect_err("source persistence must fail");
+
+        assert!(matches!(error, RevokeImageSourceError::Source(_)));
+        assert_eq!(
+            state.image_sources().authenticate(&source.token),
+            Some(source.id.clone())
+        );
+        assert_eq!(std::fs::read(&spec_path).expect("unchanged specs"), before);
+        assert!(crate::data_cards::descriptor_for_source(&state, &source.id).is_some());
+    }
+
+    #[tokio::test]
+    async fn face_persistence_failure_leaves_the_source_revoked_and_face_state_unchanged() {
+        let (root, state) = state();
+        let source = mint_face(&state, "Weather", "weather");
+        let spec_path = root.path().join("data-cards.json");
+        let backup = replace_file_with_directory(&spec_path);
+        let before = std::fs::read(&backup).expect("preserved specs");
+
+        let error = revoke_image_source(state.clone(), source.id.clone())
+            .await
+            .expect_err("face persistence must fail");
+
+        assert!(matches!(error, RevokeImageSourceError::Face(_)));
+        assert_eq!(state.image_sources().authenticate(&source.token), None);
+        assert_eq!(std::fs::read(&backup).expect("unchanged backup"), before);
+        assert!(spec_path.is_dir(), "the failing target was not replaced");
+        assert!(crate::data_cards::descriptor_for_source(&state, &source.id).is_some());
+    }
+
+    #[test]
+    fn cancellation_while_source_revocation_is_pending_never_starts_face_removal() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let (_root, state) = state();
+            let source = mint_face(&state, "Weather", "weather");
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                let _ = started_tx.send(());
+                release_rx.recv().expect("release blocking worker");
+            });
+            started_rx.await.expect("blocking worker started");
+
+            let operation = revoke_image_source(state.clone(), source.id.clone());
+            assert!(
+                operation.now_or_never().is_none(),
+                "source revocation was not pending at its first await"
+            );
+            release_tx.send(()).expect("release worker");
+            blocker.await.expect("blocking worker exits");
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while state.image_sources().authenticate(&source.token).is_some() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("detached source revocation completed");
+
+            assert!(
+                crate::data_cards::descriptor_for_source(&state, &source.id).is_some(),
+                "the face phase began after its parent operation was cancelled"
+            );
+        });
     }
 }

@@ -8,6 +8,7 @@
 
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
+use server::firmware::FirmwareCatalog;
 use server::{ServerState, app, app_with_web};
 
 const ADMIN_TOKEN: &str = "in-memory-admin-token";
@@ -601,6 +602,105 @@ async fn saving_a_configuration_revokes_the_sources_it_no_longer_declares() {
 }
 
 #[tokio::test]
+async fn saving_a_configuration_removes_an_abandoned_face_and_preserves_a_declared_one() {
+    let root = tempfile::tempdir().expect("config root");
+    let state = ServerState::new(
+        ADMIN_TOKEN.to_owned(),
+        FirmwareCatalog::in_memory(),
+        root.path().to_path_buf(),
+    );
+    let server = spawn_with(state, None).await;
+    let client = Client::new();
+    let device = mint_device(&client, &server).await;
+    let kept = mint_face_source(&client, &server, "Weather", "weather").await;
+    let abandoned = mint_face_source(&client, &server, "News", "rss").await;
+
+    let mut config = snapshot(&client, &server, &device.device_id).await["config"].clone();
+    config["image_sources"] = serde_json::json!([{ "id": kept, "name": "Weather" }]);
+    config["cards"] = serde_json::json!([{
+        "kind": "picture",
+        "id": "weather",
+        "title": "Weather",
+        "source_id": kept,
+        "tap_action": { "kind": "none" },
+        "refresh": { "kind": "manual" },
+        "alert": { "kind": "none" },
+        "dwell_seconds": null,
+    }]);
+    let saved = client
+        .put(format!(
+            "{}/v1/app/{}/config",
+            server.base_url, device.device_id
+        ))
+        .bearer_auth(ADMIN_TOKEN)
+        .header("content-type", "application/json")
+        .body(serde_json::json!({ "json": config.to_string() }).to_string())
+        .send()
+        .await
+        .expect("save config");
+
+    assert_eq!(saved.status(), StatusCode::OK);
+    assert!(
+        !listed_source_ids(&client, &server)
+            .await
+            .contains(&abandoned)
+    );
+    let bytes = std::fs::read(root.path().join("data-cards.json")).expect("persisted face specs");
+    let persisted: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("persisted face specs parse");
+    let specs = persisted.as_array().expect("persisted face spec list");
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0]["source_id"].as_str(), Some(kept.as_str()));
+}
+
+#[tokio::test]
+async fn config_save_succeeds_when_source_reconciliation_persistence_fails() {
+    let root = tempfile::tempdir().expect("config root");
+    let state = ServerState::new(
+        ADMIN_TOKEN.to_owned(),
+        FirmwareCatalog::in_memory(),
+        root.path().to_path_buf(),
+    );
+    let server = spawn_with(state, None).await;
+    let client = Client::new();
+    let device = mint_device(&client, &server).await;
+    let source = mint_face_source(&client, &server, "Weather", "weather").await;
+    let config = snapshot(&client, &server, &device.device_id).await["config"].clone();
+    let spec_path = root.path().join("data-cards.json");
+    let before = std::fs::read(&spec_path).expect("face specs");
+    replace_file_with_directory(&root.path().join("image-sources.json"));
+
+    let saved = save_config(&client, &server, &device.device_id, &config).await;
+
+    assert_eq!(saved.status(), StatusCode::OK);
+    assert!(listed_source_ids(&client, &server).await.contains(&source));
+    assert_eq!(std::fs::read(spec_path).expect("unchanged specs"), before);
+}
+
+#[tokio::test]
+async fn config_save_succeeds_when_face_reconciliation_persistence_fails() {
+    let root = tempfile::tempdir().expect("config root");
+    let state = ServerState::new(
+        ADMIN_TOKEN.to_owned(),
+        FirmwareCatalog::in_memory(),
+        root.path().to_path_buf(),
+    );
+    let server = spawn_with(state, None).await;
+    let client = Client::new();
+    let device = mint_device(&client, &server).await;
+    let source = mint_face_source(&client, &server, "Weather", "weather").await;
+    let config = snapshot(&client, &server, &device.device_id).await["config"].clone();
+    let spec_path = root.path().join("data-cards.json");
+    replace_file_with_directory(&spec_path);
+
+    let saved = save_config(&client, &server, &device.device_id, &config).await;
+
+    assert_eq!(saved.status(), StatusCode::OK);
+    assert!(!listed_source_ids(&client, &server).await.contains(&source));
+    assert!(spec_path.is_dir(), "the failing face target was replaced");
+}
+
+#[tokio::test]
 async fn a_configuration_that_still_declares_everything_revokes_nothing() {
     // The guard against the shape that has bitten this project before: a
     // KEEP-set read as a delete-list. `AssetRelease.digests` once meant "wipe
@@ -652,6 +752,48 @@ async fn mint_source(client: &Client, server: &TestServer, name: &str) -> String
         .as_str()
         .expect("source id")
         .to_owned()
+}
+
+async fn mint_face_source(
+    client: &Client,
+    server: &TestServer,
+    name: &str,
+    face_kind: &str,
+) -> String {
+    let response = client
+        .post(format!("{}/v1/images", server.base_url))
+        .bearer_auth(ADMIN_TOKEN)
+        .header("content-type", "application/json")
+        .body(serde_json::json!({ "name": name, "face_kind": face_kind }).to_string())
+        .send()
+        .await
+        .expect("mint server face");
+    assert_eq!(response.status(), StatusCode::OK);
+    json_body(response).await["id"]
+        .as_str()
+        .expect("source id")
+        .to_owned()
+}
+
+async fn save_config(
+    client: &Client,
+    server: &TestServer,
+    device_id: &str,
+    config: &serde_json::Value,
+) -> reqwest::Response {
+    client
+        .put(format!("{}/v1/app/{device_id}/config", server.base_url))
+        .bearer_auth(ADMIN_TOKEN)
+        .header("content-type", "application/json")
+        .body(serde_json::json!({ "json": config.to_string() }).to_string())
+        .send()
+        .await
+        .expect("save config")
+}
+
+fn replace_file_with_directory(path: &std::path::Path) {
+    std::fs::rename(path, path.with_extension("backup")).expect("preserve original file");
+    std::fs::create_dir(path).expect("blocking directory");
 }
 
 async fn listed_source_ids(client: &Client, server: &TestServer) -> Vec<String> {

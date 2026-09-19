@@ -193,6 +193,7 @@ mod tests {
         }
         let ingested =
             crate::image_ingest::canonical_frame_from_png(&png).expect("the black PNG is accepted");
+        assert_eq!(frame.bytes, ingested.bytes);
         assert_eq!(frame.digest, ingested.digest);
     }
 

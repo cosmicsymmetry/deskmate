@@ -30,10 +30,8 @@ fn rotation_follows_card_order_and_each_cards_own_dwell() {
 
 #[test]
 fn reordering_the_loop_replays_and_keeps_the_card_on_the_panel() {
-    // Since schema v10 there is one loop and no playlist to switch, so what
-    // replaces the old playlist-switch case is the edit that can actually
-    // happen: reordering. The panel must stay on the card it is showing --
-    // an unrelated edit jumping the loop is the behaviour this pins against.
+    // Reordering the loop must keep the panel on the card it is showing --
+    // an unrelated edit must not jump to a different card.
     let control = MockDeviceControl::default();
     let mut config = AppConfig {
         cards: vec![clock_card("shared"), clock_card("new-first")],

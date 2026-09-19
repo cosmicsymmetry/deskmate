@@ -18,10 +18,9 @@ url = "2"
 
 [dev-dependencies]
 protocol = { path = "../protocol", features = ["test-support"] }
-# `examples/scene_panel_check.rs` drives the simulator's case tables against a
-# real board. A dev-dependency rather than the reverse direction because
-# `lvgl-sim` cannot depend on this crate: `app-core -> device -> lvgl-sim`
-# already, so anything needing both has to live on this side of that edge.
+# `examples/scene_panel_check.rs` consumes lvgl-sim's cases to compare simulator
+# frames against a real board. This edge is dev-only; lvgl-sim normally depends
+# on app-core for the host scene builders those cases exercise.
 lvgl-sim = { path = "../lvgl-sim" }
 tempfile = "3"
 

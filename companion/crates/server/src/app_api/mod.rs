@@ -11,6 +11,8 @@
 //! Protected data routes use [`OperatorAuthenticated`]. `POST /v1/app/session`
 //! trades the admin token for that session cookie, while `DELETE /v1/app/session`
 //! merely expires the caller's cookie. No edge gate currently exists.
+//! Device routes authenticate their own bearer tokens independently; firmware
+//! downloads under `/v1/firmware/*` are deliberately unauthenticated.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -702,11 +704,11 @@ pub(crate) struct PreviewFrame {
 const PICTURE_PREVIEW_IS_PUSH_ONLY: &str =
     "Picture cards show the last frame pushed by their source";
 
-/// Renders one card exactly as the firmware's own template would, from the same
-/// scene `build_card_scene` would push.
+/// Renders the scene `build_card_scene` would push through the firmware's own
+/// scene decoder and interpreter compiled into lvgl-sim.
 ///
-/// This is the one renderer: the preview does not maintain a second template
-/// implementation that could drift from the scene sent to the panel.
+/// Sharing the scene builder and renderer keeps the preview aligned with the
+/// face sent to the panel.
 async fn preview(
     State(state): State<ServerState>,
     _operator: OperatorAuthenticated,
@@ -736,10 +738,9 @@ async fn preview(
         }));
     }
 
-    // A card with no published data renders with an empty field vector rather
-    // than invented sample text, so the firmware's own per-template defaults show
-    // through -- the device's actual unconfigured appearance. `sample` tells the
-    // UI that happened without the renderer lying about what it drew.
+    // A card with no published data passes an empty field vector to the host
+    // scene builder, which uses its defaults for missing fields. `sample` tells
+    // the UI those defaults were used.
     let data = snapshot
         .card_data
         .iter()

@@ -1,7 +1,7 @@
 //! Dev-only physical check for the scene interpreter's RGB565 output.
 //!
-//! This sends a local seven-instant `DigitalClock` matrix and the asset-free,
-//! representable shared cases from `lvgl_sim::cases::scene_cases()` to a device,
+//! This sends host-built digital-clock scenes and the asset-free,
+//! representable entries from `lvgl_sim::cases::scene_cases()` to a device,
 //! then byte-compares a 0x7E capture against `Simulator::render_scene()` for
 //! the identical scene and render context. It must run against a device in
 //! local tier flashed from a `DESKMATE_DEV_DIAG=1` build.
@@ -22,8 +22,8 @@
 //! # Sequencing and settle time
 //!
 //! `ApplyConfig` queues the standalone-card fallback while `PushScene` shows
-//! synchronously and cancels that provisional fallback. This older harness
-//! still lets the queue drain before the scene push. Time-sync is last: it
+//! synchronously and cancels that provisional fallback. This harness
+//! lets the queue drain before the scene push. Time-sync is last: it
 //! updates the device clock used by `time:` bindings, and the scene-binding
 //! tick then redraws them. Both waits use 300 ms, generous against the 20 ms UI
 //! queue poll and 250 ms scene tick while remaining below the one second that
@@ -156,8 +156,7 @@ struct CheckCase {
     name: String,
     request: SceneRenderRequest,
     /// The timer the device's own `timer.*` bindings must resolve against.
-    /// Protocol v2 states it directly; v1 sent a field bag a C template
-    /// re-derived it from.
+    /// Sent directly through `PushTimer` before the scene is pushed.
     timer: Option<SceneTimer>,
     exclusion: Option<String>,
 }
@@ -237,10 +236,8 @@ fn scene_node_cases() -> Vec<CheckCase> {
     cases::scene_cases()
         .into_iter()
         .map(|(name, request)| {
-            // Protocol v1 also excluded the two `field.*` rows here, because
-            // no template registry accepted the field name they bound. v2 has
-            // no field namespace at all, so those rows bind `date` and
-            // `timer.status` and run on hardware like any other.
+            // Asset transfer is outside this harness, so only scenes needing
+            // no registered assets can be compared.
             let exclusion = asset_exclusion(&request.assets);
             let timer = request.timer;
             CheckCase {

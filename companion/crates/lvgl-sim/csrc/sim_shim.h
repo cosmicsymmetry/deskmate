@@ -36,8 +36,8 @@ bool sim_asset_register(const uint8_t *digest, const uint8_t *bytes,
  *     an asset it could not acquire, or an allocation failure. Nothing to
  *     do with the bytes.
  *
- * Collapsing those into one bool made the difference invisible, which is
- * exactly the wrong trade for the one gate that has to explain itself. */
+ * Distinct statuses let framebuffer comparisons report whether decoding or
+ * rendering failed. */
 typedef enum {
     SIM_SCENE_OK = 0,
     /* NULL/empty payload or out_pixels. */
@@ -65,8 +65,8 @@ typedef enum {
  *
  * Going through the decoder rather than filling a scene_t over FFI is the
  * point: the device builds its scene_t from these same bytes with this
- * same code, so the parity gate compares two renders of one decode path,
- * not a render of the wire against a render of a hand-built struct.
+ * same code, so device-versus-simulator framebuffer comparisons exercise
+ * one decode path rather than comparing wire decoding with a hand-built struct.
  *
  * The binding context is assembled from the remaining arguments.
  * `orientation_flipped` selects the 270° mount.

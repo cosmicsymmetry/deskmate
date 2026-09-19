@@ -26,8 +26,9 @@ sha2 = "0.10"
 cc = "1"
 glob = "0.3"
 
-# This crate wraps the firmware's LVGL templates over an FFI boundary, which
-# is unavoidably `unsafe`. The workspace forbids `unsafe_code` by default, so
+# This crate executes the firmware's scene decoder and interpreter across an FFI
+# boundary, which is unavoidably `unsafe`. The workspace forbids `unsafe_code` by
+# default, so
 # `[lints] workspace = true` cannot be used here (it would inherit the
 # forbid and make the crate uncompilable). Instead the clippy groups are
 # copied verbatim from `[workspace.lints.clippy]` and `unsafe_code` is

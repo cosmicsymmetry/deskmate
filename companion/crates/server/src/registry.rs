@@ -2,22 +2,17 @@
 //! SHA-256 digests, and authenticates presented tokens in constant time.
 
 use std::fmt;
-use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use atomic_write_file::AtomicWriteFile;
-#[cfg(unix)]
-use atomic_write_file::unix::OpenOptionsExt as AtomicOpenOptionsExt;
+use app_core::secure_file::{self, BoundedReadError, FileIoError, FileOperation};
 use serde::{Deserialize, Serialize};
 
 use crate::credential::{DigestDecodeError, decode_digest as decode_credential_digest};
 use crate::credential::{random_token, token_digest};
-
-#[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt as UnixOpenOptionsExt, PermissionsExt};
 
 pub(crate) const DEVICE_IDENTITY_STORE_FILE: &str = "device-identities.json";
 
@@ -73,8 +68,7 @@ pub struct Registry {
 struct RegistryState {
     next_sequence: u64,
     tokens: Vec<TokenRecord>,
-    failed_store_needs_archive: bool,
-    failed_store_needs_config_scan: bool,
+    failed_store_pending_repair: bool,
 }
 
 struct TokenRecord {
@@ -161,13 +155,11 @@ impl Registry {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(path) = &self.path {
-            if state.failed_store_needs_config_scan {
-                state.next_sequence = state.next_sequence.max(scan_config_high_water(path)?);
-            }
-            if state.failed_store_needs_archive {
-                archive_failed_store(path)?;
-            }
+        if let Some(path) = &self.path
+            && state.failed_store_pending_repair
+        {
+            state.next_sequence = state.next_sequence.max(scan_config_high_water(path)?);
+            archive_failed_store(path)?;
         }
 
         let sequence = state
@@ -183,8 +175,7 @@ impl Registry {
 
         if let Some(path) = &self.path {
             save_store(path, &state, sequence, &record)?;
-            state.failed_store_needs_archive = false;
-            state.failed_store_needs_config_scan = false;
+            state.failed_store_pending_repair = false;
         }
 
         state.next_sequence = sequence;
@@ -264,8 +255,7 @@ impl RegistryState {
         Self {
             next_sequence: 0,
             tokens: Vec::new(),
-            failed_store_needs_archive: false,
-            failed_store_needs_config_scan: false,
+            failed_store_pending_repair: false,
         }
     }
 
@@ -273,31 +263,17 @@ impl RegistryState {
         Self {
             next_sequence,
             tokens: Vec::new(),
-            failed_store_needs_archive: true,
-            failed_store_needs_config_scan: true,
+            failed_store_pending_repair: true,
         }
     }
 }
 
 fn load_store(path: &Path) -> Result<Option<RegistryState>, RegistryError> {
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(io_error("open device identity store", &error)),
+    let Some(bytes) =
+        secure_file::read_bounded(path, MAX_REGISTRY_FILE_BYTES).map_err(bounded_read_error)?
+    else {
+        return Ok(None);
     };
-    #[cfg(unix)]
-    let _ = file.set_permissions(fs::Permissions::from_mode(0o600));
-
-    let mut bytes = Vec::new();
-    file.take((MAX_REGISTRY_FILE_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|error| io_error("read device identity store", &error))?;
-    if bytes.len() > MAX_REGISTRY_FILE_BYTES {
-        return Err(invalid_store(format!(
-            "file exceeds the {MAX_REGISTRY_FILE_BYTES}-byte limit"
-        )));
-    }
-
     decode_store(&bytes).map(Some)
 }
 
@@ -337,8 +313,7 @@ fn decode_store(bytes: &[u8]) -> Result<RegistryState, RegistryError> {
     Ok(RegistryState {
         next_sequence: persisted.next_sequence,
         tokens,
-        failed_store_needs_archive: false,
-        failed_store_needs_config_scan: false,
+        failed_store_pending_repair: false,
     })
 }
 
@@ -380,10 +355,10 @@ fn archive_failed_store(path: &Path) -> Result<(), RegistryError> {
             archived_path = %archived.display(),
             "failed device identity store archived before replacement"
         );
-        if let Err(error) = sync_parent(usable_parent(path)?) {
+        if let Err(error) = secure_file::sync_parent(usable_parent(path)?) {
             tracing::warn!(
                 store_path = %path.display(),
-                %error,
+                error = %error.source,
                 "failed identity-store archive was renamed but its directory could not be synced"
             );
         }
@@ -442,8 +417,7 @@ fn save_store(
     new_record: &TokenRecord,
 ) -> Result<(), RegistryError> {
     let parent = usable_parent(path)?;
-    fs::create_dir_all(parent)
-        .map_err(|error| io_error("create device identity store directory", &error))?;
+    secure_file::create_directory(parent).map_err(file_io_error)?;
 
     let devices = state
         .tokens
@@ -467,22 +441,12 @@ fn save_store(
         )));
     }
 
-    let mut options = AtomicWriteFile::options();
-    secure_atomic_options(&mut options);
-    let mut file = options
-        .open(path)
-        .map_err(|error| io_error("create temporary device identity store", &error))?;
-    file.write_all(&bytes)
-        .map_err(|error| io_error("write temporary device identity store", &error))?;
-    file.write_all(b"\n")
-        .map_err(|error| io_error("finish temporary device identity store", &error))?;
-    file.commit()
-        .map_err(|error| io_error("sync and replace device identity store", &error))?;
+    secure_file::write_and_replace(path, &bytes).map_err(file_io_error)?;
 
-    if let Err(error) = sync_parent(parent) {
+    if let Err(error) = secure_file::sync_parent(parent) {
         tracing::warn!(
             store_path = %path.display(),
-            %error,
+            error = %error.source,
             "device identity store was replaced but its directory could not be synced"
         );
     }
@@ -518,39 +482,41 @@ fn decode_digest(hex: &str) -> Result<[u8; 32], RegistryError> {
 }
 
 fn usable_parent(path: &Path) -> Result<&Path, RegistryError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| invalid_store(format!("{} has no parent directory", path.display())))?;
-    if parent.as_os_str().is_empty() {
-        Ok(Path::new("."))
-    } else {
-        Ok(parent)
-    }
-}
-
-#[cfg(unix)]
-fn secure_atomic_options(options: &mut atomic_write_file::OpenOptions) {
-    options.preserve_mode(false);
-    options.mode(0o600);
-}
-
-#[cfg(not(unix))]
-fn secure_atomic_options(_options: &mut atomic_write_file::OpenOptions) {}
-
-#[cfg(unix)]
-fn sync_parent(parent: &Path) -> io::Result<()> {
-    File::open(parent)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_parent(_parent: &Path) -> io::Result<()> {
-    Ok(())
+    secure_file::usable_parent(path)
+        .ok_or_else(|| invalid_store(format!("{} has no parent directory", path.display())))
 }
 
 fn io_error(operation: &'static str, error: &io::Error) -> RegistryError {
     RegistryError::Io {
         operation,
         message: error.to_string(),
+    }
+}
+
+fn bounded_read_error(error: BoundedReadError) -> RegistryError {
+    match error {
+        BoundedReadError::Io(error) => file_io_error(error),
+        BoundedReadError::TooLarge { maximum } => {
+            invalid_store(format!("file exceeds the {maximum}-byte limit"))
+        }
+    }
+}
+
+fn file_io_error(error: FileIoError) -> RegistryError {
+    let FileIoError { operation, source } = error;
+    io_error(registry_file_operation(operation), &source)
+}
+
+const fn registry_file_operation(operation: FileOperation) -> &'static str {
+    match operation {
+        FileOperation::CreateDirectory => "create device identity store directory",
+        FileOperation::Open => "open device identity store",
+        FileOperation::Read => "read device identity store",
+        FileOperation::CreateTemporary => "create temporary device identity store",
+        FileOperation::WriteTemporary => "write temporary device identity store",
+        FileOperation::FinishTemporary => "finish temporary device identity store",
+        FileOperation::SyncAndReplace => "sync and replace device identity store",
+        FileOperation::SyncDirectory => "sync device identity store directory",
     }
 }
 
@@ -644,6 +610,42 @@ mod tests {
         let rendered = format!("{identity:?}");
         assert!(!rendered.contains("super-secret-value"));
         assert!(rendered.contains("dev-0001"));
+    }
+
+    #[test]
+    fn secure_file_operations_keep_registry_error_wording() {
+        assert_eq!(
+            registry_file_operation(FileOperation::CreateDirectory),
+            "create device identity store directory"
+        );
+        assert_eq!(
+            registry_file_operation(FileOperation::Open),
+            "open device identity store"
+        );
+        assert_eq!(
+            registry_file_operation(FileOperation::Read),
+            "read device identity store"
+        );
+        assert_eq!(
+            registry_file_operation(FileOperation::CreateTemporary),
+            "create temporary device identity store"
+        );
+        assert_eq!(
+            registry_file_operation(FileOperation::WriteTemporary),
+            "write temporary device identity store"
+        );
+        assert_eq!(
+            registry_file_operation(FileOperation::FinishTemporary),
+            "finish temporary device identity store"
+        );
+        assert_eq!(
+            registry_file_operation(FileOperation::SyncAndReplace),
+            "sync and replace device identity store"
+        );
+        assert_eq!(
+            registry_file_operation(FileOperation::SyncDirectory),
+            "sync device identity store directory"
+        );
     }
 
     #[test]

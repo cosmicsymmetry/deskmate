@@ -1,5 +1,5 @@
 //! The Deskmate server owns networked devices over persistent WebSocket links
-//! and answers firmware-update checks for both connection tiers.
+//! and answers their firmware-update checks.
 //!
 //! This crate's device-facing surface -- `/v1/device/link`,
 //! `/v1/device/firmware`, and `/v1/firmware/{version}.bin` -- is the whole
@@ -16,12 +16,6 @@
 mod admin;
 // The browser companion's authenticated HTTP API.
 mod app_api;
-
-/// The event stream's change predicate, re-exported for the integration test
-/// that pins it. Reproducing a live board's telemetry churn through the HTTP
-/// surface would need hardware, so the predicate is tested directly.
-pub use app_api::change_key as app_api_change_key;
-pub use app_core::asset_sync;
 mod auth;
 mod credential;
 // Server-rendered data cards: the server pushing frames to its own image

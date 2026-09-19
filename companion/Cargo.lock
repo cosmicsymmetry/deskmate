@@ -1807,7 +1807,6 @@ name = "server"
 version = "0.1.0"
 dependencies = [
  "app-core",
- "atomic-write-file",
  "axum",
  "base64",
  "chacha20poly1305",

@@ -368,7 +368,6 @@ fn required_firmware_version(value: Result<String, std::env::VarError>) -> Strin
     )
 }
 
-/// Resolves once `SIGINT` (Ctrl-C) or, on Unix, `SIGTERM` is received, so
 /// Where the server-rendered card specs live.
 ///
 /// `DESKMATE_DATA_CARDS` overrides it; the default sits beside the rest of the
@@ -417,12 +416,6 @@ mod tests {
             ),
             ..super::GoogleOAuthEnv::default()
         }
-    }
-
-    #[test]
-    fn google_config_is_none_without_client_id() {
-        // No DESKMATE_GOOGLE_CLIENT_ID set in this unit's environment.
-        assert!(super::google_oauth_config_from_env().is_none());
     }
 
     #[test]

@@ -91,7 +91,7 @@ store. Inspect or copy the archived bytes before deciding they are irreparable.
 Because the failed store's sequence cannot be trusted, the server scans
 canonical `dev-NNNN.json` config filenames and assigns the replacement above
 their high-water mark. A replacement therefore cannot inherit an earlier
-device's id-keyed playlist. Both unknown-token warning variants -- ordinary
+device's id-keyed configuration. Both unknown-token warning variants -- ordinary
 unknown token and identity-store load failure -- share the same process-wide
 one-warning-per-minute limiter, and neither includes any token bytes.
 
@@ -273,7 +273,7 @@ Measured on the live deployment, 2026-09-18:
 
 ### Why it is fast, and what breaks if you hand-roll it
 
-The prose recipe below was correct and still took **96 seconds to produce a
+The former prose recipe was correct and still took **96 seconds to produce a
 byte-identical binary**, because the container it launched kept `CARGO_HOME` and
 `RUSTUP_HOME` inside the image: `--rm` threw the crate registry away after every
 run, so each deploy re-downloaded 229 crates and re-synced the toolchain in order
@@ -287,148 +287,58 @@ Two things must stay true or the speed goes away:
 
 - **`--exclude 'target/'` on the companion rsync.** It is a 1.6 GB build cache and
   `--delete` will take it.
-- **`--checksum` on every rsync.** `git archive` stamps each file with the commit
-  time, so a fresh export after any commit gives every file a new mtime and cargo
-  rebuilds all seven workspace crates regardless of content. Checksum mode skips
-  files whose content matches, and a skipped file keeps its old mtime.
+- **`--checksum` on every source rsync.** `git archive` stamps each file with the
+  commit time, so a fresh export after any commit gives every file a new mtime and
+  cargo rebuilds all seven workspace crates regardless of content. Checksum mode
+  skips files whose content matches, and a skipped file keeps its old mtime. The UI
+  rsync intentionally does not use it: those built assets are not the source payload
+  whose mtimes control Cargo.
 
 The persistent caches live at `~/deskmate-build/.cargo` and `~/deskmate-build/.rustup`
 on the VM, seeded once from the image. If they are ever lost, the next build
 re-creates them at the cost of one slow run; if the toolchain pin in
 `companion/rust-toolchain.toml` moves, delete `.rustup` so the new one is fetched.
 
-### The hand-rolled version
+### Operational facts behind the script
 
+The VM is `docker-vm` at the Tailscale address `100.93.166.123`. Its SSH config may
+pin the LAN address `192.168.8.20`, which is unreachable from other networks, so the
+deployment script uses the Tailscale address explicitly.
 
-This is the recipe the live deployment at `deskmate.rodi.one` actually uses. There is no
-Rust toolchain on the VM: the binary is cross-built in a throwaway container over an
-rsync'd source export.
+The reproducible source payload is a `git archive HEAD` export of both `companion/`
+and `firmware/`. Nothing the server compiles may live outside it: `lvgl-sim` needs the
+firmware's LVGL, scene decoder and fonts for card previews. The exception is
+`firmware/managed_components/`, which is gitignored and therefore copied from the
+working tree. Those third-party sources are pinned by `firmware/dependencies.lock`,
+and the script excludes their tests, demos, docs, scripts and examples. If the VM's
+copy is missing or suspect, run `idf.py -C firmware reconfigure` first to refetch
+exactly what the lock file names.
 
-**Reach the VM over Tailscale** (`docker-vm`, `100.93.166.123`). `~/.ssh/config` pins its
-LAN address (`192.168.8.20`), which is unreachable from any other network, so use the
-Tailscale address explicitly.
+There is no Rust toolchain installed on the VM. A throwaway
+`rust:1.98-bookworm` container builds the export, with persistent Cargo and Rustup
+caches mounted from `~/deskmate-build/.cargo` and `~/deskmate-build/.rustup`. The
+container image must match `companion/rust-toolchain.toml`; move the two pins
+together. The binary target is `server`, not `deskmate-server`; it is renamed only
+when installed.
+Before replacing a changed binary, the script saves the prior one under a UTC
+timestamped backup name so two deployments on the same day cannot overwrite the
+same rollback target.
 
-**Export from `git archive HEAD`, never from the working tree.** A dirty tree deploys code
-nobody can reproduce.
+`DESKMATE_FIRMWARE_VERSION` in `/etc/deskmate/server.env` must remain the exact
+`firmware/version.txt` value for the image actually published in
+`DESKMATE_FIRMWARE_DIR`; the catalog offers its configured version in either
+direction, so a mismatched pin can offer a downgrade.
 
-**The payload is `companion/` plus part of `firmware/`, and nothing the server compiles
-may live outside it.** An `include_bytes!` path that climbs out of the payload builds
-fine on the Mac and then fails to compile on the VM, where that path does not exist.
-This has happened three times: twice for the bundled Inter faces (now at
-`companion/crates/server/assets/fonts/`), and once when the card preview moved into the
-server -- `lvgl-sim` compiles the firmware's own LVGL, scene decoder and fonts, which
-live under `firmware/`.
+The browser companion remains a directory of built assets, not part of the binary.
+The service runs under `DynamicUser`, so the real state path is
+`/var/lib/private/deskmate/web` and deployed files must be owned by
+`deskmate-server`. `DESKMATE_WEB_DIR=/var/lib/deskmate/web` is the service-visible
+path. The server reads these files per request, so a UI-only deployment needs no
+Rust build or restart; it refuses to start when the configured directory lacks
+`index.html`.
 
-**`firmware/managed_components/` is gitignored**, so it cannot come from `git archive`:
-those are third-party sources the ESP-IDF component manager fetches, pinned by the
-tracked `firmware/dependencies.lock`. They are the one part of the payload copied from
-the working tree, and they are copied without `tests/`, `demos/`, `docs/`, `scripts/`
-and `examples/`, which are 121 MB of the 180 MB and none of it compiled. If the VM's copy
-is ever lost or suspect, `idf.py -C firmware reconfigure` refetches exactly what the lock
-file names.
-
-To check before deploying, build the export in isolation:
-
-```sh
-rm -rf /tmp/deskmate-exportcheck && mkdir -p /tmp/deskmate-exportcheck
-git archive HEAD companion firmware | tar -x -C /tmp/deskmate-exportcheck
-rsync -a --exclude 'tests/' --exclude 'demos/' --exclude 'docs/' --exclude 'scripts/' \
-  --exclude 'examples/' firmware/managed_components/ \
-  /tmp/deskmate-exportcheck/firmware/managed_components/
-(cd /tmp/deskmate-exportcheck/companion && cargo build --release -p server)
-```
-
-```sh
-# On the Mac, from the repository root:
-rm -rf /tmp/deskmate-deploy && mkdir -p /tmp/deskmate-deploy
-git archive HEAD companion firmware | tar -x -C /tmp/deskmate-deploy
-
-# Sources only. `target/` on the VM is root-owned and left by the previous deploy:
-# keeping it turns a cold build into roughly 40 seconds, so the exclude below is what
-# protects it from --delete. Never drop it.
-rsync -a --delete --exclude 'target/' \
-  /tmp/deskmate-deploy/companion/ rodion@100.93.166.123:~/deskmate-build/companion/
-
-# The tracked firmware sources. `managed_components/` is excluded here because it is
-# not in the export at all -- it is synced separately, below.
-rsync -a --delete --exclude 'managed_components/' \
-  /tmp/deskmate-deploy/firmware/ rodion@100.93.166.123:~/deskmate-build/firmware/
-
-# The component-manager sources, from the working tree. Only needed when they change,
-# which is when firmware/dependencies.lock changes.
-rsync -a --delete --exclude 'tests/' --exclude 'demos/' --exclude 'docs/' \
-  --exclude 'scripts/' --exclude 'examples/' \
-  firmware/managed_components/lvgl__lvgl/ \
-  rodion@100.93.166.123:~/deskmate-build/firmware/managed_components/lvgl__lvgl/
-rsync -a --delete firmware/managed_components/espressif__cbor/ \
-  rodion@100.93.166.123:~/deskmate-build/firmware/managed_components/espressif__cbor/
-```
-
-Build and install on the VM. The container image must match
-`companion/rust-toolchain.toml` (`1.98.0`). **The bin target is `server`, not
-`deskmate-server`** -- the installed file is renamed on the way in, and
-`-p server --bin deskmate-server` fails with "no bin target named".
-
-```sh
-ssh rodion@100.93.166.123
-cd ~/deskmate-build
-sudo -n docker run --rm -v "$PWD":/work -w /work/companion rust:1.98-bookworm \
-  cargo build --release -p server
-sudo -n cp -a /usr/local/bin/deskmate-server "/usr/local/bin/deskmate-server.bak-$(date -u +%Y%m%dT%H%M%SZ)"
-sudo -n install -m 0755 companion/target/release/server /usr/local/bin/deskmate-server
-```
-
-The backup name carries a **UTC timestamp, not just a date**, because more than one
-redeploy a day is now normal and `cp -a` overwrites silently: a date-only name meant the
-second deploy of a day destroyed the first one's rollback target while reporting success.
-It also stamps UTC deliberately — the VM runs UTC while the Mac driving the deploy may not,
-so a local date can name a backup for the wrong day. Note the two same-day names already on
-the box (`.bak-20260910`, `.bak-20260910-rle`) are the scar from that.
-
-### The browser companion
-
-The UI is a directory of built assets, not something compiled into the binary, so
-shipping a UI change is a copy and needs no Rust build and no restart -- the server
-reads each file per request.
-
-```sh
-# On the Mac:
-(cd companion/apps/deskmate && bun run build)
-rsync -a --delete companion/apps/deskmate/dist/ rodion@100.93.166.123:/tmp/deskmate-web/
-
-# On the VM. The service runs under DynamicUser, so its StateDirectory really lives at
-# /var/lib/private/deskmate and the files must be owned by deskmate-server:
-sudo -n rsync -a --delete --chown=deskmate-server:deskmate-server \
-  /tmp/deskmate-web/ /var/lib/private/deskmate/web/
-```
-
-`DESKMATE_WEB_DIR=/var/lib/deskmate/web` in `/etc/deskmate/server.env` is what mounts it.
-The server refuses to start if that path is set and has no `index.html`, rather than
-serving 404s that look like a routing bug.
-
-**A binary change still needs the install and restart below. A UI-only change does not.**
-
-Restart and read the service log:
-
-```sh
-ssh rodion@100.93.166.123
-sudo -n systemctl restart deskmate-server
-sudo -n journalctl -u deskmate-server -n 5 --no-pager
-```
-
-**Redeploy whenever the config schema moves.** The server
-compiles its own `CURRENT_SCHEMA_VERSION` in, so a schema bump on the app side does
-nothing to a live deployment until the binary is replaced; the symptom is a typed
-"schema version N is not supported; expected M" on the first save, which reads like a
-config problem rather than a deploy problem.
-
-### Picture-card rollout
-
-The order is load-bearing:
-
-1. **Redeploy the server binary first.** It compiles its own
-   `CURRENT_SCHEMA_VERSION`, so until the binary moves every v9 save is refused with the
-   typed `schema version 9 is not supported; expected 8` error.
-2. Mint the image source and capture its plaintext token. It is shown once.
-3. Point the producer at the picture webhook and send its PNG.
-4. Save the v9 config that names the source.
+**Redeploy whenever the config schema moves.** The server compiles its own
+`CURRENT_SCHEMA_VERSION` in, so a schema bump on the app side does nothing to a live
+deployment until the binary is replaced. The symptom is a typed "schema version N is
+not supported; expected M" on the first save, which reads like a config problem rather
+than a deployment problem.

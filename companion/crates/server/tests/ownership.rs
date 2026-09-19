@@ -166,6 +166,10 @@ fn persisted_registry_contains_digest_and_never_plaintext_token() {
 
     assert!(persisted.contains(&expected_digest));
     assert!(
+        persisted.ends_with("}\n"),
+        "persisted registry must end with exactly one newline"
+    );
+    assert!(
         !persisted.contains(&identity.token),
         "persisted registry exposed the literal bearer token"
     );
@@ -314,6 +318,48 @@ fn mint_does_not_release_a_token_when_persistence_fails() {
 
     assert!(state.registry().mint().is_err());
     assert!(!state.registry().contains_device("dev-0001"));
+}
+
+#[tokio::test]
+async fn failed_mint_http_response_keeps_the_store_error_contract() {
+    const ADMIN_TOKEN: &str = "failed-mint-http-admin-token";
+
+    let temp = tempfile::tempdir().expect("registry test temp dir");
+    let config_root = temp.path().join("not-a-directory");
+    let state = ServerState::new(
+        ADMIN_TOKEN.to_string(),
+        server::firmware::FirmwareCatalog::in_memory(),
+        config_root.clone(),
+    );
+    std::fs::write(&config_root, b"blocks registry directory creation")
+        .expect("create unwritable registry parent");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let address = listener.local_addr().expect("test server address");
+    tokio::spawn(async move {
+        axum::serve(listener, app(state))
+            .await
+            .expect("serve admin routes");
+    });
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/v1/devices"))
+        .bearer_auth(ADMIN_TOKEN)
+        .send()
+        .await
+        .expect("failed mint response");
+    assert_eq!(response.status(), 500);
+    let body: serde_json::Value =
+        serde_json::from_str(&response.text().await.expect("store error body"))
+            .expect("store error JSON");
+    assert_eq!(body["kind"], "store");
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("create device identity store directory:")),
+        "unexpected failed-mint response: {body}"
+    );
 }
 
 #[test]

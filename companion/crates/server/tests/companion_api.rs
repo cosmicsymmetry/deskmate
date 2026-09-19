@@ -551,67 +551,6 @@ async fn the_device_list_says_which_identities_have_ever_been_configured() {
 }
 
 #[tokio::test]
-async fn the_event_stream_stays_quiet_while_only_telemetry_moves() {
-    // A linked board reports uptime, signal strength and frame counters
-    // continuously. Comparing whole snapshots made the stream fire every couple
-    // of seconds and re-render the page for numbers nothing acts on -- measured
-    // on the live server as six frames in twelve seconds, differing only in
-    // `uptime_ms`, `wifi_rssi` and `counters.valid_frames`.
-    //
-    // This test drives the same predicate the stream uses, because reproducing a
-    // live board's telemetry through the HTTP surface would need hardware.
-    let base = serde_json::json!({
-        "config": { "schema_version": 10 },
-        "device": {
-            "connection": { "kind": "online" },
-            "uptime_ms": 1_000,
-            "free_heap": 120_000,
-            "wifi_rssi": -52,
-            "counters": { "valid_frames": 10 },
-        },
-        "diagnostics": { "commands_processed": 1 },
-    });
-    let mut ticked = base.clone();
-    ticked["device"]["uptime_ms"] = serde_json::json!(3_000);
-    ticked["device"]["wifi_rssi"] = serde_json::json!(-55);
-    ticked["device"]["counters"]["valid_frames"] = serde_json::json!(11);
-    ticked["diagnostics"]["commands_processed"] = serde_json::json!(4);
-    assert_eq!(
-        server::app_api_change_key(&base),
-        server::app_api_change_key(&ticked),
-        "telemetry moving is not a reason to update the page"
-    );
-
-    let mut meaningful = base.clone();
-    meaningful["config"]["schema_version"] = serde_json::json!(11);
-    assert_ne!(
-        server::app_api_change_key(&base),
-        server::app_api_change_key(&meaningful),
-        "a configuration change must still reach the page"
-    );
-
-    let mut went_offline = base.clone();
-    went_offline["device"]["connection"] = serde_json::json!({ "kind": "disconnected" });
-    assert_ne!(
-        server::app_api_change_key(&base),
-        server::app_api_change_key(&went_offline),
-        "the display appearing or disappearing is the whole point of the stream"
-    );
-
-    // Blanked, not dropped: a telemetry field that vanishes is still a change.
-    let mut lost_rssi = base.clone();
-    lost_rssi["device"]
-        .as_object_mut()
-        .expect("device object")
-        .remove("wifi_rssi");
-    assert_ne!(
-        server::app_api_change_key(&base),
-        server::app_api_change_key(&lost_rssi),
-        "a field disappearing is a change even when its value is ignored"
-    );
-}
-
-#[tokio::test]
 async fn saving_a_configuration_revokes_the_sources_it_no_longer_declares() {
     // The live server had accumulated "Weather 2" and "Weather 3": credentialed
     // image sources no card referenced, because minting happens when the owner

@@ -1414,37 +1414,11 @@ mod tests {
 
     fn scheduled_work_status() -> StatusResponse {
         StatusResponse {
-            protocol_version: protocol::PROTOCOL_VERSION,
-            max_protocol_version: protocol::MAX_PROTOCOL_VERSION,
-            capabilities: protocol::CURRENT_CAPABILITIES,
             firmware_version: "scheduled-work-test".into(),
             uptime_ms: 1,
-            free_heap: 100_000,
             display_width: 368,
             display_height: 448,
-            brightness: 200,
-            rotation: 90,
-            online: true,
-            latest_revision: 0,
-            valid_frames: 0,
-            malformed_frames: 0,
-            crc_errors: 0,
-            overflow_frames: 0,
-            dropped_responses: 0,
-            rx_dropped_bytes: 0,
-            dropped_events: 0,
-            event_queue_high_water: 0,
-            dropped_ui_commands: 0,
-            ui_queue_high_water: 0,
-            config_revision: 0,
-            latest_interrupt_token: 0,
-            tier: protocol::Tier::Local,
-            wifi_state: protocol::WifiState::Down,
-            wifi_rssi: 0,
-            ip: String::new(),
-            ota_state: protocol::OtaState::Idle,
-            last_network_error: None,
-            last_ota_error: None,
+            ..protocol::test_support::sample_status_response()
         }
     }
 

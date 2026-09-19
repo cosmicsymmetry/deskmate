@@ -837,9 +837,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    use protocol::{
-        EventAction, EventKind, HeartbeatAck, PROTOCOL_VERSION, TapAction, decode_wire_frame,
-    };
+    use protocol::{EventAction, EventKind, HeartbeatAck, TapAction, decode_wire_frame};
 
     use super::*;
 
@@ -952,37 +950,11 @@ mod tests {
 
     fn status(latest_revision: u32, config_revision: u32, uptime_ms: u64) -> StatusResponse {
         StatusResponse {
-            protocol_version: PROTOCOL_VERSION,
-            max_protocol_version: protocol::MAX_PROTOCOL_VERSION,
-            capabilities: protocol::CURRENT_CAPABILITIES,
             firmware_version: "deskmate-m2".into(),
             uptime_ms,
-            free_heap: 100_000,
-            display_width: 448,
-            display_height: 368,
-            brightness: 200,
-            rotation: 90,
-            online: true,
             latest_revision,
-            valid_frames: 0,
-            malformed_frames: 0,
-            crc_errors: 0,
-            overflow_frames: 0,
-            dropped_responses: 0,
-            rx_dropped_bytes: 0,
-            dropped_events: 0,
-            event_queue_high_water: 0,
-            dropped_ui_commands: 0,
-            ui_queue_high_water: 0,
             config_revision,
-            latest_interrupt_token: 0,
-            tier: protocol::Tier::Local,
-            wifi_state: protocol::WifiState::Down,
-            wifi_rssi: 0,
-            ip: String::new(),
-            ota_state: protocol::OtaState::Idle,
-            last_network_error: None,
-            last_ota_error: None,
+            ..protocol::test_support::sample_status_response()
         }
     }
 

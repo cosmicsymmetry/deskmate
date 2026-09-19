@@ -17,6 +17,7 @@ thiserror = "2"
 url = "2"
 
 [dev-dependencies]
+protocol = { path = "../protocol", features = ["test-support"] }
 # `examples/scene_panel_check.rs` drives the simulator's case tables against a
 # real board. A dev-dependency rather than the reverse direction because
 # `lvgl-sim` cannot depend on this crate: `app-core -> device -> lvgl-sim`

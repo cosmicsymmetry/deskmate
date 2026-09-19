@@ -324,7 +324,7 @@ pub fn connect(explicit_port: Option<&str>) -> Result<ConnectedDevice, DeviceErr
 mod tests {
     use std::collections::VecDeque;
 
-    use protocol::{Frame, PROTOCOL_VERSION, encode_frame};
+    use protocol::{Frame, encode_frame};
 
     use super::*;
 
@@ -361,37 +361,18 @@ mod tests {
 
     fn status() -> StatusResponse {
         StatusResponse {
-            protocol_version: PROTOCOL_VERSION,
-            max_protocol_version: protocol::MAX_PROTOCOL_VERSION,
-            capabilities: protocol::CURRENT_CAPABILITIES,
             firmware_version: "deskmate-m1".into(),
             uptime_ms: 123,
             free_heap: 456,
             display_width: 368,
             display_height: 448,
-            brightness: 200,
             rotation: 0,
-            online: true,
             latest_revision: 7,
             valid_frames: 10,
             malformed_frames: 2,
             crc_errors: 1,
             overflow_frames: 1,
-            dropped_responses: 0,
-            rx_dropped_bytes: 0,
-            dropped_events: 0,
-            event_queue_high_water: 0,
-            dropped_ui_commands: 0,
-            ui_queue_high_water: 0,
-            config_revision: 0,
-            latest_interrupt_token: 0,
-            tier: protocol::Tier::Local,
-            wifi_state: protocol::WifiState::Down,
-            wifi_rssi: 0,
-            ip: String::new(),
-            ota_state: protocol::OtaState::Idle,
-            last_network_error: None,
-            last_ota_error: None,
+            ..protocol::test_support::sample_status_response()
         }
     }
 

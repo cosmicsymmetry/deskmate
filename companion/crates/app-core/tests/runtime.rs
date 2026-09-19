@@ -15,8 +15,8 @@ use app_core::{
 use device::{DeviceError, ReceivedEvent, SessionDiagnostics, TransportError};
 use protocol::{
     Ack, AssetBegin, AssetChunk, AssetCommit, AssetRelease, CardConfig, DeviceEvent, ErrorCode,
-    ErrorResponse, EventAction, EventKind, PROTOCOL_VERSION, PushScene, PushTimer, Scene,
-    SceneNode, SceneValue, StatusResponse, TimeSync, TriggerInterrupt,
+    ErrorResponse, EventAction, EventKind, PushScene, PushTimer, Scene, SceneNode, SceneValue,
+    StatusResponse, TimeSync, TriggerInterrupt,
 };
 
 const FULL_JSON: &str = include_str!("fixtures/full.json");
@@ -635,38 +635,18 @@ impl app_core::ImageSourceHost for FakeImageSourceHost {
 
 fn status(uptime_ms: u64) -> StatusResponse {
     StatusResponse {
-        protocol_version: PROTOCOL_VERSION,
-        max_protocol_version: protocol::MAX_PROTOCOL_VERSION,
-        capabilities: protocol::CURRENT_CAPABILITIES,
         firmware_version: "mock-firmware".into(),
         uptime_ms,
-        free_heap: 100_000,
         display_width: 368,
         display_height: 448,
-        brightness: 200,
-        rotation: 90,
-        online: true,
-        latest_revision: 0,
-        valid_frames: 0,
-        malformed_frames: 0,
-        crc_errors: 0,
-        overflow_frames: 0,
-        dropped_responses: 0,
-        rx_dropped_bytes: 0,
-        dropped_events: 0,
-        event_queue_high_water: 0,
-        dropped_ui_commands: 0,
-        ui_queue_high_water: 0,
-        config_revision: 0,
-        latest_interrupt_token: 0,
-        tier: protocol::Tier::Local,
-        wifi_state: protocol::WifiState::Down,
-        wifi_rssi: 0,
-        ip: String::new(),
-        ota_state: protocol::OtaState::Idle,
-        last_network_error: None,
-        last_ota_error: None,
+        ..protocol::test_support::sample_status_response()
     }
+}
+
+#[test]
+fn status_fixture_preserves_its_portrait_dimensions() {
+    let fixture = status(0);
+    assert_eq!((fixture.display_width, fixture.display_height), (368, 448));
 }
 
 fn options() -> RuntimeOptions {

@@ -1,9 +1,7 @@
 #![allow(dead_code)]
 
 use futures_util::{SinkExt, StreamExt};
-use protocol::{
-    Ack, ApplyConfig, HeartbeatAck, Message, OtaState, StatusResponse, Tier, WifiState,
-};
+use protocol::{Ack, ApplyConfig, HeartbeatAck, Message, StatusResponse};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 pub type DeviceSocket =
@@ -308,8 +306,6 @@ async fn reply(socket: &mut DeviceSocket, request_id: u32, request: &Message) {
 
 fn sample_status() -> StatusResponse {
     StatusResponse {
-        protocol_version: protocol::PROTOCOL_VERSION,
-        max_protocol_version: protocol::MAX_PROTOCOL_VERSION,
         // A device that reached this server over WSS advertised networking
         // capability to get here. Use the full shipping set so this shared
         // fixture cannot describe an impossible tunnel peer or mask the next
@@ -318,30 +314,13 @@ fn sample_status() -> StatusResponse {
         firmware_version: "test-device".to_owned(),
         uptime_ms: 1_234,
         free_heap: 5_678,
-        display_width: 448,
-        display_height: 368,
         brightness: 128,
-        rotation: 90,
-        online: true,
-        latest_revision: 0,
         valid_frames: 1,
-        malformed_frames: 0,
-        crc_errors: 0,
-        overflow_frames: 0,
-        dropped_responses: 0,
-        rx_dropped_bytes: 0,
-        dropped_events: 0,
-        event_queue_high_water: 0,
-        dropped_ui_commands: 0,
-        ui_queue_high_water: 0,
-        config_revision: 0,
-        latest_interrupt_token: 0,
-        tier: Tier::Networked,
-        wifi_state: WifiState::Connected,
+        tier: protocol::Tier::Networked,
+        wifi_state: protocol::WifiState::Connected,
         wifi_rssi: -42,
         ip: "192.0.2.10".to_owned(),
-        ota_state: OtaState::Idle,
-        last_network_error: None,
         last_ota_error: Some("download: ESP_ERR_NO_MEM".to_owned()),
+        ..protocol::test_support::sample_status_response()
     }
 }

@@ -920,7 +920,7 @@ mod tests {
     use device::{DeviceError, ReplayState};
     use protocol::{
         Ack, ActivateCard, ApplyConfig, CardConfig, DeviceEvent, EventAction, EventKind, Message,
-        OtaState, StatusResponse, TapAction, Tier, TimeSync, TriggerInterrupt, WifiState,
+        StatusResponse, TapAction, TimeSync, TriggerInterrupt,
     };
 
     use super::{EventRouter, PendingRequest, SocketPeer};
@@ -1432,37 +1432,16 @@ mod tests {
 
     fn sample_status() -> StatusResponse {
         StatusResponse {
-            protocol_version: protocol::PROTOCOL_VERSION,
-            max_protocol_version: protocol::MAX_PROTOCOL_VERSION,
-            capabilities: protocol::CURRENT_CAPABILITIES,
             firmware_version: "test-device".into(),
             uptime_ms: 1_234,
             free_heap: 5_678,
-            display_width: 448,
-            display_height: 368,
             brightness: 128,
-            rotation: 90,
-            online: true,
-            latest_revision: 0,
             valid_frames: 1,
-            malformed_frames: 0,
-            crc_errors: 0,
-            overflow_frames: 0,
-            dropped_responses: 0,
-            rx_dropped_bytes: 0,
-            dropped_events: 0,
-            event_queue_high_water: 0,
-            dropped_ui_commands: 0,
-            ui_queue_high_water: 0,
-            config_revision: 0,
-            latest_interrupt_token: 0,
-            tier: Tier::Networked,
-            wifi_state: WifiState::Connected,
+            tier: protocol::Tier::Networked,
+            wifi_state: protocol::WifiState::Connected,
             wifi_rssi: -42,
             ip: "192.0.2.10".into(),
-            ota_state: OtaState::Idle,
-            last_network_error: None,
-            last_ota_error: None,
+            ..protocol::test_support::sample_status_response()
         }
     }
 }

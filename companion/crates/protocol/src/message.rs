@@ -1693,37 +1693,20 @@ mod tests {
 
     fn status() -> StatusResponse {
         StatusResponse {
-            protocol_version: PROTOCOL_VERSION,
-            max_protocol_version: MAX_PROTOCOL_VERSION,
-            capabilities: CURRENT_CAPABILITIES,
             firmware_version: "m1-test".into(),
             uptime_ms: 123_456,
             free_heap: 654_321,
             display_width: 368,
             display_height: 448,
-            brightness: 200,
             rotation: 0,
-            online: true,
             latest_revision: 7,
             valid_frames: 10,
             malformed_frames: 2,
             crc_errors: 1,
             overflow_frames: 1,
-            dropped_responses: 0,
-            rx_dropped_bytes: 0,
-            dropped_events: 0,
-            event_queue_high_water: 0,
-            dropped_ui_commands: 0,
-            ui_queue_high_water: 0,
             config_revision: 3,
             latest_interrupt_token: 9,
-            tier: Tier::Local,
-            wifi_state: WifiState::Down,
-            wifi_rssi: 0,
-            ip: String::new(),
-            ota_state: OtaState::Idle,
-            last_network_error: None,
-            last_ota_error: None,
+            ..crate::test_support::sample_status_response()
         }
     }
 

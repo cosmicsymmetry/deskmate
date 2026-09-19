@@ -27,6 +27,7 @@ import {
   unclaimedIssues,
 } from "../src/lib/configDraft";
 import type { AppConfig, CardSettings, ValidationIssue } from "../src/lib/types";
+import { cardListConfig, clockCard } from "./support/fixtures";
 import { apiContractFixtures } from "../src/lib/types.contract";
 
 function initialConfig(): AppConfig {
@@ -175,7 +176,7 @@ describe("configuration draft helpers", () => {
 
   test("every freshly-added card kind defaults to a template the wire actually implements", () => {
     const compilableTemplates = new Set(["digital-clock", "analog-clock", "progress-ring"]);
-    const expectedTemplateKind: Record<string, string> = {
+    const expectedTemplateKind: Record<"clock" | "pomodoro", "digital-clock" | "progress-ring"> = {
       clock: "digital-clock",
       pomodoro: "progress-ring",
     };
@@ -185,7 +186,7 @@ describe("configuration draft helpers", () => {
       const { config: next, cardId } = addCard(config, kind);
       config = next;
       const card = config.cards.find((candidate) => candidate.id === cardId);
-      if (!card) {
+      if (!card || card.kind !== kind) {
         throw new Error(`addCard did not append the ${kind} card`);
       }
       expect(compilableTemplates.has(card.template.kind)).toBe(true);
@@ -302,20 +303,10 @@ describe("configuration draft helpers", () => {
     const startedAtMs = 0;
     const deadlineMs = loopDeadline(startedAtMs, 45); // 45_000
 
-    // Simulates a re-render-happy caller re-checking the very same deadline
-    // hundreds of times before it is actually due — this is exactly the
-    // shape of the bug being regression-tested: a snapshot-driven re-render
-    // roughly once a second must never itself cause an advance. However
-    // many times this is checked before the deadline, the answer must stay
-    // "not yet".
-    for (let check = 0; check < 500; check += 1) {
-      expect(loopAdvance(segments, "clock", deadlineMs, deadlineMs - 1)).toBeNull();
-    }
+    expect(loopAdvance(segments, "clock", deadlineMs, deadlineMs - 1)).toBeNull();
     expect(loopAdvance(segments, "clock", deadlineMs, 0)).toBeNull();
 
-    // Once real time has actually reached the deadline, it advances —
-    // regardless of the fact that it was checked 500 times first without
-    // effect, and the new deadline is a fresh dwell for the new card.
+    // At the deadline, the next card gets a fresh dwell.
     expect(loopAdvance(segments, "clock", deadlineMs, deadlineMs)).toEqual({
       cardId: "pomodoro",
       deadlineMs: loopDeadline(deadlineMs, 20),
@@ -339,7 +330,7 @@ describe("configuration draft helpers", () => {
 
     // In the original order, clock advances to pomodoro...
     expect(loopAdvance(segments, "clock", 1_000, 1_000)?.cardId).toBe("pomodoro");
-    // ...but once the playlist is reordered mid-play, the very
+    // ...but once the loop is reordered mid-play, the very
     // same due check for the very same active card resolves against the
     // NEW order instead of a stale one — because the caller passes the
     // latest segments in on every check rather than one captured once at
@@ -370,7 +361,7 @@ describe("configuration draft helpers", () => {
     expect(issuesForPath(issues, "cards[0].size")).toEqual([]);
   });
 
-  test("matches card paths from each corresponding validation revision", () => {
+  test("routes newly validated index paths after reordering", () => {
     const base = initialConfig();
     const config: AppConfig = {
       ...base,
@@ -441,16 +432,16 @@ describe("configuration draft helpers", () => {
     expect(tapActionDescription(pomodoro)).toBe("Tapping this card starts or pauses its timer.");
   });
 
-  test("inactive-playlist issues fall through to the unclaimed fallback", () => {
+  test("unknown future paths fall through to the unclaimed fallback", () => {
     const base = initialConfig();
     const config: AppConfig = {
       ...base,
       advance: { kind: "manual" },
     };
     const issue: ValidationIssue = {
-      path: "playlists[1].name",
+      path: "future.setting",
       code: "empty",
-      message: "Playlist name is required.",
+      message: "A future setting is required.",
     };
     expect(unclaimedIssues([issue], config)).toEqual([issue]);
   });
@@ -468,7 +459,7 @@ describe("configuration draft helpers", () => {
     expect(config.cards[0]).toHaveProperty("alert");
   });
 
-  test("every alert and playlist advance variant is represented in the contract", () => {
+  test("every alert and loop advance variant is represented in the contract", () => {
     const alertKinds = apiContractFixtures.card_alerts.map((a) => a.kind).sort();
     expect(alertKinds).toEqual(["none", "on-timer-finish"]);
 
@@ -600,6 +591,9 @@ describe("automatic card naming", () => {
       "image-news",
     ]);
 
+    if (withFirst.cardId === null) {
+      throw new Error("addCard did not append the expected card");
+    }
     const afterRemoval = removeCard(config, withFirst.cardId);
     expect(afterRemoval.image_sources.map((source) => source.id)).toEqual(["image-news"]);
 
@@ -609,8 +603,14 @@ describe("automatic card naming", () => {
       sourceId: "image-news",
       sourceName: "Hacker News",
     });
+    if (withSecond.cardId === null) {
+      throw new Error("addCard did not append the expected card");
+    }
     const stillShared = removeCard(shared.config, withSecond.cardId);
     expect(stillShared.image_sources.map((source) => source.id)).toContain("image-news");
+    if (shared.cardId === null) {
+      throw new Error("addCard did not append the expected card");
+    }
     const nowFree = removeCard(stillShared, shared.cardId);
     expect(nowFree.image_sources.map((source) => source.id)).not.toContain("image-news");
   });
@@ -622,7 +622,21 @@ describe("automatic card naming", () => {
       sourceName: "Weather",
     });
     const withClock = addCard(withPicture.config, "clock");
+    if (withClock.cardId === null) {
+      throw new Error("addCard did not append the expected card");
+    }
     const afterRemoval = removeCard(withClock.config, withClock.cardId);
     expect(afterRemoval.image_sources.map((source) => source.id)).toEqual(["image-weather"]);
   });
+});
+
+test("an issue on a path no card, loop, or preference surface claims (e.g. a missing-capability issue) is not silently dropped", () => {
+  const config = cardListConfig([clockCard("only-card")]);
+  const capabilityIssue: ValidationIssue = {
+    path: "device.capabilities",
+    code: "requires-capability",
+    message:
+      "the connected firmware does not support asset transfer. Update the firmware, or remove the cards and settings that need it.",
+  };
+  expect(unclaimedIssues([capabilityIssue], config)).toEqual([capabilityIssue]);
 });

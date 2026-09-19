@@ -21,7 +21,8 @@ beforeAll(async () => {
 beforeEach(() => {
   now = 0;
   timers = [];
-  const timeout = spyOn(window, "setTimeout").mockImplementation((handler, ms = 0) => {
+  const browserWindow: Window = window;
+  const timeout = spyOn(browserWindow, "setTimeout").mockImplementation((handler, ms = 0) => {
     timers.push({ at: now + ms, run: () => (handler as () => void)() });
     return timers.length;
   });

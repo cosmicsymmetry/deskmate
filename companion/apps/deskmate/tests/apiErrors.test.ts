@@ -50,7 +50,7 @@ describe("API error primitives", () => {
       category: "internal",
       message: "[object Object]",
     });
-    expect(mock.toApiError(unknown)).toBe(unknown);
+    expect(mock.toApiError(unknown) === unknown).toBe(true);
   });
 
   test("preserves structural errors and normalizes unstructured failures", () => {

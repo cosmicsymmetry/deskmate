@@ -130,12 +130,11 @@ fn assert_unsupported_version_uses_only_genuine_fallbacks(version: u32, bytes: &
 
 #[test]
 fn v10_without_image_sources_loads_as_current_without_rewriting() {
-    let directory = test_directory("v10-omitted-image-sources");
-    let path = directory.path().join("config.json");
+    let (_directory, path, store) = test_store("v10-omitted-image-sources");
     let bytes = include_bytes!("fixtures/default.json");
     fs::write(&path, bytes).unwrap();
 
-    let loaded = ConfigStore::new(&path).load();
+    let loaded = store.load();
 
     assert_eq!(loaded.origin(), ConfigOrigin::Current);
     assert!(loaded.config().image_sources.is_empty());
@@ -144,14 +143,13 @@ fn v10_without_image_sources_loads_as_current_without_rewriting() {
 
 #[test]
 fn an_empty_v10_loop_is_validation_failed_not_repaired() {
-    let directory = test_directory("empty-v10-loop");
-    let path = directory.path().join("config.json");
+    let (_directory, path, store) = test_store("empty-v10-loop");
     let mut value = serde_json::to_value(AppConfig::default()).unwrap();
     value["cards"] = serde_json::json!([]);
     let bytes = serde_json::to_vec_pretty(&value).unwrap();
     fs::write(&path, &bytes).unwrap();
 
-    let outcome = ConfigStore::new(&path).load();
+    let outcome = store.load();
 
     let LoadOutcome::ValidationFailed {
         config,
@@ -174,11 +172,16 @@ fn test_directory(name: &str) -> tempfile::TempDir {
         .unwrap()
 }
 
-#[test]
-fn missing_file_loads_defaults_without_writing() {
-    let directory = test_directory("first-run");
+fn test_store(name: &str) -> (tempfile::TempDir, std::path::PathBuf, ConfigStore) {
+    let directory = test_directory(name);
     let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
+    (directory, path, store)
+}
+
+#[test]
+fn missing_file_loads_defaults_without_writing() {
+    let (_directory, path, store) = test_store("first-run");
 
     let outcome = store.load();
     assert_eq!(outcome.origin(), ConfigOrigin::Defaults);
@@ -189,9 +192,7 @@ fn missing_file_loads_defaults_without_writing() {
 
 #[test]
 fn invalid_persisted_config_keeps_last_good_and_reports_typed_error() {
-    let directory = test_directory("validation-recovery");
-    let path = directory.path().join("config.json");
-    let store = ConfigStore::new(&path);
+    let (_directory, path, store) = test_store("validation-recovery");
     let mut last_good = AppConfig::default();
     last_good.preferences.autostart = true;
     store.save(&last_good).unwrap();
@@ -226,9 +227,7 @@ fn invalid_persisted_config_keeps_last_good_and_reports_typed_error() {
 
 #[test]
 fn invalid_persisted_config_without_last_good_labels_fallback_as_defaults() {
-    let directory = test_directory("validation-defaults");
-    let path = directory.path().join("config.json");
-    let store = ConfigStore::new(&path);
+    let (_directory, path, store) = test_store("validation-defaults");
     let mut invalid = serde_json::to_value(AppConfig::default()).unwrap();
     invalid["cards"][0]["dwell_seconds"] = serde_json::json!(1);
     fs::write(&path, serde_json::to_vec_pretty(&invalid).unwrap()).unwrap();
@@ -248,9 +247,7 @@ fn invalid_persisted_config_without_last_good_labels_fallback_as_defaults() {
 
 #[test]
 fn save_round_trips() {
-    let directory = test_directory("round-trip");
-    let path = directory.path().join("config.json");
-    let store = ConfigStore::new(&path);
+    let (_directory, _path, store) = test_store("round-trip");
     let mut config = AppConfig::default();
     config.preferences.timezone = "Asia/Tbilisi".into();
 
@@ -265,9 +262,7 @@ fn save_round_trips() {
 #[cfg(unix)]
 #[test]
 fn saved_config_is_user_readable_and_writable_only() {
-    let directory = test_directory("private-save");
-    let path = directory.path().join("config.json");
-    let store = ConfigStore::new(&path);
+    let (_directory, path, store) = test_store("private-save");
 
     store.save(&AppConfig::default()).unwrap();
 
@@ -280,8 +275,7 @@ fn saved_config_is_user_readable_and_writable_only() {
 #[cfg(unix)]
 #[test]
 fn loading_repairs_a_permissive_existing_config_mode() {
-    let directory = test_directory("private-load");
-    let path = directory.path().join("config.json");
+    let (_directory, path, store) = test_store("private-load");
     let bytes = serde_json::to_vec_pretty(&AppConfig::default()).unwrap();
     fs::OpenOptions::new()
         .write(true)
@@ -295,7 +289,7 @@ fn loading_repairs_a_permissive_existing_config_mode() {
     // process's umask.
     fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
 
-    let loaded = ConfigStore::new(&path).load();
+    let loaded = store.load();
 
     assert_eq!(loaded.origin(), ConfigOrigin::Current);
     assert_eq!(
@@ -306,9 +300,7 @@ fn loading_repairs_a_permissive_existing_config_mode() {
 
 #[test]
 fn malformed_truncated_and_oversized_files_preserve_bytes_and_last_good() {
-    let directory = test_directory("recovery");
-    let path = directory.path().join("config.json");
-    let store = ConfigStore::new(&path);
+    let (_directory, path, store) = test_store("recovery");
     let mut last_good = AppConfig::default();
     last_good.preferences.autostart = true;
     store.save(&last_good).unwrap();
@@ -344,9 +336,7 @@ fn malformed_truncated_and_oversized_files_preserve_bytes_and_last_good() {
 
 #[test]
 fn a_save_at_the_size_limit_is_refused_and_one_byte_under_reloads() {
-    let directory = test_directory("save-size-limit");
-    let path = directory.path().join("config.json");
-    let store = ConfigStore::new(&path);
+    let (_directory, path, store) = test_store("save-size-limit");
     let last_good = AppConfig::default();
     store.save(&last_good).unwrap();
     let saved_bytes = fs::read(&path).unwrap();
@@ -426,9 +416,7 @@ fn a_save_at_the_size_limit_is_refused_and_one_byte_under_reloads() {
 
 #[test]
 fn failed_replace_preserves_last_good() {
-    let directory = test_directory("replace-failure");
-    let path = directory.path().join("config.json");
-    let store = ConfigStore::new(&path);
+    let (_directory, path, store) = test_store("replace-failure");
     let mut seeded = AppConfig::default();
     seeded.preferences.timezone = "Europe/Paris".into();
     store.save(&seeded).unwrap();
@@ -445,9 +433,8 @@ fn failed_replace_preserves_last_good() {
 
 #[test]
 fn concurrent_saves_are_serialized_and_disk_matches_latest_generation() {
-    let directory = test_directory("concurrent");
-    let path = directory.path().join("config.json");
-    let store = Arc::new(ConfigStore::new(&path));
+    let (directory, path, store) = test_store("concurrent");
+    let store = Arc::new(store);
     let barrier = Arc::new(Barrier::new(5));
     let mut threads = Vec::new();
 
@@ -484,9 +471,7 @@ fn concurrent_saves_are_serialized_and_disk_matches_latest_generation() {
 
 #[test]
 fn a_future_schema_is_a_recoverable_error_preserving_bytes() {
-    let directory = test_directory("future-version");
-    let path = directory.path().join("config.json");
-    let store = ConfigStore::new(&path);
+    let (_directory, path, store) = test_store("future-version");
 
     let mut last_good = AppConfig::default();
     last_good.preferences.autostart = true;

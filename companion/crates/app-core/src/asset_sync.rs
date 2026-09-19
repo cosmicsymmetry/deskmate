@@ -570,40 +570,31 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_durable_uses_raw_when_rle_expands() {
-        let mut device = FakeDevice::new();
-        let frame = raster_frame([0xd2; ASSET_DIGEST_LEN], true);
+    fn reconcile_durable_keeps_raw_encoding_when_rle_is_unavailable_or_larger() {
+        for (name, fill, high_entropy, capabilities) in [
+            ("rle-expands", 0xd2, true, CAPABILITY_DURABLE_ASSET_ENCODING),
+            ("capability-absent", 0xd3, false, CAPABILITY_VOLATILE_ASSETS),
+        ] {
+            let mut device = FakeDevice::new();
+            let frame = raster_frame([fill; ASSET_DIGEST_LEN], high_entropy);
 
-        AssetSync::reconcile(
-            &mut device,
-            std::slice::from_ref(&frame),
-            CAPABILITY_DURABLE_ASSET_ENCODING,
-        )
-        .expect("durable reconcile");
+            AssetSync::reconcile(&mut device, std::slice::from_ref(&frame), capabilities)
+                .unwrap_or_else(|error| panic!("case {name} failed to reconcile: {error}"));
 
-        let begin = device.begins()[0];
-        assert_eq!(begin.encoding, ASSET_ENCODING_RAW);
-        assert_eq!(begin.decoded_length, None);
-        assert_eq!(begin.total_length, protocol::VOLATILE_IMAGE_DECODED_LENGTH);
-        assert_eq!(device.wire_bytes(&frame.digest), frame.bytes.as_ref());
-    }
-
-    #[test]
-    fn reconcile_durable_without_bit_10_keeps_raw_encoding() {
-        let mut device = FakeDevice::new();
-        let frame = raster_frame([0xd3; ASSET_DIGEST_LEN], false);
-
-        AssetSync::reconcile(
-            &mut device,
-            std::slice::from_ref(&frame),
-            CAPABILITY_VOLATILE_ASSETS,
-        )
-        .expect("durable reconcile");
-
-        let begin = device.begins()[0];
-        assert_eq!(begin.encoding, ASSET_ENCODING_RAW);
-        assert_eq!(begin.decoded_length, None);
-        assert_eq!(device.wire_bytes(&frame.digest), frame.bytes.as_ref());
+            let begin = *device.begins().first().expect(name);
+            assert_eq!(begin.encoding, ASSET_ENCODING_RAW, "{name}");
+            assert_eq!(begin.decoded_length, None, "{name}");
+            assert_eq!(
+                begin.total_length,
+                protocol::VOLATILE_IMAGE_DECODED_LENGTH,
+                "{name}"
+            );
+            assert_eq!(
+                device.wire_bytes(&frame.digest),
+                frame.bytes.as_ref(),
+                "{name}"
+            );
+        }
     }
 
     #[test]

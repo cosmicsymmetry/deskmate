@@ -7,6 +7,7 @@ use app_core::{
     RuntimeDiagnostics, RuntimeState, ValidationCode, WidgetTapAction,
 };
 use protocol::{CAPABILITY_ASSET_TRANSFER, Message, TapAction, encode_message};
+use serde::de::DeserializeOwned;
 
 const DEFAULT_JSON: &str = include_str!("fixtures/default.json");
 const FULL_JSON: &str = include_str!("fixtures/full.json");
@@ -14,6 +15,20 @@ const INVALID_JSON: &str = include_str!("fixtures/invalid.json");
 const FUTURE_JSON: &str = include_str!("fixtures/future-version.json");
 const MALFORMED_JSON: &str = include_str!("fixtures/malformed.json");
 const CARD_SURFACE_JSON: &str = include_str!("fixtures/card-surface.json");
+
+fn assert_json_rejected<T: DeserializeOwned>(case: &str, json: &str) {
+    assert!(
+        serde_json::from_str::<T>(json).is_err(),
+        "case {case} unexpectedly deserialized"
+    );
+}
+
+fn assert_json_accepted<T: DeserializeOwned>(case: &str, json: &str) {
+    assert!(
+        serde_json::from_str::<T>(json).is_ok(),
+        "case {case} must deserialize without extra fields"
+    );
+}
 
 #[test]
 fn default_fixture_is_the_canonical_default() {
@@ -192,7 +207,7 @@ fn font_asset_no_longer_carries_a_pixel_size() {
         "kind": { "kind": "font", "pixel_size": 48 },
         "maximum_bytes": 262144
     }"#;
-    assert!(serde_json::from_str::<AssetSettings>(json).is_err());
+    assert_json_rejected::<AssetSettings>("font-pixel-size", json);
 }
 
 #[test]
@@ -260,7 +275,7 @@ fn card_settings_rejects_an_unknown_field_nested_inside_refresh() {
         "refresh": { "kind": "device-local", "bogus": 1 },
         "alert": { "kind": "none" }
     }"#;
-    assert!(serde_json::from_str::<CardSettings>(json).is_err());
+    assert_json_rejected::<CardSettings>("clock-refresh-bogus", json);
 }
 
 #[test]
@@ -271,15 +286,9 @@ fn display_template_rejects_unknown_fields_on_every_unit_variant() {
     // round-trips.
     for kind in ["digital-clock", "analog-clock", "progress-ring"] {
         let with_bogus = format!(r#"{{"kind":"{kind}","bogus":1}}"#);
-        assert!(
-            serde_json::from_str::<DisplayTemplate>(&with_bogus).is_err(),
-            "unit variant {kind:?} must reject an unknown field"
-        );
+        assert_json_rejected::<DisplayTemplate>(kind, &with_bogus);
         let valid = format!(r#"{{"kind":"{kind}"}}"#);
-        assert!(
-            serde_json::from_str::<DisplayTemplate>(&valid).is_ok(),
-            "unit variant {kind:?} must still deserialize without extra fields"
-        );
+        assert_json_accepted::<DisplayTemplate>(kind, &valid);
     }
 }
 
@@ -287,28 +296,18 @@ fn display_template_rejects_unknown_fields_on_every_unit_variant() {
 fn widget_tap_action_rejects_unknown_fields_on_every_unit_variant() {
     for kind in ["none", "start-pause", "reset", "dismiss"] {
         let with_bogus = format!(r#"{{"kind":"{kind}","bogus":1}}"#);
-        assert!(
-            serde_json::from_str::<WidgetTapAction>(&with_bogus).is_err(),
-            "unit variant {kind:?} must reject an unknown field"
-        );
+        assert_json_rejected::<WidgetTapAction>(kind, &with_bogus);
         let valid = format!(r#"{{"kind":"{kind}"}}"#);
-        assert!(
-            serde_json::from_str::<WidgetTapAction>(&valid).is_ok(),
-            "unit variant {kind:?} must still deserialize without extra fields"
-        );
+        assert_json_accepted::<WidgetTapAction>(kind, &valid);
     }
 
-    assert!(
-        serde_json::from_str::<WidgetTapAction>(
-            r#"{"kind":"open-url","url":"https://example.test","bogus":1}"#
-        )
-        .is_err()
+    assert_json_rejected::<WidgetTapAction>(
+        "open-url",
+        r#"{"kind":"open-url","url":"https://example.test","bogus":1}"#,
     );
-    assert!(
-        serde_json::from_str::<WidgetTapAction>(
-            r#"{"kind":"open-application","application_id":"com.example.app","bogus":1}"#
-        )
-        .is_err()
+    assert_json_rejected::<WidgetTapAction>(
+        "open-application",
+        r#"{"kind":"open-application","application_id":"com.example.app","bogus":1}"#,
     );
     let valid_url = serde_json::from_str::<WidgetTapAction>(
         r#"{"kind":"open-url","url":"https://example.test"}"#,
@@ -326,20 +325,14 @@ fn widget_tap_action_rejects_unknown_fields_on_every_unit_variant() {
 fn refresh_policy_rejects_unknown_fields_on_every_unit_variant() {
     for kind in ["device-local", "manual"] {
         let with_bogus = format!(r#"{{"kind":"{kind}","bogus":1}}"#);
-        assert!(
-            serde_json::from_str::<RefreshPolicy>(&with_bogus).is_err(),
-            "unit variant {kind:?} must reject an unknown field"
-        );
+        assert_json_rejected::<RefreshPolicy>(kind, &with_bogus);
         let valid = format!(r#"{{"kind":"{kind}"}}"#);
-        assert!(
-            serde_json::from_str::<RefreshPolicy>(&valid).is_ok(),
-            "unit variant {kind:?} must still deserialize without extra fields"
-        );
+        assert_json_accepted::<RefreshPolicy>(kind, &valid);
     }
 
-    assert!(
-        serde_json::from_str::<RefreshPolicy>(r#"{"kind":"interval","minutes":15,"bogus":1}"#)
-            .is_err()
+    assert_json_rejected::<RefreshPolicy>(
+        "interval",
+        r#"{"kind":"interval","minutes":15,"bogus":1}"#,
     );
     let valid_interval =
         serde_json::from_str::<RefreshPolicy>(r#"{"kind":"interval","minutes":15}"#).unwrap();
@@ -443,12 +436,9 @@ fn card_behaviour_types_round_trip_as_closed_tagged_json() {
 #[test]
 fn card_alert_rejects_unknown_nested_fields_in_hold() {
     // Unknown field nested in hold for OnTimerFinish
-    assert!(
-        serde_json::from_str::<CardAlert>(
-            r#"{"kind":"on-timer-finish","hold":{"kind":"seconds","value":60,"extra":1}}"#
-        )
-        .is_err(),
-        "should reject unknown field in nested hold for OnTimerFinish"
+    assert_json_rejected::<CardAlert>(
+        "on-timer-finish-nested-hold",
+        r#"{"kind":"on-timer-finish","hold":{"kind":"seconds","value":60,"extra":1}}"#,
     );
 
     // Valid nested hold still works for OnTimerFinish
@@ -466,17 +456,12 @@ fn card_alert_rejects_unknown_nested_fields_in_hold() {
 
 #[test]
 fn alert_hold_rejects_unknown_fields_when_deserialized_directly() {
-    // Unknown field on UntilDismissed variant
-    assert!(
-        serde_json::from_str::<AlertHold>(r#"{"kind":"until-dismissed","extra":1}"#).is_err(),
-        "should reject unknown field on until-dismissed"
-    );
-
-    // Unknown field on Seconds variant
-    assert!(
-        serde_json::from_str::<AlertHold>(r#"{"kind":"seconds","value":60,"extra":1}"#).is_err(),
-        "should reject unknown field on seconds"
-    );
+    for (name, json) in [
+        ("until-dismissed", r#"{"kind":"until-dismissed","extra":1}"#),
+        ("seconds", r#"{"kind":"seconds","value":60,"extra":1}"#),
+    ] {
+        assert_json_rejected::<AlertHold>(name, json);
+    }
 
     // Valid round-trip
     let valid = serde_json::from_str::<AlertHold>(r#"{"kind":"seconds","value":60}"#).unwrap();
@@ -485,20 +470,15 @@ fn alert_hold_rejects_unknown_fields_when_deserialized_directly() {
 
 #[test]
 fn carousel_advance_rejects_unknown_fields() {
-    // Unknown field on Manual variant
-    assert!(
-        serde_json::from_str::<CarouselAdvance>(r#"{"kind":"manual","extra":1}"#).is_err(),
-        "should reject unknown field on manual"
-    );
-
-    // Unknown field on Timed variant
-    assert!(
-        serde_json::from_str::<CarouselAdvance>(
-            r#"{"kind":"timed","default_dwell_seconds":20,"extra":1}"#
-        )
-        .is_err(),
-        "should reject unknown field on timed"
-    );
+    for (name, json) in [
+        ("manual", r#"{"kind":"manual","extra":1}"#),
+        (
+            "timed",
+            r#"{"kind":"timed","default_dwell_seconds":20,"extra":1}"#,
+        ),
+    ] {
+        assert_json_rejected::<CarouselAdvance>(name, json);
+    }
 
     // Valid round-trip
     let valid =
@@ -932,27 +912,9 @@ fn a_cards_own_dwell_bounds_are_enforced() {
     }));
 }
 
-fn set_card_dwell(card: CardSettings, dwell_seconds: Option<u16>) -> CardSettings {
-    match card {
-        CardSettings::Clock {
-            id,
-            title,
-            show_seconds,
-            template,
-            tap_action,
-            refresh,
-            alert,
-            ..
-        } => CardSettings::Clock {
-            id,
-            title,
-            show_seconds,
-            template,
-            tap_action,
-            refresh,
-            alert,
-            dwell_seconds,
-        },
-        other => other,
+fn set_card_dwell(mut card: CardSettings, dwell: Option<u16>) -> CardSettings {
+    if let CardSettings::Clock { dwell_seconds, .. } = &mut card {
+        *dwell_seconds = dwell;
     }
+    card
 }

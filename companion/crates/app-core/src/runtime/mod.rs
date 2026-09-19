@@ -1138,12 +1138,7 @@ mod tests {
     #[test]
     fn wrong_tier_sync_result_latches_non_ownership_without_an_error() {
         let now = Instant::now();
-        let mut scheduler = Scheduler::new(
-            now,
-            Duration::from_hours(1),
-            Duration::from_hours(1),
-            Duration::from_hours(1),
-        );
+        let mut scheduler = fresh_scheduler(now);
         let mut state = WorkerState::new(AppConfig::default(), now, &mut scheduler);
         state.device.tier = Some(DeviceTier::Local);
         state.needs_full_sync = false;
@@ -1475,6 +1470,25 @@ mod tests {
         frame: Arc<Mutex<ImageSourceFrame>>,
     }
 
+    fn picture_config() -> AppConfig {
+        AppConfig {
+            cards: vec![CardSettings::Picture {
+                id: "picture-card".into(),
+                title: "Picture card".into(),
+                source_id: "camera".into(),
+                tap_action: WidgetTapAction::None,
+                refresh: RefreshPolicy::Manual,
+                alert: CardAlert::None,
+                dwell_seconds: None,
+            }],
+            image_sources: vec![crate::config::ImageSource {
+                id: "camera".into(),
+                name: "Camera".into(),
+            }],
+            ..AppConfig::default()
+        }
+    }
+
     impl ImageSourceHost for MutablePictureHost {
         fn desired_assets(&mut self) -> Vec<DesiredAsset> {
             let frame = self.frame.lock().unwrap().clone();
@@ -1494,20 +1508,6 @@ mod tests {
     #[test]
     fn picture_negotiation_refusal_records_each_evaluated_identity_once() {
         let now = Instant::now();
-        let mut config = AppConfig::default();
-        config.cards = vec![CardSettings::Picture {
-            id: "picture-card".into(),
-            title: "Picture card".into(),
-            source_id: "camera".into(),
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Manual,
-            alert: CardAlert::None,
-            dwell_seconds: None,
-        }];
-        config.image_sources = vec![crate::config::ImageSource {
-            id: "camera".into(),
-            name: "Camera".into(),
-        }];
         let first_digest = [0x71; protocol::ASSET_DIGEST_LEN];
         let second_digest = [0x72; protocol::ASSET_DIGEST_LEN];
         let frame = Arc::new(Mutex::new(ImageSourceFrame {
@@ -1517,7 +1517,7 @@ mod tests {
         }));
         let mut scheduler = fresh_scheduler(now);
         let mut state = WorkerState::new_with_image_source_host(
-            config,
+            picture_config(),
             now,
             &mut scheduler,
             Some(Box::new(MutablePictureHost {
@@ -1569,20 +1569,6 @@ mod tests {
     #[test]
     fn a_delayed_image_notification_cannot_cancel_a_pending_transient_scene_retry() {
         let now = Instant::now();
-        let mut config = AppConfig::default();
-        config.cards = vec![CardSettings::Picture {
-            id: "picture-card".into(),
-            title: "Picture card".into(),
-            source_id: "camera".into(),
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Manual,
-            alert: CardAlert::None,
-            dwell_seconds: None,
-        }];
-        config.image_sources = vec![crate::config::ImageSource {
-            id: "camera".into(),
-            name: "Camera".into(),
-        }];
         let digest = [0x73; protocol::ASSET_DIGEST_LEN];
         let frame = Arc::new(Mutex::new(ImageSourceFrame {
             digest,
@@ -1591,7 +1577,7 @@ mod tests {
         }));
         let mut scheduler = fresh_scheduler(now);
         let mut state = WorkerState::new_with_image_source_host(
-            config,
+            picture_config(),
             now,
             &mut scheduler,
             Some(Box::new(MutablePictureHost {
@@ -1752,30 +1738,30 @@ mod tests {
         }
     }
 
-    // Under `CarouselAdvance::Manual`, no rotation deadline is ever armed.
-    // This pins `current_dwell` propagating
-    // `CarouselAdvance::default_dwell_seconds()`'s `None`.
+    // Under `CarouselAdvance::Manual`, no rotation deadline is ever armed;
+    // a timed one-card loop also has nowhere to advance. This pins both
+    // no-op paths through `current_dwell`.
     #[test]
-    fn current_dwell_is_none_under_manual_advance() {
-        let config = AppConfig::default();
-        assert!(current_dwell(&config, 0).is_none());
-        // Manual disarms regardless of which card index is asked about.
-        let two_card = timed_two_card_config();
-        let mut manual_two_card = two_card;
+    fn current_dwell_is_none_when_rotation_cannot_advance() {
+        let mut manual_two_card = timed_two_card_config();
         manual_two_card.advance = CarouselAdvance::Manual;
-        assert!(current_dwell(&manual_two_card, 0).is_none());
-        assert!(current_dwell(&manual_two_card, 1).is_none());
-    }
-
-    #[test]
-    fn current_dwell_is_none_for_a_one_card_timed_loop() {
-        let config = AppConfig {
+        let timed_single_card = AppConfig {
             advance: CarouselAdvance::Timed {
                 default_dwell_seconds: 5,
             },
             ..AppConfig::default()
         };
-        assert!(current_dwell(&config, 0).is_none());
+        for (name, config, index) in [
+            ("manual-default-card", AppConfig::default(), 0),
+            ("manual-first-of-two", manual_two_card.clone(), 0),
+            ("manual-second-of-two", manual_two_card, 1),
+            ("timed-single-card", timed_single_card, 0),
+        ] {
+            assert!(
+                current_dwell(&config, index).is_none(),
+                "case {name} unexpectedly armed rotation"
+            );
+        }
     }
 
     // Dwell is resolved per-card against the carousel default: an explicit
@@ -1811,12 +1797,7 @@ mod tests {
             },
         ));
         config.cards.push(rotation_clock_card("last"));
-        let mut scheduler = Scheduler::new(
-            now,
-            Duration::from_hours(1),
-            Duration::from_hours(1),
-            Duration::from_hours(1),
-        );
+        let mut scheduler = fresh_scheduler(now);
         let mut state = WorkerState::new(config, now, &mut scheduler);
         assert_eq!(state.active_card.as_deref(), Some("a"));
 
@@ -1843,12 +1824,7 @@ mod tests {
             },
             ..AppConfig::default()
         };
-        let mut scheduler = Scheduler::new(
-            now,
-            Duration::from_hours(1),
-            Duration::from_hours(1),
-            Duration::from_hours(1),
-        );
+        let mut scheduler = fresh_scheduler(now);
         let mut state = WorkerState::new(config, now, &mut scheduler);
         state.active_card_dirty = false;
         advance_rotation(&mut state, &mut scheduler, now);
@@ -1861,12 +1837,7 @@ mod tests {
     fn local_swipe_rearms_the_dwell_of_the_card_it_landed_on() {
         let now = Instant::now();
         let config = timed_three_card_config();
-        let mut scheduler = Scheduler::new(
-            now,
-            Duration::from_hours(1),
-            Duration::from_hours(1),
-            Duration::from_hours(1),
-        );
+        let mut scheduler = fresh_scheduler(now);
         let mut state = WorkerState::new(config, now, &mut scheduler);
         let mut device = StubDevice {
             queued_event: Some(navigation_event("c")),
@@ -1893,12 +1864,7 @@ mod tests {
         let now = Instant::now();
         let mut config = timed_two_card_config();
         config.preferences.paused = true;
-        let mut scheduler = Scheduler::new(
-            now,
-            Duration::from_hours(1),
-            Duration::from_hours(1),
-            Duration::from_hours(1),
-        );
+        let mut scheduler = fresh_scheduler(now);
         let mut state = WorkerState::new(config, now, &mut scheduler);
         assert!(state.config.preferences.paused);
         assert!(!state.connected);

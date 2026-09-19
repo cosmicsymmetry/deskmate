@@ -7,7 +7,8 @@ use std::pin::Pin;
 
 use serde::Deserialize;
 
-use crate::egress::{self, FetchResponse};
+use crate::egress;
+pub use crate::egress::FetchResponse;
 
 /// Boxed future returned by [`OAuthTransport`] so the trait stays object-safe
 /// (`Arc<dyn OAuthTransport>` is what `TokenManager` holds).

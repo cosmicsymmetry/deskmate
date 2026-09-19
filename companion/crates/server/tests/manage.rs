@@ -24,7 +24,7 @@ impl server::oauth::transport::OAuthTransport for NoTransport {
         _form: Vec<(String, String)>,
     ) -> server::oauth::transport::OAuthFuture<
         '_,
-        Result<server::egress::FetchResponse, server::oauth::transport::TransportError>,
+        Result<server::oauth::transport::FetchResponse, server::oauth::transport::TransportError>,
     > {
         Box::pin(async {
             Err(server::oauth::transport::TransportError(

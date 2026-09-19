@@ -177,8 +177,7 @@ async fn start_consent_redirects_to_google_for_an_admin_caller() {
 
 use std::sync::Mutex;
 
-use server::egress::FetchResponse;
-use server::oauth::transport::{OAuthFuture, OAuthTransport, TransportError};
+use server::oauth::transport::{FetchResponse, OAuthFuture, OAuthTransport, TransportError};
 use server::secrets::{IntegrationSecret, IntegrationStore, SecretsKey};
 
 const STORED_REFRESH_TOKEN: &str = "stored-refresh-token-value";

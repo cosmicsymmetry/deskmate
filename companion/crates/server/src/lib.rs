@@ -31,7 +31,7 @@ pub mod data_cards;
 mod device_link;
 // The SSRF egress guard, and the one HTTP client the provider layer is
 // allowed to use.
-pub mod egress;
+mod egress;
 mod egress_client;
 // The server-authored data-card faces: the SVG authoring (`faces`) and the
 // rasterizer that turns one into the frame a picture producer would have

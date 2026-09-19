@@ -208,7 +208,7 @@ Four decisions worth keeping:
 ## Icons
 
 `src/components/Icon.tsx`. One 16px grid, one 1.75 stroke, round caps and joins, drawn.
-Seven inline SVG marks keep the set consistent with zero library or asset fetches. They
+Six inline SVG marks keep the set consistent with zero library or asset fetches. They
 also avoid borrowing `×`, `↑`, `✓`, `⠿` as icons, which hands their weight and alignment
 to whatever font resolves.
 

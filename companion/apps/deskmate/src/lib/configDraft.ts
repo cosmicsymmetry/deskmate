@@ -462,13 +462,12 @@ export function cardsContainerIssues(issues: ValidationIssue[]): ValidationIssue
   return issues.filter((issue) => issue.path === "cards");
 }
 
-/// Every issue an existing surface already claims and renders: the cards container
-/// banner (`cardsContainerIssues`), each card's own row-scoped issues (`issuesForCard`,
+/// Every issue an existing surface already claims and renders: the cards container,
+/// each card's own issues, document-level advance, and timezone. Per-card issues are
 /// checked for every card in the draft — not just whichever one is currently selected,
-/// since selection is a UI-only concern this must not depend on), the loop's
-/// pacing control, and the timezone field. Returns the actual issue objects (by
-/// reference into `issues`) rather than paths, so `unclaimedIssues` can compute an exact
-/// set difference without re-deriving path-matching rules of its own.
+/// since selection is a UI-only concern this must not depend on. Returns the actual issue
+/// objects (by reference into `issues`) rather than paths, so `unclaimedIssues` can compute
+/// an exact set difference without re-deriving path-matching rules of its own.
 function claimedIssues(issues: ValidationIssue[], config: AppConfig): ValidationIssue[] {
   const claimed = new Set<ValidationIssue>();
   const claim = (matched: ValidationIssue[]) => {

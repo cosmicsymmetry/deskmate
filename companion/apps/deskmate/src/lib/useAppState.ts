@@ -99,14 +99,8 @@ export interface AppStateValue {
   error: ApiError | null;
   refresh: () => Promise<void>;
   /**
-   * Bumped whenever a new snapshot's `card_data` differs from the previous one (a
-   * pomodoro tick that changed a published field, and so on).
-   * `DevicePreview` depends on this rather than on `card_data` itself, because the
-   * runtime pushes a freshly-deserialized `AppSnapshot` on every tick even when
-   * nothing in it actually changed — comparing object identity would re-request a
-   * preview render every tick, and comparing the whole snapshot would miss nothing
-   * changing except, say, `diagnostics`. Counting real `card_data` changes gives the
-   * preview a signal that fires exactly when the pixels it would render could differ.
+   * Increments only when serialized `card_data` changes, so fresh snapshot identity
+   * and telemetry-only deliveries cannot trigger identical preview requests.
    */
   dataGeneration: number;
   networkSettings: NetworkSettings;

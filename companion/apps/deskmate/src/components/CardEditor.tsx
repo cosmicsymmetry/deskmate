@@ -28,7 +28,6 @@ interface CardEditorProps {
   /// Card-scoped by the caller via `issuesForCard`, with absolute paths retained
   /// for field matching.
   issues: ValidationIssue[];
-  /// A typed device refusal for this card's last data or scene update.
   cardError: CardError | null;
   pomodoro: PomodoroSnapshot | null;
   timerBusy: boolean;

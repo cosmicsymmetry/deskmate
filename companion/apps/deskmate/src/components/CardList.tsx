@@ -61,22 +61,11 @@ function tileValue(
   pomodoro: PomodoroSnapshot | undefined,
   sources: ImageSource[],
 ): string {
-  switch (card.kind) {
-    case "clock":
-      // Not the time. A live clock in the grid was a second clock competing with
-      // the panel's own, ticking in the corner of an editing surface, and it
-      // told the owner nothing about the card they were about to edit.
-      return "Clock";
-    case "pomodoro": {
-      const seconds = pomodoro?.remaining_seconds ?? card.duration_seconds;
-      return `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
-    }
-    case "picture":
-      // "PNG" is a file format, not a live fact -- it read the same on every
-      // picture card, which is what made three of them indistinguishable in the
-      // grid. The source is the one thing that differs between them.
-      return sources.find((source) => source.id === card.source_id)?.name ?? "Missing source";
+  if (card.kind !== "pomodoro") {
+    return cardIdentity(card, sources);
   }
+  const seconds = pomodoro?.remaining_seconds ?? card.duration_seconds;
+  return `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
 }
 
 /**
@@ -274,6 +263,35 @@ export function CardList({
       choose();
     }
   };
+
+  const renderMenuItem = (
+    key: string,
+    index: number,
+    label: string,
+    description: string,
+    choose: () => void,
+    disabled?: boolean,
+  ) => (
+    <button
+      ref={(element) => {
+        if (element) {
+          menuItemRefs.current[index] = element;
+        }
+      }}
+      type="button"
+      className="menu__item"
+      role="menuitem"
+      key={key}
+      disabled={disabled}
+      onClick={choose}
+      onKeyDown={(event) => onMenuKeyDown(event, index, choose)}
+    >
+      <span>
+        <strong>{label}</strong>
+        <small>{description}</small>
+      </span>
+    </button>
+  );
 
   /** Resolve both indexes from the current draft at the moment an action fires. */
   const moveTo = (cardId: string, targetCardId: string) => {
@@ -487,26 +505,7 @@ export function CardList({
                 <legend className="tile-label menu__label">Built in</legend>
                 {addableKinds.map(({ kind, description }, index) => {
                   const choose = () => chooseBuiltIn(kind);
-                  return (
-                    <button
-                      ref={(element) => {
-                        if (element) {
-                          menuItemRefs.current[index] = element;
-                        }
-                      }}
-                      type="button"
-                      className="menu__item"
-                      role="menuitem"
-                      key={kind}
-                      onClick={choose}
-                      onKeyDown={(event) => onMenuKeyDown(event, index, choose)}
-                    >
-                      <span>
-                        <strong>{cardKindName(kind)}</strong>
-                        <small>{description}</small>
-                      </span>
-                    </button>
-                  );
+                  return renderMenuItem(kind, index, cardKindName(kind), description, choose);
                 })}
               </fieldset>
               {/* Its own group, not beside the built-in kinds: these picture frames
@@ -517,26 +516,7 @@ export function CardList({
                 {creatableFaces.map((face, faceIndex) => {
                   const index = addableKinds.length + faceIndex;
                   const choose = () => onAddFace(face.kind, face.label);
-                  return (
-                    <button
-                      ref={(element) => {
-                        if (element) {
-                          menuItemRefs.current[index] = element;
-                        }
-                      }}
-                      type="button"
-                      className="menu__item"
-                      role="menuitem"
-                      key={face.kind}
-                      onClick={choose}
-                      onKeyDown={(event) => onMenuKeyDown(event, index, choose)}
-                    >
-                      <span>
-                        <strong>{face.label}</strong>
-                        <small>Added as a picture</small>
-                      </span>
-                    </button>
-                  );
+                  return renderMenuItem(face.kind, index, face.label, "Added as a picture", choose);
                 })}
               </fieldset>
               <fieldset className="menu__group">
@@ -544,57 +524,24 @@ export function CardList({
                 {unusedPictureSources.map((source, sourceIndex) => {
                   const index = addableKinds.length + creatableFaces.length + sourceIndex;
                   const choose = () => choosePicture(source);
-                  return (
-                    <button
-                      ref={(element) => {
-                        if (element) {
-                          menuItemRefs.current[index] = element;
-                        }
-                      }}
-                      type="button"
-                      className="menu__item"
-                      role="menuitem"
-                      key={source.id}
-                      onClick={choose}
-                      onKeyDown={(event) => onMenuKeyDown(event, index, choose)}
-                    >
-                      <span>
-                        <strong>{source.name}</strong>
-                        <small>Existing picture source</small>
-                      </span>
-                    </button>
+                  return renderMenuItem(
+                    source.id,
+                    index,
+                    source.name,
+                    "Existing picture source",
+                    choose,
                   );
                 })}
-                <button
-                  ref={(element) => {
-                    if (element) {
-                      menuItemRefs.current[
-                        addableKinds.length + creatableFaces.length + unusedPictureSources.length
-                      ] = element;
-                    }
-                  }}
-                  type="button"
-                  className="menu__item"
-                  role="menuitem"
-                  disabled={!canMintPictureSource || pictureBusy}
-                  onClick={() => choosePicture(null)}
-                  onKeyDown={(event) =>
-                    onMenuKeyDown(
-                      event,
-                      addableKinds.length + creatableFaces.length + unusedPictureSources.length,
-                      () => choosePicture(null),
-                    )
-                  }
-                >
-                  <span>
-                    <strong>{pictureBusy ? "Creating…" : "New picture source"}</strong>
-                    <small>
-                      {canMintPictureSource
-                        ? "Create credentials for a producer"
-                        : `The limit is ${MAX_IMAGE_SOURCES} picture sources`}
-                    </small>
-                  </span>
-                </button>
+                {renderMenuItem(
+                  "new-picture-source",
+                  addableKinds.length + creatableFaces.length + unusedPictureSources.length,
+                  pictureBusy ? "Creating…" : "New picture source",
+                  canMintPictureSource
+                    ? "Create credentials for a producer"
+                    : `The limit is ${MAX_IMAGE_SOURCES} picture sources`,
+                  () => choosePicture(null),
+                  !canMintPictureSource || pictureBusy,
+                )}
               </fieldset>
             </div>
           )}

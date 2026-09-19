@@ -23,6 +23,7 @@ import * as backendModule from "../src/lib/backend";
 // the browser request verifies that the mint reaches `/v1/images` with the name
 // and face kind in the body, not merely that a client function was called.
 const httpCalls: { method: string; path: string; body: unknown }[] = [];
+let creatableFacesResponse: unknown[] = [];
 const jsonResponse = (value: unknown) =>
   new Response(JSON.stringify(value), {
     status: 200,
@@ -38,6 +39,9 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     // UI's translated shape here would let the client and test share the same
     // wrong assumption about the server contract.
     return jsonResponse({ id: "picture-source", token: "plaintext-once" });
+  }
+  if (method === "GET" && path === "/v1/faces") {
+    return jsonResponse(creatableFacesResponse);
   }
   return jsonResponse([]);
 }) as typeof fetch;
@@ -570,6 +574,89 @@ describe("settings accessibility and states", () => {
     expect(html).toContain('aria-label="Remove Picture — Claude limits');
   });
 
+  test("picture tiles preserve missing and empty source identities", () => {
+    const missing = { ...pictureCard("missing-picture"), source_id: "missing-source" };
+    const missingHtml = renderToStaticMarkup(
+      <CardList
+        config={{ ...cardListConfig([missing]), image_sources: [] }}
+        issues={[]}
+        pomodoros={[]}
+        selectedCardId={null}
+        onSelect={() => {}}
+        onAdd={() => {}}
+        onChange={() => {}}
+        onRemove={() => {}}
+      />,
+    );
+    expect(missingHtml).toContain(
+      '<strong class="card-tile__value numeral">Missing source</strong>',
+    );
+
+    const empty = pictureCard("empty-source-name");
+    const emptyHtml = renderToStaticMarkup(
+      <CardList
+        config={{
+          ...cardListConfig([empty]),
+          image_sources: [{ id: empty.source_id, name: "" }],
+        }}
+        issues={[]}
+        pomodoros={[]}
+        selectedCardId={null}
+        onSelect={() => {}}
+        onAdd={() => {}}
+        onChange={() => {}}
+        onRemove={() => {}}
+      />,
+    );
+    expect(emptyHtml).toContain('<strong class="card-tile__value numeral"></strong>');
+    expect(emptyHtml).not.toContain('numeral">Missing source</strong>');
+  });
+
+  test("pomodoro tiles use duration fallback and floor live remaining time, including zero", () => {
+    const fallback = pomodoroCard("fallback", "Focus");
+    const live = pomodoroCard("live", "Live");
+    const zero = pomodoroCard("zero", "Zero");
+    const html = renderToStaticMarkup(
+      <CardList
+        config={cardListConfig([fallback, live, zero])}
+        issues={[]}
+        pomodoros={[
+          { card_id: live.id, state: "running", duration_seconds: 1500, remaining_seconds: 61.9 },
+          { card_id: zero.id, state: "completed", duration_seconds: 1500, remaining_seconds: 0 },
+        ]}
+        selectedCardId={null}
+        onSelect={() => {}}
+        onAdd={() => {}}
+        onChange={() => {}}
+        onRemove={() => {}}
+      />,
+    );
+
+    expect(html).toContain('numeral">25:00</strong>');
+    expect(html).toContain('numeral">1:01</strong>');
+    expect(html).toContain('numeral">0:00</strong>');
+  });
+
+  test("pomodoro tiles suppress blank labels and labels equal to the countdown", () => {
+    const blank = pomodoroCard("blank", "");
+    const repeated = pomodoroCard("repeated", "25:00");
+    const html = renderToStaticMarkup(
+      <CardList
+        config={cardListConfig([blank, repeated])}
+        issues={[]}
+        pomodoros={[]}
+        selectedCardId={null}
+        onSelect={() => {}}
+        onAdd={() => {}}
+        onChange={() => {}}
+        onRemove={() => {}}
+      />,
+    );
+
+    expect(html.match(/class="card-tile__value numeral">25:00<\/strong>/g)).toHaveLength(2);
+    expect(html).not.toContain("card-tile__name");
+  });
+
   test("a picture card states its source instead of offering a menu of them", () => {
     // Rendering identity as a select would imply that changing it is a safe edit,
     // when a new source makes this a different card.
@@ -947,6 +1034,79 @@ describe("settings accessibility and states", () => {
     }
   });
 
+  test("add-menu keyboard navigation crosses groups, wraps, and skips a disabled source action", async () => {
+    const config: AppConfig = {
+      ...cardListConfig([]),
+      image_sources: Array.from({ length: 8 }, (_, index) => ({
+        id: `source-${index}`,
+        name: `Source ${index}`,
+      })),
+    };
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <CardList
+            config={config}
+            issues={[]}
+            pomodoros={[]}
+            selectedCardId={null}
+            onSelect={() => {}}
+            onAdd={() => {}}
+            creatableFaces={[{ kind: "weather", label: "Weather", fields: [] }]}
+            onAddFace={() => {}}
+            onChange={() => {}}
+            onRemove={() => {}}
+          />,
+        ),
+      );
+      await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
+      const items = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+      const item = (label: string) =>
+        items.find((button) => button.querySelector("strong")?.textContent === label);
+      const press = async (button: HTMLButtonElement | undefined, key: string) => {
+        await act(async () =>
+          button?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true })),
+        );
+      };
+
+      expect(items.map((button) => button.querySelector("strong")?.textContent)).toEqual([
+        "Digital clock",
+        "Pomodoro",
+        "Weather",
+        "Source 0",
+        "Source 1",
+        "Source 2",
+        "Source 3",
+        "Source 4",
+        "Source 5",
+        "Source 6",
+        "Source 7",
+        "New picture source",
+      ]);
+      expect(item("New picture source")?.disabled).toBe(true);
+
+      item("Digital clock")?.focus();
+      await press(item("Digital clock"), "ArrowDown");
+      expect(document.activeElement).toBe(item("Pomodoro"));
+      await press(item("Pomodoro"), "ArrowDown");
+      expect(document.activeElement).toBe(item("Weather"));
+      await press(item("Weather"), "ArrowDown");
+      expect(document.activeElement).toBe(item("Source 0"));
+
+      item("Source 7")?.focus();
+      await press(item("Source 7"), "ArrowDown");
+      expect(document.activeElement).toBe(item("Digital clock"));
+      await press(item("Digital clock"), "ArrowUp");
+      expect(document.activeElement).toBe(item("Source 7"));
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("the page mints and adds a picture while keeping the token ephemeral", async () => {
     const clock = clockCard("clock", "Desk");
     snapshotImpl = async () => ({
@@ -1002,6 +1162,58 @@ describe("settings accessibility and states", () => {
         device_id: "desk-1",
         tier: "networked",
       });
+      previewImpl = () =>
+        Promise.reject(new Error("renderCardPreview not configured for this test"));
+    }
+  });
+
+  test("the page mints a server-listed face as a picture without producer credentials", async () => {
+    const clock = clockCard("clock", "Desk");
+    snapshotImpl = async () => ({
+      ...snapshot,
+      config: cardListConfig([clock]),
+      device: { ...snapshot.device, tier: "networked" },
+      pomodoros: [],
+      card_data: [],
+      card_errors: [],
+    });
+    creatableFacesResponse = [{ kind: "weather", label: "Weather", fields: [] }];
+    previewImpl = async () => ({ png_base64: null, sample: false, state: null });
+    httpCalls.length = 0;
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await renderPreviewInto(root, <App />);
+      await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
+      await waitFor(() => expect(container.textContent).toContain("Weather"));
+      const weather = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(
+        (button) => button.querySelector("strong")?.textContent === "Weather",
+      );
+      await act(async () => weather?.click());
+
+      await waitFor(() => {
+        const tiles = container.querySelectorAll<HTMLButtonElement>(".card-tile__body");
+        expect(tiles).toHaveLength(2);
+        expect(tiles[1]?.textContent).toContain("Weather");
+        expect(container.querySelector("#editor-heading")?.textContent).toBe("Weather");
+        expect(container.textContent).toContain("Picture source");
+        expect(container.textContent).toContain("picture-source");
+      });
+      expect(httpCalls).toContainEqual({
+        method: "POST",
+        path: "/v1/images",
+        body: { name: "Weather", face_kind: "weather" },
+      });
+      expect(container.textContent).toContain("Weather");
+      expect(container.querySelector("#picture-push-url")).toBeNull();
+      expect(container.querySelector("#picture-source-token")).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      snapshotImpl = async () => snapshot;
+      creatableFacesResponse = [];
       previewImpl = () =>
         Promise.reject(new Error("renderCardPreview not configured for this test"));
     }

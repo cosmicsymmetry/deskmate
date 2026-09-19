@@ -3,11 +3,11 @@ import type { ReactElement } from "react";
 /**
  * The icon set: authored on one 16px grid, one 1.75 stroke, round caps and joins.
  *
- * Deskmate uses a small inline set rather than loading an icon library for seven
+ * Deskmate uses a small inline set rather than loading an icon library for six
  * marks. Drawing them also avoids Unicode glyphs such as × and ↑, whose weight and
  * alignment depend on the resolved font, so every control keeps the same stroke.
  */
-type IconName = "left" | "right" | "close" | "plus" | "check" | "refresh" | "settings";
+type IconName = "left" | "right" | "close" | "plus" | "check" | "settings";
 
 const PATHS: Record<IconName, ReactElement> = {
   left: <path d="M10 4 6 8l4 4" />,
@@ -15,7 +15,6 @@ const PATHS: Record<IconName, ReactElement> = {
   close: <path d="M4.5 4.5l7 7M11.5 4.5l-7 7" />,
   plus: <path d="M8 3.5v9M3.5 8h9" />,
   check: <path d="M3.5 8.5l3 3 6-6.5" />,
-  refresh: <path d="M13 8a5 5 0 1 1-1.6-3.7M13 2.5V5h-2.5" />,
   /* Sliders, not a cogwheel: eight teeth turn to mush at 1.75 stroke on a 16 grid,
      and the line breaks below keep each knob legible instead of overprinting it. */
   settings: (
@@ -27,10 +26,10 @@ const PATHS: Record<IconName, ReactElement> = {
   ),
 };
 
-export function Icon({ name, className }: { name: IconName; className?: string }) {
+export function Icon({ name }: { name: IconName }) {
   return (
     <svg
-      className={className ? `icon ${className}` : "icon"}
+      className="icon"
       viewBox="0 0 16 16"
       width="16"
       height="16"

@@ -260,11 +260,7 @@ export function App() {
       : `${cardErrorCount} card updates need attention`;
   const affectedCards = cardErrorCount === 1 ? "the affected card" : "each affected card";
   const affectedCardPronoun = cardErrorCount === 1 ? "it" : "them";
-  // Issues no card-, playlist-, or preference-scoped surface below claims — e.g. a
-  // `device.capabilities` issue naming a card the connected display can't render.
-  // Rendered as its own banner so an unclaimed issue is explained somewhere rather than
-  // just blocking Save with no highlighted control anywhere in the UI (see
-  // `unclaimedIssues`).
+  // The fallback contains issues not claimed by card, document-level advance, or timezone surfaces.
   const leftoverIssues = unclaimedIssues(issues, draft);
   const serverOwned = ownershipTier === "networked";
   const protocolMismatch =
@@ -304,51 +300,42 @@ export function App() {
     setMintedPicture((current) => (current?.cardId === cardId ? current : null));
     setSelectedCardId(cardId);
   };
-  const handleAddPicture = (source: ImageSource | null) => {
-    if (source) {
-      setMintedPicture(null);
-      handleAdd({ kind: "picture", sourceId: source.id, sourceName: source.name });
-      return;
-    }
+  const mintPictureCard = (label: string, faceKind?: string): void => {
     const currentDraft = draftRef.current;
     if (!currentDraft) {
       return;
     }
-    const sourceName = nextCardName(currentDraft, "Picture");
+    const sourceName = nextCardName(currentDraft, label);
     setBusyAction("picture-source");
     setActionError(null);
-    void mintImageSource(sourceName)
+    void mintImageSource(sourceName, faceKind)
       .then((access) => {
         const cardId = handleAdd({
           kind: "picture",
           sourceId: access.source_id,
           sourceName,
         });
-        if (cardId) {
+        if (faceKind === undefined && cardId) {
           setMintedPicture({ cardId, access });
         }
       })
       .catch((nextError) => setActionError(toApiError(nextError)))
       .finally(() => setBusyAction(null));
   };
+  const handleAddPicture = (source: ImageSource | null) => {
+    if (source) {
+      setMintedPicture(null);
+      handleAdd({ kind: "picture", sourceId: source.id, sourceName: source.name });
+      return;
+    }
+    mintPictureCard("Picture");
+  };
 
   /// Adding a server-drawn card: name it, mint a source carrying that face, and
   /// put the card in the loop. The owner types nothing -- the name is chosen and
   /// the source never surfaces.
   const handleAddFace = (kind: string, label: string) => {
-    const currentDraft = draftRef.current;
-    if (!currentDraft) {
-      return;
-    }
-    const name = nextCardName(currentDraft, label);
-    setBusyAction("picture-source");
-    setActionError(null);
-    void mintImageSource(name, kind)
-      .then((access) => {
-        handleAdd({ kind: "picture", sourceId: access.source_id, sourceName: name });
-      })
-      .catch((nextError) => setActionError(toApiError(nextError)))
-      .finally(() => setBusyAction(null));
+    mintPictureCard(label, kind);
   };
 
   const handleWidgetChange = (widget: CardSettings) => {
@@ -529,11 +516,6 @@ export function App() {
             </aside>
           )}
 
-          {/* A validation issue whose path no card-, playlist-, or preference-scoped
-              surface below claims (see `unclaimedIssues`) — e.g. `device.capabilities`,
-              emitted when the connected display lacks a feature the draft needs. Without
-              this, such an issue still disabled Save but was never shown anywhere,
-              which is strictly worse than not validating it at all. */}
           {leftoverIssues.length > 0 && (
             <aside className="notice notice--bad" role="status">
               <div>

@@ -231,15 +231,10 @@ test("the page mints a server-listed face as a picture without producer credenti
     await act(async () => weather?.click());
     expect(container.querySelector('[role="menu"]') === null).toBe(true);
     const add = container.querySelector<HTMLButtonElement>(".card-tile__add");
-    expect(document.activeElement).toBe(add);
+    expect(add?.disabled).toBe(true);
     await act(async () => add?.click());
-    const busyFace = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(
-      (button) => button.querySelector("strong")?.textContent === "Weather",
-    );
-    expect(busyFace?.disabled).toBe(true);
-    await act(async () => busyFace?.click());
+    expect(container.querySelector('[role="menu"]')).toBeNull();
     expect(httpCalls.filter((call) => call.path === "/v1/images")).toHaveLength(1);
-    await act(async () => add?.click());
     await act(async () =>
       mint.resolve(jsonResponse({ id: "picture-source", token: "plaintext-once" })),
     );
@@ -951,3 +946,272 @@ for (const nextDevice of ["desk-B", "desk-A"]) {
     });
   }
 }
+
+function sourceRaceSnapshot(cardCount = 1): AppSnapshot {
+  const config = cardListConfig(
+    Array.from({ length: cardCount }, (_, index) => clockCard(`clock-${index}`)),
+  );
+  config.preferences.paused = true;
+  config.image_sources = [{ id: "existing-source", name: "Existing picture" }];
+  return {
+    ...snapshot,
+    config,
+    runtime: { kind: "running" },
+    pomodoros: [],
+    card_data: [],
+    card_errors: [],
+  };
+}
+
+function menuItem(container: ParentNode, label: string): HTMLButtonElement {
+  const item = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(
+    (button) => button.querySelector("strong")?.textContent === label,
+  );
+  if (!item) throw new Error(`Missing menu item: ${label}`);
+  return item;
+}
+
+for (const write of ["save", "resume"] as const) {
+  for (const source of ["New picture source", "Weather"]) {
+    test(`pending ${write} excludes ${source} minting before paint and permits ordinary additions`, async () => {
+      let liveSnapshot = sourceRaceSnapshot();
+      const pending = Promise.withResolvers<void>();
+      const saved: AppConfig[] = [];
+      let resumes = 0;
+      backendMocks.snapshotImpl = async () => liveSnapshot;
+      backendMocks.saveConfigImpl = async (config) => {
+        saved.push(config);
+        await pending.promise;
+        liveSnapshot = { ...liveSnapshot, config };
+        return { save: { generation: saved.length, warning: null } };
+      };
+      backendMocks.resumeImpl = async () => {
+        resumes += 1;
+        await pending.promise;
+      };
+      httpState.creatableFacesResponse = [{ kind: "weather", label: "Weather", fields: [] }];
+      httpHandlers.set("POST /v1/images", () =>
+        jsonResponse({ id: "picture-source", token: "plaintext-once" }),
+      );
+      const { container } = await mount(<App />);
+      if (write === "save") {
+        await act(async () => buttonWithText(container, "Manual")?.click());
+        await waitFor(() =>
+          expect(buttonWithText(container, "Save to server")?.disabled).toBe(false),
+        );
+      } else {
+        expect(buttonWithText(container, "Resume sending")?.disabled).toBe(false);
+      }
+      await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
+      const mint = menuItem(container, source);
+      await act(async () => {
+        buttonWithText(container, write === "save" ? "Save to server" : "Resume sending")?.click();
+        mint.click();
+      });
+      expect(saved.length + resumes).toBe(1);
+      expect(httpCalls.filter((call) => call.path === "/v1/images")).toHaveLength(0);
+      await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
+      for (const label of ["New picture source", "Weather"]) {
+        expect(menuItem(container, label).disabled).toBe(true);
+        await act(async () => menuItem(container, label).click());
+      }
+      expect(menuItem(container, "Digital clock").disabled).toBe(false);
+      expect(menuItem(container, "Pomodoro").disabled).toBe(false);
+      expect(menuItem(container, "Existing picture").disabled).toBe(false);
+      await act(async () => menuItem(container, "Digital clock").click());
+      expect(container.querySelectorAll(".card-tile__body")).toHaveLength(2);
+      await act(async () => pending.resolve());
+      expect(container.querySelectorAll(".card-tile__body")).toHaveLength(2);
+      await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
+      expect(menuItem(container, source).disabled).toBe(false);
+      await act(async () => menuItem(container, source).click());
+      expect(httpCalls.filter((call) => call.path === "/v1/images")).toHaveLength(1);
+      await waitFor(() =>
+        expect(buttonWithText(container, "Save to server")?.disabled).toBe(false),
+      );
+      await act(async () => buttonWithText(container, "Save to server")?.click());
+      const config = saved.at(-1);
+      expect(config?.cards).toHaveLength(3);
+      expect(config?.cards.at(-1)).toMatchObject({ kind: "picture", source_id: "picture-source" });
+      expect(config?.image_sources).toContainEqual({
+        id: "picture-source",
+        name: source === "Weather" ? "Weather" : "Picture",
+      });
+    });
+  }
+}
+
+test("pending mint excludes both SaveBars and Resume sending before paint until draft insertion", async () => {
+  let liveSnapshot = sourceRaceSnapshot();
+  const mint = Promise.withResolvers<Response>();
+  const saved: AppConfig[] = [];
+  let resumes = 0;
+  backendMocks.snapshotImpl = async () => liveSnapshot;
+  backendMocks.saveConfigImpl = async (config) => {
+    saved.push(config);
+    liveSnapshot = { ...liveSnapshot, config };
+    return { save: { generation: 1, warning: null } };
+  };
+  backendMocks.resumeImpl = async () => {
+    resumes += 1;
+  };
+  httpHandlers.set("POST /v1/images", () => mint.promise);
+  const { container } = await mount(<App />);
+  await act(async () => buttonWithText(container, "Manual")?.click());
+  await act(async () => container.querySelector<HTMLButtonElement>(".topbar__settings")?.click());
+  await waitFor(() => expect(buttonWithText(container, "Save to server")?.disabled).toBe(false));
+  const saves = [...container.querySelectorAll<HTMLButtonElement>("button")].filter(
+    (button) => button.textContent === "Save to server",
+  );
+  expect(saves).toHaveLength(2);
+  await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
+  const create = menuItem(container, "New picture source");
+  await act(async () => {
+    create.click();
+    create.click();
+    for (const save of saves) save.click();
+    buttonWithText(container, "Resume sending")?.click();
+  });
+  expect(saved).toHaveLength(0);
+  expect(resumes).toBe(0);
+  expect(httpCalls.filter((call) => call.path === "/v1/images")).toHaveLength(1);
+  expect(saves.every((save) => save.disabled)).toBe(true);
+  expect(buttonWithText(container, "Resume sending")?.disabled).toBe(true);
+  await act(async () => mint.resolve(jsonResponse({ id: "picture-source", token: "once" })));
+  expect(container.querySelectorAll(".card-tile__body")).toHaveLength(2);
+  await waitFor(() => expect(saves.every((save) => !save.disabled)).toBe(true));
+  await act(async () => saves[0].click());
+  expect(saved).toHaveLength(1);
+  expect(saved[0].cards.at(-1)).toMatchObject({ kind: "picture", source_id: "picture-source" });
+  expect(saved[0].image_sources).toContainEqual({ id: "picture-source", name: "Picture" });
+});
+
+test("pending mint reserves the seventh draft's final card slot", async () => {
+  const mint = Promise.withResolvers<Response>();
+  backendMocks.snapshotImpl = async () => sourceRaceSnapshot(7);
+  httpHandlers.set("POST /v1/images", () => mint.promise);
+  const { container } = await mount(<App />);
+  const add = container.querySelector<HTMLButtonElement>(".card-tile__add");
+  await act(async () => add?.click());
+  await act(async () => menuItem(container, "New picture source").click());
+  await act(async () => add?.click());
+  const competing = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(
+    (button) => button.querySelector("strong")?.textContent === "Digital clock",
+  );
+  await act(async () => competing?.click());
+  expect(container.querySelectorAll(".card-tile__body")).toHaveLength(7);
+  expect(add?.disabled).toBe(true);
+  expect(container.querySelector('[role="menu"]')).toBeNull();
+  await act(async () => mint.resolve(jsonResponse({ id: "picture-source", token: "once" })));
+  expect(container.querySelectorAll(".card-tile__body")).toHaveLength(8);
+  expect(container.querySelector<HTMLInputElement>("#picture-source-token")?.value).toBe("once");
+});
+
+for (const operation of ["mint", "save", "resume"] as const) {
+  test(`a rejected ${operation} releases the source/configuration gate`, async () => {
+    const pending = Promise.withResolvers<void>();
+    backendMocks.snapshotImpl = async () => sourceRaceSnapshot();
+    backendMocks.saveConfigImpl = async () => {
+      await pending.promise;
+      return { save: { generation: 1, warning: null } };
+    };
+    backendMocks.resumeImpl = () => pending.promise;
+    httpHandlers.set("POST /v1/images", async () => {
+      await pending.promise;
+      return jsonResponse({ id: "picture-source", token: "once" });
+    });
+    const { container } = await mount(<App />);
+    if (operation !== "resume") {
+      await act(async () => buttonWithText(container, "Manual")?.click());
+      await waitFor(() =>
+        expect(buttonWithText(container, "Save to server")?.disabled).toBe(false),
+      );
+    } else {
+      expect(buttonWithText(container, "Resume sending")?.disabled).toBe(false);
+    }
+    if (operation === "mint") {
+      await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
+      await act(async () => menuItem(container, "New picture source").click());
+      expect(buttonWithText(container, "Save to server")?.disabled).toBe(true);
+    } else {
+      await act(async () =>
+        buttonWithText(
+          container,
+          operation === "save" ? "Save to server" : "Resume sending",
+        )?.click(),
+      );
+    }
+    await act(async () => pending.reject(new Error(`${operation} rejected`)));
+    expect(container.textContent).toContain(`${operation} rejected`);
+    expect(buttonWithText(container, "Resume sending")?.disabled).toBe(operation !== "resume");
+    if (operation === "resume") {
+      await act(async () => buttonWithText(container, "Manual")?.click());
+    }
+    await waitFor(() => expect(buttonWithText(container, "Save to server")?.disabled).toBe(false));
+    expect(buttonWithText(container, "Resume sending")?.disabled).toBe(true);
+    allowImageMint("Picture");
+    await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
+    expect(menuItem(container, "New picture source").disabled).toBe(false);
+    await act(async () => menuItem(container, "New picture source").click());
+    expect(container.querySelectorAll(".card-tile__body")).toHaveLength(2);
+  });
+}
+
+test("a completed mint keeps Resume disabled until the picture draft is saved", async () => {
+  let liveSnapshot = sourceRaceSnapshot();
+  const mint = Promise.withResolvers<Response>();
+  const saving = Promise.withResolvers<void>();
+  const resumed: AppConfig[] = [];
+  backendMocks.snapshotImpl = async () => liveSnapshot;
+  backendMocks.saveConfigImpl = async (config) => {
+    await saving.promise;
+    liveSnapshot = { ...liveSnapshot, config };
+    return { save: { generation: 1, warning: null } };
+  };
+  backendMocks.resumeImpl = async () => {
+    resumed.push(liveSnapshot.config);
+  };
+  httpHandlers.set("POST /v1/images", () => mint.promise);
+  const { container } = await mount(<App />);
+  const resume = buttonWithText(container, "Resume sending");
+  expect(resume?.disabled).toBe(false);
+  await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
+  await act(async () => {
+    menuItem(container, "New picture source").click();
+    resume?.click();
+  });
+  expect(resumed).toHaveLength(0);
+  expect(resume?.disabled).toBe(true);
+  await act(async () => mint.resolve(jsonResponse({ id: "picture-source", token: "once" })));
+  expect(container.querySelectorAll(".card-tile__body")).toHaveLength(2);
+  expect(resume?.disabled).toBe(true);
+  expect(container.textContent).toContain("Save your changes before resuming.");
+  await act(async () => resume?.click());
+  expect(resumed).toHaveLength(0);
+  await waitFor(() => expect(buttonWithText(container, "Save to server")?.disabled).toBe(false));
+  await act(async () => buttonWithText(container, "Save to server")?.click());
+  expect(resume?.disabled).toBe(true);
+  await act(async () => saving.resolve());
+  expect(resume?.disabled).toBe(false);
+  expect(container.textContent).not.toContain("Save your changes before resuming.");
+  await act(async () => resume?.click());
+  expect(resumed).toHaveLength(1);
+  expect(resumed[0].cards.at(-1)).toMatchObject({ kind: "picture", source_id: "picture-source" });
+  expect(resumed[0].image_sources).toContainEqual({ id: "picture-source", name: "Picture" });
+});
+
+test("Resume rejects a draft edit before its disabled state paints", async () => {
+  let resumes = 0;
+  backendMocks.snapshotImpl = async () => sourceRaceSnapshot();
+  backendMocks.resumeImpl = async () => {
+    resumes += 1;
+  };
+  const { container } = await mount(<App />);
+  expect(buttonWithText(container, "Resume sending")?.disabled).toBe(false);
+  await act(async () => {
+    buttonWithText(container, "Manual")?.click();
+    buttonWithText(container, "Resume sending")?.click();
+  });
+  expect(resumes).toBe(0);
+  expect(buttonWithText(container, "Resume sending")?.disabled).toBe(true);
+});

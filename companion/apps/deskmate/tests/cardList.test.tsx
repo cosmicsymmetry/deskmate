@@ -949,36 +949,41 @@ for (const activation of ["click", "Enter", " "]) {
   });
 }
 
-test("busy server faces are disabled and skipped by arrow navigation", async () => {
-  const choices: string[] = [];
-  const { container } = await mount(
-    <CardList
-      config={cardListConfig([])}
-      issues={[]}
-      pomodoros={[]}
-      selectedCardId={null}
-      onSelect={() => {}}
-      onAdd={() => {}}
-      onChange={() => {}}
-      onRemove={() => {}}
-      pictureBusy
-      creatableFaces={[{ kind: "weather", label: "Weather", fields: [] }]}
-      onAddFace={(kind) => choices.push(kind)}
-    />,
-  );
-  await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
-  const items = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
-  const face = items.find((item) => item.textContent?.includes("Weather"));
-  expect(face?.disabled).toBe(true);
-  await act(async () => face?.click());
-  expect(choices).toEqual([]);
-  items[1].focus();
-  await act(async () =>
-    items[1].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })),
-  );
-  expect(document.activeElement === items[0]).toBe(true);
-  await act(async () =>
-    items[0].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true })),
-  );
-  expect(document.activeElement === items[1]).toBe(true);
-});
+for (const operation of ["mint", "save"]) {
+  test(`server faces are disabled and skipped by arrow navigation during ${operation}`, async () => {
+    const choices: string[] = [];
+    const renderList = (busy: boolean) => (
+      <CardList
+        config={cardListConfig([])}
+        issues={[]}
+        pomodoros={[]}
+        selectedCardId={null}
+        onSelect={() => {}}
+        onAdd={() => {}}
+        onChange={() => {}}
+        onRemove={() => {}}
+        pictureBusy={busy && operation === "mint"}
+        saving={busy && operation === "save"}
+        creatableFaces={[{ kind: "weather", label: "Weather", fields: [] }]}
+        onAddFace={(kind) => choices.push(kind)}
+      />
+    );
+    const { container, root } = await mount(renderList(false));
+    await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
+    await act(async () => root.render(renderList(true)));
+    const items = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+    const face = items.find((item) => item.textContent?.includes("Weather"));
+    expect(face?.disabled).toBe(true);
+    await act(async () => face?.click());
+    expect(choices).toEqual([]);
+    items[1].focus();
+    await act(async () =>
+      items[1].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })),
+    );
+    expect(document.activeElement === items[0]).toBe(true);
+    await act(async () =>
+      items[0].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true })),
+    );
+    expect(document.activeElement === items[1]).toBe(true);
+  });
+}

@@ -33,6 +33,7 @@ function defaults() {
   const saveConfigImpl: (config: AppConfig) => Promise<ConfigApplyResult> = async () => ({
     save: { generation: 1, warning: null },
   });
+  const resumeImpl: () => Promise<void> = async () => {};
   const networkSettingsImpl: () => Promise<NetworkSettings> = async () => ({
     server_url: "https://desk.example",
     device_id: "desk-1",
@@ -60,6 +61,7 @@ function defaults() {
     listenImpl,
     validateImpl,
     saveConfigImpl,
+    resumeImpl,
     networkSettingsImpl,
     signInAndSelectDeviceImpl,
     imageSourcesImpl,
@@ -80,6 +82,7 @@ mock.module("../../src/lib/backend", () => ({
     backendMocks.listenImpl(onSnapshot),
   validateConfigDraft: (config: AppConfig) => backendMocks.validateImpl(config),
   saveConfig: (config: AppConfig) => backendMocks.saveConfigImpl(config),
+  resumePushing: () => backendMocks.resumeImpl(),
   getNetworkSettings: () => backendMocks.networkSettingsImpl(),
   signInAndSelectDevice: (deviceId: string, adminToken: string) =>
     backendMocks.signInAndSelectDeviceImpl(deviceId, adminToken),

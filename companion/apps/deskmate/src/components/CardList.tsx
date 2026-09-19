@@ -46,6 +46,7 @@ interface CardListProps {
   creatableFaces?: FaceDescriptor[];
   onAddFace?: (kind: string, label: string) => void;
   pictureBusy?: boolean;
+  saving?: boolean;
   onChange: (config: AppConfig) => void;
   onRemove: (cardId: string) => void;
 }
@@ -93,6 +94,7 @@ export function CardList({
   creatableFaces = [],
   onAddFace = () => {},
   pictureBusy = false,
+  saving = false,
   onChange,
   onRemove,
 }: CardListProps) {
@@ -215,7 +217,7 @@ export function CardList({
   };
 
   const openMenu = () => {
-    if (atCapacity) {
+    if (atCapacity || pictureBusy) {
       return;
     }
     menuItemRefs.current = [];
@@ -468,7 +470,7 @@ export function CardList({
             aria-expanded={menuOpen}
             aria-controls="add-card-menu"
             aria-describedby={capacityDescription ? "add-card-capacity" : undefined}
-            disabled={atCapacity}
+            disabled={atCapacity || pictureBusy}
             onClick={() => (menuOpen ? closeMenu(false) : openMenu())}
             onKeyDown={(event) => {
               if (event.key === "Escape" && menuOpen) {
@@ -524,7 +526,7 @@ export function CardList({
                     face.label,
                     "Added as a picture",
                     choose,
-                    pictureBusy,
+                    pictureBusy || saving,
                   );
                 })}
               </fieldset>
@@ -549,7 +551,7 @@ export function CardList({
                     ? "Create credentials for a producer"
                     : `The limit is ${MAX_IMAGE_SOURCES} picture sources`,
                   () => choosePicture(null),
-                  !canMintPictureSource || pictureBusy,
+                  !canMintPictureSource || pictureBusy || saving,
                 )}
               </fieldset>
             </div>

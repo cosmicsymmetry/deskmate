@@ -43,6 +43,7 @@ interface SaveBarProps {
   saveState: SaveState;
   ownershipTier: DeviceTier | null;
   dirty: boolean;
+  busy?: boolean;
   /** The sheet is modal, so the page's primary save bar is unreachable while it is
    *  open. Rather than let a preference edit strand itself behind a dialog, the
    *  sheet renders this same bar — one implementation, so the two can never
@@ -56,11 +57,13 @@ export function SaveBar({
   saveState,
   ownershipTier,
   dirty,
+  busy = false,
   variant = "page",
   onSave,
 }: SaveBarProps) {
   const serverOwned = ownershipTier === "networked";
   const blocked =
+    busy ||
     !dirty ||
     !serverOwned ||
     validation.kind !== "ready" ||

@@ -79,8 +79,12 @@ export function App() {
   draftRef.current = draft;
   const draftRevisionRef = useRef(0);
   const saveInFlightRef = useRef(false);
+  const mintInFlightRef = useRef(false);
+  const [minting, setMinting] = useState(false);
+  const [resuming, setResuming] = useState(false);
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
+  const dirtyRef = useRef(false);
   const [validation, setValidation] = useState<ValidationState>({
     kind: "idle",
     result: validDraft,
@@ -286,6 +290,7 @@ export function App() {
     draftRevisionRef.current += 1;
     draftRef.current = next;
     setDraft(next);
+    dirtyRef.current = true;
     setDirty(true);
     if (!saveInFlightRef.current) {
       setSaveState({ kind: "idle" });
@@ -312,11 +317,12 @@ export function App() {
   };
   const mintPictureCard = (label: string, faceKind?: string): void => {
     const currentDraft = draftRef.current;
-    if (!currentDraft) {
+    if (!currentDraft || mintInFlightRef.current || saveInFlightRef.current) {
       return;
     }
     const sourceName = nextCardName(currentDraft, label);
-    setBusyAction("picture-source");
+    mintInFlightRef.current = true;
+    setMinting(true);
     setActionError(null);
     void mintImageSource(sourceName, faceKind)
       .then((access) => {
@@ -330,7 +336,10 @@ export function App() {
         }
       })
       .catch((nextError) => setActionError(toApiError(nextError)))
-      .finally(() => setBusyAction(null));
+      .finally(() => {
+        mintInFlightRef.current = false;
+        setMinting(false);
+      });
   };
   const handleAddPicture = (source: ImageSource | null) => {
     if (source) {
@@ -386,7 +395,12 @@ export function App() {
     }
   };
   const handleSave = async () => {
-    if (saveInFlightRef.current || validation.kind !== "ready" || !validation.result.valid) {
+    if (
+      saveInFlightRef.current ||
+      mintInFlightRef.current ||
+      validation.kind !== "ready" ||
+      !validation.result.valid
+    ) {
       return;
     }
     const submittedDraft = draftRef.current;
@@ -401,6 +415,7 @@ export function App() {
       const result = await saveConfig(submittedDraft);
       await refresh();
       if (draftRevisionRef.current === submittedRevision) {
+        dirtyRef.current = false;
         setDirty(false);
         setSaveState({
           kind: "saved",
@@ -419,6 +434,20 @@ export function App() {
       );
     } finally {
       saveInFlightRef.current = false;
+    }
+  };
+  const handleResume = async () => {
+    if (dirtyRef.current || saveInFlightRef.current || mintInFlightRef.current) {
+      return;
+    }
+    // Resuming writes configuration too, so it must not revoke a source being minted.
+    saveInFlightRef.current = true;
+    setResuming(true);
+    try {
+      await runAction("resume", resumePushing);
+    } finally {
+      saveInFlightRef.current = false;
+      setResuming(false);
     }
   };
   const handleTimerAction = (action: "start" | "pause" | "reset") => {
@@ -481,14 +510,17 @@ export function App() {
             <aside className="notice notice--warn" role="status">
               <div>
                 <strong>Sending to the display is paused</strong>
-                <p>Nothing you change here reaches the panel until you resume.</p>
+                <p>
+                  Nothing you change here reaches the panel until you resume.
+                  {dirty && " Save your changes before resuming."}
+                </p>
                 <button
                   className="button button--quiet"
                   type="button"
-                  disabled={busyAction === "resume"}
-                  onClick={() => void runAction("resume", resumePushing)}
+                  disabled={dirty || resuming || minting || saveState.kind === "saving"}
+                  onClick={() => void handleResume()}
                 >
-                  {busyAction === "resume" ? "Resuming…" : "Resume sending"}
+                  {resuming ? "Resuming…" : "Resume sending"}
                 </button>
               </div>
             </aside>
@@ -598,7 +630,8 @@ export function App() {
             onAddPicture={handleAddPicture}
             creatableFaces={creatableFaces}
             onAddFace={handleAddFace}
-            pictureBusy={busyAction === "picture-source"}
+            pictureBusy={minting}
+            saving={saveState.kind === "saving" || resuming}
             onChange={replaceDraft}
             onRemove={handleRemoveCard}
           />
@@ -714,6 +747,7 @@ export function App() {
           saveState={saveState}
           ownershipTier={ownershipTier}
           dirty={dirty}
+          busy={minting || resuming}
           variant="sheet"
           onSave={() => void handleSave()}
         />
@@ -724,6 +758,7 @@ export function App() {
         saveState={saveState}
         ownershipTier={ownershipTier}
         dirty={dirty}
+        busy={minting || resuming}
         onSave={() => void handleSave()}
       />
     </div>

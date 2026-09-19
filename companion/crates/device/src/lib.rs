@@ -377,6 +377,13 @@ mod tests {
         }
     }
 
+    fn client_reading(read: Result<Vec<u8>, TransportError>) -> DeviceClient<FakeTransport> {
+        DeviceClient::new(FakeTransport {
+            reads: VecDeque::from([read]),
+            ..FakeTransport::default()
+        })
+    }
+
     #[test]
     fn partial_reads_and_writes_complete_request() {
         let response = encode_message(1, &Message::StatusResponse(status())).unwrap();
@@ -429,11 +436,7 @@ mod tests {
 
     #[test]
     fn malformed_response_is_reported() {
-        let fake = FakeTransport {
-            reads: VecDeque::from([Ok(vec![2, 1, 0])]),
-            ..FakeTransport::default()
-        };
-        let mut client = DeviceClient::new(fake);
+        let mut client = client_reading(Ok(vec![2, 1, 0]));
         assert!(matches!(
             client.status(),
             Err(DeviceError::MalformedResponse(_))
@@ -474,11 +477,7 @@ mod tests {
 
     #[test]
     fn disconnect_is_distinct() {
-        let fake = FakeTransport {
-            reads: VecDeque::from([Err(TransportError::Disconnected)]),
-            ..FakeTransport::default()
-        };
-        let mut client = DeviceClient::new(fake);
+        let mut client = client_reading(Err(TransportError::Disconnected));
         assert_eq!(
             client.status(),
             Err(DeviceError::Transport(TransportError::Disconnected))
@@ -491,11 +490,7 @@ mod tests {
         let mut frame = protocol::decode_wire_frame(&valid).unwrap();
         frame.version = protocol::PROTOCOL_VERSION + 1;
         let response = encode_frame(&frame).unwrap();
-        let fake = FakeTransport {
-            reads: VecDeque::from([Ok(response)]),
-            ..FakeTransport::default()
-        };
-        let mut client = DeviceClient::new(fake);
+        let mut client = client_reading(Ok(response));
         assert_eq!(
             client.status(),
             Err(DeviceError::VersionMismatch(protocol::PROTOCOL_VERSION + 1))
@@ -506,11 +501,7 @@ mod tests {
     fn wrong_response_type_is_rejected() {
         let response =
             encode_message(1, &Message::HeartbeatAck(HeartbeatAck { uptime_ms: 1 })).unwrap();
-        let fake = FakeTransport {
-            reads: VecDeque::from([Ok(response)]),
-            ..FakeTransport::default()
-        };
-        let mut client = DeviceClient::new(fake);
+        let mut client = client_reading(Ok(response));
         assert_eq!(client.status(), Err(DeviceError::UnexpectedMessage));
     }
 

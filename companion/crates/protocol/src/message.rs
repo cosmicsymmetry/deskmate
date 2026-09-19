@@ -1714,66 +1714,113 @@ mod tests {
         decode_message(&decode_wire_frame(wire)?)
     }
 
-    fn round_trip(message: &Message) {
-        let request_id = if matches!(message, Message::DeviceEvent(_)) {
-            0
-        } else {
-            42
+    fn round_trip(name: &str, request_id: u32, message: &Message) {
+        let wire = encode_message(request_id, message)
+            .unwrap_or_else(|error| panic!("{name}: encode failed: {error:?}"));
+        let frame = decode_wire_frame(&wire)
+            .unwrap_or_else(|error| panic!("{name}: frame decode failed: {error:?}"));
+        let decoded = decode_message(&frame)
+            .unwrap_or_else(|error| panic!("{name}: message decode failed: {error:?}"));
+        assert_eq!(&decoded, message, "{name}");
+    }
+
+    macro_rules! round_trip_cases {
+        ($($name:literal, $request_id:expr, $message:expr;)+) => {
+            $(round_trip($name, $request_id, &$message);)+
         };
-        let wire = encode_message(request_id, message).unwrap();
-        let frame = decode_wire_frame(&wire).unwrap();
-        assert_eq!(&decode_message(&frame).unwrap(), message);
     }
 
     #[test]
     fn every_message_round_trips() {
-        round_trip(&Message::StatusRequest);
-        round_trip(&Message::StatusResponse(status()));
-        round_trip(&Message::TimeSync(TimeSync {
-            unix_seconds: 1_775_217_600,
-            utc_offset_minutes: 240,
-        }));
-        round_trip(&Message::Ack(Ack {
-            acknowledged_type: TYPE_TIME_SYNC,
-            revision: None,
-            already_present: None,
-        }));
-        round_trip(&Message::PushTimer(PushTimer {
-            card_id: "focus".into(),
-            revision: 7,
-            total_ms: 1_500_000,
-            remaining_ms: 900_000,
-            running: true,
-        }));
-        round_trip(&Message::Heartbeat);
-        round_trip(&Message::HeartbeatAck(HeartbeatAck { uptime_ms: 99 }));
-        round_trip(&Message::Error(ErrorResponse {
-            code: ErrorCode::StaleRevision,
-            diagnostic: "stale revision".into(),
-        }));
-        round_trip(&Message::ApplyConfig(ApplyConfig {
-            revision: 3,
-            rotation: 270,
-            cards: vec![CardConfig {
+        round_trip_cases! {
+            "status_request", 42, Message::StatusRequest;
+            "status_response", 42, Message::StatusResponse(status());
+            "time_sync", 42, Message::TimeSync(TimeSync {
+                unix_seconds: 1_775_217_600,
+                utc_offset_minutes: 240,
+            });
+            "ack", 42, Message::Ack(Ack {
+                acknowledged_type: TYPE_TIME_SYNC,
+                revision: None,
+                already_present: None,
+            });
+            "push_timer", 42, Message::PushTimer(PushTimer {
+                card_id: "focus".into(),
+                revision: 7,
+                total_ms: 1_500_000,
+                remaining_ms: 900_000,
+                running: true,
+            });
+            "heartbeat", 42, Message::Heartbeat;
+            "heartbeat_ack", 42, Message::HeartbeatAck(HeartbeatAck { uptime_ms: 99 });
+            "error", 42, Message::Error(ErrorResponse {
+                code: ErrorCode::StaleRevision,
+                diagnostic: "stale revision".into(),
+            });
+            "apply_config", 42, Message::ApplyConfig(ApplyConfig {
+                revision: 3,
+                rotation: 270,
+                cards: vec![CardConfig {
+                    card_id: "timer".into(),
+                    tap_action: TapAction::StartPause,
+                }],
+            });
+            "activate_card", 42, Message::ActivateCard(ActivateCard {
+                card_id: "focus".into(),
+            });
+            "trigger_interrupt", 42, Message::TriggerInterrupt(TriggerInterrupt {
                 card_id: "timer".into(),
-                tap_action: TapAction::StartPause,
-            }],
-        }));
-        round_trip(&Message::ActivateCard(ActivateCard {
-            card_id: "focus".into(),
-        }));
-        round_trip(&Message::TriggerInterrupt(TriggerInterrupt {
-            card_id: "timer".into(),
-            token: 4,
-            reason: "done".into(),
-        }));
-        round_trip(&Message::DeviceEvent(DeviceEvent {
-            sequence: 5,
-            kind: EventKind::InterruptDismissed,
-            card_id: "timer".into(),
-            action: EventAction::DismissInterrupt,
-            interrupt_token: Some(4),
-        }));
+                token: 4,
+                reason: "done".into(),
+            });
+            "device_event", 0, Message::DeviceEvent(DeviceEvent {
+                sequence: 5,
+                kind: EventKind::InterruptDismissed,
+                card_id: "timer".into(),
+                action: EventAction::DismissInterrupt,
+                interrupt_token: Some(4),
+            });
+            "network_config_round_trips", 42, Message::NetworkConfig(NetworkConfig {
+                ssid: "home-network".into(),
+                psk: "correct horse battery staple".into(),
+                server_url: "wss://deskmate.example.com/v1/device/link".into(),
+                device_id: "dev-0001".into(),
+                token: "t".repeat(MAX_DEVICE_TOKEN_LEN),
+                utc_offset_minutes: 240,
+                tier: Tier::Networked,
+            });
+            "factory_reset_round_trips", 42, Message::FactoryReset;
+            "push_scene_roundtrips", 45, Message::PushScene(PushScene {
+                card_id: "clock".into(),
+                revision: 7,
+                scene: sample_scene(),
+            });
+            "rle_asset_begin_roundtrips_with_wire_and_decoded_lengths", 8,
+                Message::AssetBegin(AssetBegin {
+                    digest: [0x6b; 32],
+                    kind: AssetKind::Image,
+                    total_length: 10_032,
+                    volatile: true,
+                    encoding: ASSET_ENCODING_RLE565,
+                    decoded_length: Some(VOLATILE_IMAGE_DECODED_LENGTH),
+                });
+            "asset_chunk_roundtrips", 8, Message::AssetChunk(AssetChunk {
+                digest: [0x11; 32],
+                offset: 512,
+                data: vec![0xab; 128],
+            });
+            "asset_commit_roundtrips", 9, Message::AssetCommit(AssetCommit {
+                digest: [0x22; 32],
+            });
+            "asset_release_roundtrips", 10, Message::AssetRelease(AssetRelease {
+                digests: vec![[0x33; 32], [0x44; 32]],
+            });
+            "ack_already_present_roundtrips_on_asset_begin", 11, Message::Ack(Ack {
+                acknowledged_type: TYPE_ASSET_BEGIN,
+                revision: None,
+                already_present: Some(true),
+            });
+        }
     }
 
     #[test]
@@ -1880,20 +1927,6 @@ mod tests {
     }
 
     #[test]
-    fn network_config_round_trips() {
-        let message = Message::NetworkConfig(NetworkConfig {
-            ssid: "home-network".into(),
-            psk: "correct horse battery staple".into(),
-            server_url: "wss://deskmate.example.com/v1/device/link".into(),
-            device_id: "dev-0001".into(),
-            token: "t".repeat(MAX_DEVICE_TOKEN_LEN),
-            utc_offset_minutes: 240,
-            tier: Tier::Networked,
-        });
-        round_trip(&message);
-    }
-
-    #[test]
     fn network_config_rejects_oversized_ssid() {
         let message = Message::NetworkConfig(NetworkConfig {
             ssid: "s".repeat(MAX_SSID_LEN + 1),
@@ -1908,16 +1941,15 @@ mod tests {
     }
 
     #[test]
-    fn factory_reset_round_trips() {
-        round_trip(&Message::FactoryReset);
-    }
-
-    #[test]
     fn cardinal_display_rotations_are_valid() {
         for rotation in [0, 90, 180, 270] {
             let mut value = status();
             value.rotation = rotation;
-            round_trip(&Message::StatusResponse(value));
+            round_trip(
+                &format!("rotation_{rotation}"),
+                42,
+                &Message::StatusResponse(value),
+            );
         }
 
         let mut value = status();
@@ -1955,7 +1987,11 @@ mod tests {
 
         let mut boundary = status();
         boundary.last_ota_error = Some("x".repeat(MAX_DIAGNOSTIC_LEN));
-        round_trip(&Message::StatusResponse(boundary));
+        round_trip(
+            "maximum_length_ota_error",
+            42,
+            &Message::StatusResponse(boundary),
+        );
 
         let mut oversized_value = status();
         oversized_value.last_ota_error = Some("x".repeat(MAX_DIAGNOSTIC_LEN + 1));
@@ -2010,7 +2046,11 @@ mod tests {
     fn capability_handshake_is_bounded_and_forward_compatible() {
         let mut value = status();
         value.capabilities |= 1 << 63;
-        round_trip(&Message::StatusResponse(value));
+        round_trip(
+            "unknown_capability_bit",
+            42,
+            &Message::StatusResponse(value),
+        );
 
         let mut invalid = status();
         invalid.max_protocol_version = 0;
@@ -2148,17 +2188,6 @@ mod tests {
                 }),
             ],
         }
-    }
-
-    #[test]
-    fn push_scene_roundtrips() {
-        let message = Message::PushScene(PushScene {
-            card_id: "clock".into(),
-            revision: 7,
-            scene: sample_scene(),
-        });
-        let wire = encode_message(45, &message).unwrap();
-        assert_eq!(decode_wire(&wire).unwrap(), message);
     }
 
     #[test]
@@ -2303,62 +2332,6 @@ mod tests {
         // rule, and a raw begin therefore carries neither.
         let wire_frame = crate::decode_wire_frame(&frame).unwrap();
         assert_eq!(wire_frame.payload[0], 0xa4, "raw begin: 4 keys, no 4/5");
-    }
-
-    #[test]
-    fn rle_asset_begin_roundtrips_with_wire_and_decoded_lengths() {
-        let message = Message::AssetBegin(AssetBegin {
-            digest: [0x6b; 32],
-            kind: AssetKind::Image,
-            total_length: 10_032,
-            volatile: true,
-            encoding: ASSET_ENCODING_RLE565,
-            decoded_length: Some(VOLATILE_IMAGE_DECODED_LENGTH),
-        });
-        let frame = encode_message(8, &message).expect("encode");
-        assert_eq!(decode_wire(&frame).unwrap(), message);
-    }
-
-    #[test]
-    fn asset_chunk_roundtrips() {
-        let message = Message::AssetChunk(AssetChunk {
-            digest: [0x11; 32],
-            offset: 512,
-            data: vec![0xab; 128],
-        });
-        let frame = encode_message(8, &message).expect("encode");
-        let decoded = decode_wire(&frame).expect("decode");
-        assert_eq!(decoded, message);
-    }
-
-    #[test]
-    fn asset_commit_roundtrips() {
-        let message = Message::AssetCommit(AssetCommit { digest: [0x22; 32] });
-        let frame = encode_message(9, &message).expect("encode");
-        let decoded = decode_wire(&frame).expect("decode");
-        assert_eq!(decoded, message);
-    }
-
-    #[test]
-    fn asset_release_roundtrips() {
-        let message = Message::AssetRelease(AssetRelease {
-            digests: vec![[0x33; 32], [0x44; 32]],
-        });
-        let frame = encode_message(10, &message).expect("encode");
-        let decoded = decode_wire(&frame).expect("decode");
-        assert_eq!(decoded, message);
-    }
-
-    #[test]
-    fn ack_already_present_roundtrips_on_asset_begin() {
-        let message = Message::Ack(Ack {
-            acknowledged_type: TYPE_ASSET_BEGIN,
-            revision: None,
-            already_present: Some(true),
-        });
-        let frame = encode_message(11, &message).expect("encode");
-        let decoded = decode_wire(&frame).expect("decode");
-        assert_eq!(decoded, message);
     }
 
     #[test]

@@ -198,13 +198,16 @@ mod tests {
     }
 
     fn capture_responses(request_id: u32, frame: &[u8]) -> Vec<u8> {
-        frame_chunks(&capture_chunks(request_id, frame))
+        frame_chunks("capture_responses", &capture_chunks(request_id, frame))
     }
 
-    fn frame_chunks(chunks: &[Frame]) -> Vec<u8> {
+    fn frame_chunks(name: &str, chunks: &[Frame]) -> Vec<u8> {
         chunks
             .iter()
-            .flat_map(|chunk| encode_frame(chunk).unwrap())
+            .flat_map(|chunk| {
+                encode_frame(chunk)
+                    .unwrap_or_else(|error| panic!("{name}: frame encoding failed: {error:?}"))
+            })
             .collect()
     }
 
@@ -225,40 +228,34 @@ mod tests {
     }
 
     #[test]
-    fn a_repeated_chunk_is_rejected() {
+    fn out_of_order_chunks_are_rejected() {
         let request_id = 41;
-        let mut chunks = capture_chunks(request_id, &vec![1; FRAME_BYTES]);
-        chunks.insert(1, chunks[0].clone());
-        let transport = FakeTransport {
-            reads: frame_chunks(&chunks),
-            maximum_read: 73,
-            maximum_write: 3,
-            ..FakeTransport::default()
-        };
+        let original = capture_chunks(request_id, &vec![1; FRAME_BYTES]);
+        let mut repeated = original.clone();
+        repeated.insert(1, repeated[0].clone());
+        let mut skipped = original;
+        skipped.remove(1);
 
-        let (_, captured) = capture_framebuffer(DeviceClient::new(transport), request_id);
-        assert!(
-            matches!(captured, Err(CaptureError::Invalid(_))),
-            "a repeated chunk must produce Invalid"
-        );
-        assert!(!captured.unwrap_err().is_timeout());
-    }
-
-    #[test]
-    fn a_skipped_chunk_is_rejected() {
-        let request_id = 41;
-        let mut chunks = capture_chunks(request_id, &vec![1; FRAME_BYTES]);
-        chunks.remove(1);
-        let transport = FakeTransport {
-            reads: frame_chunks(&chunks),
-            maximum_read: 73,
-            maximum_write: 3,
-            ..FakeTransport::default()
-        };
-
-        let (_, captured) = capture_framebuffer(DeviceClient::new(transport), request_id);
-        assert!(!captured.as_ref().unwrap_err().is_timeout());
-        assert!(matches!(captured, Err(CaptureError::Invalid(_))));
+        for (name, chunks) in [
+            ("a_repeated_chunk_is_rejected", repeated),
+            ("a_skipped_chunk_is_rejected", skipped),
+        ] {
+            let transport = FakeTransport {
+                reads: frame_chunks(name, &chunks),
+                maximum_read: 73,
+                maximum_write: 3,
+                ..FakeTransport::default()
+            };
+            let (_, captured) = capture_framebuffer(DeviceClient::new(transport), request_id);
+            assert!(
+                matches!(&captured, Err(CaptureError::Invalid(_))),
+                "{name}: an out-of-order chunk must produce Invalid, got {captured:?}"
+            );
+            assert!(
+                !captured.as_ref().unwrap_err().is_timeout(),
+                "{name}: an out-of-order chunk must not be classified as a timeout"
+            );
+        }
     }
 
     #[test]

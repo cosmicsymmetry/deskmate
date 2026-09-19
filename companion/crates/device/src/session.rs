@@ -648,6 +648,18 @@ mod tests {
         }
     }
 
+    fn network_config() -> NetworkConfig {
+        NetworkConfig {
+            ssid: "desk-wifi".into(),
+            psk: "hunter2".into(),
+            server_url: "wss://example.invalid/v1/device/link".into(),
+            device_id: "dev-0001".into(),
+            token: "placeholder".into(),
+            utc_offset_minutes: 240,
+            tier: protocol::Tier::Networked,
+        }
+    }
+
     #[test]
     fn require_ack_rejects_wrong_type_and_revision() {
         let response = Message::Ack(Ack {
@@ -704,15 +716,7 @@ mod tests {
         without_networking.capabilities &= !protocol::CAPABILITY_NETWORKING;
         let (transport, state) = FakeTransport::new(without_networking.clone());
         let session = DeviceSession::with_options(transport, &without_networking, options());
-        let network_config = NetworkConfig {
-            ssid: "desk-wifi".into(),
-            psk: "hunter2".into(),
-            server_url: "wss://example.invalid/v1/device/link".into(),
-            device_id: "dev-0001".into(),
-            token: "placeholder".into(),
-            utc_offset_minutes: 240,
-            tier: protocol::Tier::Networked,
-        };
+        let network_config = network_config();
         let expected = Err(DeviceError::MissingCapabilities {
             required: protocol::CAPABILITY_NETWORKING,
             available: without_networking.capabilities,
@@ -811,15 +815,7 @@ mod tests {
     fn provision_sends_the_config_and_accepts_the_ack() {
         let (transport, state) = FakeTransport::new(status(0, 0, 100));
         let session = DeviceSession::with_options(transport, &status(0, 0, 100), options());
-        let network_config = NetworkConfig {
-            ssid: "desk-wifi".into(),
-            psk: "hunter2".into(),
-            server_url: "wss://example.invalid/v1/device/link".into(),
-            device_id: "dev-0001".into(),
-            token: "placeholder".into(),
-            utc_offset_minutes: 240,
-            tier: protocol::Tier::Networked,
-        };
+        let network_config = network_config();
         session.provision(&network_config).unwrap();
         assert_eq!(
             state.lock().unwrap().requests.last(),

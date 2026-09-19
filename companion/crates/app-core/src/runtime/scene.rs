@@ -252,7 +252,8 @@ pub(super) fn native_requirements(
 
 /// Rebuilds the active card only after a host-owned event marks it dirty.
 /// Device-side bindings keep clock and pomodoro facts moving between these
-/// event-driven pushes; picture faces change only when their producer pushes.
+/// event-driven pushes; picture faces are rebuilt when their producer changes
+/// the digest or when the server-inferred staleness state flips.
 pub(super) fn push_active_scene(
     state: &mut WorkerState,
     device: &mut dyn RuntimeDevice,

@@ -808,16 +808,14 @@ fn apply_image_source_update(
     if !state.connected {
         return Err(RuntimeError::DeviceDisconnected);
     }
-    let visible_uses_source = state.active_card.as_deref().is_some_and(|active_id| {
-        state.config.cards.iter().any(|card| {
-            matches!(
-                card,
-                CardSettings::Picture {
-                    id,
-                    source_id: configured_source,
-                    ..
-                } if id == active_id && configured_source == source_id
-            )
+    let visible_picture_card_id = state.active_card.as_deref().and_then(|active_id| {
+        state.config.cards.iter().find_map(|card| match card {
+            CardSettings::Picture {
+                id,
+                source_id: configured_source,
+                ..
+            } if id == active_id && configured_source == source_id => Some(id.clone()),
+            _ => None,
         })
     });
 
@@ -859,7 +857,7 @@ fn apply_image_source_update(
     };
 
     if state.config.preferences.paused {
-        if visible_uses_source {
+        if visible_picture_card_id.is_some() {
             state.active_scene_dirty = true;
         }
         return Ok(());
@@ -871,15 +869,12 @@ fn apply_image_source_update(
     let keep_set = match AssetSync::reconcile(device, &desired, state.device.capability_bits()) {
         Ok(keep_set) => keep_set,
         Err(error) => {
-            if visible_uses_source {
-                // The render phase follows command processing. Consume any
-                // speculative dirty mark so a failed transfer cannot push a
-                // scene naming bytes this pass did not finish installing.
+            let message = error.to_string();
+            if let Some(card_id) = visible_picture_card_id.as_ref() {
                 state.active_scene_dirty = false;
+                handle_automatic_asset_error(state, card_id.clone(), error, reconnect_interval);
             }
-            return Err(RuntimeError::Device {
-                message: error.to_string(),
-            });
+            return Err(RuntimeError::Device { message });
         }
     };
     state.confirmed_durable_assets = keep_set.into_iter().collect();
@@ -888,7 +883,7 @@ fn apply_image_source_update(
     // Rebuilding an unrelated visible face would turn every background image
     // update into panel traffic. Off-screen frames simply remain resident for
     // the next ordinary rotation onto their card.
-    if visible_uses_source {
+    if visible_picture_card_id.is_some() {
         state.active_scene_dirty = true;
         push_active_scene(state, device, reconnect_interval);
     }
@@ -1371,7 +1366,7 @@ mod tests {
         status_calls: usize,
         time_sync_calls: usize,
         layout_calls: usize,
-        fail_asset_begin: bool,
+        asset_begin_failures_remaining: usize,
         /// Every scene the runtime actually pushed, so a negotiation test can
         /// assert the difference between "refused before the wire" and
         /// "pushed".
@@ -1433,7 +1428,8 @@ mod tests {
         }
 
         fn send_asset_begin(&mut self, _begin: AssetBegin) -> Result<Ack, DeviceError> {
-            if self.fail_asset_begin {
+            if self.asset_begin_failures_remaining > 0 {
+                self.asset_begin_failures_remaining -= 1;
                 return Err(DeviceError::Timeout);
             }
             Ok(Ack {
@@ -1568,6 +1564,82 @@ mod tests {
         );
         assert!(!state.active_scene_dirty);
         assert!(state.push_rejections.contains_key("picture-card"));
+    }
+
+    #[test]
+    fn a_delayed_image_notification_cannot_cancel_a_pending_transient_scene_retry() {
+        let now = Instant::now();
+        let mut config = AppConfig::default();
+        config.cards = vec![CardSettings::Picture {
+            id: "picture-card".into(),
+            title: "Picture card".into(),
+            source_id: "camera".into(),
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Manual,
+            alert: CardAlert::None,
+            dwell_seconds: None,
+        }];
+        config.image_sources = vec![crate::config::ImageSource {
+            id: "camera".into(),
+            name: "Camera".into(),
+        }];
+        let digest = [0x73; protocol::ASSET_DIGEST_LEN];
+        let frame = Arc::new(Mutex::new(ImageSourceFrame {
+            digest,
+            bytes: Arc::from(&b"picture bytes"[..]),
+            stale: false,
+        }));
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new_with_image_source_host(
+            config,
+            now,
+            &mut scheduler,
+            Some(Box::new(MutablePictureHost {
+                frame: Arc::clone(&frame),
+            })),
+        );
+        state.connected = true;
+        state.needs_full_sync = false;
+        state.device.capabilities = vec![crate::DeviceCapability::SceneRender];
+        let mut device = ScheduledWorkDevice {
+            asset_begin_failures_remaining: 2,
+            ..ScheduledWorkDevice::default()
+        };
+
+        push_active_scene(&mut state, &mut device, Duration::from_secs(1));
+        assert_eq!(
+            state
+                .last_evaluated_picture_face
+                .get("picture-card")
+                .copied(),
+            Some((digest, false))
+        );
+        assert!(state.active_scene_dirty, "the automatic retry is pending");
+
+        let error = apply_image_source_update(
+            &mut state,
+            &mut device,
+            "camera",
+            digest,
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("AssetBegin"),
+            "the command keeps the reconciliation diagnostic"
+        );
+
+        push_active_scene(&mut state, &mut device, Duration::from_secs(1));
+        assert_eq!(
+            device.scene_pushes.len(),
+            1,
+            "the unchanged frame must recover through the pending automatic retry"
+        );
+        assert_eq!(
+            frame.lock().unwrap().digest,
+            digest,
+            "the host did not change"
+        );
     }
 
     #[test]

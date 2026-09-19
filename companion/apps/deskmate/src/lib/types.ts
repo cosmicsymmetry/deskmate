@@ -115,6 +115,12 @@ export interface FaceFieldOption {
   label: string;
 }
 
+/** Raw secret-bearing response returned by the image-source mint route. */
+export interface MintSourceResponse {
+  id: string;
+  token: string;
+}
+
 /** Secret-bearing result returned once when the server creates an image source. */
 export interface MintedImageSource {
   source_id: string;
@@ -234,6 +240,13 @@ export interface NetworkSettings {
   server_url: string;
   device_id: string;
   tier: DeviceTier | null;
+}
+
+export interface DeviceRow {
+  id: string;
+  connected: boolean;
+  has_saved_config: boolean;
+  configured_at: number | null;
 }
 
 /**
@@ -386,4 +399,15 @@ export interface ApiContractFixtures {
   draft_validation: DraftValidation;
   config_apply_result: ConfigApplyResult;
   preview_frame: PreviewFrame;
+  device_rows: DeviceRow[];
+  mint_source_responses: MintSourceResponse[];
+  image_source_descriptors: ImageSourceDescriptor[];
+  face_descriptors: FaceDescriptor[];
+  card_error_kinds: CardError["kind"][];
+  card_field_values: CardFieldValue[];
+  store_warnings: StoreWarning[];
+  device_tiers: DeviceTier[];
+  device_wifi_states: DeviceWifiState[];
+  device_ota_states: DeviceOtaState[];
+  face_field_descriptors: FaceFieldDescriptor[];
 }

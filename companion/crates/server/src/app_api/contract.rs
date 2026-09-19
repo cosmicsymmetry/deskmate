@@ -1,14 +1,14 @@
 //! The TypeScript contract fixture.
 //!
-//! Serializes one value of every DTO that crosses the wire to the browser and
-//! asserts the checked `src/lib/types.contract.ts` matches byte for byte. The
-//! frontend compiles that fixture against its own declarations, so a Rust field
-//! rename that TypeScript has not been told about fails here, and a TypeScript
-//! declaration that no longer describes the Rust fails there.
+//! Serializes representative values for the DTOs that cross the wire to the
+//! browser and asserts the checked `src/lib/types.contract.ts` matches byte for
+//! byte. The frontend compiles those cases against its own declarations, so a
+//! represented Rust field rename that TypeScript has not been told about fails
+//! here, and a TypeScript declaration that no longer describes a represented
+//! Rust value fails there.
 //!
-//! Keeping the fixture generator beside the Rust DTOs makes their serialized
-//! shapes the source of truth and catches drift that either compiler alone
-//! cannot see.
+//! Keeping the fixture generator beside the Rust DTOs makes the represented
+//! serialized shapes the source of truth for this compatibility seam.
 //!
 //! To regenerate after an intentional DTO change:
 //! `cargo test -p server --lib -- --ignored print_typescript_contract_fixture --nocapture`
@@ -20,13 +20,15 @@ use app_core::{
     AlertHold, AppConfig, AppPreferences, AppSnapshot, AssetKind, AssetSource,
     CURRENT_SCHEMA_VERSION, CardAlert, CardDataSnapshot, CardError, CardErrorKind, CardField,
     CardFieldValue, CardSettings, CarouselAdvance, ConnectionState, DeviceCapability,
-    DeviceCounters, DeviceSnapshot, DisplayOrientation, DisplayTemplate, IconGlyphMapping,
-    PersistenceState, PomodoroAction, PomodoroSnapshot, PomodoroState, RefreshPolicy,
-    RuntimeDiagnostics, RuntimeState, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE, SaveReceipt,
-    StoreWarning, UpdateChannel, UpdateCheckPolicy, UpdaterSettings, ValidationCode,
-    ValidationIssue, WidgetTapAction,
+    DeviceCounters, DeviceOtaState, DeviceSnapshot, DeviceTier, DeviceWifiState,
+    DisplayOrientation, DisplayTemplate, IconGlyphMapping, PersistenceState, PomodoroAction,
+    PomodoroSnapshot, PomodoroState, RefreshPolicy, RuntimeDiagnostics, RuntimeState,
+    SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE, SaveReceipt, StoreWarning, UpdateChannel,
+    UpdateCheckPolicy, UpdaterSettings, ValidationCode, ValidationIssue, WidgetTapAction,
 };
 use serde::Serialize;
+
+use crate::data_cards::{FaceDescriptor, FaceFieldDescriptor};
 
 use super::{AppApiError, CompanionSnapshot, ConfigApplyResult, DraftValidation, PreviewFrame};
 
@@ -58,23 +60,21 @@ struct ContractFixtures {
     draft_validation: DraftValidation,
     config_apply_result: ConfigApplyResult,
     preview_frame: PreviewFrame,
-}
-
-fn contract_card_kind(card: &CardSettings) -> &'static str {
-    match card {
-        CardSettings::Clock { .. } => "clock",
-        CardSettings::Pomodoro { .. } => "pomodoro",
-        CardSettings::Picture { .. } => "picture",
-    }
+    device_rows: Vec<super::DeviceRow>,
+    mint_source_responses: Vec<serde_json::Value>,
+    image_source_descriptors: Vec<serde_json::Value>,
+    face_descriptors: Vec<FaceDescriptor>,
+    card_error_kinds: Vec<CardErrorKind>,
+    card_field_values: Vec<CardFieldValue>,
+    store_warnings: Vec<StoreWarning>,
+    device_tiers: Vec<DeviceTier>,
+    device_wifi_states: Vec<DeviceWifiState>,
+    device_ota_states: Vec<DeviceOtaState>,
+    face_field_descriptors: Vec<FaceFieldDescriptor>,
 }
 
 #[allow(clippy::too_many_lines)]
 fn contract_fixtures() -> ContractFixtures {
-    let issue = ValidationIssue {
-        path: "cards[2].source_id".into(),
-        code: ValidationCode::MissingReference,
-        message: "image source \"limits\" does not exist".into(),
-    };
     let cards = vec![
         CardSettings::Clock {
             id: "clock".into(),
@@ -128,6 +128,22 @@ fn contract_fixtures() -> ContractFixtures {
         },
         updater: UpdaterSettings::default(),
     };
+    let mut invalid_config = config.clone();
+    let Some(CardSettings::Pomodoro {
+        duration_seconds, ..
+    }) = invalid_config.cards.get_mut(1)
+    else {
+        panic!("contract fixture card 1 is not a pomodoro");
+    };
+    *duration_seconds = 0;
+    let issues = invalid_config
+        .compile(1)
+        .expect_err("zero-duration pomodoro must be invalid")
+        .issues;
+    let [issue] = issues.as_slice() else {
+        panic!("zero-duration pomodoro produced {} issues", issues.len());
+    };
+    let issue = issue.clone();
     let card_data = vec![CardDataSnapshot {
         card_id: "limits-picture".into(),
         fields: vec![
@@ -196,9 +212,10 @@ fn contract_fixtures() -> ContractFixtures {
             card_data: card_data.clone(),
             card_errors: vec![CardError {
                 kind: CardErrorKind::DataRefused,
-                card_id: "limits-picture".into(),
-                message: "the display refused this card's data (InvalidPayload): invalid push data"
-                    .into(),
+                card_id: "pomodoro".into(),
+                message:
+                    "the display refused this card's timer (InvalidPayload): invalid push data"
+                        .into(),
             }],
             persistence: PersistenceState::ValidationFailed {
                 message: SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE.into(),
@@ -212,6 +229,25 @@ fn contract_fixtures() -> ContractFixtures {
             },
         },
     };
+    let face_descriptors = crate::data_cards::creatable_faces();
+    let face_fields = face_descriptors
+        .iter()
+        .flat_map(|descriptor| descriptor.fields.iter())
+        .collect::<Vec<_>>();
+    let face_field_descriptors = [
+        face_fields
+            .iter()
+            .find(|field| matches!(field, FaceFieldDescriptor::Text { .. })),
+        face_fields
+            .iter()
+            .find(|field| matches!(field, FaceFieldDescriptor::Url { .. })),
+        face_fields
+            .iter()
+            .find(|field| matches!(field, FaceFieldDescriptor::Enum { .. })),
+    ]
+    .into_iter()
+    .map(|field| (*field.expect("creatable faces cover every field descriptor variant")).clone())
+    .collect();
 
     ContractFixtures {
         snapshot,
@@ -374,6 +410,50 @@ fn contract_fixtures() -> ContractFixtures {
             sample: true,
             state: None,
         },
+        device_rows: vec![
+            super::DeviceRow {
+                id: "unconfigured-display".into(),
+                connected: false,
+                has_saved_config: false,
+                configured_at: None,
+            },
+            super::DeviceRow {
+                id: "configured-display".into(),
+                connected: true,
+                has_saved_config: true,
+                configured_at: Some(1_700_000_000),
+            },
+        ],
+        mint_source_responses: crate::images::contract_mint_source_responses(),
+        image_source_descriptors: crate::images::contract_image_source_descriptors(),
+        face_descriptors,
+        card_error_kinds: vec![CardErrorKind::DataRefused, CardErrorKind::SceneRefused],
+        card_field_values: vec![
+            CardFieldValue::Text {
+                value: "text".into(),
+            },
+            CardFieldValue::Integer { value: 42 },
+            CardFieldValue::Boolean { value: true },
+        ],
+        store_warnings: vec![StoreWarning::Io {
+            operation: "write config".into(),
+            message: "example warning".into(),
+        }],
+        device_tiers: vec![DeviceTier::Local, DeviceTier::Networked],
+        device_wifi_states: vec![
+            DeviceWifiState::Down,
+            DeviceWifiState::Connecting,
+            DeviceWifiState::Connected,
+            DeviceWifiState::Failed,
+        ],
+        device_ota_states: vec![
+            DeviceOtaState::Idle,
+            DeviceOtaState::Checking,
+            DeviceOtaState::Downloading,
+            DeviceOtaState::PendingVerify,
+            DeviceOtaState::Failed,
+        ],
+        face_field_descriptors,
     }
 }
 
@@ -393,14 +473,300 @@ fn contract_path() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/deskmate/src/lib/types.contract.ts")
 }
 
+fn string_contract_tag(value: &serde_json::Value) -> Option<&str> {
+    value.as_str()
+}
+
+fn kind_contract_tag(value: &serde_json::Value) -> Option<&str> {
+    value.get("kind")?.as_str()
+}
+
+fn category_contract_tag(value: &serde_json::Value) -> Option<&str> {
+    value.get("category")?.as_str()
+}
+
+fn type_contract_tag(value: &serde_json::Value) -> Option<&str> {
+    value.get("type")?.as_str()
+}
+
+macro_rules! assert_enum_contract {
+    ($values:expr, $enum_type:ty, $selector:expr, { $($pattern:pat => $tag:literal),+ $(,)? }) => {{
+        let variant_tag = |value: &$enum_type| match value {
+            $($pattern => $tag),+
+        };
+        let expected_tags = [$($tag),+];
+        let actual_tags = ($values)
+            .iter()
+            .map(|value| {
+                let matched_tag = variant_tag(value);
+                let serialized = serde_json::to_value(value).expect("contract value serializes");
+                let serialized_tag = ($selector)(&serialized).expect("serialized contract tag");
+                assert_eq!(serialized_tag, matched_tag);
+                matched_tag
+            })
+            .collect::<Vec<_>>();
+        let expected_set = expected_tags.iter().copied().collect::<std::collections::BTreeSet<_>>();
+        let actual_set = actual_tags.iter().copied().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(actual_tags.len(), expected_tags.len());
+        assert_eq!(actual_set, expected_set);
+    }};
+}
+
 #[test]
-fn contract_fixture_covers_every_card_settings_variant() {
-    let kinds = contract_fixtures()
-        .card_settings
-        .iter()
-        .map(contract_card_kind)
-        .collect::<Vec<_>>();
-    assert_eq!(kinds, ["clock", "pomodoro", "picture"]);
+fn contract_fixture_covers_card_and_loop_enums() {
+    let fixtures = contract_fixtures();
+    assert_enum_contract!(&fixtures.card_settings, CardSettings, kind_contract_tag, {
+        CardSettings::Clock { .. } => "clock",
+        CardSettings::Pomodoro { .. } => "pomodoro",
+        CardSettings::Picture { .. } => "picture",
+    });
+    assert_enum_contract!(&fixtures.card_alerts, CardAlert, kind_contract_tag, {
+        CardAlert::None => "none",
+        CardAlert::OnTimerFinish { .. } => "on-timer-finish",
+    });
+    assert_enum_contract!(&fixtures.alert_holds, AlertHold, kind_contract_tag, {
+        AlertHold::UntilDismissed => "until-dismissed",
+        AlertHold::Seconds { .. } => "seconds",
+    });
+    assert_enum_contract!(&fixtures.carousel_advances, CarouselAdvance, kind_contract_tag, {
+        CarouselAdvance::Manual => "manual",
+        CarouselAdvance::Timed { .. } => "timed",
+    });
+}
+
+#[test]
+fn contract_fixture_covers_rendering_enums() {
+    let fixtures = contract_fixtures();
+    assert_enum_contract!(&fixtures.display_templates, DisplayTemplate, kind_contract_tag, {
+        DisplayTemplate::DigitalClock => "digital-clock",
+        DisplayTemplate::AnalogClock => "analog-clock",
+        DisplayTemplate::ProgressRing => "progress-ring",
+    });
+    assert_enum_contract!(&fixtures.tap_actions, WidgetTapAction, kind_contract_tag, {
+        WidgetTapAction::None => "none",
+        WidgetTapAction::StartPause => "start-pause",
+        WidgetTapAction::Reset => "reset",
+        WidgetTapAction::Dismiss => "dismiss",
+        WidgetTapAction::OpenUrl { .. } => "open-url",
+        WidgetTapAction::OpenApplication { .. } => "open-application",
+    });
+    assert_enum_contract!(&fixtures.refresh_policies, RefreshPolicy, kind_contract_tag, {
+        RefreshPolicy::DeviceLocal => "device-local",
+        RefreshPolicy::Manual => "manual",
+        RefreshPolicy::Interval { .. } => "interval",
+    });
+    assert_enum_contract!(&fixtures.asset_sources, AssetSource, kind_contract_tag, {
+        AssetSource::File(_) => "file",
+    });
+    assert_enum_contract!(&fixtures.asset_kinds, AssetKind, kind_contract_tag, {
+        AssetKind::Font => "font",
+        AssetKind::IconFont { .. } => "icon-font",
+        AssetKind::Image => "image",
+    });
+}
+
+#[test]
+fn contract_fixture_covers_scalar_config_enums() {
+    let fixtures = contract_fixtures();
+    assert_enum_contract!(&fixtures.update_channels, UpdateChannel, string_contract_tag, {
+        UpdateChannel::Stable => "stable",
+        UpdateChannel::Beta => "beta",
+        UpdateChannel::Manual => "manual",
+    });
+    assert_enum_contract!(&fixtures.update_check_policies, UpdateCheckPolicy, string_contract_tag, {
+        UpdateCheckPolicy::Disabled => "disabled",
+        UpdateCheckPolicy::Notify => "notify",
+    });
+    assert_enum_contract!(&fixtures.display_orientations, DisplayOrientation, string_contract_tag, {
+        DisplayOrientation::Landscape => "landscape",
+        DisplayOrientation::LandscapeFlipped => "landscape-flipped",
+    });
+    assert_enum_contract!(&fixtures.device_capabilities, DeviceCapability, string_contract_tag, {
+        DeviceCapability::AssetTransfer => "asset-transfer",
+        DeviceCapability::FirmwareUpdate => "firmware-update",
+        DeviceCapability::Networking => "networking",
+        DeviceCapability::SceneRender => "scene-render",
+        DeviceCapability::VolatileAssets => "volatile-assets",
+        DeviceCapability::DurableAssetEncoding => "durable-asset-encoding",
+    });
+    assert_enum_contract!(&fixtures.validation_codes, ValidationCode, string_contract_tag, {
+        ValidationCode::UnsupportedVersion => "unsupported-version",
+        ValidationCode::Empty => "empty",
+        ValidationCode::TooLong => "too-long",
+        ValidationCode::TooMany => "too-many",
+        ValidationCode::DuplicateId => "duplicate-id",
+        ValidationCode::MissingReference => "missing-reference",
+        ValidationCode::OutOfRange => "out-of-range",
+        ValidationCode::InvalidTimezone => "invalid-timezone",
+        ValidationCode::InvalidSource => "invalid-source",
+        ValidationCode::InvalidComposition => "invalid-composition",
+        ValidationCode::TooLarge => "too-large",
+        ValidationCode::RequiresCapability => "requires-capability",
+    });
+}
+
+#[test]
+fn contract_fixture_covers_snapshot_enums() {
+    let fixtures = contract_fixtures();
+    assert_enum_contract!(&fixtures.runtime_states, RuntimeState, kind_contract_tag, {
+        RuntimeState::Starting => "starting",
+        RuntimeState::Running => "running",
+        RuntimeState::Paused => "paused",
+        RuntimeState::Error { .. } => "error",
+    });
+    assert_enum_contract!(&fixtures.connection_states, ConnectionState, kind_contract_tag, {
+        ConnectionState::Disconnected { .. } => "disconnected",
+        ConnectionState::Connecting => "connecting",
+        ConnectionState::Online => "online",
+        ConnectionState::Standalone => "standalone",
+    });
+    assert_enum_contract!(&fixtures.pomodoro_states, PomodoroState, string_contract_tag, {
+        PomodoroState::Idle => "idle",
+        PomodoroState::Running => "running",
+        PomodoroState::Paused => "paused",
+        PomodoroState::Completed => "completed",
+    });
+    assert_enum_contract!(&fixtures.persistence_states, PersistenceState, kind_contract_tag, {
+        PersistenceState::Clean => "clean",
+        PersistenceState::Saving => "saving",
+        PersistenceState::RecoverableError { .. } => "recoverable-error",
+        PersistenceState::ValidationFailed { .. } => "validation-failed",
+    });
+    assert_enum_contract!(&fixtures.card_error_kinds, CardErrorKind, string_contract_tag, {
+        CardErrorKind::DataRefused => "data-refused",
+        CardErrorKind::SceneRefused => "scene-refused",
+    });
+    assert_enum_contract!(&fixtures.card_field_values, CardFieldValue, kind_contract_tag, {
+        CardFieldValue::Text { .. } => "text",
+        CardFieldValue::Integer { .. } => "integer",
+        CardFieldValue::Boolean { .. } => "boolean",
+    });
+}
+
+#[test]
+fn contract_fixture_covers_api_and_device_enums() {
+    let fixtures = contract_fixtures();
+    assert_enum_contract!(&fixtures.pomodoro_actions, PomodoroAction, string_contract_tag, {
+        PomodoroAction::Start => "start",
+        PomodoroAction::Pause => "pause",
+        PomodoroAction::Toggle => "toggle",
+        PomodoroAction::Reset => "reset",
+    });
+    assert_enum_contract!(&fixtures.errors, AppApiError, category_contract_tag, {
+        AppApiError::InvalidPayload { .. } => "invalid-payload",
+        AppApiError::PayloadTooLarge { .. } => "payload-too-large",
+        AppApiError::Validation { .. } => "validation",
+        AppApiError::Persistence { .. } => "persistence",
+        AppApiError::RuntimeUnavailable { .. } => "runtime-unavailable",
+        AppApiError::NotFound { .. } => "not-found",
+        AppApiError::Device { .. } => "device",
+        AppApiError::Internal { .. } => "internal",
+    });
+    assert_enum_contract!(&fixtures.store_warnings, StoreWarning, kind_contract_tag, {
+        StoreWarning::Io { .. } => "io",
+    });
+    assert_enum_contract!(&fixtures.device_tiers, DeviceTier, string_contract_tag, {
+        DeviceTier::Local => "local",
+        DeviceTier::Networked => "networked",
+    });
+    assert_enum_contract!(&fixtures.device_wifi_states, DeviceWifiState, string_contract_tag, {
+        DeviceWifiState::Down => "down",
+        DeviceWifiState::Connecting => "connecting",
+        DeviceWifiState::Connected => "connected",
+        DeviceWifiState::Failed => "failed",
+    });
+    assert_enum_contract!(&fixtures.device_ota_states, DeviceOtaState, string_contract_tag, {
+        DeviceOtaState::Idle => "idle",
+        DeviceOtaState::Checking => "checking",
+        DeviceOtaState::Downloading => "downloading",
+        DeviceOtaState::PendingVerify => "pending-verify",
+        DeviceOtaState::Failed => "failed",
+    });
+    assert_enum_contract!(&fixtures.face_field_descriptors, FaceFieldDescriptor, type_contract_tag, {
+        FaceFieldDescriptor::Text { .. } => "text",
+        FaceFieldDescriptor::Url { .. } => "url",
+        FaceFieldDescriptor::Enum { .. } => "enum",
+    });
+}
+
+#[test]
+fn contract_validation_issue_comes_from_the_config_compiler() {
+    let fixtures = contract_fixtures();
+    let config = &fixtures.configs[0];
+    assert!(config.compile(1).is_ok());
+
+    let mut invalid = config.clone();
+    let Some(CardSettings::Pomodoro {
+        duration_seconds, ..
+    }) = invalid.cards.get_mut(1)
+    else {
+        panic!("contract fixture card 1 is not a pomodoro");
+    };
+    *duration_seconds = 0;
+
+    let issues = invalid.compile(1).unwrap_err().issues;
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].path, "cards[1].duration_seconds");
+    assert_eq!(issues[0].code, ValidationCode::OutOfRange);
+
+    let fixture_issue_slices: [&[ValidationIssue]; 4] = [
+        match &fixtures.snapshot.app.persistence {
+            PersistenceState::ValidationFailed { issues, .. } => issues.as_slice(),
+            _ => panic!("snapshot persistence is not validation-failed"),
+        },
+        fixtures
+            .persistence_states
+            .iter()
+            .find_map(|state| match state {
+                PersistenceState::ValidationFailed { issues, .. } => Some(issues.as_slice()),
+                _ => None,
+            })
+            .expect("fixture persistence states include validation-failed"),
+        fixtures
+            .errors
+            .iter()
+            .find_map(|error| match error {
+                AppApiError::Validation { issues, .. } => Some(issues.as_slice()),
+                _ => None,
+            })
+            .expect("fixture errors include validation"),
+        fixtures.draft_validation.issues.as_slice(),
+    ];
+    for fixture_issues in fixture_issue_slices {
+        assert_eq!(fixture_issues, issues.as_slice());
+    }
+}
+
+#[test]
+fn contract_fixture_covers_nullable_response_fields() {
+    let fixtures = contract_fixtures();
+    assert!(
+        fixtures
+            .device_rows
+            .iter()
+            .any(|row| row.configured_at.is_none())
+    );
+    assert!(
+        fixtures
+            .device_rows
+            .iter()
+            .any(|row| row.configured_at.is_some())
+    );
+    assert!(
+        fixtures
+            .image_source_descriptors
+            .iter()
+            .any(|descriptor| descriptor["face"].is_null())
+    );
+    assert!(
+        fixtures
+            .image_source_descriptors
+            .iter()
+            .any(|descriptor| descriptor["face"].is_object())
+    );
+    assert!(fixtures.face_field_descriptors.iter().any(|field| {
+        matches!(field, FaceFieldDescriptor::Enum { options, .. } if !options.is_empty())
+    }));
 }
 
 #[test]

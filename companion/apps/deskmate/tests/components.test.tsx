@@ -2121,17 +2121,7 @@ describe("settings accessibility and states", () => {
   test("validation-failed persistence shows the saved-settings banner and issue messages", async () => {
     const invalidSnapshot: AppSnapshot = {
       ...(structuredClone(snapshot) as AppSnapshot),
-      persistence: {
-        kind: "validation-failed",
-        message: "Your saved settings failed validation and were not applied",
-        issues: [
-          {
-            path: "playlists[0].entries[0].card_id",
-            code: "missing-reference",
-            message: "playlist entry references a card that does not exist",
-          },
-        ],
-      },
+      persistence: structuredClone(apiContractFixtures.snapshot.persistence),
     };
     snapshotImpl = async () => invalidSnapshot;
     previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
@@ -2147,7 +2137,7 @@ describe("settings accessibility and states", () => {
         ),
       );
       expect(container.textContent).toContain(
-        "playlist entry references a card that does not exist",
+        apiContractFixtures.snapshot.persistence.issues[0].message,
       );
       expect(container.textContent).not.toContain("Using your last working settings");
     } finally {
@@ -2251,13 +2241,7 @@ describe("settings accessibility and states", () => {
   test("the global card banner names the display only for a typed data refusal", async () => {
     snapshotImpl = async () => ({
       ...(structuredClone(snapshot) as AppSnapshot),
-      card_errors: [
-        {
-          kind: "data-refused",
-          card_id: "clock",
-          message: "the display refused this card's data (InvalidPayload)",
-        },
-      ],
+      card_errors: structuredClone(apiContractFixtures.snapshot.card_errors),
     });
     previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
 
@@ -2269,6 +2253,7 @@ describe("settings accessibility and states", () => {
       await waitFor(() =>
         expect(container.textContent).toContain("The display refused one card update"),
       );
+      expect(container.textContent).toContain(apiContractFixtures.snapshot.card_errors[0].message);
       expect(container.textContent).not.toContain("One card could not be rendered");
     } finally {
       await act(async () => root.unmount());

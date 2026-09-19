@@ -14,11 +14,13 @@ import type {
   AppConfig,
   AppSnapshot,
   ConfigApplyResult,
+  DeviceRow,
   DraftValidation,
   FaceDescriptor,
   ImageSourceDescriptor,
   ApiError,
   MintedImageSource,
+  MintSourceResponse,
   NetworkSettings,
   PomodoroAction,
   PreviewFrame,
@@ -83,13 +85,6 @@ let selectedDeviceId: string | null = null;
 
 /** Where an explicit choice is remembered between visits. */
 const DEVICE_KEY = "deskmate.device_id";
-
-interface DeviceRow {
-  id: string;
-  connected: boolean;
-  has_saved_config: boolean;
-  configured_at: number | null;
-}
 
 function rememberedDeviceId(): string | null {
   try {
@@ -338,7 +333,7 @@ export function renderCardPreview(cardId: string): Promise<PreviewFrame> {
  * reports it: the app is served by the server a producer would push to.
  */
 export async function mintImageSource(name: string, faceKind?: string): Promise<MintedImageSource> {
-  const minted = await request<{ id: string; token: string }>("POST", "/v1/images", {
+  const minted = await request<MintSourceResponse>("POST", "/v1/images", {
     name,
     face_kind: faceKind ?? null,
   });

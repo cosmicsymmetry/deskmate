@@ -121,6 +121,40 @@ struct ImageSourceDescriptor {
     face: Option<crate::data_cards::FaceDescriptor>,
 }
 
+#[cfg(test)]
+pub(super) fn contract_mint_source_responses() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::to_value(MintSourceResponse {
+            id: "fixture-source".into(),
+            token: "fixture-token".into(),
+        })
+        .expect("mint source response serializes"),
+    ]
+}
+
+#[cfg(test)]
+pub(super) fn contract_image_source_descriptors() -> Vec<serde_json::Value> {
+    let face = crate::data_cards::creatable_faces()
+        .into_iter()
+        .next()
+        .expect("the server exposes at least one creatable face");
+    [
+        ImageSourceDescriptor {
+            id: "external-source".into(),
+            name: "External picture".into(),
+            face: None,
+        },
+        ImageSourceDescriptor {
+            id: "weather-source".into(),
+            name: "Weather".into(),
+            face: Some(face),
+        },
+    ]
+    .into_iter()
+    .map(|descriptor| serde_json::to_value(descriptor).expect("image source descriptor serializes"))
+    .collect()
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UpdateFaceRequest {

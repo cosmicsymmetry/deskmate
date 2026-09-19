@@ -161,8 +161,8 @@ export const apiContractFixtures = {
     "card_errors": [
       {
         "kind": "data-refused",
-        "card_id": "limits-picture",
-        "message": "the display refused this card's data (InvalidPayload): invalid push data"
+        "card_id": "pomodoro",
+        "message": "the display refused this card's timer (InvalidPayload): invalid push data"
       }
     ],
     "persistence": {
@@ -170,9 +170,9 @@ export const apiContractFixtures = {
       "message": "Your saved settings failed validation and were not applied",
       "issues": [
         {
-          "path": "cards[2].source_id",
-          "code": "missing-reference",
-          "message": "image source \"limits\" does not exist"
+          "path": "cards[1].duration_seconds",
+          "code": "out-of-range",
+          "message": "duration must be 1..=86400 seconds"
         }
       ]
     },
@@ -520,9 +520,9 @@ export const apiContractFixtures = {
       "message": "Your saved settings failed validation and were not applied",
       "issues": [
         {
-          "path": "cards[2].source_id",
-          "code": "missing-reference",
-          "message": "image source \"limits\" does not exist"
+          "path": "cards[1].duration_seconds",
+          "code": "out-of-range",
+          "message": "duration must be 1..=86400 seconds"
         }
       ]
     }
@@ -562,9 +562,9 @@ export const apiContractFixtures = {
       "message": "validation",
       "issues": [
         {
-          "path": "cards[2].source_id",
-          "code": "missing-reference",
-          "message": "image source \"limits\" does not exist"
+          "path": "cards[1].duration_seconds",
+          "code": "out-of-range",
+          "message": "duration must be 1..=86400 seconds"
         }
       ]
     },
@@ -593,9 +593,9 @@ export const apiContractFixtures = {
     "valid": false,
     "issues": [
       {
-        "path": "cards[2].source_id",
-        "code": "missing-reference",
-        "message": "image source \"limits\" does not exist"
+        "path": "cards[1].duration_seconds",
+        "code": "out-of-range",
+        "message": "duration must be 1..=86400 seconds"
       }
     ]
   },
@@ -613,5 +613,210 @@ export const apiContractFixtures = {
     "png_base64": "iVBORw0KGgo=",
     "sample": true,
     "state": null
-  }
+  },
+  "device_rows": [
+    {
+      "id": "unconfigured-display",
+      "connected": false,
+      "has_saved_config": false,
+      "configured_at": null
+    },
+    {
+      "id": "configured-display",
+      "connected": true,
+      "has_saved_config": true,
+      "configured_at": 1700000000
+    }
+  ],
+  "mint_source_responses": [
+    {
+      "id": "fixture-source",
+      "token": "fixture-token"
+    }
+  ],
+  "image_source_descriptors": [
+    {
+      "face": null,
+      "id": "external-source",
+      "name": "External picture"
+    },
+    {
+      "face": {
+        "fields": [
+          {
+            "key": "location",
+            "label": "Location",
+            "placeholder": "Dubai",
+            "type": "text",
+            "value": ""
+          },
+          {
+            "key": "units",
+            "label": "Units",
+            "options": [
+              {
+                "label": "Metric",
+                "value": "metric"
+              },
+              {
+                "label": "Imperial",
+                "value": "imperial"
+              }
+            ],
+            "type": "enum",
+            "value": "metric"
+          }
+        ],
+        "kind": "weather",
+        "label": "Weather"
+      },
+      "id": "weather-source",
+      "name": "Weather"
+    }
+  ],
+  "face_descriptors": [
+    {
+      "kind": "weather",
+      "label": "Weather",
+      "fields": [
+        {
+          "type": "text",
+          "key": "location",
+          "label": "Location",
+          "value": "",
+          "placeholder": "Dubai"
+        },
+        {
+          "type": "enum",
+          "key": "units",
+          "label": "Units",
+          "value": "metric",
+          "options": [
+            {
+              "value": "metric",
+              "label": "Metric"
+            },
+            {
+              "value": "imperial",
+              "label": "Imperial"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "rss",
+      "label": "RSS feed",
+      "fields": [
+        {
+          "type": "url",
+          "key": "url",
+          "label": "Feed URL",
+          "value": "",
+          "placeholder": "https://example.com/feed.xml"
+        },
+        {
+          "type": "text",
+          "key": "title",
+          "label": "Title",
+          "value": "",
+          "placeholder": "News"
+        }
+      ]
+    },
+    {
+      "kind": "token",
+      "label": "Token price",
+      "fields": [
+        {
+          "type": "text",
+          "key": "coin_id",
+          "label": "Coin ID",
+          "value": "",
+          "placeholder": "solana"
+        },
+        {
+          "type": "text",
+          "key": "currency",
+          "label": "Currency",
+          "value": "usd",
+          "placeholder": "usd"
+        }
+      ]
+    }
+  ],
+  "card_error_kinds": [
+    "data-refused",
+    "scene-refused"
+  ],
+  "card_field_values": [
+    {
+      "kind": "text",
+      "value": "text"
+    },
+    {
+      "kind": "integer",
+      "value": 42
+    },
+    {
+      "kind": "boolean",
+      "value": true
+    }
+  ],
+  "store_warnings": [
+    {
+      "kind": "io",
+      "operation": "write config",
+      "message": "example warning"
+    }
+  ],
+  "device_tiers": [
+    "local",
+    "networked"
+  ],
+  "device_wifi_states": [
+    "down",
+    "connecting",
+    "connected",
+    "failed"
+  ],
+  "device_ota_states": [
+    "idle",
+    "checking",
+    "downloading",
+    "pending-verify",
+    "failed"
+  ],
+  "face_field_descriptors": [
+    {
+      "type": "text",
+      "key": "location",
+      "label": "Location",
+      "value": "",
+      "placeholder": "Dubai"
+    },
+    {
+      "type": "url",
+      "key": "url",
+      "label": "Feed URL",
+      "value": "",
+      "placeholder": "https://example.com/feed.xml"
+    },
+    {
+      "type": "enum",
+      "key": "units",
+      "label": "Units",
+      "value": "metric",
+      "options": [
+        {
+          "value": "metric",
+          "label": "Metric"
+        },
+        {
+          "value": "imperial",
+          "label": "Imperial"
+        }
+      ]
+    }
+  ]
 } as const satisfies ApiContractFixtures;

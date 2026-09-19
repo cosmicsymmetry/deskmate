@@ -113,6 +113,15 @@ pub struct IntegrationStore {
     path: PathBuf,
     key: SecretsKey,
     secrets: Mutex<BTreeMap<String, IntegrationSecret>>,
+    #[cfg(test)]
+    persistence_fault: Option<PersistenceFault>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum PersistenceFault {
+    BeforeReplacement,
+    ParentSync,
 }
 
 impl IntegrationStore {
@@ -139,6 +148,8 @@ impl IntegrationStore {
             path,
             key,
             secrets: Mutex::new(secrets),
+            #[cfg(test)]
+            persistence_fault: None,
         })
     }
 
@@ -152,18 +163,21 @@ impl IntegrationStore {
         secret: IntegrationSecret,
     ) -> Result<(), SecretsError> {
         let mut secrets = self.lock();
-        secrets.insert(integration_id, secret);
-        self.persist(&secrets)
+        let mut candidate = secrets.clone();
+        candidate.insert(integration_id, secret);
+        self.commit_candidate(&mut secrets, candidate)
     }
 
     /// Removes an integration's secret. Returns whether one was present.
     pub fn remove(&self, integration_id: &str) -> Result<bool, SecretsError> {
         let mut secrets = self.lock();
-        let existed = secrets.remove(integration_id).is_some();
-        if existed {
-            self.persist(&secrets)?;
+        if !secrets.contains_key(integration_id) {
+            return Ok(false);
         }
-        Ok(existed)
+        let mut candidate = secrets.clone();
+        candidate.remove(integration_id);
+        self.commit_candidate(&mut secrets, candidate)?;
+        Ok(true)
     }
 
     /// The integration ids present, sorted. Carries presence only, never secret
@@ -172,8 +186,18 @@ impl IntegrationStore {
         self.lock().keys().cloned().collect()
     }
 
-    fn persist(&self, secrets: &BTreeMap<String, IntegrationSecret>) -> Result<(), SecretsError> {
-        let plaintext = serde_json::to_vec(secrets)
+    fn commit_candidate(
+        &self,
+        live: &mut BTreeMap<String, IntegrationSecret>,
+        candidate: BTreeMap<String, IntegrationSecret>,
+    ) -> Result<(), SecretsError> {
+        self.replace(&candidate)?;
+        *live = candidate;
+        self.sync_parent()
+    }
+
+    fn replace(&self, candidate: &BTreeMap<String, IntegrationSecret>) -> Result<(), SecretsError> {
+        let plaintext = serde_json::to_vec(candidate)
             .map_err(|error| SecretsError::Serialize(error.to_string()))?;
         let sealed = seal(&self.key, &plaintext)?;
 
@@ -183,11 +207,32 @@ impl IntegrationStore {
                 SecretsError::Io { operation, detail }
             })?;
         }
+        #[cfg(test)]
+        if matches!(
+            self.persistence_fault,
+            Some(PersistenceFault::BeforeReplacement)
+        ) {
+            return Err(SecretsError::Io {
+                operation: "replace secrets file".to_string(),
+                detail: "injected failure before replacement".to_string(),
+            });
+        }
         secure_file::write_and_replace(&self.path, &sealed).map_err(|error| {
             let (operation, detail) = error.into_strings("secrets file");
             SecretsError::Io { operation, detail }
         })?;
+        Ok(())
+    }
+
+    fn sync_parent(&self) -> Result<(), SecretsError> {
         if let Some(parent) = secure_file::usable_parent(&self.path) {
+            #[cfg(test)]
+            if matches!(self.persistence_fault, Some(PersistenceFault::ParentSync)) {
+                return Err(SecretsError::Io {
+                    operation: "sync secrets directory".to_string(),
+                    detail: "injected parent sync failure".to_string(),
+                });
+            }
             secure_file::sync_parent(parent).map_err(|error| {
                 let (operation, detail) = error.into_strings("secrets directory");
                 SecretsError::Io { operation, detail }
@@ -669,6 +714,72 @@ mod tests {
             scopes: vec!["https://www.googleapis.com/auth/calendar.events.readonly".to_string()],
             obtained_at: 1_725_600_000,
         }
+    }
+
+    fn replacement_secret() -> IntegrationSecret {
+        IntegrationSecret {
+            refresh_token: "replacement-refresh-token".to_string(),
+            obtained_at: 1_725_600_001,
+            ..sample_secret()
+        }
+    }
+
+    #[test]
+    fn failed_put_before_replacement_preserves_live_and_durable_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(SECRETS_STORE_FILE);
+        let mut store = IntegrationStore::open(path.clone(), test_key(31)).expect("open");
+        store
+            .put("id".to_string(), sample_secret())
+            .expect("seed old value");
+        store.persistence_fault = Some(PersistenceFault::BeforeReplacement);
+
+        store
+            .put("id".to_string(), replacement_secret())
+            .expect_err("replacement must fail before commit");
+
+        assert_eq!(store.get("id"), Some(sample_secret()));
+        let reopened = IntegrationStore::open(path, test_key(31)).expect("reopen");
+        assert_eq!(reopened.get("id"), Some(sample_secret()));
+    }
+
+    #[test]
+    fn failed_remove_before_replacement_preserves_live_and_durable_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(SECRETS_STORE_FILE);
+        let mut store = IntegrationStore::open(path.clone(), test_key(32)).expect("open");
+        store
+            .put("id".to_string(), sample_secret())
+            .expect("seed old value");
+        store.persistence_fault = Some(PersistenceFault::BeforeReplacement);
+        assert!(!store.remove("absent").expect("absent remove skips write"));
+
+        store
+            .remove("id")
+            .expect_err("removal must fail before commit");
+
+        assert_eq!(store.get("id"), Some(sample_secret()));
+        let reopened = IntegrationStore::open(path, test_key(32)).expect("reopen");
+        assert_eq!(reopened.get("id"), Some(sample_secret()));
+    }
+
+    #[test]
+    fn parent_sync_failure_keeps_replaced_live_and_durable_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(SECRETS_STORE_FILE);
+        let mut store = IntegrationStore::open(path.clone(), test_key(33)).expect("open");
+        store
+            .put("id".to_string(), sample_secret())
+            .expect("seed old value");
+        store.persistence_fault = Some(PersistenceFault::ParentSync);
+
+        store
+            .put("id".to_string(), replacement_secret())
+            .expect_err("parent sync failure must be reported");
+
+        assert_eq!(store.get("id"), Some(replacement_secret()));
+        let reopened = IntegrationStore::open(path, test_key(33)).expect("reopen");
+        assert_eq!(reopened.get("id"), Some(replacement_secret()));
     }
 
     #[test]

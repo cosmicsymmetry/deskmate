@@ -107,12 +107,12 @@ pub struct TokenManager {
     now: Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>,
     cache: Mutex<HashMap<String, CachedToken>>,
     health: Mutex<HashMap<String, IntegrationHealth>>,
-    /// One async gate per integration, so concurrent callers that all miss the
-    /// cache take turns instead of each posting its own refresh. The outer lock
-    /// is a std `Mutex` because it is only ever held long enough to clone an
-    /// `Arc`; the inner one is a tokio `Mutex` because it IS held across an
+    /// One async gate per integration, so exchange, refresh, and revoke publish
+    /// their store/cache/health transitions in acquisition order. The outer
+    /// lock is a std `Mutex` because it is only ever held long enough to clone
+    /// an `Arc`; the inner one is a tokio `Mutex` because it IS held across an
     /// await.
-    refresh_gates: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    operation_gates: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl TokenManager {
@@ -141,7 +141,7 @@ impl TokenManager {
             now,
             cache: Mutex::new(HashMap::new()),
             health: Mutex::new(HashMap::new()),
-            refresh_gates: Mutex::new(HashMap::new()),
+            operation_gates: Mutex::new(HashMap::new()),
         }
     }
 
@@ -151,6 +151,8 @@ impl TokenManager {
         code: &str,
         code_verifier: &str,
     ) -> Result<(), TokenError> {
+        let gate = self.operation_gate(integration_id);
+        let _turn = gate.lock().await;
         let form = vec![
             ("grant_type".to_string(), "authorization_code".to_string()),
             ("code".to_string(), code.to_string()),
@@ -212,6 +214,8 @@ impl TokenManager {
         &self,
         integration_id: &str,
     ) -> Result<(String, DateTime<Utc>), TokenError> {
+        let gate = self.operation_gate(integration_id);
+        let _turn = gate.lock().await;
         if let Some(pair) = self.cached_valid(integration_id) {
             return Ok(pair);
         }
@@ -221,8 +225,6 @@ impl TokenManager {
         // sharing one integration means N simultaneous refreshes, N tokens
         // minted, N-1 of them immediately orphaned by `cache_token`'s
         // last-writer-wins, and Google rate-limiting the client.
-        let gate = self.refresh_gate(integration_id);
-        let _turn = gate.lock().await;
         // Re-check under the gate: whoever held it before us has already
         // refreshed and cached, and their token is the one to return.
         if let Some(pair) = self.cached_valid(integration_id) {
@@ -270,6 +272,8 @@ impl TokenManager {
     }
 
     pub(crate) async fn revoke(&self, integration_id: &str) -> Result<(), TokenError> {
+        let gate = self.operation_gate(integration_id);
+        let _turn = gate.lock().await;
         let secret = self.store_get(integration_id.to_string()).await?;
         if let Some(secret) = &secret {
             // Best-effort remote revoke; local removal proceeds regardless, because
@@ -362,10 +366,10 @@ impl TokenManager {
         Ok(tokens)
     }
 
-    /// The per-integration refresh gate, created on first use.
-    fn refresh_gate(&self, integration_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    /// The per-integration operation gate, created on first use.
+    fn operation_gate(&self, integration_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut gates = self
-            .refresh_gates
+            .operation_gates
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         Arc::clone(
@@ -390,9 +394,11 @@ impl TokenManager {
     }
 
     fn cache_token(&self, integration_id: &str, access_token: String, expires_in: u64) {
-        let expires_in = i64::try_from(expires_in).unwrap_or(i64::MAX);
-        let expires_at = (self.now)()
-            .checked_add_signed(Duration::seconds(expires_in))
+        let now = (self.now)();
+        let expires_at = i64::try_from(expires_in)
+            .ok()
+            .and_then(Duration::try_seconds)
+            .and_then(|duration| now.checked_add_signed(duration))
             .unwrap_or(DateTime::<Utc>::MAX_UTC);
         self.cache
             .lock()
@@ -452,6 +458,8 @@ mod tests {
     use crate::egress::FetchResponse;
     use crate::oauth::transport::{OAuthFuture, TransportError};
     use std::collections::VecDeque;
+    use std::time::Duration as StdDuration;
+    use tokio::sync::Notify;
 
     type Form = Vec<(String, String)>;
     type Call = (String, Form);
@@ -487,6 +495,84 @@ mod tests {
                 .pop_front()
                 .expect("FakeTransport ran out of queued responses");
             Box::pin(async move { response })
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum PausedOperation {
+        Exchange,
+        Refresh,
+        Revoke,
+    }
+
+    struct ControlledTransport {
+        paused: PausedOperation,
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+        calls: Mutex<Vec<Call>>,
+    }
+
+    impl ControlledTransport {
+        fn new(paused: PausedOperation) -> Arc<Self> {
+            Arc::new(Self {
+                paused,
+                started: Arc::new(Notify::new()),
+                release: Arc::new(Notify::new()),
+                calls: Mutex::new(Vec::new()),
+            })
+        }
+
+        async fn wait_until_paused(&self) {
+            self.started.notified().await;
+        }
+
+        fn release(&self) {
+            self.release.notify_one();
+        }
+    }
+
+    impl OAuthTransport for ControlledTransport {
+        fn post_form(
+            &self,
+            url: String,
+            form: Form,
+        ) -> OAuthFuture<'_, Result<FetchResponse, TransportError>> {
+            self.calls.lock().unwrap().push((url.clone(), form.clone()));
+            let grant_type = form
+                .iter()
+                .find_map(|(key, value)| (key == "grant_type").then_some(value.as_str()));
+            let operation = if url.contains("revoke") {
+                Some(PausedOperation::Revoke)
+            } else {
+                match grant_type {
+                    Some("authorization_code") => Some(PausedOperation::Exchange),
+                    Some("refresh_token") => Some(PausedOperation::Refresh),
+                    _ => None,
+                }
+            };
+            let should_pause = operation == Some(self.paused);
+            let paused = self.paused;
+            let started = Arc::clone(&self.started);
+            let release = Arc::clone(&self.release);
+            Box::pin(async move {
+                if should_pause {
+                    started.notify_one();
+                    release.notified().await;
+                }
+                match operation {
+                    Some(PausedOperation::Exchange) if paused == PausedOperation::Refresh => {
+                        ok(r#"{"access_token":"first","expires_in":30,"refresh_token":"old-rt"}"#)
+                    }
+                    Some(PausedOperation::Exchange) => ok(
+                        r#"{"access_token":"exchanged","expires_in":3600,"refresh_token":"new-rt"}"#,
+                    ),
+                    Some(PausedOperation::Refresh) => {
+                        ok(r#"{"access_token":"refreshed","expires_in":3600}"#)
+                    }
+                    Some(PausedOperation::Revoke) => ok(""),
+                    None => panic!("unexpected controlled transport call: {url} {form:?}"),
+                }
+            })
         }
     }
 
@@ -593,7 +679,38 @@ mod tests {
             .expect("exchange");
 
         // Well before expiry: served from cache, no second transport call.
-        assert_eq!(manager.access_token("id").await.expect("cached"), "at");
+        assert_eq!(
+            manager
+                .access_token_with_expiry("id")
+                .await
+                .expect("cached"),
+            ("at".to_string(), now + Duration::seconds(3600))
+        );
+    }
+
+    #[tokio::test]
+    async fn maximum_token_lifetime_saturates_expiry_without_panicking() {
+        let (_dir, store) = store();
+        let transport = FakeTransport::new(vec![ok(
+            r#"{"access_token":"at","expires_in":18446744073709551615,"refresh_token":"rt"}"#,
+        )]);
+        let now = DateTime::parse_from_rfc3339("2026-09-19T12:00:00Z")
+            .expect("fixed time")
+            .with_timezone(&Utc);
+        let manager = manager(store, transport, now);
+
+        manager
+            .exchange_code("id", "code", "verifier")
+            .await
+            .expect("exchange");
+
+        assert_eq!(
+            manager
+                .access_token_with_expiry("id")
+                .await
+                .expect("cached"),
+            ("at".to_string(), DateTime::<Utc>::MAX_UTC)
+        );
     }
 
     /// A refresh stampede: many callers want the same integration's token at the
@@ -647,6 +764,132 @@ mod tests {
                 .map(|call| call.0.clone())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn revoke_waits_for_in_flight_refresh_then_clears_all_local_state() {
+        let (_dir, store) = store();
+        let transport = ControlledTransport::new(PausedOperation::Refresh);
+        let now = Utc::now();
+        let manager = Arc::new(manager(Arc::clone(&store), transport.clone(), now));
+        manager
+            .exchange_code("id", "code", "verifier")
+            .await
+            .expect("initial exchange");
+
+        let refresh = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            async move { manager.access_token("id").await }
+        });
+        transport.wait_until_paused().await;
+        let mut revoke = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            async move { manager.revoke("id").await }
+        });
+        let early_revoke = tokio::time::timeout(StdDuration::from_millis(50), &mut revoke).await;
+        transport.release();
+
+        assert_eq!(
+            refresh.await.expect("refresh task").expect("refresh"),
+            "refreshed"
+        );
+        match early_revoke {
+            Ok(result) => result.expect("revoke task").expect("revoke"),
+            Err(_) => revoke.await.expect("revoke task").expect("revoke"),
+        }
+        let stored = tokio::task::spawn_blocking({
+            let store = Arc::clone(&store);
+            move || store.get("id")
+        })
+        .await
+        .expect("store read");
+        assert_eq!(stored, None, "revoke must win after the earlier refresh");
+        assert!(matches!(
+            manager.access_token("id").await,
+            Err(TokenError::NotFound)
+        ));
+        assert_eq!(manager.health("id"), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cached_vending_waits_for_in_flight_revoke() {
+        let (_dir, store) = store();
+        let transport = ControlledTransport::new(PausedOperation::Revoke);
+        let manager = Arc::new(manager(store, transport.clone(), Utc::now()));
+        manager
+            .exchange_code("id", "code", "verifier")
+            .await
+            .expect("initial exchange");
+
+        let revoke = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            async move { manager.revoke("id").await }
+        });
+        transport.wait_until_paused().await;
+        let mut vend = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            async move { manager.access_token_with_expiry("id").await }
+        });
+
+        tokio::time::timeout(StdDuration::from_millis(50), &mut vend)
+            .await
+            .expect_err("cached vending must wait behind an active revoke");
+        transport.release();
+
+        revoke.await.expect("revoke task").expect("revoke");
+        assert!(matches!(
+            vend.await.expect("vend task"),
+            Err(TokenError::NotFound)
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn revoke_waits_for_earlier_exchange_and_removes_its_grant() {
+        let (_dir, store) = store();
+        store
+            .put(
+                "id".to_string(),
+                IntegrationSecret {
+                    provider: "google".to_string(),
+                    refresh_token: "old-rt".to_string(),
+                    client_secret: None,
+                    scopes: vec![],
+                    obtained_at: 1,
+                },
+            )
+            .expect("seed old grant");
+        let transport = ControlledTransport::new(PausedOperation::Exchange);
+        let manager = Arc::new(manager(Arc::clone(&store), transport.clone(), Utc::now()));
+
+        let exchange = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            async move { manager.exchange_code("id", "code", "verifier").await }
+        });
+        transport.wait_until_paused().await;
+        let mut revoke = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            async move { manager.revoke("id").await }
+        });
+        let early_revoke = tokio::time::timeout(StdDuration::from_millis(50), &mut revoke).await;
+        transport.release();
+
+        exchange.await.expect("exchange task").expect("exchange");
+        match early_revoke {
+            Ok(result) => result.expect("revoke task").expect("revoke"),
+            Err(_) => revoke.await.expect("revoke task").expect("revoke"),
+        }
+        let stored = tokio::task::spawn_blocking({
+            let store = Arc::clone(&store);
+            move || store.get("id")
+        })
+        .await
+        .expect("store read");
+        assert_eq!(stored, None, "revoke must win after the earlier exchange");
+        assert!(matches!(
+            manager.access_token("id").await,
+            Err(TokenError::NotFound)
+        ));
+        assert_eq!(manager.health("id"), None);
     }
 
     /// A response with no usable `expires_in` would cache a token that

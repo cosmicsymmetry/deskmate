@@ -1,22 +1,19 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use protocol::{
-    Ack, ActivateCard, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, AssetRelease, CardConfig,
-    Deframer, DeviceEvent, Message, NetworkConfig, PushScene, PushTimer, RequestIdAllocator,
-    StatusResponse, TYPE_ASSET_BEGIN, TimeSync, TriggerInterrupt, decode_message, encode_message,
-    expected_response_type,
+    Deframer, DeviceEvent, Message, NetworkConfig, RequestIdAllocator, StatusResponse,
+    decode_message, encode_message, expected_response_type,
 };
 
 use crate::{
-    ConnectedDevice, DeviceError, ReplayState, SerialTransport, Transport, TransportError, connect,
-    message_error, session_state::DiagnosticCounters, session_state::require_ack,
+    ConnectedDevice, DeviceError, SerialTransport, Transport, TransportError, connect,
+    message_error, session_state::require_ack,
 };
 
-const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(3);
 pub const DEFAULT_EVENT_QUEUE_CAPACITY: usize = 32;
 const COMMAND_QUEUE_CAPACITY: usize = 8;
 const IDLE_READ_PAUSE: Duration = Duration::from_millis(1);
@@ -36,16 +33,12 @@ const REPLY_TIMEOUT_FACTOR: u32 = 2;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SessionOptions {
     request_timeout: Duration,
-    keepalive_interval: Duration,
-    event_queue_capacity: usize,
 }
 
 impl Default for SessionOptions {
     fn default() -> Self {
         Self {
             request_timeout: crate::DEFAULT_REQUEST_TIMEOUT,
-            keepalive_interval: DEFAULT_KEEPALIVE_INTERVAL,
-            event_queue_capacity: DEFAULT_EVENT_QUEUE_CAPACITY,
         }
     }
 }
@@ -63,7 +56,6 @@ enum WorkerCommand<T> {
     },
     Reconnect {
         transport: T,
-        status: StatusResponse,
         response: SyncSender<Result<(), DeviceError>>,
     },
     Shutdown,
@@ -71,11 +63,7 @@ enum WorkerCommand<T> {
 
 pub struct DeviceSession<T: Transport + Send + 'static> {
     command_sender: SyncSender<WorkerCommand<T>>,
-    event_receiver: Receiver<ReceivedEvent>,
-    latest_data_revision: Arc<AtomicU32>,
-    latest_config_revision: Arc<AtomicU32>,
     capabilities: Arc<AtomicU64>,
-    diagnostics: Arc<DiagnosticCounters>,
     worker: Option<JoinHandle<()>>,
     request_timeout: Duration,
     /// Closed by the worker as it returns. `Drop` waits on this rather than
@@ -99,28 +87,13 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         initial_status: &StatusResponse,
         options: SessionOptions,
     ) -> Self {
-        let event_capacity = options.event_queue_capacity.max(1);
         let (command_sender, command_receiver) = mpsc::sync_channel(COMMAND_QUEUE_CAPACITY);
-        let (event_sender, event_receiver) = mpsc::sync_channel(event_capacity);
-        let latest_data_revision = Arc::new(AtomicU32::new(initial_status.latest_revision));
-        let latest_config_revision = Arc::new(AtomicU32::new(initial_status.config_revision));
         let capabilities = Arc::new(AtomicU64::new(initial_status.capabilities));
-        let diagnostics = Arc::new(DiagnosticCounters::default());
         let connection = SessionConnection {
             transport,
             deframer: Deframer::new(),
             request_ids: RequestIdAllocator::new(),
             request_timeout: options.request_timeout,
-            keepalive_interval: options.keepalive_interval,
-            last_request_finished: Instant::now(),
-            event_sender,
-            last_seen_event_sequence: None,
-            last_queued_event_sequence: None,
-            latest_data_revision: Arc::clone(&latest_data_revision),
-            latest_config_revision: Arc::clone(&latest_config_revision),
-            diagnostics: Arc::clone(&diagnostics),
-            replay: ReplayState::default(),
-            last_device_uptime_ms: initial_status.uptime_ms,
         };
         let (finished_sender, finished_receiver) = mpsc::sync_channel::<()>(1);
         let worker = thread::Builder::new()
@@ -134,11 +107,7 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
             .expect("failed to spawn Deskmate device-session worker");
         Self {
             command_sender,
-            event_receiver,
-            latest_data_revision,
-            latest_config_revision,
             capabilities,
-            diagnostics,
             worker: Some(worker),
             request_timeout: options.request_timeout,
             finished: finished_receiver,
@@ -179,30 +148,6 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         self.request(message).map(|_| ())
     }
 
-    fn allocate_revision(counter: &AtomicU32) -> Result<u32, DeviceError> {
-        let mut current = counter.load(Ordering::Acquire);
-        loop {
-            let next = current
-                .checked_add(1)
-                .ok_or(DeviceError::RevisionExhausted)?;
-            match counter.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire)
-            {
-                Ok(_) => return Ok(next),
-                Err(observed) => current = observed,
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn latest_data_revision(&self) -> u32 {
-        self.latest_data_revision.load(Ordering::Acquire)
-    }
-
-    #[cfg(test)]
-    fn latest_config_revision(&self) -> u32 {
-        self.latest_config_revision.load(Ordering::Acquire)
-    }
-
     fn capabilities(&self) -> u64 {
         self.capabilities.load(Ordering::Acquire)
     }
@@ -216,66 +161,6 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
             }
             _ => Err(DeviceError::UnexpectedMessage),
         }
-    }
-
-    pub fn time_sync(&self, sync: TimeSync) -> Result<(), DeviceError> {
-        self.request_ack(Message::TimeSync(sync))
-    }
-
-    fn push_timer(&self, push: PushTimer) -> Result<(), DeviceError> {
-        self.request_ack(Message::PushTimer(push))
-    }
-
-    pub fn push_next_timer(
-        &self,
-        card_id: impl Into<String>,
-        total_ms: u32,
-        remaining_ms: u32,
-        running: bool,
-    ) -> Result<(), DeviceError> {
-        let revision = Self::allocate_revision(&self.latest_data_revision)?;
-        self.push_timer(PushTimer {
-            card_id: card_id.into(),
-            revision,
-            total_ms,
-            remaining_ms,
-            running,
-        })
-    }
-
-    fn apply_config(&self, config: ApplyConfig) -> Result<(), DeviceError> {
-        // Protocol v2 has no capability a card list can require. The v1 bits
-        // that gated this -- "core widgets" and a separate one for a
-        // 270-degree rotation -- both described a device that rendered
-        // templates; a v2 device renders scenes and accepts either mounting
-        // unconditionally.
-        self.request_ack(Message::ApplyConfig(config))
-    }
-
-    pub fn apply_next_config(
-        &self,
-        rotation: u16,
-        cards: Vec<CardConfig>,
-    ) -> Result<(), DeviceError> {
-        let revision = Self::allocate_revision(&self.latest_config_revision)?;
-        self.apply_config(ApplyConfig {
-            revision,
-            rotation,
-            cards,
-        })
-    }
-
-    pub fn activate_card(&self, activation: ActivateCard) -> Result<(), DeviceError> {
-        self.request_ack(Message::ActivateCard(activation))
-    }
-
-    pub fn push_scene(&self, push: PushScene) -> Result<(), DeviceError> {
-        ensure_capabilities(protocol::CAPABILITY_SCENE_RENDER, self.capabilities())?;
-        self.request_ack(Message::PushScene(push))
-    }
-
-    pub fn trigger_interrupt(&self, interrupt: TriggerInterrupt) -> Result<(), DeviceError> {
-        self.request_ack(Message::TriggerInterrupt(interrupt))
     }
 
     /// Provision the device's network config over USB. The device persists
@@ -294,60 +179,6 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         self.request_ack(Message::FactoryReset)
     }
 
-    /// Reserve (or re-attach to) storage for one asset. Unlike `provision` and
-    /// `factory_reset`, asset transfer is not cable-only -- the same seam
-    /// drives both the serial and networked transports, so this is a plain
-    /// request/reply like `push_scene`. The `Ack`'s `already_present` tells
-    /// the caller whether to skip chunking entirely (content addressing is
-    /// the inventory protocol; see `app_core::asset_sync`).
-    pub fn asset_begin(&self, begin: AssetBegin) -> Result<Ack, DeviceError> {
-        match self.request(Message::AssetBegin(begin))? {
-            Message::Ack(ack)
-                if ack.acknowledged_type == TYPE_ASSET_BEGIN
-                    && ack.revision.is_none()
-                    && ack.already_present.is_some() =>
-            {
-                Ok(ack)
-            }
-            _ => Err(DeviceError::UnexpectedMessage),
-        }
-    }
-
-    pub fn asset_chunk(&self, chunk: AssetChunk) -> Result<(), DeviceError> {
-        self.request_ack(Message::AssetChunk(chunk))
-    }
-
-    pub fn asset_commit(&self, commit: AssetCommit) -> Result<(), DeviceError> {
-        self.request_ack(Message::AssetCommit(commit))
-    }
-
-    /// Tell the device the full set of digests that should survive. The
-    /// device aborts any in-flight transfer, marks committed records absent
-    /// from this set dead, and compacts -- so this must carry every desired
-    /// digest, not just the ones this session happened to (re)upload.
-    pub fn asset_release(&self, release: AssetRelease) -> Result<(), DeviceError> {
-        self.request_ack(Message::AssetRelease(release))
-    }
-
-    pub fn try_recv_event(&self) -> Option<ReceivedEvent> {
-        self.event_receiver.try_recv().ok()
-    }
-
-    #[cfg(test)]
-    fn recv_event_timeout(&self, timeout: Duration) -> Result<Option<ReceivedEvent>, DeviceError> {
-        match self.event_receiver.recv_timeout(timeout) {
-            Ok(event) => Ok(Some(event)),
-            Err(RecvTimeoutError::Timeout) => Ok(None),
-            Err(RecvTimeoutError::Disconnected) => {
-                Err(DeviceError::Transport(TransportError::Disconnected))
-            }
-        }
-    }
-
-    pub fn diagnostics(&self) -> crate::SessionDiagnostics {
-        self.diagnostics.snapshot()
-    }
-
     /// Whether this session's worker has stopped answering. Such a session can
     /// never be revived -- `reconnect` hands the new transport to that same
     /// worker -- so a caller holding one must discard it and open another.
@@ -355,6 +186,8 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         self.stalled.load(Ordering::Acquire)
     }
 
+    // Preserve the handoff signature exercised by the unchanged stall regression.
+    #[allow(clippy::needless_pass_by_value)]
     fn reconnect(&self, transport: T, initial_status: StatusResponse) -> Result<(), DeviceError> {
         if self.stalled.load(Ordering::Acquire) {
             return Err(DeviceError::Transport(TransportError::Disconnected));
@@ -364,7 +197,6 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         self.command_sender
             .send(WorkerCommand::Reconnect {
                 transport,
-                status: initial_status,
                 response: response_sender,
             })
             .map_err(|_| DeviceError::Transport(TransportError::Disconnected))?;
@@ -381,8 +213,7 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
                     return Err(DeviceError::Transport(TransportError::Disconnected));
                 }
             };
-        // The worker has replaced its transport even when replay is rejected. Publish
-        // that device's capabilities so every later request is gated against the
+        // Publish the replacement device's capabilities so every later request is gated against the
         // actual connection rather than the previous firmware.
         self.capabilities.store(capabilities, Ordering::Release);
         result
@@ -459,23 +290,9 @@ struct SessionConnection<T> {
     deframer: Deframer,
     request_ids: RequestIdAllocator,
     request_timeout: Duration,
-    keepalive_interval: Duration,
-    last_request_finished: Instant,
-    event_sender: SyncSender<ReceivedEvent>,
-    last_seen_event_sequence: Option<u64>,
-    last_queued_event_sequence: Option<u64>,
-    latest_data_revision: Arc<AtomicU32>,
-    latest_config_revision: Arc<AtomicU32>,
-    diagnostics: Arc<DiagnosticCounters>,
-    replay: ReplayState,
-    last_device_uptime_ms: u64,
 }
 
 impl<T: Transport> SessionConnection<T> {
-    fn keepalive_due(&self) -> bool {
-        self.last_request_finished.elapsed() >= self.keepalive_interval
-    }
-
     fn write_all(&mut self, wire: &[u8], deadline: Instant) -> Result<(), DeviceError> {
         let mut written = 0;
         while written < wire.len() {
@@ -514,9 +331,6 @@ impl<T: Transport> SessionConnection<T> {
                 let frame = match framed {
                     Ok(frame) => frame,
                     Err(error) => {
-                        self.diagnostics
-                            .malformed_device_frames
-                            .fetch_add(1, Ordering::Relaxed);
                         if response.is_none() {
                             return Err(DeviceError::MalformedResponse(error.to_string()));
                         }
@@ -525,15 +339,12 @@ impl<T: Transport> SessionConnection<T> {
                 };
                 if frame.request_id == 0 {
                     match decode_message(&frame).map_err(message_error)? {
-                        Message::DeviceEvent(event) => self.route_event(event),
+                        Message::DeviceEvent(_) => {}
                         _ => return Err(DeviceError::UnexpectedMessage),
                     }
                     continue;
                 }
                 if frame.request_id != request_id {
-                    self.diagnostics
-                        .unexpected_device_frames
-                        .fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
                 let message = decode_message(&frame).map_err(message_error)?;
@@ -549,7 +360,6 @@ impl<T: Transport> SessionConnection<T> {
                 }
             }
             if let Some(response) = response {
-                self.last_request_finished = Instant::now();
                 return response;
             }
         }
@@ -558,13 +368,7 @@ impl<T: Transport> SessionConnection<T> {
     fn transact_acked(&mut self, request: &Message) -> Result<Message, DeviceError> {
         let response = self.transact(request)?;
         if matches!(response, Message::Ack(_)) {
-            let revision = match request {
-                Message::ApplyConfig(config) => Some(config.revision),
-                Message::PushTimer(push) => Some(push.revision),
-                Message::PushScene(push) => Some(push.revision),
-                _ => None,
-            };
-            require_ack(&response, request.type_id(), revision)?;
+            require_ack(&response, request.type_id(), None)?;
         }
         Ok(response)
     }
@@ -575,143 +379,8 @@ impl<T: Transport> SessionConnection<T> {
         if count == 0 {
             return Ok(false);
         }
-        for framed in self.deframer.push(&chunk[..count]) {
-            let Ok(frame) = framed else {
-                self.diagnostics
-                    .malformed_device_frames
-                    .fetch_add(1, Ordering::Relaxed);
-                continue;
-            };
-            match decode_message(&frame) {
-                Ok(Message::DeviceEvent(event)) if frame.request_id == 0 => {
-                    self.route_event(event);
-                }
-                _ => {
-                    self.diagnostics
-                        .unexpected_device_frames
-                        .fetch_add(1, Ordering::Relaxed);
-                }
-            }
-        }
+        let _ = self.deframer.push(&chunk[..count]);
         Ok(true)
-    }
-
-    fn route_event(&mut self, event: DeviceEvent) {
-        if self
-            .last_seen_event_sequence
-            .is_some_and(|sequence| event.sequence <= sequence)
-        {
-            self.diagnostics
-                .duplicate_or_out_of_order_events
-                .fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-        self.last_seen_event_sequence = Some(event.sequence);
-        self.replay.observe_event(&event);
-        let missed_before = self.last_queued_event_sequence.map_or(0, |sequence| {
-            event.sequence.saturating_sub(sequence).saturating_sub(1)
-        });
-        let sequence = event.sequence;
-        match self.event_sender.try_send(ReceivedEvent {
-            event,
-            missed_before,
-        }) {
-            Ok(()) => {
-                self.last_queued_event_sequence = Some(sequence);
-                self.diagnostics
-                    .detected_event_gaps
-                    .fetch_add(missed_before, Ordering::Relaxed);
-            }
-            Err(mpsc::TrySendError::Full(_)) => {
-                self.diagnostics
-                    .locally_dropped_events
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => {}
-        }
-    }
-
-    fn remember_success(&mut self, request: &Message) {
-        self.replay.remember_success(request);
-        match request {
-            Message::ApplyConfig(config) => {
-                self.latest_config_revision
-                    .fetch_max(config.revision, Ordering::AcqRel);
-            }
-            Message::PushTimer(push) => {
-                self.latest_data_revision
-                    .fetch_max(push.revision, Ordering::AcqRel);
-            }
-            _ => {}
-        }
-    }
-
-    fn replay_after_reconnect(&mut self, status: &StatusResponse) -> Result<(), DeviceError> {
-        let mut replay = self.replay.clone();
-        let powered_session_reset = status.uptime_ms < self.last_device_uptime_ms
-            || (status.latest_revision == 0
-                && status.config_revision == 0
-                && (self.latest_data_revision.load(Ordering::Acquire) != 0
-                    || self.latest_config_revision.load(Ordering::Acquire) != 0));
-        if powered_session_reset {
-            self.last_seen_event_sequence = None;
-            self.last_queued_event_sequence = None;
-        }
-        self.last_device_uptime_ms = status.uptime_ms;
-        self.latest_data_revision
-            .store(status.latest_revision, Ordering::Release);
-        self.latest_config_revision
-            .store(status.config_revision, Ordering::Release);
-
-        if let Some((mut sync, synchronized_at)) = replay.time_sync {
-            if let Ok(elapsed) = i64::try_from(synchronized_at.elapsed().as_secs())
-                && let Some(adjusted) = sync.unix_seconds.checked_add(elapsed)
-            {
-                sync.unix_seconds = adjusted;
-            }
-            self.transact_acked(&Message::TimeSync(sync))?;
-        }
-
-        let mut config_applied = false;
-        if let Some(config) = replay.config.as_mut() {
-            if config.revision != status.config_revision {
-                if config.revision < status.config_revision {
-                    config.revision = status
-                        .config_revision
-                        .checked_add(1)
-                        .ok_or(DeviceError::RevisionExhausted)?;
-                }
-                self.transact_acked(&Message::ApplyConfig(config.clone()))?;
-                config_applied = true;
-            }
-            self.latest_config_revision
-                .store(config.revision, Ordering::Release);
-        }
-
-        let mut data_revision = status.latest_revision;
-        for push in &mut replay.pushes {
-            if !config_applied && push.revision <= data_revision {
-                continue;
-            }
-            if push.revision <= data_revision {
-                push.revision = data_revision
-                    .checked_add(1)
-                    .ok_or(DeviceError::RevisionExhausted)?;
-            }
-            self.transact_acked(&Message::PushTimer(push.clone()))?;
-            data_revision = push.revision;
-        }
-        self.latest_data_revision
-            .store(data_revision, Ordering::Release);
-
-        if let Some(activation) = &replay.active_card {
-            self.transact_acked(&Message::ActivateCard(activation.clone()))?;
-        }
-        for interrupt in &replay.interrupts {
-            self.transact_acked(&Message::TriggerInterrupt(interrupt.clone()))?;
-        }
-        self.replay.commit_replay(replay);
-        Ok(())
     }
 }
 
@@ -744,9 +413,6 @@ fn run_worker<T: Transport + Send + 'static>(
             Ok(WorkerCommand::Request { message, response }) => {
                 let result = if connected {
                     let result = connection.transact_acked(&message);
-                    if result.is_ok() {
-                        connection.remember_success(&message);
-                    }
                     if matches!(result, Err(DeviceError::Transport(_))) {
                         connected = false;
                     }
@@ -759,37 +425,15 @@ fn run_worker<T: Transport + Send + 'static>(
             }
             Ok(WorkerCommand::Reconnect {
                 transport,
-                status,
                 response,
             }) => {
                 connection.transport = transport;
                 connection.deframer = Deframer::new();
-                connection.last_request_finished = Instant::now();
-                let result = connection.replay_after_reconnect(&status);
-                connected = !matches!(result, Err(DeviceError::Transport(_)));
-                if result.is_ok() {
-                    connection
-                        .diagnostics
-                        .reconnects
-                        .fetch_add(1, Ordering::Relaxed);
-                }
-                let _ = response.send(result);
+                connected = true;
+                let _ = response.send(Ok(()));
                 continue;
             }
             Err(TryRecvError::Empty) => {}
-        }
-
-        if connection.keepalive_due() {
-            let result = connection.transact(&Message::Heartbeat);
-            if result.is_ok() {
-                connection
-                    .diagnostics
-                    .keepalives_sent
-                    .fetch_add(1, Ordering::Relaxed);
-            } else if matches!(result, Err(DeviceError::Transport(_))) {
-                connected = false;
-            }
-            continue;
         }
 
         match connection.read_idle() {
@@ -801,14 +445,15 @@ fn run_worker<T: Transport + Send + 'static>(
 }
 
 #[cfg(test)]
+// Keep the original stall regressions textually intact after narrowing SessionOptions.
+#[allow(clippy::needless_update)]
 mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
     use protocol::{
-        EventAction, EventKind, HeartbeatAck, TYPE_ACTIVATE_CARD, TYPE_APPLY_CONFIG,
-        TYPE_FACTORY_RESET, TYPE_NETWORK_CONFIG, TYPE_PUSH_TIMER, TYPE_TIME_SYNC,
-        TYPE_TRIGGER_INTERRUPT, TapAction, decode_wire_frame,
+        Ack, EventAction, EventKind, PushTimer, TYPE_APPLY_CONFIG, TYPE_FACTORY_RESET,
+        TYPE_NETWORK_CONFIG, TYPE_PUSH_TIMER, TYPE_TIME_SYNC, TimeSync, decode_wire_frame,
     };
 
     use super::*;
@@ -823,11 +468,14 @@ mod tests {
         reads: VecDeque<Result<Vec<u8>, TransportError>>,
         requests: Vec<Message>,
         reply_modes: VecDeque<ReplyMode>,
+        written: Vec<u8>,
+        maximum_write: usize,
     }
 
     enum ReplyMode {
         Normal,
         Response(Message),
+        RawAck(u8, Option<u8>),
         Fragmented,
         StaleResponseBeforeReply(u32),
         EventBeforeReply(DeviceEvent),
@@ -844,6 +492,8 @@ mod tests {
                 reads: VecDeque::new(),
                 requests: Vec::new(),
                 reply_modes: VecDeque::new(),
+                written: Vec::new(),
+                maximum_write: usize::MAX,
             }));
             (
                 Self {
@@ -856,11 +506,17 @@ mod tests {
 
     impl Transport for FakeTransport {
         fn write(&mut self, bytes: &[u8]) -> Result<usize, TransportError> {
+            let mut state = self.state.lock().unwrap();
+            let count = bytes.len().min(state.maximum_write);
+            state.written.extend_from_slice(&bytes[..count]);
+            if state.written.last() != Some(&0) {
+                return Ok(count);
+            }
+            let wire = std::mem::take(&mut state.written);
             let frame =
-                decode_wire_frame(bytes).map_err(|error| TransportError::Io(error.to_string()))?;
+                decode_wire_frame(&wire).map_err(|error| TransportError::Io(error.to_string()))?;
             let request =
                 decode_message(&frame).map_err(|error| TransportError::Io(error.to_string()))?;
-            let mut state = self.state.lock().unwrap();
             state.requests.push(request.clone());
             let response = match state.reply_modes.front() {
                 Some(ReplyMode::Response(response)) => response.clone(),
@@ -871,6 +527,21 @@ mod tests {
             match state.reply_modes.pop_front().unwrap_or(ReplyMode::Normal) {
                 ReplyMode::Normal | ReplyMode::Response(_) => {
                     state.reads.push_back(Ok(response_wire));
+                }
+                ReplyMode::RawAck(acknowledged_type, revision) => {
+                    let mut frame = decode_wire_frame(&response_wire).unwrap();
+                    frame.message_type = protocol::TYPE_ACK;
+                    frame.payload = vec![
+                        if revision.is_some() { 0xa2 } else { 0xa1 },
+                        0,
+                        acknowledged_type,
+                    ];
+                    if let Some(revision) = revision {
+                        frame.payload.extend([1, 0x18, revision]);
+                    }
+                    state
+                        .reads
+                        .push_back(Ok(protocol::encode_frame(&frame).unwrap()));
                 }
                 ReplyMode::Fragmented => {
                     let split = response_wire.len() / 2;
@@ -903,7 +574,7 @@ mod tests {
                     state.reads.push_back(Err(TransportError::Disconnected));
                 }
             }
-            Ok(bytes.len())
+            Ok(count)
         }
 
         fn read(&mut self, bytes: &mut [u8]) -> Result<usize, TransportError> {
@@ -933,9 +604,6 @@ mod tests {
     fn fake_response(status: &StatusResponse, request: &Message) -> Message {
         match request {
             Message::StatusRequest => Message::StatusResponse(status.clone()),
-            Message::Heartbeat => Message::HeartbeatAck(HeartbeatAck {
-                uptime_ms: status.uptime_ms,
-            }),
             Message::TimeSync(_) => Message::Ack(Ack {
                 acknowledged_type: TYPE_TIME_SYNC,
                 revision: None,
@@ -944,21 +612,6 @@ mod tests {
             Message::PushTimer(push) => Message::Ack(Ack {
                 acknowledged_type: TYPE_PUSH_TIMER,
                 revision: Some(push.revision),
-                already_present: None,
-            }),
-            Message::ApplyConfig(config) => Message::Ack(Ack {
-                acknowledged_type: TYPE_APPLY_CONFIG,
-                revision: Some(config.revision),
-                already_present: None,
-            }),
-            Message::ActivateCard(_) => Message::Ack(Ack {
-                acknowledged_type: TYPE_ACTIVATE_CARD,
-                revision: None,
-                already_present: None,
-            }),
-            Message::TriggerInterrupt(_) => Message::Ack(Ack {
-                acknowledged_type: TYPE_TRIGGER_INTERRUPT,
-                revision: None,
                 already_present: None,
             }),
             Message::NetworkConfig(_) => Message::Ack(Ack {
@@ -971,24 +624,7 @@ mod tests {
                 revision: None,
                 already_present: None,
             }),
-            Message::PushScene(push) => Message::Ack(Ack {
-                acknowledged_type: protocol::TYPE_PUSH_SCENE,
-                revision: Some(push.revision),
-                already_present: None,
-            }),
             _ => panic!("unexpected fake request: {request:?}"),
-        }
-    }
-
-    fn scene_push(revision: u32) -> protocol::PushScene {
-        protocol::PushScene {
-            card_id: "clock".into(),
-            revision,
-            scene: protocol::Scene {
-                revision,
-                background: 0,
-                nodes: Vec::new(),
-            },
         }
     }
 
@@ -1006,169 +642,10 @@ mod tests {
         }
     }
 
-    fn config(revision: u32) -> ApplyConfig {
-        ApplyConfig {
-            revision,
-            rotation: 90,
-            cards: vec![CardConfig {
-                card_id: "timer".into(),
-                tap_action: TapAction::StartPause,
-            }],
-        }
-    }
-
-    fn options(keepalive_interval: Duration, event_queue_capacity: usize) -> SessionOptions {
+    fn options() -> SessionOptions {
         SessionOptions {
             request_timeout: Duration::from_millis(250),
-            keepalive_interval,
-            event_queue_capacity,
         }
-    }
-
-    fn inject_events(state: &Arc<Mutex<FakeState>>, events: impl IntoIterator<Item = DeviceEvent>) {
-        let mut state = state.lock().unwrap();
-        for event in events {
-            state
-                .reads
-                .push_back(Ok(encode_message(0, &Message::DeviceEvent(event)).unwrap()));
-        }
-    }
-
-    fn test_connection(
-        event_queue_capacity: usize,
-    ) -> (SessionConnection<FakeTransport>, Receiver<ReceivedEvent>) {
-        let (transport, _) = FakeTransport::new(status(0, 0, 100));
-        let (event_sender, event_receiver) = mpsc::sync_channel(event_queue_capacity);
-        (
-            SessionConnection {
-                transport,
-                deframer: Deframer::new(),
-                request_ids: RequestIdAllocator::new(),
-                request_timeout: Duration::from_millis(250),
-                keepalive_interval: Duration::from_mins(1),
-                last_request_finished: Instant::now(),
-                event_sender,
-                last_seen_event_sequence: None,
-                last_queued_event_sequence: None,
-                latest_data_revision: Arc::new(AtomicU32::new(0)),
-                latest_config_revision: Arc::new(AtomicU32::new(0)),
-                diagnostics: Arc::new(DiagnosticCounters::default()),
-                replay: ReplayState::default(),
-                last_device_uptime_ms: 100,
-            },
-            event_receiver,
-        )
-    }
-
-    fn wait_for(predicate: impl Fn() -> bool) {
-        let deadline = Instant::now() + Duration::from_millis(500);
-        while !predicate() {
-            assert!(Instant::now() < deadline, "condition did not become true");
-            thread::sleep(Duration::from_millis(2));
-        }
-    }
-
-    #[test]
-    fn duplicate_navigation_cannot_change_replay_state() {
-        let (mut connection, _events) = test_connection(8);
-        let mut layout = config(1);
-        layout.cards.push(CardConfig {
-            card_id: "calendar".into(),
-            tap_action: TapAction::None,
-        });
-        connection.replay.config = Some(layout);
-        connection.replay.active_card = Some(ActivateCard {
-            card_id: "timer".into(),
-        });
-        connection.route_event(DeviceEvent {
-            sequence: 2,
-            kind: EventKind::Navigation,
-            card_id: "calendar".into(),
-            action: EventAction::NavigateNext,
-            interrupt_token: None,
-        });
-        connection.route_event(DeviceEvent {
-            sequence: 2,
-            kind: EventKind::Navigation,
-            card_id: "timer".into(),
-            action: EventAction::NavigatePrevious,
-            interrupt_token: None,
-        });
-
-        assert_eq!(connection.replay.active_card.unwrap().card_id, "calendar");
-    }
-
-    #[test]
-    fn full_event_queue_does_not_block_navigation_or_dismissal_replay_updates() {
-        let (mut connection, _events) = test_connection(1);
-        let mut layout = config(1);
-        layout.cards.push(CardConfig {
-            card_id: "calendar".into(),
-            tap_action: TapAction::None,
-        });
-        connection.replay.config = Some(layout);
-        connection.replay.active_card = Some(ActivateCard {
-            card_id: "timer".into(),
-        });
-        connection.replay.interrupts = [3, 5, 7]
-            .into_iter()
-            .map(|token| TriggerInterrupt {
-                card_id: "timer".into(),
-                token,
-                reason: format!("interrupt-{token}"),
-            })
-            .collect();
-        connection.route_event(event(1, EventKind::Tap, None));
-
-        connection.route_event(DeviceEvent {
-            sequence: 2,
-            kind: EventKind::Navigation,
-            card_id: "calendar".into(),
-            action: EventAction::NavigateNext,
-            interrupt_token: None,
-        });
-        connection.route_event(event(3, EventKind::InterruptDismissed, Some(5)));
-
-        assert_eq!(connection.replay.active_card.unwrap().card_id, "calendar");
-        assert_eq!(
-            connection
-                .replay
-                .interrupts
-                .iter()
-                .map(|interrupt| interrupt.token)
-                .collect::<Vec<_>>(),
-            vec![3, 7]
-        );
-        assert_eq!(
-            connection
-                .diagnostics
-                .locally_dropped_events
-                .load(Ordering::Relaxed),
-            2
-        );
-    }
-
-    #[test]
-    fn remember_success_publishes_monotonic_config_and_data_revisions() {
-        let (mut connection, _events) = test_connection(8);
-        connection.remember_success(&Message::ApplyConfig(config(4)));
-        assert_eq!(connection.replay.config.as_ref().unwrap().revision, 4);
-        assert_eq!(connection.latest_config_revision.load(Ordering::Acquire), 4);
-        connection.remember_success(&Message::ApplyConfig(config(2)));
-        assert_eq!(connection.replay.config.as_ref().unwrap().revision, 2);
-        assert_eq!(connection.latest_config_revision.load(Ordering::Acquire), 4);
-
-        for revision in [9, 3] {
-            connection.remember_success(&Message::PushTimer(PushTimer {
-                card_id: "timer".into(),
-                revision,
-                total_ms: 60_000,
-                remaining_ms: 30_000,
-                running: false,
-            }));
-            assert_eq!(connection.replay.pushes[0].revision, revision);
-        }
-        assert_eq!(connection.latest_data_revision.load(Ordering::Acquire), 9);
     }
 
     #[test]
@@ -1190,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn fragmented_response_and_events_on_both_sides_of_reply_are_demultiplexed() {
+    fn fragmented_response_and_events_on_both_sides_of_reply_preserve_responses() {
         let (transport, state) = FakeTransport::new(status(7, 3, 100));
         {
             let mut state = state.lock().unwrap();
@@ -1202,32 +679,10 @@ mod tests {
                 .reply_modes
                 .push_back(ReplyMode::EventAfterReply(event(2, EventKind::Tap, None)));
         }
-        let session = DeviceSession::with_options(
-            transport,
-            &status(7, 3, 100),
-            options(Duration::from_mins(1), 8),
-        );
+        let session = DeviceSession::with_options(transport, &status(7, 3, 100), options());
         assert_eq!(session.status().unwrap().latest_revision, 7);
         assert_eq!(session.status().unwrap().latest_revision, 7);
         assert_eq!(session.status().unwrap().latest_revision, 7);
-        assert_eq!(
-            session
-                .recv_event_timeout(Duration::from_millis(100))
-                .unwrap()
-                .unwrap()
-                .event
-                .sequence,
-            1
-        );
-        assert_eq!(
-            session
-                .recv_event_timeout(Duration::from_millis(100))
-                .unwrap()
-                .unwrap()
-                .event
-                .sequence,
-            2
-        );
     }
 
     #[test]
@@ -1238,182 +693,9 @@ mod tests {
             .unwrap()
             .reply_modes
             .push_back(ReplyMode::StaleResponseBeforeReply(41));
-        let session = DeviceSession::with_options(
-            transport,
-            &status(7, 3, 100),
-            options(Duration::from_mins(1), 8),
-        );
+        let session = DeviceSession::with_options(transport, &status(7, 3, 100), options());
 
         assert_eq!(session.status().unwrap(), status(7, 3, 100));
-        assert_eq!(session.diagnostics().unexpected_device_frames, 1);
-    }
-
-    #[test]
-    fn duplicate_and_out_of_order_events_are_ignored_and_gaps_are_reported() {
-        let (transport, state) = FakeTransport::new(status(0, 0, 100));
-        let session = DeviceSession::with_options(
-            transport,
-            &status(0, 0, 100),
-            options(Duration::from_mins(1), 8),
-        );
-        inject_events(
-            &state,
-            [
-                event(5, EventKind::Tap, None),
-                event(5, EventKind::Tap, None),
-                event(4, EventKind::Tap, None),
-                event(7, EventKind::Tap, None),
-            ],
-        );
-        let first = session
-            .recv_event_timeout(Duration::from_millis(100))
-            .unwrap()
-            .unwrap();
-        let second = session
-            .recv_event_timeout(Duration::from_millis(100))
-            .unwrap()
-            .unwrap();
-        assert_eq!((first.event.sequence, first.missed_before), (5, 0));
-        assert_eq!((second.event.sequence, second.missed_before), (7, 1));
-        let diagnostics = session.diagnostics();
-        assert_eq!(diagnostics.duplicate_or_out_of_order_events, 2);
-        assert_eq!(diagnostics.detected_event_gaps, 1);
-    }
-
-    #[test]
-    fn bounded_event_queue_drops_newest_and_reports_the_later_gap() {
-        let (transport, state) = FakeTransport::new(status(0, 0, 100));
-        let session = DeviceSession::with_options(
-            transport,
-            &status(0, 0, 100),
-            options(Duration::from_mins(1), 2),
-        );
-        inject_events(
-            &state,
-            [
-                event(1, EventKind::Tap, None),
-                event(2, EventKind::Tap, None),
-                event(3, EventKind::Tap, None),
-            ],
-        );
-        wait_for(|| session.diagnostics().locally_dropped_events == 1);
-        assert_eq!(session.try_recv_event().unwrap().event.sequence, 1);
-        assert_eq!(session.try_recv_event().unwrap().event.sequence, 2);
-        inject_events(&state, [event(4, EventKind::Tap, None)]);
-        let recovered = session
-            .recv_event_timeout(Duration::from_millis(100))
-            .unwrap()
-            .unwrap();
-        assert_eq!((recovered.event.sequence, recovered.missed_before), (4, 1));
-    }
-
-    #[test]
-    fn idle_session_emits_keepalives_without_caller_polling() {
-        let (transport, state) = FakeTransport::new(status(0, 0, 100));
-        let session = DeviceSession::with_options(
-            transport,
-            &status(0, 0, 100),
-            options(Duration::from_millis(20), 8),
-        );
-        wait_for(|| session.diagnostics().keepalives_sent >= 3);
-        let heartbeat_count = state
-            .lock()
-            .unwrap()
-            .requests
-            .iter()
-            .filter(|message| matches!(message, Message::Heartbeat))
-            .count();
-        assert!(heartbeat_count >= 3);
-    }
-
-    #[test]
-    fn data_revision_starts_above_connect_time_status() {
-        let (transport, state) = FakeTransport::new(status(41, 0, 100));
-        let session = DeviceSession::with_options(
-            transport,
-            &status(41, 0, 100),
-            options(Duration::from_mins(1), 8),
-        );
-        session
-            .push_next_timer("timer", 60_000, 60_000, false)
-            .unwrap();
-        assert!(matches!(
-            state.lock().unwrap().requests.last(),
-            Some(Message::PushTimer(PushTimer { revision: 42, .. }))
-        ));
-    }
-
-    #[test]
-    fn push_scene_requires_the_ack_type_and_revision_it_sent() {
-        let (transport, state) = FakeTransport::new(status(0, 0, 100));
-        let session = DeviceSession::with_options(
-            transport,
-            &status(0, 0, 100),
-            options(Duration::from_mins(1), 8),
-        );
-
-        let push = scene_push(7);
-        session.push_scene(push.clone()).unwrap();
-        assert_eq!(
-            state.lock().unwrap().requests.last(),
-            Some(&Message::PushScene(push))
-        );
-
-        state
-            .lock()
-            .unwrap()
-            .reply_modes
-            .push_back(ReplyMode::Response(Message::Ack(Ack {
-                acknowledged_type: protocol::TYPE_PUSH_SCENE,
-                revision: Some(8),
-                already_present: None,
-            })));
-        assert_eq!(
-            session.push_scene(scene_push(7)),
-            Err(DeviceError::UnexpectedMessage)
-        );
-
-        state
-            .lock()
-            .unwrap()
-            .reply_modes
-            .push_back(ReplyMode::Response(Message::Ack(Ack {
-                acknowledged_type: TYPE_PUSH_TIMER,
-                revision: Some(7),
-                already_present: None,
-            })));
-        assert_eq!(
-            session.push_scene(scene_push(7)),
-            Err(DeviceError::UnexpectedMessage)
-        );
-    }
-
-    #[test]
-    fn firmware_without_scene_render_refuses_push_scene_before_wire_mutation() {
-        let mut without_scene_render = status(0, 0, 100);
-        without_scene_render.capabilities &= !protocol::CAPABILITY_SCENE_RENDER;
-        let (transport, state) = FakeTransport::new(without_scene_render.clone());
-        let session = DeviceSession::with_options(
-            transport,
-            &without_scene_render,
-            options(Duration::from_mins(1), 8),
-        );
-
-        assert_eq!(
-            session.push_scene(scene_push(7)),
-            Err(DeviceError::MissingCapabilities {
-                required: protocol::CAPABILITY_SCENE_RENDER,
-                available: without_scene_render.capabilities,
-            })
-        );
-        assert!(
-            state
-                .lock()
-                .unwrap()
-                .requests
-                .iter()
-                .all(|request| !matches!(request, Message::PushScene(_)))
-        );
     }
 
     #[test]
@@ -1421,11 +703,7 @@ mod tests {
         let mut without_networking = status(0, 0, 100);
         without_networking.capabilities &= !protocol::CAPABILITY_NETWORKING;
         let (transport, state) = FakeTransport::new(without_networking.clone());
-        let session = DeviceSession::with_options(
-            transport,
-            &without_networking,
-            options(Duration::from_mins(1), 8),
-        );
+        let session = DeviceSession::with_options(transport, &without_networking, options());
         let network_config = NetworkConfig {
             ssid: "desk-wifi".into(),
             psk: "hunter2".into(),
@@ -1461,8 +739,6 @@ mod tests {
             &status(0, 0, 100),
             SessionOptions {
                 request_timeout: Duration::from_millis(20),
-                keepalive_interval: Duration::from_mins(1),
-                event_queue_capacity: 8,
             },
         );
         assert_eq!(timeout_session.status(), Err(DeviceError::Timeout));
@@ -1473,11 +749,8 @@ mod tests {
             .unwrap()
             .reply_modes
             .push_back(ReplyMode::Malformed);
-        let malformed_session = DeviceSession::with_options(
-            malformed_transport,
-            &status(0, 0, 100),
-            options(Duration::from_mins(1), 8),
-        );
+        let malformed_session =
+            DeviceSession::with_options(malformed_transport, &status(0, 0, 100), options());
         assert!(matches!(
             malformed_session.status(),
             Err(DeviceError::MalformedResponse(_))
@@ -1485,75 +758,9 @@ mod tests {
     }
 
     #[test]
-    fn wrong_config_ack_preserves_acknowledged_replay_after_power_reset() {
+    fn disconnect_during_request_is_distinct_and_later_requests_do_not_write() {
         let (first_transport, first_state) = FakeTransport::new(status(7, 3, 1_000));
-        let session = DeviceSession::with_options(
-            first_transport,
-            &status(7, 3, 1_000),
-            options(Duration::from_mins(1), 8),
-        );
-        let acknowledged_config = config(4);
-        let acknowledged_timer = PushTimer {
-            card_id: "timer".into(),
-            revision: 8,
-            total_ms: 60_000,
-            remaining_ms: 30_000,
-            running: false,
-        };
-        session.apply_config(acknowledged_config.clone()).unwrap();
-        session.push_timer(acknowledged_timer.clone()).unwrap();
-        first_state
-            .lock()
-            .unwrap()
-            .reply_modes
-            .push_back(ReplyMode::Response(Message::Ack(Ack {
-                acknowledged_type: TYPE_APPLY_CONFIG,
-                revision: Some(9),
-                already_present: None,
-            })));
-        assert_eq!(
-            session.apply_config(config(5)),
-            Err(DeviceError::UnexpectedMessage)
-        );
-        assert_eq!(session.status().unwrap(), status(7, 3, 1_000));
-
-        let (second_transport, second_state) = FakeTransport::new(status(0, 0, 50));
-        session
-            .reconnect(second_transport, status(0, 0, 50))
-            .unwrap();
-        assert_eq!(
-            second_state.lock().unwrap().requests,
-            vec![
-                Message::ApplyConfig(acknowledged_config),
-                Message::PushTimer(acknowledged_timer),
-            ]
-        );
-    }
-
-    #[test]
-    fn disconnect_during_request_is_distinct_and_reconnect_replays_state() {
-        let (first_transport, first_state) = FakeTransport::new(status(7, 3, 1_000));
-        let session = DeviceSession::with_options(
-            first_transport,
-            &status(7, 3, 1_000),
-            options(Duration::from_mins(1), 8),
-        );
-        session.apply_config(config(4)).unwrap();
-        session
-            .push_next_timer("timer", 60_000, 60_000, false)
-            .unwrap();
-        session
-            .activate_card(ActivateCard {
-                card_id: "timer".into(),
-            })
-            .unwrap();
-        session
-            .trigger_interrupt(TriggerInterrupt {
-                card_id: "timer".into(),
-                token: 1,
-                reason: "done".into(),
-            })
-            .unwrap();
+        let session = DeviceSession::with_options(first_transport, &status(7, 3, 1_000), options());
         first_state
             .lock()
             .unwrap()
@@ -1569,219 +776,41 @@ mod tests {
             Err(DeviceError::Transport(TransportError::Disconnected))
         );
         assert_eq!(first_state.lock().unwrap().requests.len(), request_count);
-
-        let (second_transport, second_state) = FakeTransport::new(status(0, 0, 50));
-        session
-            .reconnect(second_transport, status(0, 0, 50))
-            .unwrap();
-        let replayed = second_state.lock().unwrap().requests.clone();
-        assert!(matches!(replayed.first(), Some(Message::ApplyConfig(_))));
-        assert!(matches!(replayed.get(1), Some(Message::PushTimer(_))));
-        assert!(matches!(replayed.get(2), Some(Message::ActivateCard(_))));
-        assert!(matches!(
-            replayed.get(3),
-            Some(Message::TriggerInterrupt(_))
-        ));
-        assert_eq!(session.latest_config_revision(), 4);
-        assert_eq!(session.latest_data_revision(), 8);
-        assert_eq!(session.diagnostics().reconnects, 1);
     }
 
     #[test]
-    fn local_navigation_updates_the_card_replayed_after_power_reset() {
-        let (first_transport, first_state) = FakeTransport::new(status(0, 0, 1_000));
-        let session = DeviceSession::with_options(
-            first_transport,
-            &status(0, 0, 1_000),
-            options(Duration::from_mins(1), 8),
-        );
-        let mut layout = config(1);
-        layout.cards.push(CardConfig {
-            card_id: "calendar".into(),
-            tap_action: TapAction::None,
-        });
-        session.apply_config(layout).unwrap();
-        session
-            .activate_card(ActivateCard {
-                card_id: "timer".into(),
-            })
-            .unwrap();
-
-        inject_events(
-            &first_state,
-            [DeviceEvent {
-                sequence: 1,
-                kind: EventKind::Navigation,
-                card_id: "calendar".into(),
-                action: EventAction::NavigateNext,
-                interrupt_token: None,
-            }],
-        );
-        session.status().unwrap();
-        assert_eq!(
-            session
-                .recv_event_timeout(Duration::from_millis(100))
-                .unwrap()
-                .unwrap()
-                .event
-                .card_id,
-            "calendar"
-        );
-
+    fn reconnect_after_request_disconnect_uses_the_replacement_transport() {
+        let (first_transport, first_state) = FakeTransport::new(status(7, 3, 1_000));
+        let session = DeviceSession::with_options(first_transport, &status(7, 3, 1_000), options());
         first_state
             .lock()
             .unwrap()
             .reply_modes
             .push_back(ReplyMode::Disconnect);
-        assert!(matches!(
+        assert_eq!(
             session.status(),
             Err(DeviceError::Transport(TransportError::Disconnected))
-        ));
-        let (second_transport, second_state) = FakeTransport::new(status(0, 0, 10));
-        session
-            .reconnect(second_transport, status(0, 0, 10))
-            .unwrap();
-
-        assert!(second_state.lock().unwrap().requests.iter().any(|request| {
-            matches!(
-                request,
-                Message::ActivateCard(ActivateCard { card_id })
-                    if card_id == "calendar"
-            )
-        }));
-    }
-
-    #[test]
-    fn reconnect_preserves_navigation_received_during_replay() {
-        let event = DeviceEvent {
-            sequence: 1,
-            kind: EventKind::Navigation,
-            card_id: "calendar".into(),
-            action: EventAction::NavigateNext,
-            interrupt_token: None,
-        };
-        for mode in [
-            ReplyMode::EventBeforeReply(event.clone()),
-            ReplyMode::EventAfterReply(event),
-        ] {
-            let replayed = replay_after_concurrent_event(mode);
-            assert!(
-                replayed.contains(&Message::ActivateCard(ActivateCard {
-                    card_id: "calendar".into(),
-                })),
-                "next replay must activate the navigated-to card"
-            );
-        }
-    }
-
-    #[test]
-    fn reconnect_preserves_interrupt_dismissal_received_during_replay() {
-        let event = event(1, EventKind::InterruptDismissed, Some(5));
-        for mode in [
-            ReplyMode::EventBeforeReply(event.clone()),
-            ReplyMode::EventAfterReply(event),
-        ] {
-            let replayed = replay_after_concurrent_event(mode);
-            assert!(
-                !replayed.iter().any(|request| matches!(request,
-                    Message::TriggerInterrupt(interrupt) if interrupt.token == 5
-                )),
-                "next replay must not resend the dismissed interrupt"
-            );
-        }
-    }
-
-    fn replay_after_concurrent_event(mode: ReplyMode) -> Vec<Message> {
-        let (first_transport, _) = FakeTransport::new(status(0, 0, 1_000));
-        let session = DeviceSession::with_options(
-            first_transport,
-            &status(0, 0, 1_000),
-            options(Duration::from_mins(1), 8),
         );
-        let mut layout = config(1);
-        layout.cards.push(CardConfig {
-            card_id: "calendar".into(),
-            tap_action: TapAction::None,
-        });
-        session.apply_config(layout).unwrap();
-        session
-            .push_next_timer("timer", 60_000, 30_000, false)
-            .unwrap();
-        session
-            .activate_card(ActivateCard {
-                card_id: "timer".into(),
-            })
-            .unwrap();
-        session
-            .trigger_interrupt(TriggerInterrupt {
-                card_id: "timer".into(),
-                token: 5,
-                reason: "done".into(),
-            })
-            .unwrap();
 
-        let (second_transport, second_state) = FakeTransport::new(status(11, 11, 2_000));
-        second_state.lock().unwrap().reply_modes.extend([
-            ReplyMode::Normal,
-            ReplyMode::Normal,
-            ReplyMode::Normal,
-            mode,
-        ]);
+        let (second_transport, second_state) = FakeTransport::new(status(0, 0, 50));
         session
-            .reconnect(second_transport, status(11, 11, 2_000))
+            .reconnect(second_transport, status(0, 0, 50))
             .unwrap();
-        assert!(matches!(
-            second_state.lock().unwrap().requests.last(),
-            Some(Message::TriggerInterrupt(TriggerInterrupt { token: 5, .. }))
-        ));
-        assert_eq!(session.try_recv_event().unwrap().event.sequence, 1);
-        assert_eq!(session.latest_config_revision(), 12);
-        assert_eq!(session.latest_data_revision(), 12);
-
-        let (third_transport, third_state) = FakeTransport::new(status(12, 12, 3_000));
-        session
-            .reconnect(third_transport, status(12, 12, 3_000))
-            .unwrap();
-        let replayed = third_state.lock().unwrap().requests.clone();
-        assert!(
-            !replayed
-                .iter()
-                .any(|request| matches!(request, Message::ApplyConfig(_) | Message::PushTimer(_))),
-            "acknowledged rebased revisions must not be resent"
+        assert_eq!(session.status().unwrap(), status(0, 0, 50));
+        assert_eq!(
+            first_state.lock().unwrap().requests,
+            vec![Message::StatusRequest]
         );
-        replayed
-    }
-
-    #[test]
-    fn same_powered_device_reconnect_does_not_repush_retained_revisions() {
-        let (first_transport, _) = FakeTransport::new(status(7, 3, 1_000));
-        let session = DeviceSession::with_options(
-            first_transport,
-            &status(7, 3, 1_000),
-            options(Duration::from_mins(1), 8),
+        assert_eq!(
+            second_state.lock().unwrap().requests,
+            vec![Message::StatusRequest]
         );
-        session.apply_config(config(4)).unwrap();
-        session
-            .push_next_timer("timer", 60_000, 60_000, false)
-            .unwrap();
-
-        let (second_transport, second_state) = FakeTransport::new(status(8, 4, 2_000));
-        session
-            .reconnect(second_transport, status(8, 4, 2_000))
-            .unwrap();
-        assert!(second_state.lock().unwrap().requests.is_empty());
-        assert_eq!(session.latest_data_revision(), 8);
-        assert_eq!(session.latest_config_revision(), 4);
     }
 
     #[test]
     fn provision_sends_the_config_and_accepts_the_ack() {
         let (transport, state) = FakeTransport::new(status(0, 0, 100));
-        let session = DeviceSession::with_options(
-            transport,
-            &status(0, 0, 100),
-            options(Duration::from_mins(1), 8),
-        );
+        let session = DeviceSession::with_options(transport, &status(0, 0, 100), options());
         let network_config = NetworkConfig {
             ssid: "desk-wifi".into(),
             psk: "hunter2".into(),
@@ -1801,16 +830,225 @@ mod tests {
     #[test]
     fn factory_reset_sends_the_request_and_accepts_the_ack() {
         let (transport, state) = FakeTransport::new(status(0, 0, 100));
-        let session = DeviceSession::with_options(
-            transport,
-            &status(0, 0, 100),
-            options(Duration::from_mins(1), 8),
-        );
+        let session = DeviceSession::with_options(transport, &status(0, 0, 100), options());
         session.factory_reset().unwrap();
         assert_eq!(
             state.lock().unwrap().requests.last(),
             Some(&Message::FactoryReset)
         );
+    }
+
+    // Device-level characterization of the five cable messages sent by the CLI.
+    // Exercise DeviceClient and DeviceSession directly; these tests do not invoke
+    // CLI dispatch or characterize its output, argument mapping, or exit codes.
+    fn device_cable_request(
+        transport: FakeTransport,
+        initial_status: &StatusResponse,
+        request: Message,
+    ) -> Result<(), DeviceError> {
+        match request {
+            Message::StatusRequest => {
+                let actual = crate::DeviceClient::new(transport).status()?;
+                assert_eq!(&actual, initial_status);
+                Ok(())
+            }
+            Message::TimeSync(sync) => crate::DeviceClient::new(transport)
+                .time_sync(sync)
+                .map(|_| ()),
+            Message::PushTimer(push) => crate::DeviceClient::new(transport)
+                .push_timer(push)
+                .map(|_| ()),
+            Message::NetworkConfig(config) => {
+                DeviceSession::with_options(transport, initial_status, options()).provision(&config)
+            }
+            Message::FactoryReset => {
+                DeviceSession::with_options(transport, initial_status, options()).factory_reset()
+            }
+            other => panic!("not a characterized cable message: {other:?}"),
+        }
+    }
+
+    fn device_cable_messages() -> Vec<Message> {
+        vec![
+            Message::StatusRequest,
+            Message::TimeSync(TimeSync {
+                unix_seconds: 1_789_776_000,
+                utc_offset_minutes: 240,
+            }),
+            Message::PushTimer(PushTimer {
+                card_id: "timer".into(),
+                revision: 7,
+                total_ms: 60_000,
+                remaining_ms: 30_000,
+                running: true,
+            }),
+            Message::NetworkConfig(NetworkConfig {
+                ssid: "desk-wifi".into(),
+                psk: "test-only".into(),
+                server_url: "wss://example.invalid/v1/device/link".into(),
+                device_id: "dev-test".into(),
+                token: "test-only".into(),
+                utc_offset_minutes: 240,
+                tier: protocol::Tier::Networked,
+            }),
+            Message::FactoryReset,
+        ]
+    }
+
+    #[test]
+    fn device_cable_messages_preserve_exact_requests_with_partial_io_and_stale_replies() {
+        for request in device_cable_messages() {
+            for mode in [
+                ReplyMode::Fragmented,
+                ReplyMode::StaleResponseBeforeReply(41),
+            ] {
+                let initial_status = status(7, 3, 100);
+                let (transport, state) = FakeTransport::new(initial_status.clone());
+                {
+                    let mut state = state.lock().unwrap();
+                    state.maximum_write = 3;
+                    state.reply_modes.push_back(mode);
+                }
+                device_cable_request(transport, &initial_status, request.clone()).unwrap();
+                assert_eq!(state.lock().unwrap().requests, vec![request.clone()]);
+            }
+        }
+    }
+
+    #[test]
+    fn device_cable_messages_accept_unsolicited_events_before_and_after_the_reply() {
+        for request in device_cable_messages() {
+            for mode in [
+                ReplyMode::EventBeforeReply(event(1, EventKind::Tap, None)),
+                ReplyMode::EventAfterReply(event(2, EventKind::Tap, None)),
+            ] {
+                let initial_status = status(7, 3, 100);
+                let (transport, state) = FakeTransport::new(initial_status.clone());
+                state.lock().unwrap().reply_modes.push_back(mode);
+                device_cable_request(transport, &initial_status, request.clone()).unwrap();
+                assert_eq!(state.lock().unwrap().requests, vec![request.clone()]);
+            }
+        }
+    }
+
+    #[test]
+    fn device_cable_mutations_require_exact_ack_type_and_revision() {
+        for request in device_cable_messages().into_iter().skip(1) {
+            let revision = match &request {
+                Message::PushTimer(push) => Some(push.revision),
+                _ => None,
+            };
+            for (acknowledged_type, ack_revision) in [
+                (protocol::TYPE_ACTIVATE_CARD, None),
+                (request.type_id(), Some(99)),
+                (request.type_id(), None),
+            ] {
+                if acknowledged_type == request.type_id() && ack_revision == revision {
+                    continue;
+                }
+                let initial_status = status(7, 3, 100);
+                let (transport, state) = FakeTransport::new(initial_status.clone());
+                state
+                    .lock()
+                    .unwrap()
+                    .reply_modes
+                    .push_back(ReplyMode::RawAck(
+                        acknowledged_type,
+                        ack_revision.map(|value| u8::try_from(value).unwrap()),
+                    ));
+                let result = device_cable_request(transport, &initial_status, request.clone());
+                if acknowledged_type == request.type_id()
+                    && ack_revision.is_some() != revision.is_some()
+                {
+                    assert!(matches!(result, Err(DeviceError::MalformedResponse(_))));
+                } else {
+                    assert_eq!(result, Err(DeviceError::UnexpectedMessage));
+                }
+                assert_eq!(state.lock().unwrap().requests, vec![request.clone()]);
+            }
+        }
+    }
+
+    #[test]
+    fn device_cable_messages_preserve_malformed_rejected_and_disconnect_errors() {
+        let rejection = protocol::ErrorResponse {
+            code: protocol::ErrorCode::Busy,
+            diagnostic: "test rejection".into(),
+        };
+        for request in device_cable_messages() {
+            for mode in [
+                ReplyMode::Malformed,
+                ReplyMode::Disconnect,
+                ReplyMode::Response(Message::Error(rejection.clone())),
+            ] {
+                let expected = match mode {
+                    ReplyMode::Disconnect => {
+                        Some(DeviceError::Transport(TransportError::Disconnected))
+                    }
+                    ReplyMode::Response(_) => Some(DeviceError::Rejected(rejection.clone())),
+                    _ => None,
+                };
+                let initial_status = status(7, 3, 100);
+                let (transport, state) = FakeTransport::new(initial_status.clone());
+                state.lock().unwrap().reply_modes.push_back(mode);
+                let result = device_cable_request(transport, &initial_status, request.clone());
+                if let Some(expected) = expected {
+                    assert_eq!(result, Err(expected));
+                } else {
+                    assert!(matches!(result, Err(DeviceError::MalformedResponse(_))));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn device_cable_administration_without_networking_writes_nothing() {
+        for request in device_cable_messages().into_iter().skip(3) {
+            let mut initial_status = status(7, 3, 100);
+            initial_status.capabilities &= !protocol::CAPABILITY_NETWORKING;
+            let (transport, state) = FakeTransport::new(initial_status.clone());
+            assert_eq!(
+                device_cable_request(transport, &initial_status, request),
+                Err(DeviceError::MissingCapabilities {
+                    required: protocol::CAPABILITY_NETWORKING,
+                    available: initial_status.capabilities,
+                })
+            );
+            assert!(state.lock().unwrap().requests.is_empty());
+        }
+    }
+
+    #[test]
+    fn stalled_request_reports_disconnect_and_subsequent_calls_fail_immediately() {
+        let released = Arc::new(AtomicBool::new(false));
+        let reading = Arc::new(AtomicBool::new(false));
+        let session = DeviceSession::with_options(
+            StalledTransport {
+                released: Arc::clone(&released),
+                reading: Arc::clone(&reading),
+            },
+            &status(0, 0, 100),
+            SessionOptions {
+                request_timeout: Duration::from_millis(100),
+                ..SessionOptions::default()
+            },
+        );
+        let (cancel, watchdog) = arm_release_watchdog(&released);
+        wait_until_blocked_in_read(&reading);
+        assert_eq!(
+            session.factory_reset(),
+            Err(DeviceError::Transport(TransportError::Disconnected))
+        );
+        assert!(session.is_stalled());
+        let started = Instant::now();
+        assert_eq!(
+            session.factory_reset(),
+            Err(DeviceError::Transport(TransportError::Disconnected))
+        );
+        assert!(started.elapsed() < Duration::from_millis(100));
+        drop(session);
+        drop(cancel);
+        watchdog.join().unwrap();
     }
 
     /// A transport whose `read` blocks and never returns -- behavior some USB

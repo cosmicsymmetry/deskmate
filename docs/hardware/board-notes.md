@@ -1681,6 +1681,8 @@ color/contrast at desk distance.
 
 ## Unpowered-alert fix — hardware re-verification PASSED (2026-08-15)
 
+Retired 2026-09-19: `alert_replay_check` verified the deleted desktop serial host; the historical result below is preserved.
+
 Firmware `m1-113-g05d04ce` on `/dev/cu.usbmodem1101`, main at the alert-hold fix
 (`4206a98`), user observing the panel. Driven by the sequenced harness
 `companion/crates/app-core/examples/alert_replay_check.rs` (15 s pomodoro,
@@ -5264,3 +5266,37 @@ runnable right now: a server-rendered face on the panel at either mounting, the 
 RLE565 transfer size against the 329,740-byte raw frame, the capability word read by name,
 and the OTA download against the -104-byte `.bss` shift. **None of them has been run**;
 this note records only that the link came up.
+
+
+## Serial session subtraction — 2026-09-19
+
+`companion/crates/app-core/examples/alert_replay_check.rs` is retired on owner
+instruction. It was the only remaining consumer of the long-lived serial runtime
+capabilities, verified the desktop serial host deleted in `18a9779` / `64a25aa`,
+and is not among CLAUDE.md's "Hardware verification still owed". Its 2026-08-15
+PASS and the unperformed true-power-loss variant remain historical observations.
+
+Removed with it: serial acknowledged-state replay, event routing and its bounded
+queue, keepalive heartbeats, serial diagnostic counters, automatic timer/config
+revision allocation, and the unused time-sync, timer/config, scene, asset,
+interrupt and activation methods on `DeviceSession`. The minimal reconnect
+transport handoff and idle-read loop remain because removing them would invalidate
+the unchanged reconnect-stall and idle-blocked Drop regressions. Reconnect no
+longer replays state. Shared replay, event and diagnostic types used by the server
+remain intact, as do the other hardware examples.
+
+The CLI's cable path is unchanged code: status, time-sync and push-timer still use
+`DeviceClient`; provision and factory-reset still use `connect_session` and the
+existing worker. Its bounded reply wait, sticky stalled-session marking,
+`Transport(Disconnected)` on a missed reply and bounded, non-joining Drop on a
+blocked worker remain. FakeTransport characterization passed before subtraction
+and covers all five messages, partial I/O, response correlation, ACK validation,
+capability refusal before writes, and unsolicited events around replies.
+
+NO hardware verification of this change was observed (the board was off).
+The next cable session should run `deskmate-cli status` and one provision dry-run
+before trusting it. There is currently no `provision --dry-run` option; the exact
+non-mutating dry-run procedure still needs to be settled before that check. The
+initial status handshake in `connect_session` remains synchronous and outside the
+worker's stall protection; this subtraction does not make connection establishment
+bounded.

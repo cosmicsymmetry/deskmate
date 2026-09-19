@@ -15,6 +15,7 @@ pub struct ReplayState {
 }
 
 impl ReplayState {
+    /// Record replay state only after validating the ACK's request type and revision.
     pub fn remember_success(&mut self, request: &Message) {
         match request {
             Message::TimeSync(sync) => self.time_sync = Some((*sync, Instant::now())),

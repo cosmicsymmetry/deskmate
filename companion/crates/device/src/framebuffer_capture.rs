@@ -4,7 +4,7 @@
 //! than in `protocol`: they are diagnostics compiled out of release firmware,
 //! not part of the frozen wire contract. Keeping the reassembler in one place
 //! also means every hardware harness validates the same request ids, totals,
-//! chunk CRCs, and bounds before trusting a device frame.
+//! chunk CRCs, sequential offsets, and bounds before trusting a device frame.
 
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -92,7 +92,6 @@ pub fn capture_framebuffer<T: Transport>(
         let mut read_buffer = [0u8; 512];
         let deadline = Instant::now() + CAPTURE_TIMEOUT;
         let mut frame_buffer = vec![0u8; FRAME_BYTES];
-        let mut total: Option<u32> = None;
         let mut bytes_received = 0usize;
 
         while bytes_received < FRAME_BYTES {
@@ -137,18 +136,16 @@ pub fn capture_framebuffer<T: Transport>(
                 if crc32c(data) != chunk_crc {
                     return Err(invalid(format!("chunk at offset {offset} failed its CRC")));
                 }
-                match total {
-                    None if chunk_total as usize == FRAME_BYTES => total = Some(chunk_total),
-                    None => {
-                        return Err(invalid(format!(
-                            "capture total {chunk_total} does not match the expected \
-                             {FRAME_BYTES}-byte frame"
-                        )));
-                    }
-                    Some(expected) if expected != chunk_total => {
-                        return Err(invalid("capture total changed mid-stream"));
-                    }
-                    Some(_) => {}
+                if chunk_total as usize != FRAME_BYTES {
+                    return Err(invalid(format!(
+                        "capture total {chunk_total} does not match the expected \
+                         {FRAME_BYTES}-byte frame"
+                    )));
+                }
+                if offset != bytes_received {
+                    return Err(invalid(format!(
+                        "chunk at offset {offset} is not the next expected byte {bytes_received}"
+                    )));
                 }
                 let end = offset.saturating_add(data.len());
                 if end > frame_buffer.len() {
@@ -159,7 +156,7 @@ pub fn capture_framebuffer<T: Transport>(
                     )));
                 }
                 frame_buffer[offset..end].copy_from_slice(data);
-                bytes_received += data.len();
+                bytes_received = end;
                 if bytes_received >= FRAME_BYTES {
                     break;
                 }
@@ -201,9 +198,20 @@ mod tests {
     }
 
     fn capture_responses(request_id: u32, frame: &[u8]) -> Vec<u8> {
+        frame_chunks(&capture_chunks(request_id, frame))
+    }
+
+    fn frame_chunks(chunks: &[Frame]) -> Vec<u8> {
+        chunks
+            .iter()
+            .flat_map(|chunk| encode_frame(chunk).unwrap())
+            .collect()
+    }
+
+    fn capture_chunks(request_id: u32, frame: &[u8]) -> Vec<Frame> {
         const DATA_PER_CHUNK: usize = 1000;
         let total = u32::try_from(frame.len()).unwrap();
-        let mut wire = Vec::new();
+        let mut chunks = Vec::new();
         for (offset, data) in frame.chunks(DATA_PER_CHUNK).enumerate() {
             let offset = u32::try_from(offset * DATA_PER_CHUNK).unwrap();
             let mut payload = Vec::with_capacity(CHUNK_HEADER_LEN + data.len());
@@ -211,11 +219,46 @@ mod tests {
             payload.extend_from_slice(&total.to_le_bytes());
             payload.extend_from_slice(&crc32c(data).to_le_bytes());
             payload.extend_from_slice(data);
-            wire.extend(
-                encode_frame(&Frame::new(CAPTURE_CHUNK_TYPE, request_id, payload)).unwrap(),
-            );
+            chunks.push(Frame::new(CAPTURE_CHUNK_TYPE, request_id, payload));
         }
-        wire
+        chunks
+    }
+
+    #[test]
+    fn a_repeated_chunk_is_rejected() {
+        let request_id = 41;
+        let mut chunks = capture_chunks(request_id, &vec![1; FRAME_BYTES]);
+        chunks.insert(1, chunks[0].clone());
+        let transport = FakeTransport {
+            reads: frame_chunks(&chunks),
+            maximum_read: 73,
+            maximum_write: 3,
+            ..FakeTransport::default()
+        };
+
+        let (_, captured) = capture_framebuffer(DeviceClient::new(transport), request_id);
+        assert!(
+            matches!(captured, Err(CaptureError::Invalid(_))),
+            "a repeated chunk must produce Invalid"
+        );
+        assert!(!captured.unwrap_err().is_timeout());
+    }
+
+    #[test]
+    fn a_skipped_chunk_is_rejected() {
+        let request_id = 41;
+        let mut chunks = capture_chunks(request_id, &vec![1; FRAME_BYTES]);
+        chunks.remove(1);
+        let transport = FakeTransport {
+            reads: frame_chunks(&chunks),
+            maximum_read: 73,
+            maximum_write: 3,
+            ..FakeTransport::default()
+        };
+
+        let (_, captured) = capture_framebuffer(DeviceClient::new(transport), request_id);
+        assert!(!captured.as_ref().unwrap_err().is_timeout());
+        assert!(matches!(captured, Err(CaptureError::Invalid(_))));
     }
 
     #[test]

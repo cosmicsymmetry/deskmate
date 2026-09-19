@@ -200,9 +200,10 @@ impl<T: Transport> DeviceClient<T> {
     }
 
     pub fn push_timer(&mut self, push: PushTimer) -> Result<Ack, DeviceError> {
+        let revision = push.revision;
         match self.request(&Message::PushTimer(push))? {
             Message::Ack(ack)
-                if ack.acknowledged_type == TYPE_PUSH_TIMER && ack.revision.is_some() =>
+                if ack.acknowledged_type == TYPE_PUSH_TIMER && ack.revision == Some(revision) =>
             {
                 Ok(ack)
             }
@@ -393,6 +394,37 @@ mod tests {
         assert_eq!(client.status().unwrap(), status());
         let fake = client.into_transport();
         assert_eq!(fake.written, expected_request);
+    }
+
+    #[test]
+    fn push_timer_requires_the_revision_it_sent() {
+        for revision in [8, 7] {
+            let ack = Ack {
+                acknowledged_type: TYPE_PUSH_TIMER,
+                revision: Some(revision),
+                already_present: None,
+            };
+            let fake = FakeTransport {
+                reads: VecDeque::from([Ok(encode_message(1, &Message::Ack(ack)).unwrap())]),
+                ..FakeTransport::default()
+            };
+            let mut client = DeviceClient::new(fake);
+            let result = client.push_timer(PushTimer {
+                card_id: "timer".into(),
+                revision: 7,
+                total_ms: 60_000,
+                remaining_ms: 30_000,
+                running: false,
+            });
+            assert_eq!(
+                result,
+                if revision == 7 {
+                    Ok(ack)
+                } else {
+                    Err(DeviceError::UnexpectedMessage)
+                }
+            );
+        }
     }
 
     #[test]

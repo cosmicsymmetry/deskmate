@@ -307,6 +307,7 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
     /// hot-swaps ownership mid-session, so this ACK does not mean the device
     /// is networked yet.
     pub fn provision(&self, config: &NetworkConfig) -> Result<(), DeviceError> {
+        ensure_capabilities(protocol::CAPABILITY_NETWORKING, self.capabilities())?;
         self.request_ack(
             Message::NetworkConfig(config.clone()),
             TYPE_NETWORK_CONFIG,
@@ -317,6 +318,7 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
     /// Erase the device's persisted network config, returning it to
     /// factory-fresh local tier on its next boot.
     pub fn factory_reset(&self) -> Result<(), DeviceError> {
+        ensure_capabilities(protocol::CAPABILITY_NETWORKING, self.capabilities())?;
         self.request_ack(Message::FactoryReset, TYPE_FACTORY_RESET, None)
     }
 
@@ -581,6 +583,20 @@ impl<T: Transport> SessionConnection<T> {
         }
     }
 
+    fn transact_acked(&mut self, request: &Message) -> Result<Message, DeviceError> {
+        let response = self.transact(request)?;
+        if matches!(response, Message::Ack(_)) {
+            let revision = match request {
+                Message::ApplyConfig(config) => Some(config.revision),
+                Message::PushTimer(push) => Some(push.revision),
+                Message::PushScene(push) => Some(push.revision),
+                _ => None,
+            };
+            require_ack(&response, request.type_id(), revision)?;
+        }
+        Ok(response)
+    }
+
     fn read_idle(&mut self) -> Result<bool, DeviceError> {
         let mut chunk = [0_u8; 512];
         let count = self.transport.read(&mut chunk)?;
@@ -681,11 +697,7 @@ impl<T: Transport> SessionConnection<T> {
             {
                 sync.unix_seconds = adjusted;
             }
-            require_ack(
-                &self.transact(&Message::TimeSync(sync))?,
-                TYPE_TIME_SYNC,
-                None,
-            )?;
+            self.transact_acked(&Message::TimeSync(sync))?;
         }
 
         let mut config_applied = false;
@@ -697,11 +709,7 @@ impl<T: Transport> SessionConnection<T> {
                         .checked_add(1)
                         .ok_or(DeviceError::RevisionExhausted)?;
                 }
-                require_ack(
-                    &self.transact(&Message::ApplyConfig(config.clone()))?,
-                    TYPE_APPLY_CONFIG,
-                    Some(config.revision),
-                )?;
+                self.transact_acked(&Message::ApplyConfig(config.clone()))?;
                 config_applied = true;
             }
             self.latest_config_revision
@@ -718,29 +726,17 @@ impl<T: Transport> SessionConnection<T> {
                     .checked_add(1)
                     .ok_or(DeviceError::RevisionExhausted)?;
             }
-            require_ack(
-                &self.transact(&Message::PushTimer(push.clone()))?,
-                TYPE_PUSH_TIMER,
-                Some(push.revision),
-            )?;
+            self.transact_acked(&Message::PushTimer(push.clone()))?;
             data_revision = push.revision;
         }
         self.latest_data_revision
             .store(data_revision, Ordering::Release);
 
         if let Some(activation) = &replay.active_card {
-            require_ack(
-                &self.transact(&Message::ActivateCard(activation.clone()))?,
-                TYPE_ACTIVATE_CARD,
-                None,
-            )?;
+            self.transact_acked(&Message::ActivateCard(activation.clone()))?;
         }
         for interrupt in &replay.interrupts {
-            require_ack(
-                &self.transact(&Message::TriggerInterrupt(interrupt.clone()))?,
-                TYPE_TRIGGER_INTERRUPT,
-                None,
-            )?;
+            self.transact_acked(&Message::TriggerInterrupt(interrupt.clone()))?;
         }
         self.replay = replay;
         Ok(())
@@ -775,7 +771,7 @@ fn run_worker<T: Transport + Send + 'static>(
             Ok(WorkerCommand::Shutdown) | Err(TryRecvError::Disconnected) => break,
             Ok(WorkerCommand::Request { message, response }) => {
                 let result = if connected {
-                    let result = connection.transact(&message);
+                    let result = connection.transact_acked(&message);
                     if result.is_ok() {
                         connection.remember_success(&message);
                     }
@@ -1445,6 +1441,38 @@ mod tests {
     }
 
     #[test]
+    fn firmware_without_networking_refuses_cable_operations_before_wire_mutation() {
+        let mut without_networking = status(0, 0, 100);
+        without_networking.capabilities &= !protocol::CAPABILITY_NETWORKING;
+        let (transport, state) = FakeTransport::new(without_networking.clone());
+        let session = DeviceSession::with_options(
+            transport,
+            &without_networking,
+            options(Duration::from_mins(1), 8),
+        );
+        let network_config = NetworkConfig {
+            ssid: "desk-wifi".into(),
+            psk: "hunter2".into(),
+            server_url: "wss://example.invalid/v1/device/link".into(),
+            device_id: "dev-0001".into(),
+            token: "placeholder".into(),
+            utc_offset_minutes: 240,
+            tier: protocol::Tier::Networked,
+        };
+        let expected = Err(DeviceError::MissingCapabilities {
+            required: protocol::CAPABILITY_NETWORKING,
+            available: without_networking.capabilities,
+        });
+        assert_eq!(
+            [session.provision(&network_config), session.factory_reset()],
+            [expected.clone(), expected]
+        );
+        assert!(state.lock().unwrap().requests.iter().all(|request| {
+            !matches!(request, Message::NetworkConfig(_) | Message::FactoryReset)
+        }));
+    }
+
+    #[test]
     fn timeout_and_malformed_response_keep_distinct_error_classes() {
         let (timeout_transport, timeout_state) = FakeTransport::new(status(0, 0, 100));
         timeout_state
@@ -1478,6 +1506,52 @@ mod tests {
             malformed_session.status(),
             Err(DeviceError::MalformedResponse(_))
         ));
+    }
+
+    #[test]
+    fn wrong_config_ack_preserves_acknowledged_replay_after_power_reset() {
+        let (first_transport, first_state) = FakeTransport::new(status(7, 3, 1_000));
+        let session = DeviceSession::with_options(
+            first_transport,
+            &status(7, 3, 1_000),
+            options(Duration::from_mins(1), 8),
+        );
+        let acknowledged_config = config(4);
+        let acknowledged_timer = PushTimer {
+            card_id: "timer".into(),
+            revision: 8,
+            total_ms: 60_000,
+            remaining_ms: 30_000,
+            running: false,
+        };
+        session.apply_config(acknowledged_config.clone()).unwrap();
+        session.push_timer(acknowledged_timer.clone()).unwrap();
+        first_state
+            .lock()
+            .unwrap()
+            .reply_modes
+            .push_back(ReplyMode::Response(Message::Ack(Ack {
+                acknowledged_type: TYPE_APPLY_CONFIG,
+                revision: Some(9),
+                already_present: None,
+            })));
+        assert_eq!(
+            session.apply_config(config(5)),
+            Err(DeviceError::UnexpectedMessage)
+        );
+        assert_eq!(session.status().unwrap(), status(7, 3, 1_000));
+
+        let (second_transport, second_state) = FakeTransport::new(status(0, 0, 50));
+        session
+            .reconnect(second_transport, status(0, 0, 50))
+            .unwrap();
+        assert_eq!(
+            second_state.lock().unwrap().requests,
+            vec![
+                Message::ApplyConfig(acknowledged_config),
+                Message::PushTimer(acknowledged_timer),
+            ]
+        );
     }
 
     #[test]

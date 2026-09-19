@@ -14,7 +14,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use app_core::{DeviceConnection, RuntimeDevice};
 use axum::extract::ws::{Message as WsMessage, WebSocket};
-use device::{DeviceError, ReceivedEvent, SessionDiagnostics, TransportError};
+use device::{
+    DeviceError, ReceivedEvent, ReplayState, SessionDiagnostics, TransportError,
+    session_state::{DiagnosticCounters, require_ack},
+};
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use protocol::{
@@ -201,33 +204,6 @@ impl TransportSlot {
     }
 }
 
-#[derive(Default)]
-struct DiagnosticCounters {
-    keepalives_sent: AtomicU64,
-    reconnects: AtomicU64,
-    duplicate_or_out_of_order_events: AtomicU64,
-    locally_dropped_events: AtomicU64,
-    detected_event_gaps: AtomicU64,
-    malformed_device_frames: AtomicU64,
-    unexpected_device_frames: AtomicU64,
-}
-
-impl DiagnosticCounters {
-    fn snapshot(&self) -> SessionDiagnostics {
-        SessionDiagnostics {
-            keepalives_sent: self.keepalives_sent.load(Ordering::Relaxed),
-            reconnects: self.reconnects.load(Ordering::Relaxed),
-            duplicate_or_out_of_order_events: self
-                .duplicate_or_out_of_order_events
-                .load(Ordering::Relaxed),
-            locally_dropped_events: self.locally_dropped_events.load(Ordering::Relaxed),
-            detected_event_gaps: self.detected_event_gaps.load(Ordering::Relaxed),
-            malformed_device_frames: self.malformed_device_frames.load(Ordering::Relaxed),
-            unexpected_device_frames: self.unexpected_device_frames.load(Ordering::Relaxed),
-        }
-    }
-}
-
 struct EventRouter {
     sender: SyncSender<ReceivedEvent>,
     last_seen_sequence: Option<u64>,
@@ -253,29 +229,7 @@ impl EventRouter {
                 .replay
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if event.kind == protocol::EventKind::Navigation
-                && matches!(
-                    event.action,
-                    protocol::EventAction::NavigatePrevious | protocol::EventAction::NavigateNext
-                )
-                && replay.config.as_ref().is_some_and(|config| {
-                    config
-                        .cards
-                        .iter()
-                        .any(|card| card.card_id == event.card_id)
-                })
-            {
-                replay.active_card = Some(ActivateCard {
-                    card_id: event.card_id.clone(),
-                });
-            }
-            if event.kind == protocol::EventKind::InterruptDismissed
-                && let Some(token) = event.interrupt_token
-            {
-                replay
-                    .interrupts
-                    .retain(|interrupt| interrupt.token != token);
-            }
+            replay.observe_event(&event);
         }
         let missed_before = self.last_queued_sequence.map_or(0, |sequence| {
             event.sequence.saturating_sub(sequence).saturating_sub(1)
@@ -299,15 +253,6 @@ impl EventRouter {
             Err(mpsc::TrySendError::Disconnected(_)) => {}
         }
     }
-}
-
-#[derive(Clone, Default)]
-struct ReplayState {
-    time_sync: Option<(TimeSync, std::time::Instant)>,
-    config: Option<ApplyConfig>,
-    pushes: Vec<PushTimer>,
-    active_card: Option<ActivateCard>,
-    interrupts: Vec<TriggerInterrupt>,
 }
 
 /// Stable attachment point retained beside a device's long-lived runtime.
@@ -458,21 +403,6 @@ impl WebSocketRuntimeDevice {
             .map(|(_, response)| response)
     }
 
-    fn require_ack(
-        response: &Message,
-        acknowledged_type: u8,
-        revision: Option<u32>,
-    ) -> Result<(), DeviceError> {
-        match response {
-            Message::Ack(Ack {
-                acknowledged_type: received_type,
-                revision: received_revision,
-                ..
-            }) if *received_type == acknowledged_type && *received_revision == revision => Ok(()),
-            _ => Err(DeviceError::UnexpectedMessage),
-        }
-    }
-
     fn next_revision(current: u32) -> Result<u32, DeviceError> {
         current.checked_add(1).ok_or(DeviceError::RevisionExhausted)
     }
@@ -482,45 +412,7 @@ impl WebSocketRuntimeDevice {
             .replay
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match request {
-            Message::TimeSync(sync) => replay.time_sync = Some((*sync, std::time::Instant::now())),
-            Message::ApplyConfig(config) => {
-                let changes_live_model = replay.config.as_ref() != Some(config);
-                replay.config = Some(config.clone());
-                if changes_live_model {
-                    replay.pushes.clear();
-                    replay.interrupts.clear();
-                    if replay.active_card.as_ref().is_some_and(|active| {
-                        !config
-                            .cards
-                            .iter()
-                            .any(|card| card.card_id == active.card_id)
-                    }) {
-                        replay.active_card = None;
-                    }
-                }
-            }
-            Message::PushTimer(push) => {
-                replay
-                    .pushes
-                    .retain(|cached| cached.card_id != push.card_id);
-                replay.pushes.push(push.clone());
-                replay.pushes.sort_unstable_by_key(|cached| cached.revision);
-            }
-            Message::ActivateCard(activation) => {
-                replay.active_card = Some(activation.clone());
-            }
-            Message::TriggerInterrupt(interrupt) => {
-                replay
-                    .interrupts
-                    .retain(|cached| cached.token != interrupt.token);
-                replay.interrupts.push(interrupt.clone());
-                replay
-                    .interrupts
-                    .sort_unstable_by_key(|cached| cached.token);
-            }
-            _ => {}
-        }
+        replay.remember_success(request);
     }
 
     fn replay_after_reconnect(
@@ -549,7 +441,7 @@ impl WebSocketRuntimeDevice {
             }
             let (_, response) =
                 self.request_on_generation(Some(generation), Message::TimeSync(sync))?;
-            Self::require_ack(&response, protocol::TYPE_TIME_SYNC, None)?;
+            require_ack(&response, protocol::TYPE_TIME_SYNC, None)?;
         }
 
         let mut config_applied = false;
@@ -565,7 +457,7 @@ impl WebSocketRuntimeDevice {
                     Some(generation),
                     Message::ApplyConfig(config.clone()),
                 )?;
-                Self::require_ack(
+                require_ack(
                     &response,
                     protocol::TYPE_APPLY_CONFIG,
                     Some(config.revision),
@@ -587,7 +479,7 @@ impl WebSocketRuntimeDevice {
             }
             let (_, response) =
                 self.request_on_generation(Some(generation), Message::PushTimer(push.clone()))?;
-            Self::require_ack(&response, protocol::TYPE_PUSH_TIMER, Some(push.revision))?;
+            require_ack(&response, protocol::TYPE_PUSH_TIMER, Some(push.revision))?;
             data_revision = push.revision;
         }
         self.latest_data_revision = data_revision;
@@ -597,14 +489,14 @@ impl WebSocketRuntimeDevice {
                 Some(generation),
                 Message::ActivateCard(activation.clone()),
             )?;
-            Self::require_ack(&response, protocol::TYPE_ACTIVATE_CARD, None)?;
+            require_ack(&response, protocol::TYPE_ACTIVATE_CARD, None)?;
         }
         for interrupt in &replay.interrupts {
             let (_, response) = self.request_on_generation(
                 Some(generation),
                 Message::TriggerInterrupt(interrupt.clone()),
             )?;
-            Self::require_ack(&response, protocol::TYPE_TRIGGER_INTERRUPT, None)?;
+            require_ack(&response, protocol::TYPE_TRIGGER_INTERRUPT, None)?;
         }
 
         *self
@@ -669,7 +561,7 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
     fn time_sync(&mut self, sync: TimeSync) -> Result<(), DeviceError> {
         let request = Message::TimeSync(sync);
         let response = self.connected_request(request.clone())?;
-        Self::require_ack(&response, protocol::TYPE_TIME_SYNC, None)?;
+        require_ack(&response, protocol::TYPE_TIME_SYNC, None)?;
         self.remember_success(&request);
         Ok(())
     }
@@ -689,7 +581,7 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
             cards,
         });
         let response = self.connected_request(request.clone())?;
-        Self::require_ack(&response, protocol::TYPE_APPLY_CONFIG, Some(revision))?;
+        require_ack(&response, protocol::TYPE_APPLY_CONFIG, Some(revision))?;
         self.latest_config_revision = revision;
         self.remember_success(&request);
         Ok(())
@@ -711,7 +603,7 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
             running,
         });
         let response = self.connected_request(request.clone())?;
-        Self::require_ack(&response, protocol::TYPE_PUSH_TIMER, Some(revision))?;
+        require_ack(&response, protocol::TYPE_PUSH_TIMER, Some(revision))?;
         self.latest_data_revision = revision;
         self.remember_success(&request);
         Ok(())
@@ -730,13 +622,13 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
         }
         let revision = push.revision;
         let response = self.connected_request(Message::PushScene(push))?;
-        Self::require_ack(&response, protocol::TYPE_PUSH_SCENE, Some(revision))
+        require_ack(&response, protocol::TYPE_PUSH_SCENE, Some(revision))
     }
 
     fn activate_card(&mut self, card_id: String) -> Result<(), DeviceError> {
         let request = Message::ActivateCard(ActivateCard { card_id });
         let response = self.connected_request(request.clone())?;
-        Self::require_ack(&response, protocol::TYPE_ACTIVATE_CARD, None)?;
+        require_ack(&response, protocol::TYPE_ACTIVATE_CARD, None)?;
         self.remember_success(&request);
         Ok(())
     }
@@ -744,7 +636,7 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
     fn trigger_interrupt(&mut self, interrupt: TriggerInterrupt) -> Result<(), DeviceError> {
         let request = Message::TriggerInterrupt(interrupt);
         let response = self.connected_request(request.clone())?;
-        Self::require_ack(&response, protocol::TYPE_TRIGGER_INTERRUPT, None)?;
+        require_ack(&response, protocol::TYPE_TRIGGER_INTERRUPT, None)?;
         self.remember_success(&request);
         Ok(())
     }
@@ -770,17 +662,17 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
 
     fn send_asset_chunk(&mut self, chunk: AssetChunk) -> Result<(), DeviceError> {
         let response = self.connected_request(Message::AssetChunk(chunk))?;
-        Self::require_ack(&response, protocol::TYPE_ASSET_CHUNK, None)
+        require_ack(&response, protocol::TYPE_ASSET_CHUNK, None)
     }
 
     fn send_asset_commit(&mut self, commit: AssetCommit) -> Result<(), DeviceError> {
         let response = self.connected_request(Message::AssetCommit(commit))?;
-        Self::require_ack(&response, protocol::TYPE_ASSET_COMMIT, None)
+        require_ack(&response, protocol::TYPE_ASSET_COMMIT, None)
     }
 
     fn send_asset_release(&mut self, release: AssetRelease) -> Result<(), DeviceError> {
         let response = self.connected_request(Message::AssetRelease(release))?;
-        Self::require_ack(&response, protocol::TYPE_ASSET_RELEASE, None)
+        require_ack(&response, protocol::TYPE_ASSET_RELEASE, None)
     }
 
     fn try_recv_event(&mut self) -> Option<ReceivedEvent> {
@@ -1021,13 +913,157 @@ fn mark_seen(last_seen_unix_ms: &AtomicU64) {
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use app_core::RuntimeDevice;
-    use device::DeviceError;
-    use protocol::{Ack, Message, OtaState, StatusResponse, Tier, TimeSync, WifiState};
+    use device::{DeviceError, ReplayState};
+    use protocol::{
+        Ack, ActivateCard, ApplyConfig, CardConfig, DeviceEvent, EventAction, EventKind, Message,
+        OtaState, StatusResponse, TapAction, Tier, TimeSync, TriggerInterrupt, WifiState,
+    };
 
-    use super::{PendingRequest, SocketPeer};
+    use super::{EventRouter, PendingRequest, SocketPeer};
+
+    fn event_router(
+        capacity: usize,
+        replay: Arc<Mutex<ReplayState>>,
+    ) -> (EventRouter, mpsc::Receiver<device::ReceivedEvent>) {
+        let (sender, receiver) = mpsc::sync_channel(capacity);
+        let (device, _connector) = super::WebSocketRuntimeDevice::channel("diagnostics".into());
+        (
+            EventRouter {
+                sender,
+                last_seen_sequence: None,
+                last_queued_sequence: None,
+                diagnostics: Arc::clone(&device.diagnostics),
+                replay,
+            },
+            receiver,
+        )
+    }
+
+    fn navigation(sequence: u64, card_id: &str) -> DeviceEvent {
+        DeviceEvent {
+            sequence,
+            kind: EventKind::Navigation,
+            card_id: card_id.into(),
+            action: EventAction::NavigateNext,
+            interrupt_token: None,
+        }
+    }
+
+    fn interrupt(token: u32) -> TriggerInterrupt {
+        TriggerInterrupt {
+            card_id: "timer".into(),
+            token,
+            reason: format!("interrupt-{token}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_navigation_does_not_change_socket_replay_state() {
+        let replay = Arc::new(Mutex::new(ReplayState {
+            config: Some(ApplyConfig {
+                revision: 1,
+                rotation: 90,
+                cards: vec![
+                    CardConfig {
+                        card_id: "timer".into(),
+                        tap_action: TapAction::StartPause,
+                    },
+                    CardConfig {
+                        card_id: "calendar".into(),
+                        tap_action: TapAction::None,
+                    },
+                ],
+            }),
+            active_card: Some(ActivateCard {
+                card_id: "timer".into(),
+            }),
+            ..ReplayState::default()
+        }));
+        let (mut router, _events) = event_router(8, Arc::clone(&replay));
+
+        router.route(navigation(2, "calendar"));
+        router.route(navigation(2, "timer"));
+
+        assert_eq!(
+            replay.lock().unwrap().active_card.as_ref().unwrap().card_id,
+            "calendar"
+        );
+    }
+
+    #[test]
+    fn socket_replay_updates_even_when_the_delivery_queue_is_full() {
+        let replay = Arc::new(Mutex::new(ReplayState {
+            config: Some(ApplyConfig {
+                revision: 1,
+                rotation: 90,
+                cards: vec![
+                    CardConfig {
+                        card_id: "timer".into(),
+                        tap_action: TapAction::StartPause,
+                    },
+                    CardConfig {
+                        card_id: "calendar".into(),
+                        tap_action: TapAction::None,
+                    },
+                ],
+            }),
+            active_card: Some(ActivateCard {
+                card_id: "timer".into(),
+            }),
+            interrupts: vec![interrupt(3), interrupt(5), interrupt(7)],
+            ..ReplayState::default()
+        }));
+        let (mut router, _events) = event_router(1, Arc::clone(&replay));
+        router.route(DeviceEvent {
+            sequence: 1,
+            kind: EventKind::Tap,
+            card_id: "timer".into(),
+            action: EventAction::StartPause,
+            interrupt_token: None,
+        });
+
+        router.route(navigation(2, "calendar"));
+        router.route(DeviceEvent {
+            sequence: 3,
+            kind: EventKind::InterruptDismissed,
+            card_id: "timer".into(),
+            action: EventAction::DismissInterrupt,
+            interrupt_token: Some(5),
+        });
+
+        let replay = replay.lock().unwrap();
+        assert_eq!(replay.active_card.as_ref().unwrap().card_id, "calendar");
+        assert_eq!(
+            replay
+                .interrupts
+                .iter()
+                .map(|cached| cached.token)
+                .collect::<Vec<_>>(),
+            vec![3, 7]
+        );
+    }
+
+    #[test]
+    fn websocket_require_ack_rejects_wrong_type_and_revision() {
+        let response = Message::Ack(Ack {
+            acknowledged_type: protocol::TYPE_PUSH_TIMER,
+            revision: Some(7),
+            already_present: None,
+        });
+
+        assert_eq!(
+            super::require_ack(&response, protocol::TYPE_APPLY_CONFIG, Some(7)),
+            Err(DeviceError::UnexpectedMessage)
+        );
+        assert_eq!(
+            super::require_ack(&response, protocol::TYPE_PUSH_TIMER, Some(8)),
+            Err(DeviceError::UnexpectedMessage)
+        );
+    }
 
     #[test]
     fn remembering_a_later_status_clears_an_older_ota_error() {

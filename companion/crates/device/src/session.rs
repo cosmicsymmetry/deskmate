@@ -6,16 +6,16 @@ use std::time::{Duration, Instant};
 
 use protocol::{
     Ack, ActivateCard, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, AssetRelease, CardConfig,
-    Deframer, DeviceEvent, EventAction, EventKind, Message, NetworkConfig, PushScene, PushTimer,
-    RequestIdAllocator, StatusResponse, TYPE_ACTIVATE_CARD, TYPE_APPLY_CONFIG, TYPE_ASSET_BEGIN,
-    TYPE_ASSET_CHUNK, TYPE_ASSET_COMMIT, TYPE_ASSET_RELEASE, TYPE_FACTORY_RESET,
-    TYPE_NETWORK_CONFIG, TYPE_PUSH_SCENE, TYPE_PUSH_TIMER, TYPE_TIME_SYNC, TYPE_TRIGGER_INTERRUPT,
-    TimeSync, TriggerInterrupt, decode_message, encode_message, expected_response_type,
+    Deframer, DeviceEvent, Message, NetworkConfig, PushScene, PushTimer, RequestIdAllocator,
+    StatusResponse, TYPE_ACTIVATE_CARD, TYPE_APPLY_CONFIG, TYPE_ASSET_BEGIN, TYPE_ASSET_CHUNK,
+    TYPE_ASSET_COMMIT, TYPE_ASSET_RELEASE, TYPE_FACTORY_RESET, TYPE_NETWORK_CONFIG,
+    TYPE_PUSH_SCENE, TYPE_PUSH_TIMER, TYPE_TIME_SYNC, TYPE_TRIGGER_INTERRUPT, TimeSync,
+    TriggerInterrupt, decode_message, encode_message, expected_response_type,
 };
 
 use crate::{
-    ConnectedDevice, DeviceError, SerialTransport, Transport, TransportError, connect,
-    message_error,
+    ConnectedDevice, DeviceError, ReplayState, SerialTransport, Transport, TransportError, connect,
+    message_error, session_state::DiagnosticCounters, session_state::require_ack,
 };
 
 const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(3);
@@ -58,44 +58,6 @@ pub struct ReceivedEvent {
     pub missed_before: u64,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SessionDiagnostics {
-    pub keepalives_sent: u64,
-    pub reconnects: u64,
-    pub duplicate_or_out_of_order_events: u64,
-    pub locally_dropped_events: u64,
-    pub detected_event_gaps: u64,
-    pub malformed_device_frames: u64,
-    pub unexpected_device_frames: u64,
-}
-
-#[derive(Default)]
-struct DiagnosticCounters {
-    keepalives_sent: AtomicU64,
-    reconnects: AtomicU64,
-    duplicate_or_out_of_order_events: AtomicU64,
-    locally_dropped_events: AtomicU64,
-    detected_event_gaps: AtomicU64,
-    malformed_device_frames: AtomicU64,
-    unexpected_device_frames: AtomicU64,
-}
-
-impl DiagnosticCounters {
-    fn snapshot(&self) -> SessionDiagnostics {
-        SessionDiagnostics {
-            keepalives_sent: self.keepalives_sent.load(Ordering::Relaxed),
-            reconnects: self.reconnects.load(Ordering::Relaxed),
-            duplicate_or_out_of_order_events: self
-                .duplicate_or_out_of_order_events
-                .load(Ordering::Relaxed),
-            locally_dropped_events: self.locally_dropped_events.load(Ordering::Relaxed),
-            detected_event_gaps: self.detected_event_gaps.load(Ordering::Relaxed),
-            malformed_device_frames: self.malformed_device_frames.load(Ordering::Relaxed),
-            unexpected_device_frames: self.unexpected_device_frames.load(Ordering::Relaxed),
-        }
-    }
-}
-
 enum WorkerCommand<T> {
     Request {
         message: Message,
@@ -107,15 +69,6 @@ enum WorkerCommand<T> {
         response: SyncSender<Result<(), DeviceError>>,
     },
     Shutdown,
-}
-
-#[derive(Clone, Default)]
-struct ReplayState {
-    time_sync: Option<(TimeSync, Instant)>,
-    config: Option<ApplyConfig>,
-    pushes: Vec<PushTimer>,
-    active_card: Option<ActivateCard>,
-    interrupts: Vec<TriggerInterrupt>,
 }
 
 pub struct DeviceSession<T: Transport + Send + 'static> {
@@ -230,7 +183,7 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         acknowledged_type: u8,
         revision: Option<u32>,
     ) -> Result<(), DeviceError> {
-        SessionConnection::<T>::require_ack(&self.request(message)?, acknowledged_type, revision)
+        require_ack(&self.request(message)?, acknowledged_type, revision)
     }
 
     fn allocate_revision(counter: &AtomicU32) -> Result<u32, DeviceError> {
@@ -417,7 +370,7 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         }
     }
 
-    pub fn diagnostics(&self) -> SessionDiagnostics {
+    pub fn diagnostics(&self) -> crate::SessionDiagnostics {
         self.diagnostics.snapshot()
     }
 
@@ -666,29 +619,7 @@ impl<T: Transport> SessionConnection<T> {
             return;
         }
         self.last_seen_event_sequence = Some(event.sequence);
-        if event.kind == EventKind::Navigation
-            && matches!(
-                event.action,
-                EventAction::NavigatePrevious | EventAction::NavigateNext
-            )
-            && self.replay.config.as_ref().is_some_and(|config| {
-                config
-                    .cards
-                    .iter()
-                    .any(|card| card.card_id == event.card_id)
-            })
-        {
-            self.replay.active_card = Some(ActivateCard {
-                card_id: event.card_id.clone(),
-            });
-        }
-        if event.kind == EventKind::InterruptDismissed
-            && let Some(token) = event.interrupt_token
-        {
-            self.replay
-                .interrupts
-                .retain(|interrupt| interrupt.token != token);
-        }
+        self.replay.observe_event(&event);
         let missed_before = self.last_queued_event_sequence.map_or(0, |sequence| {
             event.sequence.saturating_sub(sequence).saturating_sub(1)
         });
@@ -713,48 +644,15 @@ impl<T: Transport> SessionConnection<T> {
     }
 
     fn remember_success(&mut self, request: &Message) {
+        self.replay.remember_success(request);
         match request {
-            Message::TimeSync(sync) => self.replay.time_sync = Some((*sync, Instant::now())),
             Message::ApplyConfig(config) => {
-                let changes_live_model = self.replay.config.as_ref() != Some(config);
-                self.replay.config = Some(config.clone());
-                if changes_live_model {
-                    self.replay.pushes.clear();
-                    self.replay.interrupts.clear();
-                    if self.replay.active_card.as_ref().is_some_and(|active| {
-                        !config
-                            .cards
-                            .iter()
-                            .any(|card| card.card_id == active.card_id)
-                    }) {
-                        self.replay.active_card = None;
-                    }
-                }
                 self.latest_config_revision
                     .fetch_max(config.revision, Ordering::AcqRel);
             }
             Message::PushTimer(push) => {
-                self.replay
-                    .pushes
-                    .retain(|cached| cached.card_id != push.card_id);
-                self.replay.pushes.push(push.clone());
-                self.replay
-                    .pushes
-                    .sort_unstable_by_key(|cached| cached.revision);
                 self.latest_data_revision
                     .fetch_max(push.revision, Ordering::AcqRel);
-            }
-            Message::ActivateCard(activation) => {
-                self.replay.active_card = Some(activation.clone());
-            }
-            Message::TriggerInterrupt(interrupt) => {
-                self.replay
-                    .interrupts
-                    .retain(|cached| cached.token != interrupt.token);
-                self.replay.interrupts.push(interrupt.clone());
-                self.replay
-                    .interrupts
-                    .sort_unstable_by_key(|cached| cached.token);
             }
             _ => {}
         }
@@ -783,7 +681,7 @@ impl<T: Transport> SessionConnection<T> {
             {
                 sync.unix_seconds = adjusted;
             }
-            Self::require_ack(
+            require_ack(
                 &self.transact(&Message::TimeSync(sync))?,
                 TYPE_TIME_SYNC,
                 None,
@@ -799,7 +697,7 @@ impl<T: Transport> SessionConnection<T> {
                         .checked_add(1)
                         .ok_or(DeviceError::RevisionExhausted)?;
                 }
-                Self::require_ack(
+                require_ack(
                     &self.transact(&Message::ApplyConfig(config.clone()))?,
                     TYPE_APPLY_CONFIG,
                     Some(config.revision),
@@ -820,7 +718,7 @@ impl<T: Transport> SessionConnection<T> {
                     .checked_add(1)
                     .ok_or(DeviceError::RevisionExhausted)?;
             }
-            Self::require_ack(
+            require_ack(
                 &self.transact(&Message::PushTimer(push.clone()))?,
                 TYPE_PUSH_TIMER,
                 Some(push.revision),
@@ -831,14 +729,14 @@ impl<T: Transport> SessionConnection<T> {
             .store(data_revision, Ordering::Release);
 
         if let Some(activation) = &replay.active_card {
-            Self::require_ack(
+            require_ack(
                 &self.transact(&Message::ActivateCard(activation.clone()))?,
                 TYPE_ACTIVATE_CARD,
                 None,
             )?;
         }
         for interrupt in &replay.interrupts {
-            Self::require_ack(
+            require_ack(
                 &self.transact(&Message::TriggerInterrupt(interrupt.clone()))?,
                 TYPE_TRIGGER_INTERRUPT,
                 None,
@@ -846,21 +744,6 @@ impl<T: Transport> SessionConnection<T> {
         }
         self.replay = replay;
         Ok(())
-    }
-
-    fn require_ack(
-        response: &Message,
-        acknowledged_type: u8,
-        revision: Option<u32>,
-    ) -> Result<(), DeviceError> {
-        match response {
-            Message::Ack(ack)
-                if ack.acknowledged_type == acknowledged_type && ack.revision == revision =>
-            {
-                Ok(())
-            }
-            _ => Err(DeviceError::UnexpectedMessage),
-        }
     }
 }
 
@@ -954,7 +837,9 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    use protocol::{EventAction, HeartbeatAck, PROTOCOL_VERSION, TapAction, decode_wire_frame};
+    use protocol::{
+        EventAction, EventKind, HeartbeatAck, PROTOCOL_VERSION, TapAction, decode_wire_frame,
+    };
 
     use super::*;
 
@@ -1205,12 +1090,159 @@ mod tests {
         }
     }
 
+    fn test_connection(
+        event_queue_capacity: usize,
+    ) -> (SessionConnection<FakeTransport>, Receiver<ReceivedEvent>) {
+        let (transport, _) = FakeTransport::new(status(0, 0, 100));
+        let (event_sender, event_receiver) = mpsc::sync_channel(event_queue_capacity);
+        (
+            SessionConnection {
+                transport,
+                deframer: Deframer::new(),
+                request_ids: RequestIdAllocator::new(),
+                request_timeout: Duration::from_millis(250),
+                keepalive_interval: Duration::from_mins(1),
+                last_request_finished: Instant::now(),
+                event_sender,
+                last_seen_event_sequence: None,
+                last_queued_event_sequence: None,
+                latest_data_revision: Arc::new(AtomicU32::new(0)),
+                latest_config_revision: Arc::new(AtomicU32::new(0)),
+                diagnostics: Arc::new(DiagnosticCounters::default()),
+                replay: ReplayState::default(),
+                last_device_uptime_ms: 100,
+            },
+            event_receiver,
+        )
+    }
+
     fn wait_for(predicate: impl Fn() -> bool) {
         let deadline = Instant::now() + Duration::from_millis(500);
         while !predicate() {
             assert!(Instant::now() < deadline, "condition did not become true");
             thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    #[test]
+    fn duplicate_navigation_cannot_change_replay_state() {
+        let (mut connection, _events) = test_connection(8);
+        let mut layout = config(1);
+        layout.cards.push(CardConfig {
+            card_id: "calendar".into(),
+            tap_action: TapAction::None,
+        });
+        connection.replay.config = Some(layout);
+        connection.replay.active_card = Some(ActivateCard {
+            card_id: "timer".into(),
+        });
+        connection.route_event(DeviceEvent {
+            sequence: 2,
+            kind: EventKind::Navigation,
+            card_id: "calendar".into(),
+            action: EventAction::NavigateNext,
+            interrupt_token: None,
+        });
+        connection.route_event(DeviceEvent {
+            sequence: 2,
+            kind: EventKind::Navigation,
+            card_id: "timer".into(),
+            action: EventAction::NavigatePrevious,
+            interrupt_token: None,
+        });
+
+        assert_eq!(connection.replay.active_card.unwrap().card_id, "calendar");
+    }
+
+    #[test]
+    fn full_event_queue_does_not_block_navigation_or_dismissal_replay_updates() {
+        let (mut connection, _events) = test_connection(1);
+        let mut layout = config(1);
+        layout.cards.push(CardConfig {
+            card_id: "calendar".into(),
+            tap_action: TapAction::None,
+        });
+        connection.replay.config = Some(layout);
+        connection.replay.active_card = Some(ActivateCard {
+            card_id: "timer".into(),
+        });
+        connection.replay.interrupts = [3, 5, 7]
+            .into_iter()
+            .map(|token| TriggerInterrupt {
+                card_id: "timer".into(),
+                token,
+                reason: format!("interrupt-{token}"),
+            })
+            .collect();
+        connection.route_event(event(1, EventKind::Tap, None));
+
+        connection.route_event(DeviceEvent {
+            sequence: 2,
+            kind: EventKind::Navigation,
+            card_id: "calendar".into(),
+            action: EventAction::NavigateNext,
+            interrupt_token: None,
+        });
+        connection.route_event(event(3, EventKind::InterruptDismissed, Some(5)));
+
+        assert_eq!(connection.replay.active_card.unwrap().card_id, "calendar");
+        assert_eq!(
+            connection
+                .replay
+                .interrupts
+                .iter()
+                .map(|interrupt| interrupt.token)
+                .collect::<Vec<_>>(),
+            vec![3, 7]
+        );
+        assert_eq!(
+            connection
+                .diagnostics
+                .locally_dropped_events
+                .load(Ordering::Relaxed),
+            2
+        );
+    }
+
+    #[test]
+    fn remember_success_publishes_monotonic_config_and_data_revisions() {
+        let (mut connection, _events) = test_connection(8);
+        connection.remember_success(&Message::ApplyConfig(config(4)));
+        assert_eq!(connection.replay.config.as_ref().unwrap().revision, 4);
+        assert_eq!(connection.latest_config_revision.load(Ordering::Acquire), 4);
+        connection.remember_success(&Message::ApplyConfig(config(2)));
+        assert_eq!(connection.replay.config.as_ref().unwrap().revision, 2);
+        assert_eq!(connection.latest_config_revision.load(Ordering::Acquire), 4);
+
+        for revision in [9, 3] {
+            connection.remember_success(&Message::PushTimer(PushTimer {
+                card_id: "timer".into(),
+                revision,
+                total_ms: 60_000,
+                remaining_ms: 30_000,
+                running: false,
+            }));
+            assert_eq!(connection.replay.pushes[0].revision, revision);
+        }
+        assert_eq!(connection.latest_data_revision.load(Ordering::Acquire), 9);
+    }
+
+    #[test]
+    fn require_ack_rejects_wrong_type_and_revision() {
+        let response = Message::Ack(Ack {
+            acknowledged_type: TYPE_PUSH_TIMER,
+            revision: Some(7),
+            already_present: None,
+        });
+
+        assert_eq!(
+            require_ack(&response, TYPE_APPLY_CONFIG, Some(7)),
+            Err(DeviceError::UnexpectedMessage)
+        );
+        assert_eq!(
+            require_ack(&response, TYPE_PUSH_TIMER, Some(8)),
+            Err(DeviceError::UnexpectedMessage)
+        );
     }
 
     #[test]

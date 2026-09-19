@@ -9,12 +9,15 @@ use protocol::{
 };
 
 pub mod framebuffer_capture;
+mod replay;
 mod session;
+pub mod session_state;
 
+pub use replay::ReplayState;
 pub use session::{
-    ConnectedSession, DEFAULT_EVENT_QUEUE_CAPACITY, DeviceSession, ReceivedEvent,
-    SessionDiagnostics, connect_session,
+    ConnectedSession, DEFAULT_EVENT_QUEUE_CAPACITY, DeviceSession, ReceivedEvent, connect_session,
 };
+pub use session_state::SessionDiagnostics;
 
 const ESPRESSIF_USB_VID: u16 = 0x303a;
 const ESP32_S3_SERIAL_JTAG_PID: u16 = 0x1001;

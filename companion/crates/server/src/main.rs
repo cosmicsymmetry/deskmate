@@ -291,7 +291,12 @@ async fn main() {
     // it after the state has taken ownership.
     let state = ServerState::new(
         admin_token,
-        FirmwareCatalog::new(firmware_dir, firmware_version),
+        FirmwareCatalog::new(firmware_dir, firmware_version).unwrap_or_else(|error| {
+            panic!(
+                "DESKMATE_FIRMWARE_VERSION is invalid ({error}); copy the exact value from \
+                 firmware/version.txt and see deploy/README.md"
+            )
+        }),
         config_dir.clone(),
     );
 

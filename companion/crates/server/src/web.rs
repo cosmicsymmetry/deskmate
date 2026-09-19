@@ -49,7 +49,10 @@ async fn asset(State(root): State<WebRoot>, uri: Uri) -> Response {
         return StatusCode::NOT_FOUND.into_response();
     }
     match safe_join(&root.0, path) {
-        Some(file) if file.is_file() => serve_file(&file, false),
+        Some(file) if file.is_file() => {
+            let is_shell = file == root.0.join("index.html");
+            serve_file(&file, is_shell)
+        }
         _ => serve_file(&root.0.join("index.html"), true),
     }
 }

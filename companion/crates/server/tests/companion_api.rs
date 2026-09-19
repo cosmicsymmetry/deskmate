@@ -78,6 +78,24 @@ async fn json_body(response: reqwest::Response) -> serde_json::Value {
     serde_json::from_str(&text).unwrap_or_else(|error| panic!("body is not JSON ({error}): {text}"))
 }
 
+async fn direct_snapshot(state: &ServerState, device_id: &str) -> serde_json::Value {
+    let response = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/app/{device_id}/snapshot"))
+                .header("authorization", format!("Bearer {ADMIN_TOKEN}"))
+                .body(Body::empty())
+                .expect("snapshot request"),
+        )
+        .await
+        .expect("snapshot response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("snapshot body");
+    serde_json::from_slice(&body).expect("snapshot JSON")
+}
+
 #[tokio::test]
 async fn event_stream_ends_when_shutdown_begins_without_a_socket() {
     use futures_util::{FutureExt as _, StreamExt as _};
@@ -358,6 +376,78 @@ async fn an_unlinked_device_reports_its_stored_configuration_and_says_it_is_disc
     // Nothing is claimed about a device that has not spoken.
     assert!(body["device"]["firmware_version"].is_null());
     assert!(body["device"]["protocol_version"].is_null());
+}
+
+#[tokio::test]
+async fn an_unlinked_device_reports_malformed_saved_settings_without_rewriting_them() {
+    let root = tempfile::tempdir().expect("config root");
+    let state = ServerState::new(
+        ADMIN_TOKEN.to_owned(),
+        FirmwareCatalog::in_memory(),
+        root.path().to_path_buf(),
+    );
+    let device = state.registry().mint().expect("mint device");
+    let path = root.path().join(format!("{}.json", device.device_id));
+    let saved = b"{ definitely not json";
+    std::fs::write(&path, saved).expect("write malformed saved settings");
+
+    let body = direct_snapshot(&state, &device.device_id).await;
+
+    assert_eq!(
+        body["config"],
+        serde_json::to_value(app_core::AppConfig::default()).expect("default config JSON")
+    );
+    assert_eq!(body["persistence"]["kind"], "recoverable-error");
+    assert_eq!(
+        body["persistence"]["message"],
+        "invalid config JSON: key must be a string at line 1 column 3"
+    );
+    assert_eq!(body["has_saved_config"], true);
+    assert_eq!(
+        std::fs::read(path).expect("saved settings after GET"),
+        saved
+    );
+}
+
+#[tokio::test]
+async fn an_unlinked_device_reports_invalid_saved_settings_without_rewriting_them() {
+    let root = tempfile::tempdir().expect("config root");
+    let state = ServerState::new(
+        ADMIN_TOKEN.to_owned(),
+        FirmwareCatalog::in_memory(),
+        root.path().to_path_buf(),
+    );
+    let device = state.registry().mint().expect("mint device");
+    let path = root.path().join(format!("{}.json", device.device_id));
+    let mut invalid =
+        serde_json::to_value(app_core::AppConfig::default()).expect("default config JSON");
+    invalid["cards"][0]["dwell_seconds"] = serde_json::json!(app_core::MIN_DWELL_SECONDS - 1);
+    let parsed: app_core::AppConfig =
+        serde_json::from_value(invalid.clone()).expect("deserializable v10 settings");
+    let expected_issues = parsed.validate().expect_err("invalid settings").issues;
+    let saved = serde_json::to_vec_pretty(&invalid).expect("encode invalid settings");
+    std::fs::write(&path, &saved).expect("write invalid saved settings");
+
+    let body = direct_snapshot(&state, &device.device_id).await;
+
+    assert_eq!(
+        body["config"],
+        serde_json::to_value(app_core::AppConfig::default()).expect("default config JSON")
+    );
+    assert_eq!(body["persistence"]["kind"], "validation-failed");
+    assert_eq!(
+        body["persistence"]["message"],
+        app_core::SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE
+    );
+    assert_eq!(
+        body["persistence"]["issues"],
+        serde_json::to_value(expected_issues).expect("validation issues JSON")
+    );
+    assert_eq!(body["has_saved_config"], true);
+    assert_eq!(
+        std::fs::read(path).expect("saved settings after GET"),
+        saved
+    );
 }
 
 #[tokio::test]
@@ -661,6 +751,72 @@ async fn the_spa_fallback_serves_client_routes_but_never_shadows_the_api() {
         .expect("devices");
     assert_eq!(devices.status(), StatusCode::OK);
     assert_eq!(devices.text().await.expect("body"), "[]");
+}
+
+#[tokio::test]
+async fn the_spa_cache_policy_distinguishes_shell_from_fingerprinted_assets() {
+    let root = tempfile::tempdir().expect("web root");
+    let shell = b"<!doctype html>shell";
+    let asset = b"console.log(1)";
+    std::fs::write(root.path().join("index.html"), shell).expect("write shell");
+    std::fs::create_dir_all(root.path().join("assets")).expect("assets dir");
+    std::fs::write(root.path().join("assets/app-abc123.js"), asset).expect("write asset");
+    let app = app_with_web(ServerState::in_memory(), Some(root.path().to_path_buf()));
+
+    for path in ["/", "/index.html", "/settings/cards"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("shell request"),
+            )
+            .await
+            .expect("shell response");
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        assert_eq!(
+            response
+                .headers()
+                .get("cache-control")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-cache"),
+            "{path} must not cache the deploy-varying shell"
+        );
+        assert_eq!(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("shell body")
+                .as_ref(),
+            shell,
+            "{path} shell body"
+        );
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/assets/app-abc123.js")
+                .body(Body::empty())
+                .expect("asset request"),
+        )
+        .await
+        .expect("asset response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("public, max-age=31536000, immutable")
+    );
+    assert_eq!(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("asset body")
+            .as_ref(),
+        asset
+    );
 }
 
 #[tokio::test]

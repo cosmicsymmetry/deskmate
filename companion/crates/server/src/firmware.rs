@@ -30,6 +30,10 @@ pub struct FirmwareCatalog {
     _temp_dir: Option<tempfile::TempDir>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("firmware version cannot be served as a firmware image path")]
+pub struct InvalidFirmwareVersion;
+
 /// The result of comparing a device's reported version against the catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FirmwareCheck {
@@ -38,13 +42,18 @@ enum FirmwareCheck {
 }
 
 impl FirmwareCatalog {
-    #[must_use]
-    pub fn new(directory: PathBuf, current_version: String) -> Self {
-        Self {
+    pub fn new(
+        directory: PathBuf,
+        current_version: String,
+    ) -> Result<Self, InvalidFirmwareVersion> {
+        if !valid_firmware_version(&current_version) {
+            return Err(InvalidFirmwareVersion);
+        }
+        Ok(Self {
             directory,
             current_version,
             _temp_dir: None,
-        }
+        })
     }
 
     /// A catalog suitable for tests: the current version is the fixed
@@ -113,13 +122,7 @@ impl FirmwareCatalog {
     }
 
     fn image_path(&self, version: &str) -> Option<PathBuf> {
-        if version.is_empty() || version.len() > 32 {
-            return None;
-        }
-        let is_safe = version
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_');
-        if !is_safe || version.contains("..") {
+        if !valid_firmware_version(version) {
             return None;
         }
         // Every character above is ASCII-alphanumeric, '.', '-' or '_', so
@@ -132,6 +135,15 @@ impl FirmwareCatalog {
         }
         Some(self.directory.join(file_name))
     }
+}
+
+fn valid_firmware_version(version: &str) -> bool {
+    !version.is_empty()
+        && version.len() <= protocol::MAX_FIRMWARE_VERSION_LEN
+        && !version.contains("..")
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
 }
 
 #[derive(Debug, Deserialize)]
@@ -218,14 +230,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn constructor_accepts_every_supported_firmware_version_boundary() {
+        for version in [
+            "v2.1.0-proto2".to_string(),
+            "release_1-rc.2".to_string(),
+            "a".repeat(protocol::MAX_FIRMWARE_VERSION_LEN),
+        ] {
+            let catalog = FirmwareCatalog::new(PathBuf::from("/firmware"), version.clone())
+                .expect("supported firmware version");
+            assert!(
+                catalog.image_path(&version).is_some(),
+                "constructor rejected supported version {version:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn constructor_rejects_unservable_firmware_versions() {
+        for version in [
+            String::new(),
+            "a".repeat(protocol::MAX_FIRMWARE_VERSION_LEN + 1),
+            "bad/version".to_string(),
+            r"bad\version".to_string(),
+            "bad..version".to_string(),
+            "vé2".to_string(),
+            "bad\nversion".to_string(),
+        ] {
+            assert!(
+                matches!(
+                    FirmwareCatalog::new(PathBuf::from("/firmware"), version.clone()),
+                    Err(InvalidFirmwareVersion)
+                ),
+                "constructor accepted unservable version {version:?}"
+            );
+        }
+    }
+
+    #[test]
     fn check_reports_up_to_date_for_the_current_version() {
-        let catalog = FirmwareCatalog::new(PathBuf::from("/tmp"), "1.0.0".to_string());
+        let catalog = FirmwareCatalog::new(PathBuf::from("/tmp"), "1.0.0".to_string())
+            .expect("valid version");
         assert_eq!(catalog.check("1.0.0"), FirmwareCheck::UpToDate);
     }
 
     #[test]
     fn check_reports_an_update_for_an_older_version() {
-        let catalog = FirmwareCatalog::new(PathBuf::from("/tmp"), "1.1.0".to_string());
+        let catalog = FirmwareCatalog::new(PathBuf::from("/tmp"), "1.1.0".to_string())
+            .expect("valid version");
         assert_eq!(
             catalog.check("1.0.0"),
             FirmwareCheck::UpdateAvailable {
@@ -237,7 +288,8 @@ mod tests {
 
     #[test]
     fn image_path_rejects_traversal() {
-        let catalog = FirmwareCatalog::new(PathBuf::from("/firmware"), "1.0.0".to_string());
+        let catalog = FirmwareCatalog::new(PathBuf::from("/firmware"), "1.0.0".to_string())
+            .expect("valid version");
         assert!(catalog.image_path("../etc/passwd").is_none());
         assert!(catalog.image_path("..").is_none());
         assert!(catalog.image_path("1.0.0").is_some());
@@ -245,7 +297,8 @@ mod tests {
 
     #[test]
     fn image_path_rejects_an_absolute_override() {
-        let catalog = FirmwareCatalog::new(PathBuf::from("/firmware"), "1.0.0".to_string());
+        let catalog = FirmwareCatalog::new(PathBuf::from("/firmware"), "1.0.0".to_string())
+            .expect("valid version");
         // A naive `directory.join(version)` silently replaces the base when
         // `version` is itself absolute; the allowlist must reject this
         // before it ever reaches `.join()`.

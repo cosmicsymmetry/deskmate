@@ -38,7 +38,9 @@ sudo $EDITOR /etc/deskmate/server.env   # set token and published firmware versi
 `firmware/version.txt` that corresponds to the image published in
 `DESKMATE_FIRMWARE_DIR`; a mismatch can make the bidirectional catalog offer a
 downgrade. The supplied systemd unit and launchd job already source this environment
-file, so no second unit-local value should be added.
+file, so no second unit-local value should be added. Startup also rejects a value that
+cannot name a served firmware image: it must be 1–32 ASCII letters, digits, dots,
+hyphens, or underscores, and it must not contain `..`.
 
 **`DESKMATE_ADMIN_TOKEN` controls the browser-facing operator surface.** Generate it
 with `openssl rand -hex 32` and paste it straight into the file; never type it

@@ -8,6 +8,8 @@
 
 use std::fmt::Write as _;
 
+use crate::oauth::IntegrationHealth;
+
 /// Escapes text for interpolation into element content or a quoted attribute.
 ///
 /// `&` must be replaced FIRST: doing it after the others would re-escape the
@@ -29,8 +31,7 @@ pub(crate) struct DeviceRow {
 
 pub(crate) struct IntegrationRow {
     pub(crate) id: String,
-    pub(crate) health: String,
-    pub(crate) needs_reconnect: bool,
+    pub(crate) health: Option<IntegrationHealth>,
     pub(crate) has_producer_credential: bool,
 }
 
@@ -105,13 +106,15 @@ pub(crate) fn render_dashboard(model: &DashboardModel) -> String {
             "<table><tr><th>Integration</th><th>Health</th><th>Producer</th><th></th></tr>",
         );
         for integration in &model.integrations {
-            let class = if integration.needs_reconnect {
-                "bad"
-            } else if integration.health == "Connected" {
-                "ok"
-            } else {
-                "warn"
+            let class = match integration.health.as_ref() {
+                Some(IntegrationHealth::Connected) => "ok",
+                Some(IntegrationHealth::NeedsReconnect) => "bad",
+                Some(IntegrationHealth::Error(_)) | None => "warn",
             };
+            let health = integration
+                .health
+                .as_ref()
+                .map_or_else(|| "Unknown".to_string(), |health| format!("{health:?}"));
             let id = escape_html(&integration.id);
             let producer = if integration.has_producer_credential {
                 "<span class=\"ok\">issued</span>"
@@ -125,7 +128,7 @@ pub(crate) fn render_dashboard(model: &DashboardModel) -> String {
 <form method=\"post\" action=\"/v1/manage/integrations/{id}/producer\"><button>New producer credential</button></form> \
 <form method=\"post\" action=\"/v1/manage/integrations/{id}/revoke\"><button>Revoke</button></form>\
 </td></tr>",
-                escape_html(&integration.health)
+                escape_html(&health)
             );
         }
         body.push_str("</table>");
@@ -264,8 +267,7 @@ mod tests {
             }],
             integrations: vec![IntegrationRow {
                 id: "google".to_string(),
-                health: "NeedsReconnect".to_string(),
-                needs_reconnect: true,
+                health: Some(IntegrationHealth::NeedsReconnect),
                 has_producer_credential: true,
             }],
             sources: vec![SourceRow {
@@ -282,6 +284,41 @@ mod tests {
         assert!(html.contains("NeedsReconnect"));
         // A disconnected board is the resting state, not an error.
         assert!(html.contains("Not connected"));
+    }
+
+    #[test]
+    fn integration_health_classes_follow_variants_and_escape_details() {
+        for (health, expected_cell) in [
+            (None, "<td class=\"warn\">Unknown</td>"),
+            (
+                Some(IntegrationHealth::Connected),
+                "<td class=\"ok\">Connected</td>",
+            ),
+            (
+                Some(IntegrationHealth::NeedsReconnect),
+                "<td class=\"bad\">NeedsReconnect</td>",
+            ),
+            (
+                Some(IntegrationHealth::Error(
+                    "NeedsReconnect <retry & wait>".to_string(),
+                )),
+                "<td class=\"warn\">Error(&quot;NeedsReconnect &lt;retry &amp; wait&gt;&quot;)</td>",
+            ),
+        ] {
+            let html = render_dashboard(&DashboardModel {
+                devices: Vec::new(),
+                integrations: vec![IntegrationRow {
+                    id: "google".to_string(),
+                    health,
+                    has_producer_credential: false,
+                }],
+                sources: Vec::new(),
+            });
+            assert!(
+                html.contains(expected_cell),
+                "missing {expected_cell}: {html}"
+            );
+        }
     }
 
     #[test]

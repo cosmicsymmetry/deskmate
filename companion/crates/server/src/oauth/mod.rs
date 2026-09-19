@@ -9,4 +9,5 @@ mod token;
 pub mod transport;
 
 pub use routes::IntegrationRuntime;
+pub(crate) use token::IntegrationHealth;
 pub use token::{GoogleOAuthConfig, TokenManager};

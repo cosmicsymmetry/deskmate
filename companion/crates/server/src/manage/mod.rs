@@ -60,12 +60,8 @@ async fn dashboard(
             .integration_ids()
             .into_iter()
             .map(|id| {
-                let health = runtime
-                    .token_manager()
-                    .health(&id)
-                    .map_or_else(|| "Unknown".to_string(), |health| format!("{health:?}"));
+                let health = runtime.token_manager().health(&id);
                 IntegrationRow {
-                    needs_reconnect: health.contains("NeedsReconnect"),
                     has_producer_credential: state.producer_credentials().has_credential(&id),
                     id,
                     health,

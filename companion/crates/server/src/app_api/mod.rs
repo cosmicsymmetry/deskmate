@@ -19,8 +19,8 @@ use std::time::Duration;
 
 use app_core::{
     AppConfig, AppSnapshot, CardField, CardFieldValue, CardSettings, ConnectionState,
-    DeviceSnapshot, PomodoroAction, RuntimeError, RuntimeHandle, SaveReceipt, StoreError,
-    ValidationIssue,
+    DeviceSnapshot, LoadOutcome, PersistenceState, PomodoroAction, RuntimeError, RuntimeHandle,
+    SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE, SaveReceipt, StoreError, ValidationIssue,
 };
 use axum::Json;
 use axum::Router;
@@ -313,9 +313,24 @@ async fn read_snapshot(
     let device_config = state.configs().for_device(&device_id);
     tokio::task::spawn_blocking(move || {
         let has_saved_config = device_config.store.path().exists();
-        let outcome = device_config.store.load();
-        let config = outcome.config().clone();
+        let (config, persistence) = match device_config.store.load() {
+            LoadOutcome::Loaded { config, .. } => (config, PersistenceState::Clean),
+            LoadOutcome::Recovered { config, error, .. } => (
+                config,
+                PersistenceState::RecoverableError {
+                    message: error.to_string(),
+                },
+            ),
+            LoadOutcome::ValidationFailed { config, issues, .. } => (
+                config,
+                PersistenceState::ValidationFailed {
+                    message: SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE.into(),
+                    issues,
+                },
+            ),
+        };
         let mut app = app_core::initial_snapshot(&config, app_core::RuntimeDiagnostics::default());
+        app.persistence = persistence;
         app.device = DeviceSnapshot {
             active_card_id: config.cards.first().map(|card| card.id().to_owned()),
             ..app_core::empty_device(ConnectionState::Disconnected {

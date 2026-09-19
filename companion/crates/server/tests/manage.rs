@@ -1,15 +1,18 @@
 //! Route-level checks for the management surface through in-process
 //! `Router::oneshot` requests.
 
+use std::sync::Arc;
+
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderMap, Request, StatusCode, header};
+use server::oauth::transport::OAuthTransport;
 use server::secrets::IntegrationSecret;
 use server::{ServerState, app};
 use tower::ServiceExt;
 
 mod oauth_support;
 
-use oauth_support::{FakeTransport, integration_state};
+use oauth_support::{FakeTransport, IntegrationFixture, integration_state};
 
 const ADMIN: &str = "in-memory-admin-token";
 const STORED_REFRESH_TOKEN: &str = "stored-refresh-token-value";
@@ -23,6 +26,10 @@ fn stored_grant() -> IntegrationSecret {
         scopes: vec!["calendar.events.readonly".to_string()],
         obtained_at: 0,
     }
+}
+
+fn state_with_stored_grant(transport: Arc<dyn OAuthTransport>) -> IntegrationFixture {
+    integration_state(transport, Some(stored_grant()))
 }
 
 async fn get(state: &ServerState, uri: &str, bearer: Option<&str>) -> (StatusCode, String) {
@@ -183,7 +190,7 @@ async fn the_session_cookie_from_the_form_opens_the_dashboard() {
 #[tokio::test]
 async fn the_dashboard_never_renders_a_stored_credential() {
     // The dashboard reports presence and health, never credential values.
-    let fixture = integration_state(FakeTransport::with(vec![]), Some(stored_grant()));
+    let fixture = state_with_stored_grant(FakeTransport::with(vec![]));
     let (_, body) = get(&fixture.state, "/v1/manage", Some(ADMIN)).await;
     assert!(!body.contains(STORED_REFRESH_TOKEN));
     assert!(!body.contains(STORED_CLIENT_SECRET));
@@ -191,7 +198,7 @@ async fn the_dashboard_never_renders_a_stored_credential() {
 
 #[tokio::test]
 async fn the_dashboard_lists_a_stored_integration_by_id() {
-    let fixture = integration_state(FakeTransport::with(vec![]), Some(stored_grant()));
+    let fixture = state_with_stored_grant(FakeTransport::with(vec![]));
     let (_, body) = get(&fixture.state, "/v1/manage", Some(ADMIN)).await;
     assert!(body.contains("google"));
 }
@@ -229,7 +236,7 @@ async fn connecting_redirects_to_the_providers_consent_page() {
 
 #[tokio::test]
 async fn revoking_from_the_dashboard_redirects_back_to_it() {
-    let fixture = integration_state(FakeTransport::with(vec![]), Some(stored_grant()));
+    let fixture = state_with_stored_grant(FakeTransport::with(vec![]));
     let (status, headers, _) = post_form(
         &fixture.state,
         "/v1/manage/integrations/google/revoke",
@@ -245,7 +252,7 @@ async fn revoking_from_the_dashboard_redirects_back_to_it() {
 async fn minting_shows_the_credential_inline_and_never_in_a_url() {
     // A redirect would carry the value in Location, which reaches browser
     // history and every access log between here and the operator.
-    let fixture = integration_state(FakeTransport::with(vec![]), Some(stored_grant()));
+    let fixture = state_with_stored_grant(FakeTransport::with(vec![]));
     let (status, headers, body) = post_form(
         &fixture.state,
         "/v1/manage/integrations/google/producer",
@@ -266,7 +273,7 @@ async fn a_credential_minted_from_the_dashboard_actually_vends() {
         200,
         r#"{"access_token":"ya29.dashboard-token","expires_in":3600}"#,
     )]);
-    let fixture = integration_state(transport, Some(stored_grant()));
+    let fixture = state_with_stored_grant(transport);
     let (mint_status, _, body) = post_form(
         &fixture.state,
         "/v1/manage/integrations/google/producer",
@@ -292,4 +299,42 @@ async fn a_credential_minted_from_the_dashboard_actually_vends() {
     let body: serde_json::Value = serde_json::from_str(&body).expect("vend response JSON");
     assert_eq!(body["access_token"], "ya29.dashboard-token");
     assert!(body["expires_at"].is_string());
+}
+
+#[tokio::test]
+async fn a_provider_error_that_mentions_needs_reconnect_is_still_warning_health() {
+    let fixture = state_with_stored_grant(FakeTransport::with(vec![(
+        503,
+        r#"{"error":"temporarily_unavailable","error_description":"NeedsReconnect <retry & wait>"}"#,
+    )]));
+    let (mint_status, _, body) = post_form(
+        &fixture.state,
+        "/v1/manage/integrations/google/producer",
+        "",
+        Some(ADMIN),
+    )
+    .await;
+    assert_eq!(mint_status, StatusCode::OK);
+    let token = body
+        .split(|c: char| !c.is_ascii_hexdigit())
+        .find(|candidate| candidate.len() == 64)
+        .expect("a credential on the page");
+
+    let (vend_status, _, _) = post_form(
+        &fixture.state,
+        "/v1/integrations/google/token",
+        "",
+        Some(token),
+    )
+    .await;
+    assert_eq!(vend_status, StatusCode::BAD_GATEWAY);
+
+    let (dashboard_status, dashboard) = get(&fixture.state, "/v1/manage", Some(ADMIN)).await;
+    assert_eq!(dashboard_status, StatusCode::OK);
+    assert!(
+        dashboard.contains(
+            "<td class=\"warn\">Error(&quot;temporarily_unavailable: NeedsReconnect &lt;retry &amp; wait&gt;&quot;)</td>"
+        ),
+        "wrong health cell: {dashboard}"
+    );
 }

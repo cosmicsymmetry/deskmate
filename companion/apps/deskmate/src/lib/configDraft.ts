@@ -80,15 +80,6 @@ export function cardLabel(card: CardSettings): string {
   return cardKindName(card.kind);
 }
 
-/**
- * The owner's words for this card, if they typed any. Null rather than a fallback,
- * because a secondary line repeating the label it sits under is worse than no line.
- */
-export function cardTitle(card: CardSettings): string | null {
-  const typed = card.kind === "pomodoro" ? card.label : card.title;
-  return typed.trim() === "" ? null : typed;
-}
-
 export function cardKindName(kind: AddableCardKind): string {
   switch (kind) {
     case "clock":
@@ -123,7 +114,7 @@ function nextId(prefix: string, used: Set<string>): string {
 export function nextCardName(config: AppConfig, label: string): string {
   const taken = new Set<string>();
   for (const card of config.cards) {
-    const typed = cardTitle(card);
+    const typed = ownerSetName(card);
     if (typed) {
       taken.add(typed);
     }

@@ -447,6 +447,7 @@ export function App() {
             selectedWidgetId={selectedCardId}
             orientation={draft.preferences.orientation}
             dataGeneration={dataGeneration}
+            imageSources={draft.image_sources}
           />
           <LoopRing
             config={draft}

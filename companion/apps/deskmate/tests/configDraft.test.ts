@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test";
 
 import {
   addCard,
+  cardIdentity,
   cardLabel,
   cardMoveFromKey,
   cardsContainerIssues,
-  cardTitle,
   firstRunSteps,
   firstSelectableCard,
   formatDuration,
@@ -67,11 +67,11 @@ function cardsConfig(ids: string[]): AppConfig {
   };
 }
 
-test("a picture card is called Picture, with the owner's words beside it", () => {
+test("a picture card uses its source identity while retaining its frozen title", () => {
   const card: CardSettings = {
     kind: "picture",
     id: "shot",
-    title: "Limits",
+    title: "Frozen legacy title",
     source_id: "limits",
     tap_action: { kind: "none" },
     refresh: { kind: "manual" },
@@ -79,7 +79,8 @@ test("a picture card is called Picture, with the owner's words beside it", () =>
     dwell_seconds: null,
   };
   expect(cardLabel(card)).toBe("Picture");
-  expect(cardTitle(card)).toBe("Limits");
+  expect(cardIdentity(card, [{ id: "limits", name: "Claude limits" }])).toBe("Claude limits");
+  expect(card.title).toBe("Frozen legacy title");
 });
 
 describe("configuration draft helpers", () => {
@@ -564,9 +565,37 @@ describe("automatic card naming", () => {
     expect(nextCardName(config, "Weather")).toBe("Weather 2");
   });
 
-  test("a name typed on a card is respected, not just source names", () => {
+  test("invisible clock and picture titles do not reserve names or get rewritten", () => {
     const config = initialConfig();
-    expect(nextCardName(config, "Desk")).toBe("Desk 2");
+    const clock = config.cards[0];
+    if (clock.kind !== "clock") throw new Error("missing clock fixture");
+    clock.title = "Weather";
+    const picture: CardSettings = {
+      kind: "picture",
+      id: "legacy-picture",
+      title: "Picture",
+      source_id: "legacy-source",
+      tap_action: { kind: "none" },
+      refresh: { kind: "manual" },
+      alert: { kind: "none" },
+      dwell_seconds: null,
+    };
+    config.cards.push(picture);
+    config.image_sources.push({ id: "legacy-source", name: "Different source name" });
+
+    expect(nextCardName(config, "Weather")).toBe("Weather");
+    expect(nextCardName(config, "Picture")).toBe("Picture");
+    expect(clock.title).toBe("Weather");
+    expect(picture.title).toBe("Picture");
+    expect(config.image_sources[0].name).toBe("Different source name");
+  });
+
+  test("a nonblank pomodoro label still reserves its visible name", () => {
+    const config = addCard(initialConfig(), "pomodoro").config;
+    const pomodoro = config.cards.find((card) => card.kind === "pomodoro");
+    if (pomodoro?.kind !== "pomodoro") throw new Error("missing pomodoro fixture");
+    pomodoro.label = "Weather";
+    expect(nextCardName(config, "Weather")).toBe("Weather 2");
   });
 
   test("removing a picture card frees its source, and keeps one another card shares", () => {

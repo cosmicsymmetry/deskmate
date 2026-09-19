@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 
 import { renderCardPreview } from "../lib/backend";
-import type { CardSettings, DisplayOrientation } from "../lib/types";
+import { cardIdentity } from "../lib/configDraft";
+import type { CardSettings, DisplayOrientation, ImageSource } from "../lib/types";
 
 interface DevicePreviewProps {
   cards: CardSettings[];
   selectedWidgetId: string | null;
   orientation: DisplayOrientation;
   dataGeneration: number; // bump when card_data changes; triggers re-render
+  imageSources: ImageSource[];
 }
 
 const LIVE_TEMPLATES = new Set(["clock", "pomodoro"]);
@@ -17,6 +19,7 @@ export function DevicePreview({
   selectedWidgetId,
   orientation,
   dataGeneration,
+  imageSources,
 }: DevicePreviewProps) {
   const widget = cards.find((card) => card.id === selectedWidgetId) ?? cards[0];
   const [frame, setFrame] = useState<{
@@ -81,7 +84,7 @@ export function DevicePreview({
             </p>
           ) : frame?.pngBase64 ? (
             <img
-              alt={`Device preview of ${widget.id}`}
+              alt={`Device preview of ${cardIdentity(widget, imageSources)}`}
               width={448}
               height={368}
               src={`data:image/png;base64,${frame.pngBase64}`}

@@ -760,7 +760,7 @@ fieldset legend,
 
 .loop__entry-name {
   overflow: hidden;
-  flex-shrink: 0;
+  min-width: 0;
   font-size: 0.8rem;
   font-weight: 540;
   white-space: nowrap;

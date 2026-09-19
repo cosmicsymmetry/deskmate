@@ -52,30 +52,76 @@ const scenario = currentScenario();
 let config: AppConfig = mockConfig();
 let network: NetworkSettings = mockNetworkSettings();
 let snapshot: AppSnapshot = mockSnapshot(config);
-let mockFace: FaceDescriptor = {
-  kind: "server-face",
-  label: "Source settings",
-  fields: [
-    {
-      key: "place",
-      label: "Place",
-      type: "text",
-      value: "Dubai",
-      placeholder: "Dubai",
-    },
-    {
-      key: "units",
-      label: "Units",
-      type: "enum",
-      value: "metric",
-      options: [
-        { value: "metric", label: "Metric" },
-        { value: "imperial", label: "Imperial" },
-      ],
-    },
-  ],
-};
+const CREATABLE_FACES: FaceDescriptor[] = [
+  {
+    kind: "weather",
+    label: "Weather",
+    fields: [
+      {
+        key: "location",
+        label: "Location",
+        type: "text",
+        value: "",
+        placeholder: "Dubai",
+      },
+      {
+        key: "units",
+        label: "Units",
+        type: "enum",
+        value: "metric",
+        options: [
+          { value: "metric", label: "Metric" },
+          { value: "imperial", label: "Imperial" },
+        ],
+      },
+    ],
+  },
+  {
+    kind: "rss",
+    label: "RSS feed",
+    fields: [
+      {
+        key: "url",
+        label: "Feed URL",
+        type: "url",
+        value: "",
+        placeholder: "https://example.com/feed.xml",
+      },
+      {
+        key: "title",
+        label: "Title",
+        type: "text",
+        value: "",
+        placeholder: "News",
+      },
+    ],
+  },
+  {
+    kind: "token",
+    label: "Token price",
+    fields: [
+      {
+        key: "coin_id",
+        label: "Coin ID",
+        type: "text",
+        value: "",
+        placeholder: "solana",
+      },
+      {
+        key: "currency",
+        label: "Currency",
+        type: "text",
+        value: "usd",
+        placeholder: "usd",
+      },
+    ],
+  },
+];
 const listeners = new Set<(next: AppSnapshot) => void>();
+
+function cloneFace(face: FaceDescriptor): FaceDescriptor {
+  return JSON.parse(JSON.stringify(face)) as FaceDescriptor;
+}
 
 function applyScenario() {
   switch (scenario) {
@@ -150,16 +196,55 @@ function applyScenario() {
 }
 applyScenario();
 
+const imageSources = new Map(config.image_sources.map((source) => [source.id, { ...source }]));
+const imageSourceFaces = new Map<string, FaceDescriptor>();
+if (scenario === "picture") {
+  const source = config.image_sources[0];
+  const face = cloneFace(CREATABLE_FACES[0]);
+  face.fields[0].value = "Dubai";
+  if (source) imageSourceFaces.set(source.id, face);
+}
+const mintedTokens = new Set<string>();
+let nextSourceNumber = 1;
+
 function publish() {
   snapshot = { ...snapshot, config };
   for (const listener of listeners) listener(snapshot);
 }
 
+function reconcilePomodoros(previousConfig: AppConfig, nextConfig: AppConfig) {
+  const previousSettings = new Map(
+    previousConfig.cards.filter((card) => card.kind === "pomodoro").map((card) => [card.id, card]),
+  );
+  const previousSnapshots = new Map(snapshot.pomodoros.map((timer) => [timer.card_id, timer]));
+  snapshot.pomodoros = nextConfig.cards.flatMap((card) => {
+    if (card.kind !== "pomodoro") return [];
+    const previous = previousSettings.get(card.id);
+    const timer = previousSnapshots.get(card.id);
+    if (
+      previous?.kind === "pomodoro" &&
+      previous.label === card.label &&
+      previous.duration_seconds === card.duration_seconds &&
+      timer
+    ) {
+      return [timer];
+    }
+    return [
+      {
+        card_id: card.id,
+        state: "idle" as const,
+        duration_seconds: card.duration_seconds,
+        remaining_seconds: card.duration_seconds,
+      },
+    ];
+  });
+}
+
 function imageSourceDescriptors(): ImageSourceDescriptor[] {
-  return config.image_sources.map((source, index) => ({
-    ...source,
-    face: scenario === "picture" && index === 0 ? mockFace : null,
-  }));
+  return Array.from(imageSources.values(), (source) => {
+    const face = imageSourceFaces.get(source.id);
+    return { ...source, face: face ? cloneFace(face) : null };
+  });
 }
 
 // A deliberately partial re-implementation of the backend's rules: enough that every
@@ -212,9 +297,15 @@ function validate(draft: AppConfig): DraftValidation {
 // A running pomodoro ticks so the preview and the timer complication move, which is
 // the only way to review motion and tabular-numeral behaviour without hardware.
 window.setInterval(() => {
-  const timer = snapshot.pomodoros[0];
-  if (timer && timer.state === "running" && timer.remaining_seconds > 0) {
-    timer.remaining_seconds -= 1;
+  let changed = false;
+  for (const timer of snapshot.pomodoros) {
+    if (timer.state === "running" && timer.remaining_seconds > 0) {
+      timer.remaining_seconds -= 1;
+      if (timer.remaining_seconds === 0) timer.state = "completed";
+      changed = true;
+    }
+  }
+  if (changed) {
     snapshot.card_data = mockCardData();
     publish();
   }
@@ -231,18 +322,38 @@ export function getNetworkSettings(): Promise<NetworkSettings> {
   return delay(network);
 }
 
-export function mintImageSource(_name: string, _faceKind?: string): Promise<MintedImageSource> {
-  const sourceNumber = config.image_sources.length + 1;
-  const token = `dev-picture-token-${sourceNumber}`;
+export function mintImageSource(name: string, faceKind?: string): Promise<MintedImageSource> {
+  const face =
+    faceKind === undefined
+      ? undefined
+      : CREATABLE_FACES.find((candidate) => candidate.kind === faceKind);
+  if (faceKind !== undefined && !face) {
+    return Promise.reject({
+      category: "invalid-payload",
+      message: `Unknown face kind "${faceKind}".`,
+    });
+  }
+
+  let sourceId: string;
+  let token: string;
+  do {
+    sourceId = `picture-source-${nextSourceNumber}`;
+    token = `dev-picture-token-${nextSourceNumber}`;
+    nextSourceNumber += 1;
+  } while (imageSources.has(sourceId) || mintedTokens.has(token));
+
+  imageSources.set(sourceId, { id: sourceId, name });
+  mintedTokens.add(token);
+  if (face) imageSourceFaces.set(sourceId, cloneFace(face));
   return delay({
-    source_id: `picture-source-${sourceNumber}`,
+    source_id: sourceId,
     token,
     push_url: `${network.server_url.replace(/\/$/, "")}/v1/images/${token}`,
   });
 }
 
-export async function listCreatableFaces(): Promise<FaceDescriptor[]> {
-  throw { category: "not-found", message: "mock backend has no operation `list_creatable_faces`" };
+export function listCreatableFaces(): Promise<FaceDescriptor[]> {
+  return delay(CREATABLE_FACES.map(cloneFace));
 }
 
 export function listImageSources(): Promise<ImageSourceDescriptor[]> {
@@ -253,17 +364,25 @@ export async function updateImageSourceFace(
   sourceId: string,
   fields: Record<string, string>,
 ): Promise<FaceDescriptor> {
-  if (!config.image_sources.some((source) => source.id === sourceId)) {
+  if (!imageSources.has(sourceId)) {
     throw { category: "not-found", message: "This picture source no longer exists." };
   }
-  mockFace = {
-    ...mockFace,
-    fields: mockFace.fields.map((field) => ({
+  const face = imageSourceFaces.get(sourceId);
+  if (!face) {
+    throw {
+      category: "invalid-payload",
+      message: "This picture source has no configurable face.",
+    };
+  }
+  const updated = {
+    ...face,
+    fields: face.fields.map((field) => ({
       ...field,
       value: fields[field.key] ?? field.value,
     })),
   };
-  return delay(mockFace);
+  imageSourceFaces.set(sourceId, updated);
+  return delay(cloneFace(updated));
 }
 
 export function validateConfigDraft(draft: AppConfig): Promise<DraftValidation> {
@@ -271,7 +390,16 @@ export function validateConfigDraft(draft: AppConfig): Promise<DraftValidation> 
 }
 
 export function saveConfig(draft: AppConfig): Promise<ConfigApplyResult> {
-  config = JSON.parse(JSON.stringify(draft)) as AppConfig;
+  const nextConfig = JSON.parse(JSON.stringify(draft)) as AppConfig;
+  reconcilePomodoros(config, nextConfig);
+  config = nextConfig;
+  const retained = new Set(nextConfig.image_sources.map((source) => source.id));
+  for (const sourceId of imageSources.keys()) {
+    if (!retained.has(sourceId)) {
+      imageSources.delete(sourceId);
+      imageSourceFaces.delete(sourceId);
+    }
+  }
   try {
     publish();
   } catch (error) {
@@ -291,14 +419,29 @@ export async function resumePushing(): Promise<void> {
   return delay(undefined);
 }
 
-export async function controlPomodoro(_cardId: string, action: PomodoroAction): Promise<void> {
-  const timer = snapshot.pomodoros[0];
-  if (timer) {
-    if (action === "start") timer.state = "running";
-    if (action === "pause") timer.state = "paused";
-    if (action === "reset") {
+export async function controlPomodoro(cardId: string, action: PomodoroAction): Promise<void> {
+  const timer = snapshot.pomodoros.find((candidate) => candidate.card_id === cardId);
+  if (!timer) {
+    throw { category: "device", message: `UnknownCard { card_id: "${cardId}" }` };
+  }
+  switch (action) {
+    case "start":
+      if (timer.state === "idle" || timer.state === "paused") timer.state = "running";
+      break;
+    case "pause":
+      if (timer.state === "running") timer.state = "paused";
+      break;
+    case "toggle":
+      if (timer.state === "running") timer.state = "paused";
+      else if (timer.state === "idle" || timer.state === "paused") timer.state = "running";
+      break;
+    case "reset":
       timer.state = "idle";
       timer.remaining_seconds = timer.duration_seconds;
+      break;
+    default: {
+      const exhaustive: never = action;
+      throw new Error(`Unhandled pomodoro action: ${exhaustive}`);
     }
   }
   publish();

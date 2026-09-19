@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 
 import { mockConfig } from "../src/dev/fixture";
-import type { AppSnapshot } from "../src/lib/types";
+import type { AppSnapshot, FaceDescriptor } from "../src/lib/types";
 
 let backend: typeof import("../src/dev/backendClient");
 let now = 0;
@@ -254,54 +254,351 @@ describe("mock backend contract", () => {
     expect(published).toHaveLength(1);
   });
 
-  test("keeps the missing face-list operation rejection", async () => {
-    await expect(backend.listCreatableFaces()).rejects.toEqual({
+  test("discovers creatable faces and returns defensive clones", async () => {
+    const expected: FaceDescriptor[] = [
+      {
+        kind: "weather",
+        label: "Weather",
+        fields: [
+          {
+            type: "text",
+            key: "location",
+            label: "Location",
+            value: "",
+            placeholder: "Dubai",
+          },
+          {
+            type: "enum",
+            key: "units",
+            label: "Units",
+            value: "metric",
+            options: [
+              { value: "metric", label: "Metric" },
+              { value: "imperial", label: "Imperial" },
+            ],
+          },
+        ],
+      },
+      {
+        kind: "rss",
+        label: "RSS feed",
+        fields: [
+          {
+            type: "url",
+            key: "url",
+            label: "Feed URL",
+            value: "",
+            placeholder: "https://example.com/feed.xml",
+          },
+          {
+            type: "text",
+            key: "title",
+            label: "Title",
+            value: "",
+            placeholder: "News",
+          },
+        ],
+      },
+      {
+        kind: "token",
+        label: "Token price",
+        fields: [
+          {
+            type: "text",
+            key: "coin_id",
+            label: "Coin ID",
+            value: "",
+            placeholder: "solana",
+          },
+          {
+            type: "text",
+            key: "currency",
+            label: "Currency",
+            value: "usd",
+            placeholder: "usd",
+          },
+        ],
+      },
+    ];
+    const discovered = await finish(backend.listCreatableFaces());
+    expect(discovered).toEqual(expected);
+    discovered[0].label = "mutated";
+    discovered[0].fields[0].value = "mutated";
+    expect(await finish(backend.listCreatableFaces())).toEqual(expected);
+  });
+
+  test("mints named sources immediately with distinct identities and independent faces", async () => {
+    await finish(backend.saveConfig(mockConfig()), 350);
+    const weather = await finish(backend.mintImageSource("My weather", "weather"));
+    const feed = await finish(backend.mintImageSource("My feed", "rss"));
+    expect(weather.source_id).not.toBe(feed.source_id);
+    expect(weather.token).not.toBe(feed.token);
+    expect(weather.push_url).toEndWith(`/v1/images/${weather.token}`);
+    expect(feed.push_url).toEndWith(`/v1/images/${feed.token}`);
+
+    const listed = await finish(backend.listImageSources());
+    expect(listed.find((source) => source.id === weather.source_id)).toMatchObject({
+      name: "My weather",
+      face: { kind: "weather" },
+    });
+    expect(listed.find((source) => source.id === feed.source_id)).toMatchObject({
+      name: "My feed",
+      face: { kind: "rss" },
+    });
+
+    const updatedWeather = await finish(
+      backend.updateImageSourceFace(weather.source_id, { location: "Tbilisi" }),
+    );
+    const updatedFeed = await finish(
+      backend.updateImageSourceFace(feed.source_id, {
+        url: "https://example.com/news.xml",
+        title: "Desk news",
+      }),
+    );
+    expect(updatedWeather.fields.map((field) => field.value)).toEqual(["Tbilisi", "metric"]);
+    expect(updatedFeed.fields.map((field) => field.value)).toEqual([
+      "https://example.com/news.xml",
+      "Desk news",
+    ]);
+
+    updatedWeather.fields[0].value = "mutated";
+    const relisted = await finish(backend.listImageSources());
+    expect(
+      relisted
+        .find((source) => source.id === weather.source_id)
+        ?.face?.fields.map((field) => field.value),
+    ).toEqual(["Tbilisi", "metric"]);
+    expect(
+      relisted
+        .find((source) => source.id === feed.source_id)
+        ?.face?.fields.map((field) => field.value),
+    ).toEqual(["https://example.com/news.xml", "Desk news"]);
+  });
+
+  test("rejects unknown face kinds transactionally and reconciles sources on save", async () => {
+    await finish(backend.saveConfig(mockConfig()), 350);
+    const before = await finish(backend.listImageSources());
+    await expect(backend.mintImageSource("Unknown", "not-a-face")).rejects.toEqual({
+      category: "invalid-payload",
+      message: 'Unknown face kind "not-a-face".',
+    });
+    expect(await finish(backend.listImageSources())).toEqual(before);
+
+    const kept = await finish(backend.mintImageSource("Kept", "token"));
+    const removed = await finish(backend.mintImageSource("Removed", "weather"));
+    const draft = mockConfig();
+    draft.image_sources.push({ id: kept.source_id, name: "Kept" });
+    await finish(backend.saveConfig(draft), 350);
+    const after = await finish(backend.listImageSources());
+    expect(after.some((source) => source.id === kept.source_id)).toBe(true);
+    expect(after.some((source) => source.id === removed.source_id)).toBe(false);
+    await expect(backend.updateImageSourceFace(removed.source_id, {})).rejects.toEqual({
       category: "not-found",
-      message: "mock backend has no operation `list_creatable_faces`",
+      message: "This picture source no longer exists.",
     });
   });
 
-  test("minting does not add a source or distinguish face kinds", async () => {
+  test("rejects an explicitly empty face kind without minting a source", async () => {
+    await finish(backend.saveConfig(mockConfig()), 350);
     const before = await finish(backend.listImageSources());
-    const first = await finish(backend.mintImageSource("First", "weather"));
-    expect(await finish(backend.mintImageSource("Second"))).toEqual(first);
-    expect(first).toEqual({
-      source_id: "picture-source-2",
-      token: "dev-picture-token-2",
-      push_url: "https://deskmate.rodi.one/v1/images/dev-picture-token-2",
+    let rejection: unknown;
+    try {
+      await finish(backend.mintImageSource("Empty kind probe", ""));
+    } catch (error) {
+      rejection = error;
+    }
+    expect(rejection).toEqual({
+      category: "invalid-payload",
+      message: 'Unknown face kind "".',
     });
     expect(await finish(backend.listImageSources())).toEqual(before);
   });
 
-  test("controls the first timer regardless of id, leaves toggle unchanged, and publishes", async () => {
-    const published: AppSnapshot[] = [];
-    cleanup.push(await backend.listenToAppState((next) => published.push(next)));
-    for (const [action, state] of [
-      ["pause", "paused"],
-      ["toggle", "paused"],
-      ["start", "running"],
-      ["reset", "idle"],
-    ] as const) {
-      const count = published.length;
-      const pending = backend.controlPomodoro("missing", action);
-      expect(published).toHaveLength(count + 1);
-      expect(published.at(-1)?.pomodoros[0].state).toBe(state);
-      expect(timers.map((timer) => timer.at - now)).toEqual([90]);
-      await finish(pending);
-    }
-    const timer = published.at(-1)?.pomodoros[0];
-    expect(timer?.remaining_seconds).toBe(timer?.duration_seconds);
-  });
-
-  test("updates known face fields and rejects a missing source", async () => {
-    const face = await finish(
-      backend.updateImageSourceFace("studio", { place: "Tbilisi", unknown: "ignored" }),
-    );
-    expect(face.fields.map((field) => field.value)).toEqual(["Tbilisi", "metric"]);
+  test("rejects updates for external and missing sources", async () => {
+    await finish(backend.saveConfig(mockConfig()), 350);
+    await expect(backend.updateImageSourceFace("studio", {})).rejects.toEqual({
+      category: "invalid-payload",
+      message: "This picture source has no configurable face.",
+    });
     await expect(backend.updateImageSourceFace("missing", {})).rejects.toEqual({
       category: "not-found",
       message: "This picture source no longer exists.",
     });
-    expect((await finish(backend.listImageSources()))[0].face).toBeNull();
+  });
+
+  test("preserves the picture scenario's editable face when seeding source state", async () => {
+    const previousUrl = window.location.href;
+    window.location.href = "http://localhost/?scenario=picture";
+    try {
+      const modulePath = "../src/dev/mockBackend.ts?picture-face-regression";
+      const pictureBackend: typeof import("../src/dev/mockBackend") = await import(modulePath);
+      const sources = await finish(pictureBackend.listImageSources());
+      expect(sources).toHaveLength(1);
+      expect(sources[0]).toMatchObject({
+        id: "claude-limits",
+        name: "Claude usage",
+        face: { kind: "weather" },
+      });
+      expect(sources[0].face?.fields.map((field) => field.value)).toEqual(["Dubai", "metric"]);
+    } finally {
+      window.location.href = previousUrl;
+    }
+  });
+
+  test("targets pomodoro actions by card id with exhaustive state semantics", async () => {
+    await backend.signIn("token");
+    const draft = mockConfig();
+    const first = draft.cards.find((card) => card.kind === "pomodoro");
+    if (first?.kind !== "pomodoro") throw new Error("missing timer fixture");
+    const second = {
+      ...first,
+      id: "pomodoro-two",
+      label: "Second timer",
+      duration_seconds: 600,
+    };
+    draft.cards.push(second);
+    await finish(backend.saveConfig(draft), 350);
+    const firstState = (await finish(backend.getAppSnapshot())).pomodoros.find(
+      (timer) => timer.card_id === "pomodoro",
+    )?.state;
+
+    const published: AppSnapshot[] = [];
+    cleanup.push(await backend.listenToAppState((next) => published.push(next)));
+    await finish(backend.controlPomodoro("pomodoro-two", "start"));
+    expect(
+      published.at(-1)?.pomodoros.find((timer) => timer.card_id === "pomodoro-two")?.state,
+    ).toBe("running");
+    expect(published.at(-1)?.pomodoros.find((timer) => timer.card_id === "pomodoro")?.state).toBe(
+      firstState,
+    );
+    await finish(backend.controlPomodoro("pomodoro-two", "pause"));
+    expect(
+      published.at(-1)?.pomodoros.find((timer) => timer.card_id === "pomodoro-two")?.state,
+    ).toBe("paused");
+    await finish(backend.controlPomodoro("pomodoro-two", "toggle"));
+    expect(
+      published.at(-1)?.pomodoros.find((timer) => timer.card_id === "pomodoro-two")?.state,
+    ).toBe("running");
+    await finish(backend.controlPomodoro("pomodoro-two", "toggle"));
+    expect(
+      published.at(-1)?.pomodoros.find((timer) => timer.card_id === "pomodoro-two")?.state,
+    ).toBe("paused");
+    await finish(backend.controlPomodoro("pomodoro-two", "reset"));
+    const reset = published.at(-1)?.pomodoros.find((timer) => timer.card_id === "pomodoro-two");
+    expect(reset).toMatchObject({ state: "idle", duration_seconds: 600, remaining_seconds: 600 });
+
+    const beforeUnknown = JSON.parse(
+      JSON.stringify((await finish(backend.getAppSnapshot())).pomodoros),
+    );
+    const publicationCount = published.length;
+    await expect(backend.controlPomodoro("missing", "start")).rejects.toEqual({
+      category: "device",
+      message: 'UnknownCard { card_id: "missing" }',
+    });
+    expect(published).toHaveLength(publicationCount);
+    expect((await finish(backend.getAppSnapshot())).pomodoros).toEqual(beforeUnknown);
+  });
+
+  test("reconciles pomodoros across unchanged, edited, added, and removed cards", async () => {
+    await backend.signIn("token");
+    const draft = mockConfig();
+    const first = draft.cards.find((card) => card.kind === "pomodoro");
+    if (first?.kind !== "pomodoro") throw new Error("missing timer fixture");
+    const second = {
+      ...first,
+      id: "pomodoro-two",
+      label: "Second timer",
+      duration_seconds: 600,
+    };
+    draft.cards.push(second);
+    await finish(backend.saveConfig(draft), 350);
+    await finish(backend.controlPomodoro("pomodoro-two", "start"));
+    await finish(backend.controlPomodoro("pomodoro", "pause"));
+
+    await finish(backend.saveConfig(draft), 350);
+    let snapshots = (await finish(backend.getAppSnapshot())).pomodoros;
+    expect(snapshots.find((timer) => timer.card_id === "pomodoro")?.state).toBe("paused");
+    expect(snapshots.find((timer) => timer.card_id === "pomodoro-two")?.state).toBe("running");
+
+    first.label = "Edited label";
+    second.duration_seconds = 900;
+    await finish(backend.saveConfig(draft), 350);
+    snapshots = (await finish(backend.getAppSnapshot())).pomodoros;
+    expect(snapshots.find((timer) => timer.card_id === "pomodoro")).toMatchObject({
+      state: "idle",
+      duration_seconds: 1500,
+      remaining_seconds: 1500,
+    });
+    expect(snapshots.find((timer) => timer.card_id === "pomodoro-two")).toMatchObject({
+      state: "idle",
+      duration_seconds: 900,
+      remaining_seconds: 900,
+    });
+
+    draft.cards = draft.cards.filter((card) => card.id !== "pomodoro");
+    const third = { ...second, id: "pomodoro-three", label: "New timer" };
+    draft.cards.push(third);
+    await finish(backend.saveConfig(draft), 350);
+    snapshots = (await finish(backend.getAppSnapshot())).pomodoros;
+    expect(snapshots.map((timer) => timer.card_id)).toEqual(["pomodoro-two", "pomodoro-three"]);
+    expect(snapshots.find((timer) => timer.card_id === "pomodoro-three")).toMatchObject({
+      state: "idle",
+      duration_seconds: 900,
+      remaining_seconds: 900,
+    });
+  });
+
+  test("ticks every running pomodoro, completes at zero, and publishes once", async () => {
+    const ticks: (() => void)[] = [];
+    const browserWindow: Window = window;
+    const interval = spyOn(browserWindow, "setInterval").mockImplementation((handler) => {
+      ticks.push(() => (handler as () => void)());
+      return ticks.length;
+    });
+    try {
+      const modulePath = "../src/dev/mockBackend.ts?pomodoro-tick-regression";
+      const tickingBackend: typeof import("../src/dev/mockBackend") = await import(modulePath);
+      expect(ticks).toHaveLength(1);
+      const draft = mockConfig();
+      const first = draft.cards.find((card) => card.kind === "pomodoro");
+      if (first?.kind !== "pomodoro") throw new Error("missing timer fixture");
+      first.duration_seconds = 1;
+      const second = { ...first, id: "pomodoro-two", label: "Second timer" };
+      draft.cards.push(second);
+      await finish(tickingBackend.saveConfig(draft), 350);
+      await finish(tickingBackend.controlPomodoro("pomodoro", "start"));
+      await finish(tickingBackend.controlPomodoro("pomodoro-two", "start"));
+      const published: AppSnapshot[] = [];
+      cleanup.push(await tickingBackend.listenToAppState((next) => published.push(next)));
+
+      ticks[0]();
+      expect(published).toHaveLength(1);
+      expect(published[0].pomodoros).toEqual([
+        { card_id: "pomodoro", state: "completed", duration_seconds: 1, remaining_seconds: 0 },
+        {
+          card_id: "pomodoro-two",
+          state: "completed",
+          duration_seconds: 1,
+          remaining_seconds: 0,
+        },
+      ]);
+
+      for (const action of ["start", "pause", "toggle"] as const) {
+        await finish(tickingBackend.controlPomodoro("pomodoro", action));
+        expect(
+          (await finish(tickingBackend.mockGetAppSnapshot())).pomodoros.find(
+            (timer) => timer.card_id === "pomodoro",
+          )?.state,
+        ).toBe("completed");
+      }
+      await finish(tickingBackend.controlPomodoro("pomodoro", "reset"));
+      expect(
+        (await finish(tickingBackend.mockGetAppSnapshot())).pomodoros.find(
+          (timer) => timer.card_id === "pomodoro",
+        ),
+      ).toMatchObject({ state: "idle", remaining_seconds: 1 });
+    } finally {
+      interval.mockRestore();
+    }
   });
 });

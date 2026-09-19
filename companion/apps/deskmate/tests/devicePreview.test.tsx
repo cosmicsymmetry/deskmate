@@ -4,10 +4,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { DevicePreview } from "../src/components/DevicePreview";
 
-import type { CardSettings, PreviewFrame } from "../src/lib/types";
+import type { CardSettings, ImageSource, PreviewFrame } from "../src/lib/types";
 
 import { backendMocks, resetBackendMocks } from "./support/backendMock";
-import { clockCard, pictureCard } from "./support/fixtures";
+import { clockCard, pictureCard, pomodoroCard } from "./support/fixtures";
 import { installDomLifecycle, renderPreviewInto, waitFor } from "./support/dom";
 import { installHttpLifecycle } from "./support/http";
 
@@ -19,6 +19,7 @@ afterEach(resetBackendMocks);
 async function mountPreview(
   card: CardSettings,
   dataGeneration = 0,
+  imageSources: ImageSource[] = [],
 ): Promise<Awaited<ReturnType<typeof mount>>> {
   const { container, root, cleanup } = await mount();
   await renderPreviewInto(
@@ -28,12 +29,13 @@ async function mountPreview(
       selectedWidgetId={card.id}
       orientation="landscape"
       dataGeneration={dataGeneration}
+      imageSources={imageSources}
     />,
   );
   return { container, root, cleanup };
 }
 
-test("renders the device's own pixels as an img when the preview request resolves", async () => {
+test("renders the device's own pixels with the card identity while requesting its wire id", async () => {
   backendMocks.previewImpl = async (cardId) => {
     expect(cardId).toBe("upnext");
     return { png_base64: "Zmlyc3QtZnJhbWU=", sample: false, state: null };
@@ -43,6 +45,7 @@ test("renders the device's own pixels as an img when the preview request resolve
     const img = container.querySelector("img");
     expect(img).not.toBeNull();
     expect(img?.getAttribute("src")).toBe("data:image/png;base64,Zmlyc3QtZnJhbWU=");
+    expect(img?.getAttribute("alt")).toBe("Device preview of Clock");
   });
   expect(container.querySelector(".stage__badge")).toBeNull();
   await cleanup();
@@ -108,6 +111,7 @@ test("re-requests the preview when dataGeneration bumps", async () => {
       selectedWidgetId={card.id}
       orientation="landscape"
       dataGeneration={1}
+      imageSources={[]}
     />,
   );
   await waitFor(() => expect(calls).toBe(2));
@@ -149,6 +153,7 @@ test("keeps a stale frame on screen while a superseding request is in flight, th
       selectedWidgetId="second"
       orientation="landscape"
       dataGeneration={0}
+      imageSources={[]}
     />,
   );
   await waitFor(() => expect(requestCount).toBe(2));
@@ -165,6 +170,61 @@ test("keeps a stale frame on screen while a superseding request is in flight, th
     );
   });
   await cleanup();
+});
+
+test("uses pomodoro labels and selected-card fallback in resolved image alt text", async () => {
+  backendMocks.previewImpl = async (cardId) => {
+    expect(cardId).toBe("wire-pomodoro-id");
+    return { png_base64: "timer-frame", sample: false, state: null };
+  };
+  const card = pomodoroCard("wire-pomodoro-id", "Editorial sprint");
+  const { container, root, cleanup } = await mountPreview(card);
+  await waitFor(() => {
+    expect(container.querySelector("img")?.getAttribute("alt")).toBe(
+      "Device preview of Editorial sprint",
+    );
+  });
+
+  await renderPreviewInto(
+    root,
+    <DevicePreview
+      cards={[card]}
+      selectedWidgetId="missing-selection"
+      orientation="landscape"
+      dataGeneration={0}
+      imageSources={[]}
+    />,
+  );
+  expect(container.querySelector("img")?.getAttribute("alt")).toBe(
+    "Device preview of Editorial sprint",
+  );
+  await cleanup();
+});
+
+test("uses picture source names and the missing-source fallback in resolved image alt text", async () => {
+  backendMocks.previewImpl = async () => ({
+    png_base64: "picture-frame",
+    sample: false,
+    state: null,
+  });
+  const card = pictureCard("wire-picture-id");
+  const named = await mountPreview(card, 0, [
+    { id: "limits-source", name: "Quarterly launch board" },
+  ]);
+  await waitFor(() => {
+    expect(named.container.querySelector("img")?.getAttribute("alt")).toBe(
+      "Device preview of Quarterly launch board",
+    );
+  });
+  await named.cleanup();
+
+  const missing = await mountPreview(card);
+  await waitFor(() => {
+    expect(missing.container.querySelector("img")?.getAttribute("alt")).toBe(
+      "Device preview of Missing source",
+    );
+  });
+  await missing.cleanup();
 });
 
 // Regression test: `preview.rs`'s latest-wins coalescing replies to a superseded
@@ -259,6 +319,7 @@ test("shows 'No cards configured' when there are no cards, never a stale or inve
       selectedWidgetId={null}
       orientation="landscape-flipped"
       dataGeneration={0}
+      imageSources={[]}
     />,
   );
   expect(html).toContain("No cards configured");

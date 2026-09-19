@@ -30,7 +30,6 @@ import {
   toApiError,
   validateConfigDraft,
   isSessionMissing,
-  signIn,
 } from "./lib/backend";
 import type {
   AppConfig,
@@ -72,11 +71,14 @@ export function App() {
     networkSettings,
     ownershipTier,
     saveConfig,
+    signIn,
     signInAndSelectDevice,
   } = useAppState();
   const [draft, setDraft] = useState<AppConfig | null>(null);
   const draftRef = useRef<AppConfig | null>(draft);
   draftRef.current = draft;
+  const draftRevisionRef = useRef(0);
+  const saveInFlightRef = useRef(false);
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [validation, setValidation] = useState<ValidationState>({
@@ -97,10 +99,15 @@ export function App() {
 
   const [creatableFaces, setCreatableFaces] = useState<FaceDescriptor[]>([]);
 
-  // Asked once: the list only changes when the server is redeployed, and a
+  const hasSnapshot = snapshot !== null;
+
+  // Requested once after the first authenticated snapshot. A
   // failure here must not block the page -- the menu simply offers the
   // built-in kinds, exactly as it did before the server could draw anything.
   useEffect(() => {
+    if (!hasSnapshot) {
+      return;
+    }
     let cancelled = false;
     void listCreatableFaces()
       .then((faces) => {
@@ -116,7 +123,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [hasSnapshot]);
 
   useEffect(() => {
     if (!snapshot || dirty) {
@@ -276,10 +283,13 @@ export function App() {
     snapshot.device.last_network_error !== null;
 
   const replaceDraft = (next: AppConfig) => {
+    draftRevisionRef.current += 1;
     draftRef.current = next;
     setDraft(next);
     setDirty(true);
-    setSaveState({ kind: "idle" });
+    if (!saveInFlightRef.current) {
+      setSaveState({ kind: "idle" });
+    }
   };
   const handleAdd = (request: AddCardRequest): string | null => {
     // Source minting is asynchronous. Read the latest draft here so settings edited
@@ -376,23 +386,39 @@ export function App() {
     }
   };
   const handleSave = async () => {
-    if (validation.kind !== "ready" || !validation.result.valid) {
+    if (saveInFlightRef.current || validation.kind !== "ready" || !validation.result.valid) {
       return;
     }
+    const submittedDraft = draftRef.current;
+    if (!submittedDraft) {
+      return;
+    }
+    const submittedRevision = draftRevisionRef.current;
+    saveInFlightRef.current = true;
     setSaveState({ kind: "saving" });
     setActionError(null);
     try {
-      const result = await saveConfig(draft);
-      setDirty(false);
-      setSaveState({
-        kind: "saved",
-        message: result.save.warning
-          ? `Saved. ${result.save.warning.message}`
-          : "Saved to the server. The server will update your display.",
-      });
+      const result = await saveConfig(submittedDraft);
       await refresh();
+      if (draftRevisionRef.current === submittedRevision) {
+        setDirty(false);
+        setSaveState({
+          kind: "saved",
+          message: result.save.warning
+            ? `Saved. ${result.save.warning.message}`
+            : "Saved to the server. The server will update your display.",
+        });
+      } else {
+        setSaveState({ kind: "idle" });
+      }
     } catch (nextError) {
-      setSaveState({ kind: "error", error: toApiError(nextError) });
+      setSaveState(
+        draftRevisionRef.current === submittedRevision
+          ? { kind: "error", error: toApiError(nextError) }
+          : { kind: "idle" },
+      );
+    } finally {
+      saveInFlightRef.current = false;
     }
   };
   const handleTimerAction = (action: "start" | "pause" | "reset") => {

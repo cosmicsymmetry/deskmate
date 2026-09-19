@@ -223,16 +223,18 @@ export function CardList({
     queueMicrotask(() => menuItemRefs.current[0]?.focus());
   };
 
-  const chooseBuiltIn = (kind: AddableCardKind) => {
+  const chooseCard = (add: () => void): void => {
     pendingNewCardIdsRef.current = new Set(config.cards.map((card) => card.id));
-    onAdd(kind);
+    add();
     closeMenu(false);
   };
 
+  const chooseBuiltIn = (kind: AddableCardKind) => {
+    chooseCard(() => onAdd(kind));
+  };
+
   const choosePicture = (source: ImageSource | null) => {
-    pendingNewCardIdsRef.current = new Set(config.cards.map((card) => card.id));
-    onAddPicture(source);
-    closeMenu(false);
+    chooseCard(() => onAddPicture(source));
   };
 
   const onMenuKeyDown = (
@@ -515,8 +517,15 @@ export function CardList({
                 <legend className="tile-label menu__label">Server-side</legend>
                 {creatableFaces.map((face, faceIndex) => {
                   const index = addableKinds.length + faceIndex;
-                  const choose = () => onAddFace(face.kind, face.label);
-                  return renderMenuItem(face.kind, index, face.label, "Added as a picture", choose);
+                  const choose = () => chooseCard(() => onAddFace(face.kind, face.label));
+                  return renderMenuItem(
+                    face.kind,
+                    index,
+                    face.label,
+                    "Added as a picture",
+                    choose,
+                    pictureBusy,
+                  );
                 })}
               </fieldset>
               <fieldset className="menu__group">

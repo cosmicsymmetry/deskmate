@@ -17,6 +17,7 @@ import {
   httpHandlers,
   expectJsonRequest,
   allowImageMint,
+  jsonResponse,
 } from "./support/http";
 
 beforeEach(resetBackendMocks);
@@ -63,6 +64,15 @@ test("signing in fills the device id the first load could not know", async () =>
   // left the Settings sheet showing an empty Device ID for the rest of the
   // session -- visible only by actually signing in, which is how this was found.
   let signedIn = false;
+  const registrations: string[] = [];
+  let publishSnapshot: ((next: AppSnapshot) => void) | undefined;
+  httpState.creatableFacesResponse = [{ kind: "future-face", label: "Future face", fields: [] }];
+  backendMocks.listenImpl = async (publish) => {
+    publishSnapshot = publish;
+    registrations.push(signedIn ? "dev-0005" : "");
+    if (!signedIn) throw new Error("pre-login listen rejected");
+    return () => {};
+  };
   httpHandlers.set("POST /v1/app/session", (body, init) => {
     expectJsonRequest(init);
     expect(body).toEqual({ token: "admin-secret" });
@@ -88,6 +98,7 @@ test("signing in fills the device id the first load could not know", async () =>
   try {
     await act(async () => root.render(<App />));
     await waitFor(() => expect(container.textContent).toContain("Sign in to Deskmate"));
+    expect(httpCalls.filter((call) => call.path === "/v1/faces")).toHaveLength(0);
 
     const token = container.querySelector<HTMLInputElement>('input[type="password"]');
     await act(async () => {
@@ -105,6 +116,14 @@ test("signing in fills the device id the first load could not know", async () =>
       );
     await waitFor(() => expect(settingsButton()).toBeDefined());
     expect(httpCalls.filter((call) => call.path === "/v1/app/session")).toHaveLength(1);
+    expect(registrations).toEqual(["", "dev-0005"]);
+    expect(httpCalls.filter((call) => call.path === "/v1/faces")).toHaveLength(1);
+    await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
+    expect(
+      [...container.querySelectorAll('[role="menuitem"] strong')].map((node) => node.textContent),
+    ).toContain("Future face");
+    await act(async () => publishSnapshot?.({ ...snapshot }));
+    expect(httpCalls.filter((call) => call.path === "/v1/faces")).toHaveLength(1);
     await act(async () => settingsButton()?.click());
     await waitFor(() => {
       const deviceId = [...container.querySelectorAll<HTMLInputElement>("input")].find(
@@ -182,7 +201,12 @@ test("the page mints and adds a picture while keeping the token ephemeral", asyn
 });
 
 test("the page mints a server-listed face as a picture without producer credentials", async () => {
-  allowImageMint("Weather", "weather");
+  const mint = Promise.withResolvers<Response>();
+  httpHandlers.set("POST /v1/images", (body, init) => {
+    expectJsonRequest(init);
+    expect(body).toEqual({ name: "Weather", face_kind: "weather" });
+    return mint.promise;
+  });
   const clock = clockCard("clock", "Desk");
   backendMocks.snapshotImpl = async () => ({
     ...snapshot,
@@ -205,11 +229,26 @@ test("the page mints a server-listed face as a picture without producer credenti
       (button) => button.querySelector("strong")?.textContent === "Weather",
     );
     await act(async () => weather?.click());
+    expect(container.querySelector('[role="menu"]') === null).toBe(true);
+    const add = container.querySelector<HTMLButtonElement>(".card-tile__add");
+    expect(document.activeElement).toBe(add);
+    await act(async () => add?.click());
+    const busyFace = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(
+      (button) => button.querySelector("strong")?.textContent === "Weather",
+    );
+    expect(busyFace?.disabled).toBe(true);
+    await act(async () => busyFace?.click());
+    expect(httpCalls.filter((call) => call.path === "/v1/images")).toHaveLength(1);
+    await act(async () => add?.click());
+    await act(async () =>
+      mint.resolve(jsonResponse({ id: "picture-source", token: "plaintext-once" })),
+    );
 
     await waitFor(() => {
       const tiles = container.querySelectorAll<HTMLButtonElement>(".card-tile__body");
       expect(tiles).toHaveLength(2);
       expect(tiles[1]?.textContent).toContain("Weather");
+      expect(tiles[1]?.getAttribute("aria-pressed")).toBe("true");
       expect(container.querySelector("#editor-heading")?.textContent).toBe("Weather");
       expect(container.textContent).toContain("Picture source");
       expect(container.textContent).toContain("picture-source");
@@ -742,3 +781,173 @@ test("the mounted app routes validation issues to their visible owning surfaces"
     }
   }
 });
+
+for (const outcome of ["success", "rejection"] as const) {
+  test(`a pending save ${outcome} preserves newer edits and permits saving them next`, async () => {
+    let liveSnapshot: AppSnapshot = structuredClone(snapshot);
+    const pending = Promise.withResolvers<void>();
+    const refreshing = Promise.withResolvers<AppSnapshot>();
+    let refreshStarted = false;
+    const saved: AppConfig[] = [];
+    backendMocks.snapshotImpl = async () => liveSnapshot;
+    backendMocks.previewImpl = async () => ({ png_base64: null, sample: false, state: null });
+    backendMocks.saveConfigImpl = async (config) => {
+      saved.push(config);
+      if (saved.length === 1) {
+        await pending.promise;
+        liveSnapshot = { ...liveSnapshot, config };
+        backendMocks.snapshotImpl = () => {
+          refreshStarted = true;
+          return refreshing.promise;
+        };
+      } else {
+        liveSnapshot = { ...liveSnapshot, config };
+      }
+      return { save: { generation: saved.length, warning: null } };
+    };
+    const { container } = await mount(<App />);
+    await act(async () => buttonWithText(container, "Manual")?.click());
+    await waitFor(() => expect(buttonWithText(container, "Save to server")?.disabled).toBe(false));
+    await act(async () => buttonWithText(container, "Save to server")?.click());
+    expect(saved).toHaveLength(1);
+    expect(saved[0].advance).toEqual({ kind: "manual" });
+    await act(async () => buttonWithText(container, "Timed")?.click());
+    if (outcome === "success") {
+      await act(async () => pending.resolve());
+      await waitFor(() => expect(refreshStarted).toBe(true));
+      expect(buttonWithText(container, "Timed")?.getAttribute("aria-pressed")).toBe("true");
+      await act(async () => refreshing.resolve(liveSnapshot));
+    } else {
+      await act(async () => pending.reject(new Error("old draft rejected")));
+    }
+    expect(container.textContent).not.toContain("old draft rejected");
+    expect(buttonWithText(container, "Timed")?.getAttribute("aria-pressed")).toBe("true");
+    expect(container.textContent).toContain("Unsaved changes");
+    backendMocks.snapshotImpl = async () => liveSnapshot;
+    await waitFor(() => expect(buttonWithText(container, "Save to server")?.disabled).toBe(false));
+    await act(async () => buttonWithText(container, "Save to server")?.click());
+    expect(saved).toHaveLength(2);
+    expect(saved[1].advance.kind).toBe("timed");
+    expect(container.textContent).toContain(
+      "Saved to the server. The server will update your display.",
+    );
+  });
+}
+
+test("both SaveBars reject reentry before paint and stay disabled after a pending edit", async () => {
+  const pending = Promise.withResolvers<void>();
+  let saves = 0;
+  backendMocks.saveConfigImpl = async () => {
+    saves += 1;
+    await pending.promise;
+    return { save: { generation: 1, warning: null } };
+  };
+  const { container } = await mount(<App />);
+  await act(async () => buttonWithText(container, "Manual")?.click());
+  await act(async () => container.querySelector<HTMLButtonElement>(".topbar__settings")?.click());
+  await waitFor(() => expect(buttonWithText(container, "Save to server")?.disabled).toBe(false));
+  const savesButtons = [...container.querySelectorAll<HTMLButtonElement>("button")].filter(
+    (button) => button.textContent === "Save to server",
+  );
+  expect(savesButtons).toHaveLength(2);
+  await act(async () => {
+    savesButtons[0].click();
+    savesButtons[1].click();
+  });
+  expect(saves).toBe(1);
+  await act(async () => buttonWithText(container, "Timed")?.click());
+  expect(savesButtons.every((button) => button.disabled)).toBe(true);
+  expect(savesButtons.every((button) => button.textContent === "Saving to server…")).toBe(true);
+  await act(async () => pending.resolve());
+});
+
+async function changeInput(input: HTMLInputElement | null, value: string) {
+  expect(input).not.toBeNull();
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, value);
+    input?.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
+for (const nextDevice of ["desk-B", "desk-A"]) {
+  for (const pendingListen of [false, true]) {
+    test(`subscription regenerates for ${nextDevice} with pending listen ${pendingListen}`, async () => {
+      let deviceId = "desk-A";
+      let changing = false;
+      let holdOldRefresh = false;
+      const oldFetch = Promise.withResolvers<AppSnapshot>();
+      let staleDeliveredBeforeCleanup = false;
+      const oldListen = Promise.withResolvers<() => void>();
+      const registrations: {
+        deviceId: string;
+        publish: (next: AppSnapshot) => void;
+        closes: number;
+      }[] = [];
+      const marked = (message: string): AppSnapshot => ({
+        ...snapshot,
+        runtime: { kind: "error", message },
+      });
+      backendMocks.networkSettingsImpl = async () => ({
+        server_url: "https://desk.example",
+        device_id: deviceId,
+        tier: "networked",
+      });
+      backendMocks.signInAndSelectDeviceImpl = async (selected, token) => {
+        expect(token).toBe("new-session");
+        deviceId = selected;
+        changing = true;
+        return backendMocks.networkSettingsImpl();
+      };
+      backendMocks.listenImpl = async (publish) => {
+        const registration = { deviceId, publish, closes: 0 };
+        registrations.push(registration);
+        if (registrations.length === 1 && pendingListen) return oldListen.promise;
+        return () => {
+          registration.closes += 1;
+        };
+      };
+      backendMocks.snapshotImpl = () => {
+        if (!changing)
+          return holdOldRefresh ? oldFetch.promise : Promise.resolve(marked("original device"));
+        oldFetch.reject(new Error("stale subscription error"));
+        if (registrations[0].closes === 0) {
+          staleDeliveredBeforeCleanup = true;
+          registrations[0].publish(marked("stale before cleanup"));
+        }
+        return new Promise<AppSnapshot>(() => {});
+      };
+      const { container } = await mount(<App />);
+      if (pendingListen) await act(async () => registrations[0].publish(marked("original device")));
+      await waitFor(() => expect(container.textContent).toContain("original device"));
+      holdOldRefresh = true;
+      await act(async () => window.dispatchEvent(new Event("focus")));
+      await act(async () =>
+        container.querySelector<HTMLButtonElement>(".topbar__settings")?.click(),
+      );
+      await changeInput(container.querySelector('.network-form input[maxlength="32"]'), nextDevice);
+      await changeInput(
+        container.querySelector('.network-form input[type="password"]'),
+        "new-session",
+      );
+      await act(async () => buttonWithText(container, "Sign in")?.click());
+      expect(staleDeliveredBeforeCleanup).toBe(true);
+      expect(container.textContent).not.toContain("stale before cleanup");
+      expect(container.textContent).not.toContain("stale subscription error");
+      expect(registrations.map((entry) => entry.deviceId)).toEqual(["desk-A", nextDevice]);
+      if (pendingListen) {
+        await act(async () =>
+          oldListen.resolve(() => {
+            registrations[0].closes += 1;
+          }),
+        );
+      }
+      expect(registrations[0].closes).toBe(1);
+      await act(async () => registrations[1].publish(marked("current stream")));
+      await act(async () => registrations[0].publish(marked("stale after cleanup")));
+      expect(container.textContent).toContain("current stream");
+      expect(container.textContent).not.toContain("stale after cleanup");
+      await act(async () => window.dispatchEvent(new Event("focus")));
+      expect(registrations).toHaveLength(2);
+    });
+  }
+}

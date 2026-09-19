@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect } from "bun:test";
 
 type HttpCall = { method: string; path: string; body: unknown };
-type Handler = (body: unknown, init: RequestInit | undefined) => Response;
+type Handler = (body: unknown, init: RequestInit | undefined) => Response | Promise<Response>;
 
 export function jsonResponse(value: unknown) {
   return new Response(JSON.stringify(value), {

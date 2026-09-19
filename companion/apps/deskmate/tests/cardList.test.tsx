@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { act, useState } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -290,6 +290,7 @@ test("the add menu offers the faces the server says it can draw", async () => {
       kind: "weather",
       label: "Weather",
     });
+    expect(container.querySelector('[role="menu"]') === null).toBe(true);
   } finally {
     await cleanup();
   }
@@ -897,4 +898,87 @@ test("dropping a loop tile on itself does not emit a draft change", async () => 
   } finally {
     await cleanup();
   }
+});
+
+for (const activation of ["click", "Enter", " "]) {
+  test(`server face ${JSON.stringify(activation)} closes the menu and restores focus once`, async () => {
+    const choices: string[] = [];
+    const { container } = await mount(
+      <CardList
+        config={cardListConfig([])}
+        issues={[]}
+        pomodoros={[]}
+        selectedCardId={null}
+        onSelect={() => {}}
+        onAdd={() => {}}
+        onChange={() => {}}
+        onRemove={() => {}}
+        creatableFaces={[{ kind: "sunrise", label: "Sunrise", fields: [] }]}
+        onAddFace={(kind) => choices.push(kind)}
+      />,
+    );
+    const add = container.querySelector<HTMLButtonElement>(".card-tile__add");
+    if (!add) throw new Error("Missing add control");
+    await act(async () => add.click());
+    const focus = spyOn(add, "focus");
+    try {
+      const face = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(
+        (item) => item.textContent?.includes("Sunrise"),
+      );
+      if (!face) throw new Error("Missing server face");
+      await act(async () => {
+        if (activation === "click") face.click();
+        else {
+          const event = new KeyboardEvent("keydown", {
+            key: activation,
+            bubbles: true,
+            cancelable: true,
+          });
+          face.dispatchEvent(event);
+          expect(event.defaultPrevented).toBe(true);
+        }
+      });
+      expect(choices).toEqual(["sunrise"]);
+      expect(container.querySelector('[role="menu"]') === null).toBe(true);
+      expect(add.getAttribute("aria-expanded")).toBe("false");
+      expect(document.activeElement).toBe(add);
+      expect(focus).toHaveBeenCalledTimes(1);
+    } finally {
+      focus.mockRestore();
+    }
+  });
+}
+
+test("busy server faces are disabled and skipped by arrow navigation", async () => {
+  const choices: string[] = [];
+  const { container } = await mount(
+    <CardList
+      config={cardListConfig([])}
+      issues={[]}
+      pomodoros={[]}
+      selectedCardId={null}
+      onSelect={() => {}}
+      onAdd={() => {}}
+      onChange={() => {}}
+      onRemove={() => {}}
+      pictureBusy
+      creatableFaces={[{ kind: "weather", label: "Weather", fields: [] }]}
+      onAddFace={(kind) => choices.push(kind)}
+    />,
+  );
+  await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
+  const items = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+  const face = items.find((item) => item.textContent?.includes("Weather"));
+  expect(face?.disabled).toBe(true);
+  await act(async () => face?.click());
+  expect(choices).toEqual([]);
+  items[1].focus();
+  await act(async () =>
+    items[1].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })),
+  );
+  expect(document.activeElement === items[0]).toBe(true);
+  await act(async () =>
+    items[0].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true })),
+  );
+  expect(document.activeElement === items[1]).toBe(true);
 });

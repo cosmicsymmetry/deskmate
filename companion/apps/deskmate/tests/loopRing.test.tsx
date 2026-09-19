@@ -250,3 +250,52 @@ test("playback keeps its deadline across equivalent configs and reads the latest
     }
   }
 });
+
+test("playback keeps the original deadline and newest callback across parent rerenders", async () => {
+  let now = 1_000;
+  let tick: (() => void) | undefined;
+  const selected: { revision: number; id: string }[] = [];
+  function Harness({ revision }: { revision: number }) {
+    return (
+      <LoopRing
+        config={loopConfig()}
+        issues={[]}
+        selectedCardId="first"
+        onSelect={(id) => selected.push({ revision, id })}
+        onChange={() => {}}
+      />
+    );
+  }
+  const browserWindow: Window = window;
+  const dateNow = spyOn(Date, "now").mockImplementation(() => now);
+  const interval = spyOn(browserWindow, "setInterval").mockImplementation((handler) => {
+    if (typeof handler !== "function") throw new Error("Expected an interval callback");
+    tick = () => handler();
+    return 1;
+  });
+  const clearInterval = spyOn(browserWindow, "clearInterval").mockImplementation(() => {});
+  try {
+    const { container, root } = await mount(<Harness revision={0} />);
+    await act(async () => buttonWithText(container, "Play the loop")?.click());
+    for (let revision = 1; revision <= 3; revision += 1) {
+      now += 10_000;
+      await act(async () => root.render(<Harness revision={revision} />));
+    }
+    now = 45_999;
+    await act(async () => tick?.());
+    expect(selected).toEqual([]);
+    now = 46_000;
+    await act(async () => tick?.());
+    expect(selected).toEqual([{ revision: 3, id: "second" }]);
+    expect(interval).toHaveBeenCalledTimes(1);
+    expect(clearInterval).not.toHaveBeenCalled();
+  } finally {
+    try {
+      await cleanupMountedRoots();
+    } finally {
+      dateNow.mockRestore();
+      interval.mockRestore();
+      clearInterval.mockRestore();
+    }
+  }
+});

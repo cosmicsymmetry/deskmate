@@ -99,13 +99,12 @@ export function LoopRing({ config, issues, selectedCardId, onSelect, onChange }:
 
   const segmentsRef = useRef(segments);
   segmentsRef.current = segments;
+  const onSelectRef = useRef(onSelect);
+  onSelectRef.current = onSelect;
   const deadlineRef = useRef<number | null>(null);
 
-  // Primitive deps only: `segments` and
-  // `activeSegment` are freshly allocated every render, so depending on them tore
-  // down and re-armed the interval on every unrelated re-render — and a running
-  // pomodoro re-renders this component once a second, which meant a 20-45s dwell
-  // could never survive long enough to fire.
+  // Primitive playback dependencies keep the deadline stable; refs carry the
+  // latest segments and selection callback across unrelated renders.
   useEffect(() => {
     if (!isTimed || !isPlaying || activeCardId === null || segments.length < 2) {
       deadlineRef.current = null;
@@ -127,21 +126,13 @@ export function LoopRing({ config, issues, selectedCardId, onSelect, onChange }:
       );
       if (result) {
         deadlineRef.current = result.deadlineMs;
-        onSelect(result.cardId);
+        onSelectRef.current(result.cardId);
       }
     }, TICK_MS);
     return () => {
       window.clearInterval(interval);
     };
-  }, [
-    isTimed,
-    isPlaying,
-    activeCardId,
-    activeDwellSeconds,
-    segments.length,
-    reducedMotion,
-    onSelect,
-  ]);
+  }, [isTimed, isPlaying, activeCardId, activeDwellSeconds, segments.length, reducedMotion]);
 
   const advanceIssues = issuesForPath(issues, "advance");
   const defaultDwellPath = "advance.default_dwell_seconds";

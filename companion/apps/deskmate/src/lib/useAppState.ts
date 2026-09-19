@@ -6,6 +6,7 @@ import {
   getNetworkSettings,
   listenToAppState,
   saveConfig as saveConfigRequest,
+  signIn as signInRequest,
   signInAndSelectDevice,
   toApiError,
 } from "./backend";
@@ -106,6 +107,7 @@ export interface AppStateValue {
   networkSettings: NetworkSettings;
   ownershipTier: DeviceTier | null;
   saveConfig: (config: AppConfig) => Promise<ConfigApplyResult>;
+  signIn: (adminToken: string) => Promise<void>;
   signInAndSelectDevice: (deviceId: string, adminToken: string) => Promise<void>;
 }
 
@@ -119,6 +121,8 @@ export function useAppState(): AppStateValue {
     device_id: "",
     tier: null,
   });
+  const [subscriptionGeneration, setSubscriptionGeneration] = useState(0);
+  const subscriptionGenerationRef = useRef(0);
   const lastCardDataRef = useRef<string | null>(null);
   const networkSettingsRef = useRef(networkSettings);
 
@@ -154,12 +158,25 @@ export function useAppState(): AppStateValue {
     }
   }, [acceptError, acceptNetworkSettings, acceptSnapshot]);
 
+  const restartSubscription = useCallback(() => {
+    subscriptionGenerationRef.current += 1;
+    setSubscriptionGeneration(subscriptionGenerationRef.current);
+  }, []);
+  const signIn = useCallback(
+    async (adminToken: string) => {
+      await signInRequest(adminToken);
+      restartSubscription();
+    },
+    [restartSubscription],
+  );
+
   const selectDevice = useCallback(
     async (deviceId: string, adminToken: string) => {
       const settings = await signInAndSelectDevice(deviceId, adminToken);
       acceptNetworkSettings(settings);
+      restartSubscription();
     },
-    [acceptNetworkSettings],
+    [acceptNetworkSettings, restartSubscription],
   );
 
   const saveConfig = useCallback(async (config: AppConfig) => {
@@ -178,12 +195,20 @@ export function useAppState(): AppStateValue {
       startAppStateSubscription({
         fetchSnapshot: getAppSnapshot,
         listen: listenToAppState,
-        onSnapshot: acceptSnapshot,
-        onError: acceptError,
+        onSnapshot: (next) => {
+          if (subscriptionGeneration === subscriptionGenerationRef.current) {
+            acceptSnapshot(next);
+          }
+        },
+        onError: (next) => {
+          if (subscriptionGeneration === subscriptionGenerationRef.current) {
+            acceptError(next);
+          }
+        },
         focusTarget: window,
         visibilityTarget: document,
       }),
-    [acceptError, acceptSnapshot],
+    [acceptError, acceptSnapshot, subscriptionGeneration],
   );
 
   useEffect(() => {
@@ -216,6 +241,7 @@ export function useAppState(): AppStateValue {
     networkSettings,
     ownershipTier,
     saveConfig,
+    signIn,
     signInAndSelectDevice: selectDevice,
   };
 }

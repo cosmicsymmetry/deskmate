@@ -1,5 +1,6 @@
 use protocol::{
     Deframer, FrameError, MAX_PAYLOAD_SIZE, MessageError, decode_message, decode_wire_frame,
+    encode_message,
 };
 
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../protocol/fixtures/v2");
@@ -9,7 +10,7 @@ fn fixture(name: &str) -> Vec<u8> {
 }
 
 #[test]
-fn valid_golden_frames_decode() {
+fn valid_golden_frames_round_trip_byte_exactly() {
     for name in [
         "status_request.bin",
         "status_response.bin",
@@ -48,9 +49,15 @@ fn valid_golden_frames_decode() {
         "push_scene_min.bin",
         "ack_scene.bin",
     ] {
-        let frame =
-            decode_wire_frame(&fixture(name)).unwrap_or_else(|error| panic!("{name}: {error}"));
-        decode_message(&frame).unwrap_or_else(|error| panic!("{name}: {error}"));
+        let bytes = fixture(name);
+        let frame = decode_wire_frame(&bytes).unwrap_or_else(|error| panic!("{name}: {error}"));
+        let message = decode_message(&frame).unwrap_or_else(|error| panic!("{name}: {error}"));
+        let wire = encode_message(frame.request_id, &message)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(
+            wire, bytes,
+            "{name}: re-encode differs from the golden frame"
+        );
     }
 }
 

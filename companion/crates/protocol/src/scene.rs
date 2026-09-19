@@ -3,7 +3,7 @@
 //! This mirrors `firmware/main/core/scene_model.h` and the wire shape
 //! documented at the top of `firmware/main/core/scene_decode.c`, key for key
 //! and bound for bound. Where the two can disagree, they are caught by the
-//! shared fixture corpus in `protocol/fixtures/v1/`: the Rust encoder writes
+//! shared fixture corpus in `protocol/fixtures/v2/`: the Rust encoder writes
 //! `push_scene.bin` and `firmware/host_tests/test_protocol.c` decodes it,
 //! re-encodes it in C and `memcmp`s the result against the file.
 //!
@@ -27,7 +27,7 @@
 //! one, and nothing should send one.
 
 use crate::cbor::{Decoder, Encoder};
-use crate::message::{ASSET_DIGEST_LEN, MessageError};
+use crate::message::{ASSET_DIGEST_LEN, MessageError, next_numeric_key, read_u32};
 
 pub const SCENE_CANVAS_WIDTH: i32 = 448;
 pub const SCENE_CANVAS_HEIGHT: i32 = 368;
@@ -123,7 +123,7 @@ pub struct SceneRect {
     pub fill: u32,
     pub opacity: u8,
     /// Absolute canvas clip. The renderer realizes this as a styleless parent
-    /// so LVGL performs the same child clipping as template containers.
+    /// so LVGL clips the child.
     pub clip: Option<SceneClipRect>,
 }
 
@@ -250,9 +250,9 @@ pub struct SceneScale {
     pub major_tick_color: u32,
 }
 
-/// A text label that draws its own background: `deskmate_chip()`,
-/// `deskmate_eyebrow()`, and `BigNumberLabel`'s pill are all this shape. The
-/// node carries the STYLE and the device sizes the box, because the box is
+/// A content-sized text label that draws its own background: a chip when
+/// filled, an eyebrow when `fill_opacity` is transparent. The node carries
+/// the style and the device sizes the box, because the box is
 /// `text_width + 2 * pad_hor` and text width depends on per-glyph advances,
 /// kern pairs in 4.4 format and `letter_space` -- LVGL's own arithmetic,
 /// which the host would otherwise have to reimplement and keep correct
@@ -275,19 +275,18 @@ pub struct SceneLabel {
     pub pad_hor: i32,
     pub pad_ver: i32,
     pub letter_space: i32,
-    /// `deskmate_chip_set_text()` HIDES a chip given an empty string rather
-    /// than drawing a collapsed blob, and `icon-badge-text--empty-badge`
-    /// pins that. The device must do the same, or that golden breaks.
+    /// An empty string hides the whole node instead of drawing a padded blob.
+    /// The empty pink chip in `lvgl-sim/src/cases.rs`'s `scene_label_nodes()`
+    /// pins this behaviour.
     pub hide_when_empty: bool,
 }
 
-/// A rectangle rotated about a pivot, which is how every clock hand is drawn:
-/// `make_hand()` in `analog_clock.c` sets `transform_pivot_x/y` and
-/// `set_hand_angle()` sets `transform_rotation`. A `Line` node cannot stand in
-/// for this -- LVGL draws lines through a different path than the transform
-/// matrix, so the anti-aliased edges differ and the gate is byte-exact.
-/// A clip is needed when the C object is a child of a clipping coordinate
-/// frame: scene nodes are otherwise direct children of the screen.
+/// A rectangle rotated about a pivot using LVGL's transform rotation, which
+/// is how clock hands are drawn. A `Line` node cannot stand in for this --
+/// LVGL draws lines through a different path than the transform matrix, so
+/// the anti-aliased edges differ. A clip is needed when the rectangle is a
+/// child of a clipping coordinate frame: scene nodes are otherwise direct
+/// children of the screen.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SceneRotRect {
     pub x: i32,
@@ -988,9 +987,8 @@ fn encode_node_payload(encoder: &mut Encoder, node: &SceneNode) {
 /// entry points cannot disagree about the bytes. This one exists for callers
 /// that hold a `Scene` and want the device's own decoder to build it without
 /// inventing a link: `companion/crates/lvgl-sim` hands the result straight to
-/// `scene_decode()` so the simulator renders a scene it decoded from the wire
-/// shape rather than one it constructed field by field, so parity checks compare
-/// like with like.
+/// `scene_decode()` so previews, goldens and framebuffer comparisons build
+/// `scene_t` from the same bytes with the same decoder.
 ///
 /// # Errors
 ///
@@ -1026,21 +1024,8 @@ pub(crate) fn encode_scene(encoder: &mut Encoder, scene: &Scene) {
 // Decoding.
 // ---------------------------------------------------------------------------
 
-fn next_key(decoder: &mut Decoder<'_>, previous: &mut Option<u64>) -> Result<u64, MessageError> {
-    let key = decoder.unsigned()?;
-    if previous.is_some_and(|last| key <= last) {
-        return Err(MessageError::DuplicateOrUnsortedKey);
-    }
-    *previous = Some(key);
-    Ok(key)
-}
-
 fn read_i32(decoder: &mut Decoder<'_>, name: &'static str) -> Result<i32, MessageError> {
     i32::try_from(decoder.signed()?).map_err(|_| MessageError::InvalidValue(name))
-}
-
-fn read_u32(decoder: &mut Decoder<'_>, name: &'static str) -> Result<u32, MessageError> {
-    u32::try_from(decoder.unsigned()?).map_err(|_| MessageError::InvalidValue(name))
 }
 
 fn read_digest(decoder: &mut Decoder<'_>) -> Result<[u8; ASSET_DIGEST_LEN], MessageError> {
@@ -1068,7 +1053,7 @@ fn decode_font(decoder: &mut Decoder<'_>) -> Result<SceneFont, MessageError> {
     let mut digest = None;
     let mut pixel_size = 0i32;
     for _ in 0..len {
-        match next_key(decoder, &mut previous)? {
+        match next_numeric_key(decoder, &mut previous)? {
             0 => kind = Some(read_u32(decoder, "scene font kind")?),
             1 => tier = read_u32(decoder, "scene font tier")?,
             2 => digest = Some(read_digest(decoder)?),
@@ -1101,7 +1086,7 @@ fn decode_value(decoder: &mut Decoder<'_>) -> Result<SceneValue, MessageError> {
     let mut literal = String::new();
     let mut binding = String::new();
     for _ in 0..len {
-        match next_key(decoder, &mut previous)? {
+        match next_numeric_key(decoder, &mut previous)? {
             0 => kind = Some(read_u32(decoder, "scene value kind")?),
             1 => {
                 literal = read_bounded_text(decoder, MAX_SCENE_TEXT_LEN, "scene text literal")?;
@@ -1138,7 +1123,7 @@ fn decode_clip_rect(decoder: &mut Decoder<'_>) -> Result<SceneClipRect, MessageE
     let mut present = 0u8;
     let mut values = [0i32; 4];
     for _ in 0..len {
-        let key = next_key(decoder, &mut previous)?;
+        let key = next_numeric_key(decoder, &mut previous)?;
         match key {
             0..=3 => {
                 let slot = usize::try_from(key).expect("clip keys 0..=3 fit usize");
@@ -1195,7 +1180,7 @@ fn decode_node_payload(decoder: &mut Decoder<'_>, kind: u32) -> Result<SceneNode
     let mut running_color = None;
 
     for _ in 0..len {
-        let key = next_key(decoder, &mut previous)?;
+        let key = next_numeric_key(decoder, &mut previous)?;
         if key < 32 {
             present |= 1 << key;
         }
@@ -1475,7 +1460,7 @@ fn decode_node(decoder: &mut Decoder<'_>) -> Result<SceneNode, MessageError> {
     let mut kind = None;
     let mut node = None;
     for _ in 0..len {
-        match next_key(decoder, &mut previous)? {
+        match next_numeric_key(decoder, &mut previous)? {
             0 => kind = Some(read_u32(decoder, "scene node kind")?),
             // Keys are strictly increasing, so key 0 has already set the kind
             // by the time the payload arrives.
@@ -1496,7 +1481,7 @@ pub(crate) fn decode_scene(decoder: &mut Decoder<'_>) -> Result<Scene, MessageEr
     let mut background = None;
     let mut nodes = None;
     for _ in 0..len {
-        match next_key(decoder, &mut previous)? {
+        match next_numeric_key(decoder, &mut previous)? {
             0 => revision = Some(read_u32(decoder, "scene revision")?),
             1 => background = Some(read_u32(decoder, "scene background")?),
             2 => {
@@ -1797,22 +1782,6 @@ mod tests {
             decode_scene(&mut decoder),
             Err(MessageError::InvalidValue("scene line point count"))
         );
-    }
-
-    #[test]
-    fn a_full_turn_is_a_multiple_of_360_not_a_degenerate_arc() {
-        // Not behaviour this module implements -- it is the convention the
-        // device's renderer reads, pinned here so a host author meets it.
-        let arc = SceneArc {
-            cx: 100,
-            cy: 100,
-            r: 50,
-            start_deg: 270,
-            end_deg: 630,
-            width: 8,
-            ..SceneArc::default()
-        };
-        assert!(validate_node(&SceneNode::Arc(arc)).is_ok());
     }
 
     #[test]

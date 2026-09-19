@@ -75,7 +75,8 @@ impl ConfigStore {
         let bytes = serde_json::to_vec_pretty(config).map_err(|error| StoreError::InvalidJson {
             message: error.to_string(),
         })?;
-        if bytes.len() > MAX_CONFIG_FILE_BYTES {
+        // Account for the trailing newline appended by write_and_replace.
+        if bytes.len() >= MAX_CONFIG_FILE_BYTES {
             return Err(StoreError::TooLarge {
                 maximum: MAX_CONFIG_FILE_BYTES,
             });

@@ -8,10 +8,11 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use app_core::{
-    AlertHold, AppConfig, CURRENT_SCHEMA_VERSION, CardAlert, CardSettings, CarouselAdvance,
-    ConfigOrigin, ConfigStore, DisplayOrientation, DisplayTemplate, LoadOutcome,
-    MAX_CONFIG_FILE_BYTES, RefreshPolicy, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE, StoreError,
-    WidgetTapAction,
+    AlertHold, AppConfig, AssetKind, AssetSettings, AssetSource, CURRENT_SCHEMA_VERSION, CardAlert,
+    CardSettings, CarouselAdvance, ConfigOrigin, ConfigStore, DisplayOrientation, DisplayTemplate,
+    IconGlyphMapping, LoadOutcome, MAX_ASSET_SOURCE_LEN, MAX_CONFIG_FILE_BYTES,
+    MAX_ICON_GLYPH_NAME_LEN, MAX_ICON_GLYPHS, RefreshPolicy,
+    SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE, StoreError, WidgetTapAction,
 };
 
 #[test]
@@ -500,6 +501,88 @@ fn malformed_truncated_and_oversized_files_preserve_bytes_and_last_good() {
         Some(StoreError::TooLarge { .. })
     ));
     assert_eq!(fs::metadata(&path).unwrap().len(), oversized.len() as u64);
+}
+
+#[test]
+fn a_save_at_the_size_limit_is_refused_and_one_byte_under_reloads() {
+    let directory = test_directory("save-size-limit");
+    let path = directory.path().join("config.json");
+    let store = ConfigStore::new(&path);
+    let last_good = AppConfig::default();
+    store.save(&last_good).unwrap();
+    let saved_bytes = fs::read(&path).unwrap();
+
+    let mut config = AppConfig::default();
+    for index in 0..3 {
+        config.assets.push(AssetSettings {
+            id: format!("icons-{index}"),
+            source: AssetSource::File("icons.ttf".into()),
+            kind: AssetKind::IconFont {
+                glyphs: (0..MAX_ICON_GLYPHS)
+                    .map(|glyph| IconGlyphMapping {
+                        name: format!("{glyph:0MAX_ICON_GLYPH_NAME_LEN$}"),
+                        codepoint: 65,
+                    })
+                    .collect(),
+            },
+            maximum_bytes: 1,
+        });
+    }
+    config.assets.push(AssetSettings {
+        id: "font".into(),
+        source: AssetSource::File(String::new()),
+        kind: AssetKind::Font,
+        maximum_bytes: 1,
+    });
+
+    let source_len = loop {
+        let size = serde_json::to_vec_pretty(&config).unwrap().len();
+        if let Some(delta) = MAX_CONFIG_FILE_BYTES.checked_sub(size)
+            && (1..=MAX_ASSET_SOURCE_LEN).contains(&delta)
+        {
+            break delta;
+        }
+        config
+            .assets
+            .iter_mut()
+            .find_map(|asset| match &mut asset.kind {
+                AssetKind::IconFont { glyphs } if glyphs.len() > 1 => Some(glyphs),
+                _ => None,
+            })
+            .expect("enough glyphs to trim to the file limit")
+            .pop();
+    };
+    config.assets.last_mut().unwrap().source = AssetSource::File("x".repeat(source_len));
+    assert!(config.validate().is_ok());
+    assert_eq!(
+        serde_json::to_vec_pretty(&config).unwrap().len(),
+        MAX_CONFIG_FILE_BYTES
+    );
+
+    assert_eq!(
+        store.save(&config),
+        Err(StoreError::TooLarge {
+            maximum: MAX_CONFIG_FILE_BYTES
+        })
+    );
+    assert_eq!(fs::read(&path).unwrap(), saved_bytes);
+    assert_eq!(store.last_good().unwrap(), last_good);
+
+    let AssetSource::File(source) = &mut config.assets.last_mut().unwrap().source;
+    source.pop();
+    store.save(&config).unwrap();
+    let mut expected_bytes = serde_json::to_vec_pretty(&config).unwrap();
+    expected_bytes.push(b'\n');
+    let written_bytes = fs::read(&path).unwrap();
+    assert_eq!(written_bytes.len(), MAX_CONFIG_FILE_BYTES);
+    assert_eq!(written_bytes, expected_bytes);
+    assert_eq!(
+        ConfigStore::new(&path).load(),
+        LoadOutcome::Loaded {
+            config,
+            origin: ConfigOrigin::Current
+        }
+    );
 }
 
 #[test]

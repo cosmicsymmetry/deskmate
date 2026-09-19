@@ -1377,3 +1377,75 @@ running the thing rather than reading it:
 The first was caught by asking what a browser sends, the second and third by opening the
 page in Chrome. That last check is new: it is the one the desktop app could never have
 had, and it is now the cheapest honest check in the project.
+
+## 2026-09-19 — the review sweep
+
+A whole-codebase review, a behaviour-preserving refactor, and then the defects the review
+had found, in that order and on one branch. It was run as a pipeline rather than as a
+reading: twenty review units, each read independently by two models that never saw each
+other's work (288 findings, 206 distinct once merged); every candidate then cross-examined
+by the model that had *not* reported it, whose brief was to refute it and then to assume it
+got implemented by someone who did not know the codebase; 183 survived, 113 of them only
+after their proposal was amended — a missed call site, a clippy lint the change would trip,
+a comment the frozen docs still required, a value a test pinned. Implementation ran in
+file-disjoint batches in separate worktrees, each reviewed by the other model with mutation
+probes, each gated by the full workspace outside the implementer's sandbox, and merged in
+crate-graph order with a workspace check after every merge.
+
+The scope was `companion/` and `tools/`. Nothing under `firmware/` moved, because any
+change to the image moves `.bss` and buys an on-board OTA re-verification; schema v10, wire
+v2 and its fixtures, the HTTP contracts and the product rules were frozen.
+
+What the numbers were: production code about 600 lines smaller even after the fixes had added
+theirs back, tests about 5,000 lines larger, Rust tests 729 → 851, frontend 125 → 183, the
+warm suite still 23 seconds. The test growth was not decoration. Again and again the thing to be
+simplified turned out not to be pinned by anything, and the safeguard had to exist first:
+the Rust encoder had never been compared to the frozen fixtures (the firmware host tests
+`memcmp`'d; Rust only ever decoded, and round-tripped against itself) — all 36 golden
+frames re-encode byte-exactly now, and that landed before the decoder was touched.
+
+Three things the process taught, beyond the code:
+
+- **Textual mergeability is not semantic mergeability.** Three reviewers independently
+  proposed moving the same test into `app_api/mod.rs`; two batches did it; git merged both
+  and only the compiler noticed two `mod tests`. One batch made `data_cards` private while
+  another's new tests reached into it. Neither was a conflict git could see.
+- **A reviewer that reverts the fix is weaker than one that restores the old code and
+  keeps the new helper.** That is how two "regression tests" were shown to test a
+  validator function rather than the harness that was supposed to call it.
+- **The mock harness and the DOM suite are blind in ways that matter.** happy-dom applies
+  no stylesheet, so every CSS mutation survived; the CSS refactor was instead proven by
+  diffing 252 rendered states against `main`, and that instrument lied twice before it
+  told the truth — screenshots from separate Chrome launches differ in corner
+  anti-aliasing, and a clock that is *set* still ticks. `tools/webcheck/` keeps both
+  lessons. And three defects were reproduced against the real server that no harness
+  could show: after signing in, the window never fetched the face catalog and never opened
+  its event stream, and one open tab held a SIGTERM past fifteen seconds because the SSE
+  body had no end and Axum drains every connection.
+
+The last wave came from a review nobody had planned at the start: every batch had been
+reviewed in isolation, so two models were put on the files that three to seven independent
+batches had each edited. They found that the reconnect fix had reached the WebSocket
+adapter and missed the serial one sharing its state; that the failed-refresh fix had left
+the providers' last-good cache read only by tests; and a hazard the sweep itself had
+sharpened -- saving revokes image sources the config does not declare, and the new save
+fix preserved edits made mid-save, so a picture added during a save kept its card and
+lost its source. Minting and saving are mutually exclusive now, and "Resume sending",
+which writes the config you are not looking at, waits for a clean draft.
+
+Forty-three defects were fixed (47 findings: four pairs were one bug seen from two units;
+three of the defects came from that last review), each behind a test seen to fail first. The ones an owner
+would notice: a save that completed while you were still typing discarded what you had
+typed since; a failed weather, feed or price fetch re-stamped the old face as fresh, so an
+outage never showed the stale footer; a failed fetch logged its URL, and the CoinGecko key
+travels in the URL; a refresh racing a revoke could put a live token back in the cache for
+a revoked integration; a config saved at exactly the size limit wrote a file one byte too
+large for the loader to read back.
+
+Deliberately not done, and why: the provider refresh floors were deleted rather than wired
+in, because the documented contract is one universal 60 s–6 h clamp and nothing had ever
+read them; `serialport` stays in the server's dependency graph, because the verified way
+to remove it mirrored `DeviceError` as parallel types in `app-core`, and an optional cargo
+feature is the cheaper route if it is wanted; the `light-dark()` palette rewrite was a
+theming-mechanism change for 29 lines. The systemd `DynamicUser` secret-file permissions
+finding is real but could not be reproduced on macOS, so the unit file was not touched.

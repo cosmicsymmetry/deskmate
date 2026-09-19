@@ -224,6 +224,15 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         }
     }
 
+    fn request_ack(
+        &self,
+        message: Message,
+        acknowledged_type: u8,
+        revision: Option<u32>,
+    ) -> Result<(), DeviceError> {
+        SessionConnection::<T>::require_ack(&self.request(message)?, acknowledged_type, revision)
+    }
+
     fn allocate_revision(counter: &AtomicU32) -> Result<u32, DeviceError> {
         let mut current = counter.load(Ordering::Acquire);
         loop {
@@ -263,29 +272,16 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         }
     }
 
-    pub fn time_sync(&self, sync: TimeSync) -> Result<Ack, DeviceError> {
-        match self.request(Message::TimeSync(sync))? {
-            Message::Ack(ack)
-                if ack.acknowledged_type == TYPE_TIME_SYNC && ack.revision.is_none() =>
-            {
-                Ok(ack)
-            }
-            _ => Err(DeviceError::UnexpectedMessage),
-        }
+    pub fn time_sync(&self, sync: TimeSync) -> Result<(), DeviceError> {
+        self.request_ack(Message::TimeSync(sync), TYPE_TIME_SYNC, None)
     }
 
-    fn push_timer(&self, push: PushTimer) -> Result<Ack, DeviceError> {
+    fn push_timer(&self, push: PushTimer) -> Result<(), DeviceError> {
         let revision = push.revision;
-        match self.request(Message::PushTimer(push))? {
-            Message::Ack(ack)
-                if ack.acknowledged_type == TYPE_PUSH_TIMER && ack.revision == Some(revision) =>
-            {
-                self.latest_data_revision
-                    .fetch_max(revision, Ordering::AcqRel);
-                Ok(ack)
-            }
-            _ => Err(DeviceError::UnexpectedMessage),
-        }
+        self.request_ack(Message::PushTimer(push), TYPE_PUSH_TIMER, Some(revision))?;
+        self.latest_data_revision
+            .fetch_max(revision, Ordering::AcqRel);
+        Ok(())
     }
 
     pub fn push_next_timer(
@@ -294,7 +290,7 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         total_ms: u32,
         remaining_ms: u32,
         running: bool,
-    ) -> Result<Ack, DeviceError> {
+    ) -> Result<(), DeviceError> {
         let revision = Self::allocate_revision(&self.latest_data_revision)?;
         self.push_timer(PushTimer {
             card_id: card_id.into(),
@@ -305,30 +301,28 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         })
     }
 
-    fn apply_config(&self, config: ApplyConfig) -> Result<Ack, DeviceError> {
+    fn apply_config(&self, config: ApplyConfig) -> Result<(), DeviceError> {
         // Protocol v2 has no capability a card list can require. The v1 bits
         // that gated this -- "core widgets" and a separate one for a
         // 270-degree rotation -- both described a device that rendered
         // templates; a v2 device renders scenes and accepts either mounting
         // unconditionally.
         let revision = config.revision;
-        match self.request(Message::ApplyConfig(config))? {
-            Message::Ack(ack)
-                if ack.acknowledged_type == TYPE_APPLY_CONFIG && ack.revision == Some(revision) =>
-            {
-                self.latest_config_revision
-                    .fetch_max(revision, Ordering::AcqRel);
-                Ok(ack)
-            }
-            _ => Err(DeviceError::UnexpectedMessage),
-        }
+        self.request_ack(
+            Message::ApplyConfig(config),
+            TYPE_APPLY_CONFIG,
+            Some(revision),
+        )?;
+        self.latest_config_revision
+            .fetch_max(revision, Ordering::AcqRel);
+        Ok(())
     }
 
     pub fn apply_next_config(
         &self,
         rotation: u16,
         cards: Vec<CardConfig>,
-    ) -> Result<Ack, DeviceError> {
+    ) -> Result<(), DeviceError> {
         let revision = Self::allocate_revision(&self.latest_config_revision)?;
         self.apply_config(ApplyConfig {
             revision,
@@ -337,67 +331,40 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         })
     }
 
-    pub fn activate_card(&self, activation: ActivateCard) -> Result<Ack, DeviceError> {
-        match self.request(Message::ActivateCard(activation))? {
-            Message::Ack(ack)
-                if ack.acknowledged_type == TYPE_ACTIVATE_CARD && ack.revision.is_none() =>
-            {
-                Ok(ack)
-            }
-            _ => Err(DeviceError::UnexpectedMessage),
-        }
+    pub fn activate_card(&self, activation: ActivateCard) -> Result<(), DeviceError> {
+        self.request_ack(Message::ActivateCard(activation), TYPE_ACTIVATE_CARD, None)
     }
 
-    pub fn push_scene(&self, push: PushScene) -> Result<Ack, DeviceError> {
+    pub fn push_scene(&self, push: PushScene) -> Result<(), DeviceError> {
         ensure_capabilities(protocol::CAPABILITY_SCENE_RENDER, self.capabilities())?;
         let revision = push.revision;
-        match self.request(Message::PushScene(push))? {
-            Message::Ack(ack)
-                if ack.acknowledged_type == TYPE_PUSH_SCENE && ack.revision == Some(revision) =>
-            {
-                Ok(ack)
-            }
-            _ => Err(DeviceError::UnexpectedMessage),
-        }
+        self.request_ack(Message::PushScene(push), TYPE_PUSH_SCENE, Some(revision))
     }
 
-    pub fn trigger_interrupt(&self, interrupt: TriggerInterrupt) -> Result<Ack, DeviceError> {
-        match self.request(Message::TriggerInterrupt(interrupt))? {
-            Message::Ack(ack)
-                if ack.acknowledged_type == TYPE_TRIGGER_INTERRUPT && ack.revision.is_none() =>
-            {
-                Ok(ack)
-            }
-            _ => Err(DeviceError::UnexpectedMessage),
-        }
+    pub fn trigger_interrupt(&self, interrupt: TriggerInterrupt) -> Result<(), DeviceError> {
+        self.request_ack(
+            Message::TriggerInterrupt(interrupt),
+            TYPE_TRIGGER_INTERRUPT,
+            None,
+        )
     }
 
     /// Provision the device's network config over USB. The device persists
     /// this and applies the resulting tier on its *next* boot -- it never
     /// hot-swaps ownership mid-session, so this ACK does not mean the device
     /// is networked yet.
-    pub fn provision(&self, config: &NetworkConfig) -> Result<Ack, DeviceError> {
-        match self.request(Message::NetworkConfig(config.clone()))? {
-            Message::Ack(ack)
-                if ack.acknowledged_type == TYPE_NETWORK_CONFIG && ack.revision.is_none() =>
-            {
-                Ok(ack)
-            }
-            _ => Err(DeviceError::UnexpectedMessage),
-        }
+    pub fn provision(&self, config: &NetworkConfig) -> Result<(), DeviceError> {
+        self.request_ack(
+            Message::NetworkConfig(config.clone()),
+            TYPE_NETWORK_CONFIG,
+            None,
+        )
     }
 
     /// Erase the device's persisted network config, returning it to
     /// factory-fresh local tier on its next boot.
-    pub fn factory_reset(&self) -> Result<Ack, DeviceError> {
-        match self.request(Message::FactoryReset)? {
-            Message::Ack(ack)
-                if ack.acknowledged_type == TYPE_FACTORY_RESET && ack.revision.is_none() =>
-            {
-                Ok(ack)
-            }
-            _ => Err(DeviceError::UnexpectedMessage),
-        }
+    pub fn factory_reset(&self) -> Result<(), DeviceError> {
+        self.request_ack(Message::FactoryReset, TYPE_FACTORY_RESET, None)
     }
 
     /// Reserve (or re-attach to) storage for one asset. Unlike `provision` and
@@ -419,41 +386,20 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         }
     }
 
-    pub fn asset_chunk(&self, chunk: AssetChunk) -> Result<Ack, DeviceError> {
-        match self.request(Message::AssetChunk(chunk))? {
-            Message::Ack(ack)
-                if ack.acknowledged_type == TYPE_ASSET_CHUNK && ack.revision.is_none() =>
-            {
-                Ok(ack)
-            }
-            _ => Err(DeviceError::UnexpectedMessage),
-        }
+    pub fn asset_chunk(&self, chunk: AssetChunk) -> Result<(), DeviceError> {
+        self.request_ack(Message::AssetChunk(chunk), TYPE_ASSET_CHUNK, None)
     }
 
-    pub fn asset_commit(&self, commit: AssetCommit) -> Result<Ack, DeviceError> {
-        match self.request(Message::AssetCommit(commit))? {
-            Message::Ack(ack)
-                if ack.acknowledged_type == TYPE_ASSET_COMMIT && ack.revision.is_none() =>
-            {
-                Ok(ack)
-            }
-            _ => Err(DeviceError::UnexpectedMessage),
-        }
+    pub fn asset_commit(&self, commit: AssetCommit) -> Result<(), DeviceError> {
+        self.request_ack(Message::AssetCommit(commit), TYPE_ASSET_COMMIT, None)
     }
 
     /// Tell the device the full set of digests that should survive. The
     /// device aborts any in-flight transfer, marks committed records absent
     /// from this set dead, and compacts -- so this must carry every desired
     /// digest, not just the ones this session happened to (re)upload.
-    pub fn asset_release(&self, release: AssetRelease) -> Result<Ack, DeviceError> {
-        match self.request(Message::AssetRelease(release))? {
-            Message::Ack(ack)
-                if ack.acknowledged_type == TYPE_ASSET_RELEASE && ack.revision.is_none() =>
-            {
-                Ok(ack)
-            }
-            _ => Err(DeviceError::UnexpectedMessage),
-        }
+    pub fn asset_release(&self, release: AssetRelease) -> Result<(), DeviceError> {
+        self.request_ack(Message::AssetRelease(release), TYPE_ASSET_RELEASE, None)
     }
 
     pub fn try_recv_event(&self) -> Option<ReceivedEvent> {
@@ -935,7 +881,14 @@ fn run_worker<T: Transport + Send + 'static>(
 ) {
     let mut connected = true;
     loop {
-        match command_receiver.try_recv() {
+        let received = if connected {
+            command_receiver.try_recv()
+        } else {
+            command_receiver
+                .recv()
+                .map_err(|_| TryRecvError::Disconnected)
+        };
+        match received {
             Ok(WorkerCommand::Shutdown) | Err(TryRecvError::Disconnected) => break,
             Ok(WorkerCommand::Request { message, response }) => {
                 let result = if connected {
@@ -973,38 +926,6 @@ fn run_worker<T: Transport + Send + 'static>(
                 continue;
             }
             Err(TryRecvError::Empty) => {}
-        }
-
-        if !connected {
-            match command_receiver.recv() {
-                Ok(WorkerCommand::Shutdown) | Err(_) => break,
-                Ok(command) => match command {
-                    WorkerCommand::Request { response, .. } => {
-                        let _ = response
-                            .send(Err(DeviceError::Transport(TransportError::Disconnected)));
-                    }
-                    WorkerCommand::Reconnect {
-                        transport,
-                        status,
-                        response,
-                    } => {
-                        connection.transport = transport;
-                        connection.deframer = Deframer::new();
-                        connection.last_request_finished = Instant::now();
-                        let result = connection.replay_after_reconnect(&status);
-                        connected = !matches!(result, Err(DeviceError::Transport(_)));
-                        if result.is_ok() {
-                            connection
-                                .diagnostics
-                                .reconnects
-                                .fetch_add(1, Ordering::Relaxed);
-                        }
-                        let _ = response.send(result);
-                    }
-                    WorkerCommand::Shutdown => break,
-                },
-            }
-            continue;
         }
 
         if connection.keepalive_due() {
@@ -1437,10 +1358,9 @@ mod tests {
             &status(41, 0, 100),
             options(Duration::from_mins(1), 8),
         );
-        let ack = session
+        session
             .push_next_timer("timer", 60_000, 60_000, false)
             .unwrap();
-        assert_eq!(ack.revision, Some(42));
         assert!(matches!(
             state.lock().unwrap().requests.last(),
             Some(Message::PushTimer(PushTimer { revision: 42, .. }))
@@ -1457,8 +1377,7 @@ mod tests {
         );
 
         let push = scene_push(7);
-        let ack = session.push_scene(push.clone()).unwrap();
-        assert_eq!(ack.revision, Some(7));
+        session.push_scene(push.clone()).unwrap();
         assert_eq!(
             state.lock().unwrap().requests.last(),
             Some(&Message::PushScene(push))
@@ -1590,6 +1509,12 @@ mod tests {
             session.status(),
             Err(DeviceError::Transport(TransportError::Disconnected))
         );
+        let request_count = first_state.lock().unwrap().requests.len();
+        assert_eq!(
+            session.status(),
+            Err(DeviceError::Transport(TransportError::Disconnected))
+        );
+        assert_eq!(first_state.lock().unwrap().requests.len(), request_count);
 
         let (second_transport, second_state) = FakeTransport::new(status(0, 0, 50));
         session
@@ -1695,7 +1620,7 @@ mod tests {
     }
 
     #[test]
-    fn provision_sends_the_config_and_returns_the_ack() {
+    fn provision_sends_the_config_and_accepts_the_ack() {
         let (transport, state) = FakeTransport::new(status(0, 0, 100));
         let session = DeviceSession::with_options(
             transport,
@@ -1711,9 +1636,7 @@ mod tests {
             utc_offset_minutes: 240,
             tier: protocol::Tier::Networked,
         };
-        let ack = session.provision(&network_config).unwrap();
-        assert_eq!(ack.acknowledged_type, TYPE_NETWORK_CONFIG);
-        assert_eq!(ack.revision, None);
+        session.provision(&network_config).unwrap();
         assert_eq!(
             state.lock().unwrap().requests.last(),
             Some(&Message::NetworkConfig(network_config))
@@ -1721,16 +1644,14 @@ mod tests {
     }
 
     #[test]
-    fn factory_reset_sends_the_request_and_returns_the_ack() {
+    fn factory_reset_sends_the_request_and_accepts_the_ack() {
         let (transport, state) = FakeTransport::new(status(0, 0, 100));
         let session = DeviceSession::with_options(
             transport,
             &status(0, 0, 100),
             options(Duration::from_mins(1), 8),
         );
-        let ack = session.factory_reset().unwrap();
-        assert_eq!(ack.acknowledged_type, TYPE_FACTORY_RESET);
-        assert_eq!(ack.revision, None);
+        session.factory_reset().unwrap();
         assert_eq!(
             state.lock().unwrap().requests.last(),
             Some(&Message::FactoryReset)
@@ -1777,6 +1698,18 @@ mod tests {
         }
     }
 
+    fn arm_release_watchdog(
+        released: &Arc<AtomicBool>,
+    ) -> (mpsc::Sender<()>, thread::JoinHandle<()>) {
+        let (cancel_sender, cancel_receiver) = mpsc::channel();
+        let released = Arc::clone(released);
+        let watchdog = thread::spawn(move || {
+            let _ = cancel_receiver.recv_timeout(Duration::from_secs(2));
+            released.store(true, Ordering::Release);
+        });
+        (cancel_sender, watchdog)
+    }
+
     /// A stalled transport must not be able to wedge the caller. `request` waits on
     /// the worker's reply, and the worker is the very thing a blocking read stops;
     /// without a deadline of its own that wait is unbounded, and one detached cable
@@ -1804,8 +1737,9 @@ mod tests {
             let started = Instant::now();
             let outcome = session.status();
             let _ = done_sender.send((outcome.is_err(), started.elapsed()));
-            // Handed back so the session is dropped only once the read is released:
-            // `Drop` joins the worker, which is itself stuck in that read.
+            // Handed back so the session is dropped after the read is released;
+            // `Drop` no longer joins a stalled worker (next test), so this only keeps
+            // the worker thread from outliving the test.
             session
         });
 
@@ -1845,13 +1779,7 @@ mod tests {
         // Armed before the first request, not after it: every wait this test can
         // regress into -- the request's and the drop's -- is then released on its
         // own, so a regression fails an assertion instead of hanging the suite.
-        let watchdog = {
-            let released = Arc::clone(&released);
-            thread::spawn(move || {
-                thread::sleep(Duration::from_secs(2));
-                released.store(true, Ordering::Release);
-            })
-        };
+        let (cancel, watchdog) = arm_release_watchdog(&released);
 
         assert!(
             session.status().is_err(),
@@ -1866,6 +1794,7 @@ mod tests {
         drop(session);
         let elapsed = started.elapsed();
 
+        drop(cancel);
         watchdog.join().expect("the watchdog must not panic");
         assert!(
             elapsed < Duration::from_secs(1),
@@ -1896,13 +1825,7 @@ mod tests {
         // Without this the worker may still be at its command channel, take the
         // Reconnect, and answer -- which tests nothing.
         wait_until_blocked_in_read(&reading);
-        let watchdog = {
-            let released = Arc::clone(&released);
-            thread::spawn(move || {
-                thread::sleep(Duration::from_secs(2));
-                released.store(true, Ordering::Release);
-            })
-        };
+        let (cancel, watchdog) = arm_release_watchdog(&released);
 
         let started = Instant::now();
         let outcome = session.reconnect(
@@ -1914,6 +1837,7 @@ mod tests {
         );
         let elapsed = started.elapsed();
 
+        drop(cancel);
         watchdog.join().expect("the watchdog must not panic");
         assert!(
             outcome.is_err(),
@@ -1945,13 +1869,7 @@ mod tests {
             },
         );
         wait_until_blocked_in_read(&reading);
-        let watchdog = {
-            let released = Arc::clone(&released);
-            thread::spawn(move || {
-                thread::sleep(Duration::from_secs(2));
-                released.store(true, Ordering::Release);
-            })
-        };
+        let (cancel, watchdog) = arm_release_watchdog(&released);
         assert!(
             !session.is_stalled(),
             "no request was made, so nothing can have marked this session stalled"
@@ -1961,6 +1879,7 @@ mod tests {
         drop(session);
         let elapsed = started.elapsed();
 
+        drop(cancel);
         watchdog.join().expect("the watchdog must not panic");
         assert!(
             elapsed < Duration::from_secs(1),

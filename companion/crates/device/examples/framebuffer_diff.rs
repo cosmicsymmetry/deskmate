@@ -570,7 +570,7 @@ mod tests {
         assert_eq!(
             requests.len(),
             44,
-            "42 non-manifest rows + 2 date-overflow rows"
+            "42 scene + face rows + 2 date-overflow rows"
         );
         assert_eq!(running_mid_countdown, 2);
         assert_eq!(

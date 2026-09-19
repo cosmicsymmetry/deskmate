@@ -72,14 +72,11 @@ impl RuntimeDevice for HarnessSerialDevice {
     }
 
     fn time_sync(&mut self, sync: TimeSync) -> Result<(), DeviceError> {
-        self.connected()?.session.time_sync(sync).map(|_| ())
+        self.connected()?.session.time_sync(sync)
     }
 
     fn apply_layout(&mut self, rotation: u16, cards: Vec<CardConfig>) -> Result<(), DeviceError> {
-        self.connected()?
-            .session
-            .apply_next_config(rotation, cards)
-            .map(|_| ())
+        self.connected()?.session.apply_next_config(rotation, cards)
     }
 
     fn push_timer(
@@ -92,25 +89,20 @@ impl RuntimeDevice for HarnessSerialDevice {
         self.connected()?
             .session
             .push_next_timer(card_id, total_ms, remaining_ms, running)
-            .map(|_| ())
     }
 
     fn push_scene(&mut self, push: PushScene) -> Result<(), DeviceError> {
-        self.connected()?.session.push_scene(push).map(|_| ())
+        self.connected()?.session.push_scene(push)
     }
 
     fn activate_card(&mut self, card_id: String) -> Result<(), DeviceError> {
         self.connected()?
             .session
             .activate_card(ActivateCard { card_id })
-            .map(|_| ())
     }
 
     fn trigger_interrupt(&mut self, interrupt: TriggerInterrupt) -> Result<(), DeviceError> {
-        self.connected()?
-            .session
-            .trigger_interrupt(interrupt)
-            .map(|_| ())
+        self.connected()?.session.trigger_interrupt(interrupt)
     }
 
     fn send_asset_begin(&mut self, begin: AssetBegin) -> Result<Ack, DeviceError> {
@@ -118,15 +110,15 @@ impl RuntimeDevice for HarnessSerialDevice {
     }
 
     fn send_asset_chunk(&mut self, chunk: AssetChunk) -> Result<(), DeviceError> {
-        self.connected()?.session.asset_chunk(chunk).map(|_| ())
+        self.connected()?.session.asset_chunk(chunk)
     }
 
     fn send_asset_commit(&mut self, commit: AssetCommit) -> Result<(), DeviceError> {
-        self.connected()?.session.asset_commit(commit).map(|_| ())
+        self.connected()?.session.asset_commit(commit)
     }
 
     fn send_asset_release(&mut self, release: AssetRelease) -> Result<(), DeviceError> {
-        self.connected()?.session.asset_release(release).map(|_| ())
+        self.connected()?.session.asset_release(release)
     }
 
     fn try_recv_event(&mut self) -> Option<ReceivedEvent> {

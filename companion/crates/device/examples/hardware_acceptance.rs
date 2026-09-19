@@ -212,7 +212,8 @@ fn run() -> Result<(), String> {
     let invalid_push_response = read_frames(&mut transport, 1, Duration::from_secs(2))?;
     require_error(&invalid_push_response[0], 103, ErrorCode::InvalidPayload)?;
 
-    // Canonical {0: 1577836799, 1: 0}: one second before the v1 time floor.
+    // Canonical {0: 1577836799, 1: 0}: one second before the TimeSync floor
+    // (protocol::MIN_UNIX_SECONDS).
     let invalid_time = encode_frame(&Frame::new(
         TYPE_TIME_SYNC,
         104,

@@ -8,79 +8,163 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use app_core::{
-    AlertHold, AppConfig, AssetKind, AssetSettings, AssetSource, CURRENT_SCHEMA_VERSION, CardAlert,
-    CardSettings, CarouselAdvance, ConfigOrigin, ConfigStore, DisplayOrientation, DisplayTemplate,
-    IconGlyphMapping, LoadOutcome, MAX_ASSET_SOURCE_LEN, MAX_CONFIG_FILE_BYTES,
-    MAX_ICON_GLYPH_NAME_LEN, MAX_ICON_GLYPHS, RefreshPolicy,
-    SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE, StoreError, WidgetTapAction,
+    AppConfig, AssetKind, AssetSettings, AssetSource, CURRENT_SCHEMA_VERSION, ConfigOrigin,
+    ConfigStore, IconGlyphMapping, LoadOutcome, MAX_ASSET_SOURCE_LEN, MAX_CONFIG_FILE_BYTES,
+    MAX_ICON_GLYPH_NAME_LEN, MAX_ICON_GLYPHS, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE,
+    StoreError,
 };
 
 #[test]
-fn a_pre_v4_document_is_refused_as_an_unsupported_version() {
-    // No supported companion version writes v0-v3 documents. Refusing one is
-    // a typed, legible outcome -- not a validation failure, which would be
-    // presented to the owner as broken settings.
-    let directory = test_directory("pre-v4-refused");
+fn unsupported_schema_matrix_preserves_bytes_and_uses_only_genuine_fallbacks() {
+    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11] {
+        for bytes in [
+            format!(r#"{{"schema_version":{version}}}"#).into_bytes(),
+            format!(
+                r#"{{"schema_version":{version},"preferences":{{}},"cards":[],"playlists":[],"active_playlist_id":"old"}}"#
+            )
+            .into_bytes(),
+        ] {
+            assert_unsupported_version_uses_only_genuine_fallbacks(version, &bytes);
+        }
+    }
+}
+
+fn assert_unsupported_version_uses_only_genuine_fallbacks(version: u32, bytes: &[u8]) {
+    let directory = test_directory(&format!("unsupported-v{version}"));
     let path = directory.path().join("config.json");
-    fs::write(
-        &path,
-        br#"{"schema_version":3,"preferences":{},"cards":[]}"#,
-    )
-    .expect("write v3 document");
+    fs::write(&path, bytes).unwrap();
 
     let store = ConfigStore::new(&path);
-    let outcome = store.load();
-
-    let recovery = outcome.recovery().expect("a v3 document must be refused");
-    assert!(
-        matches!(
-            recovery,
-            StoreError::UnsupportedVersion {
-                found: 3,
-                supported: CURRENT_SCHEMA_VERSION
-            }
-        ),
-        "a v3 document must be an UnsupportedVersion refusal, got {recovery:?}"
+    let fresh = store.load();
+    assert_eq!(fresh.origin(), ConfigOrigin::Defaults, "schema v{version}");
+    assert_eq!(fresh.config(), &AppConfig::default(), "schema v{version}");
+    assert_eq!(
+        fresh.recovery(),
+        Some(StoreError::UnsupportedVersion {
+            found: version,
+            supported: CURRENT_SCHEMA_VERSION,
+        }),
+        "schema v{version}"
     );
+    assert_eq!(fs::read(&path).unwrap(), bytes, "schema v{version}");
+
+    let repeated = store.load();
+    assert_eq!(
+        repeated.origin(),
+        ConfigOrigin::Defaults,
+        "schema v{version}"
+    );
+    assert_eq!(
+        repeated.config(),
+        &AppConfig::default(),
+        "schema v{version}"
+    );
+    assert_eq!(
+        repeated.recovery(),
+        Some(StoreError::UnsupportedVersion {
+            found: version,
+            supported: CURRENT_SCHEMA_VERSION,
+        }),
+        "schema v{version}"
+    );
+    assert_eq!(fs::read(&path).unwrap(), bytes, "schema v{version}");
+
+    let loaded_path = directory.path().join("loaded.json");
+    let loaded_store = ConfigStore::new(&loaded_path);
+    let mut loaded_last_good = AppConfig::default();
+    loaded_last_good.preferences.timezone = "Europe/Paris".into();
+    fs::write(
+        &loaded_path,
+        serde_json::to_vec_pretty(&loaded_last_good).unwrap(),
+    )
+    .unwrap();
+    let loaded = loaded_store.load();
+    assert_eq!(loaded.origin(), ConfigOrigin::Current, "schema v{version}");
+    assert_eq!(loaded.config(), &loaded_last_good, "schema v{version}");
+    fs::write(&loaded_path, bytes).unwrap();
+    let recovered_after_load = loaded_store.load();
+    assert_eq!(
+        recovered_after_load.origin(),
+        ConfigOrigin::LastGood,
+        "schema v{version}"
+    );
+    assert_eq!(
+        recovered_after_load.config(),
+        &loaded_last_good,
+        "schema v{version}"
+    );
+    assert_eq!(
+        recovered_after_load.recovery(),
+        Some(StoreError::UnsupportedVersion {
+            found: version,
+            supported: CURRENT_SCHEMA_VERSION,
+        }),
+        "schema v{version}"
+    );
+    assert_eq!(fs::read(&loaded_path).unwrap(), bytes, "schema v{version}");
+
+    let saved_path = directory.path().join("saved.json");
+    let saved_store = ConfigStore::new(&saved_path);
+    let mut saved_last_good = AppConfig::default();
+    saved_last_good.preferences.timezone = "Asia/Tbilisi".into();
+    saved_store.save(&saved_last_good).unwrap();
+    fs::write(&saved_path, bytes).unwrap();
+
+    let recovered = saved_store.load();
+    assert_eq!(
+        recovered.origin(),
+        ConfigOrigin::LastGood,
+        "schema v{version}"
+    );
+    assert_eq!(recovered.config(), &saved_last_good, "schema v{version}");
+    assert_eq!(
+        recovered.recovery(),
+        Some(StoreError::UnsupportedVersion {
+            found: version,
+            supported: CURRENT_SCHEMA_VERSION,
+        }),
+        "schema v{version}"
+    );
+    assert_eq!(fs::read(&saved_path).unwrap(), bytes, "schema v{version}");
 }
 
 #[test]
-fn v9_folds_the_active_playlist_into_the_card_order_and_loses_no_card() {
-    // The whole point of v10: one list. The active playlist's order becomes the
-    // card order and its dwells ride along; cards it never named are appended
-    // rather than dropped, which is what a v4-v9 "library outside the loop"
-    // becomes. Playlist names and the inactive playlist itself are the only
-    // things lost, on purpose.
-    let directory = test_directory("v9-two-playlists");
+fn v10_without_image_sources_loads_as_current_without_rewriting() {
+    let directory = test_directory("v10-omitted-image-sources");
     let path = directory.path().join("config.json");
-    fs::write(&path, include_bytes!("fixtures/v9-two-playlists.json")).unwrap();
+    let bytes = include_bytes!("fixtures/default.json");
+    fs::write(&path, bytes).unwrap();
+
+    let loaded = ConfigStore::new(&path).load();
+
+    assert_eq!(loaded.origin(), ConfigOrigin::Current);
+    assert!(loaded.config().image_sources.is_empty());
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+}
+
+#[test]
+fn an_empty_v10_loop_is_validation_failed_not_repaired() {
+    let directory = test_directory("empty-v10-loop");
+    let path = directory.path().join("config.json");
+    let mut value = serde_json::to_value(AppConfig::default()).unwrap();
+    value["cards"] = serde_json::json!([]);
+    let bytes = serde_json::to_vec_pretty(&value).unwrap();
+    fs::write(&path, &bytes).unwrap();
 
     let outcome = ConfigStore::new(&path).load();
-    assert_eq!(outcome.origin(), ConfigOrigin::MigratedV9);
-    let config = outcome.config();
-    assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
 
-    // Entry order first, then everything the active playlist did not name, in
-    // the order the card library had them.
-    let ids: Vec<&str> = config.cards.iter().map(CardSettings::id).collect();
-    assert_eq!(ids, ["desk", "focus", "library-only", "evening-only"]);
-
-    // Dwell rode across from the entry, and an unnamed card gets none.
-    assert_eq!(config.cards[0].dwell_seconds(), Some(20));
-    assert_eq!(config.cards[1].dwell_seconds(), None);
-    assert_eq!(config.cards[2].dwell_seconds(), None);
-    assert_eq!(config.cards[3].dwell_seconds(), None);
-
-    // The active playlist's advance became the document's; the inactive
-    // playlist's `manual` did not win.
-    assert_eq!(
-        config.advance,
-        CarouselAdvance::Timed {
-            default_dwell_seconds: 30
-        }
-    );
-
-    config.compile(7).unwrap();
+    let LoadOutcome::ValidationFailed {
+        config,
+        origin,
+        issues,
+    } = outcome
+    else {
+        panic!("an empty current loop must remain a validation failure");
+    };
+    assert_eq!(origin, ConfigOrigin::Defaults);
+    assert_eq!(config, AppConfig::default());
+    assert!(issues.iter().any(|issue| issue.path == "cards"));
+    assert_eq!(fs::read(&path).unwrap(), bytes);
 }
 
 fn test_directory(name: &str) -> tempfile::TempDir {
@@ -163,7 +247,7 @@ fn invalid_persisted_config_without_last_good_labels_fallback_as_defaults() {
 }
 
 #[test]
-fn save_round_trips_and_migration_is_explicit() {
+fn save_round_trips() {
     let directory = test_directory("round-trip");
     let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
@@ -176,55 +260,6 @@ fn save_round_trips_and_migration_is_explicit() {
     let loaded = store.load();
     assert_eq!(loaded.origin(), ConfigOrigin::Current);
     assert_eq!(loaded.config(), &config);
-
-    // A migration is never silent: the outcome names the version it came from,
-    // which is what lets a caller tell "this is what you saved" from "this is
-    // what we made of what you saved".
-    fs::write(&path, include_bytes!("fixtures/v4-roundtrip.json")).unwrap();
-    let migrated = store.load();
-    assert_eq!(migrated.origin(), ConfigOrigin::MigratedV4);
-    assert_eq!(migrated.config().schema_version, CURRENT_SCHEMA_VERSION);
-    assert_eq!(migrated.config().preferences.timezone, "Asia/Tbilisi");
-    assert!(migrated.config().preferences.autostart);
-    assert_eq!(
-        migrated.config().preferences.orientation,
-        DisplayOrientation::LandscapeFlipped
-    );
-    assert_eq!(migrated.config().cards.len(), 2);
-    assert!(matches!(
-        &migrated.config().cards[0],
-        CardSettings::Clock {
-            id,
-            title,
-            show_seconds: true,
-            template: DisplayTemplate::DigitalClock,
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::DeviceLocal,
-            alert: CardAlert::None,
-            ..
-        } if id == "clock" && title == "Desk"
-    ));
-    assert!(matches!(
-        &migrated.config().cards[1],
-        CardSettings::Pomodoro {
-            id,
-            label,
-            duration_seconds: 1_500,
-            template: DisplayTemplate::ProgressRing,
-            tap_action: WidgetTapAction::StartPause,
-            refresh: RefreshPolicy::DeviceLocal,
-            alert: CardAlert::OnTimerFinish { hold: AlertHold::UntilDismissed },
-            ..
-        } if id == "focus" && label == "Focus"
-    ));
-    assert!(migrated.config().assets.is_empty());
-    assert_eq!(
-        migrated.config().advance,
-        CarouselAdvance::Timed {
-            default_dwell_seconds: 30
-        }
-    );
-    migrated.config().compile(7).unwrap();
 }
 
 #[cfg(unix)]
@@ -267,202 +302,6 @@ fn loading_repairs_a_permissive_existing_config_mode() {
         fs::metadata(path).unwrap().permissions().mode() & 0o777,
         0o600
     );
-}
-
-#[test]
-fn v4_config_migrates_to_current_with_surviving_cards_unchanged() {
-    // At v4 the compile step rejected a non-empty `assets` array, so saved v4
-    // configs need no asset transformation. The shared legacy migration strips
-    // retired cards and their playlist entries, folds the active playlist into
-    // card order, and defaults the missing `image_sources`.
-    let directory = test_directory("v4-migration");
-    let path = directory.path().join("config.json");
-    let store = ConfigStore::new(&path);
-    fs::write(&path, include_bytes!("fixtures/v4-roundtrip.json")).unwrap();
-
-    let outcome = store.load();
-    assert_eq!(outcome.origin(), ConfigOrigin::MigratedV4);
-    assert!(outcome.recovery().is_none());
-
-    let config = outcome.config();
-    assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
-    assert!(config.image_sources.is_empty());
-    assert!(config.assets.is_empty());
-    assert_eq!(config.preferences.timezone, "Asia/Tbilisi");
-    assert_eq!(config.cards.len(), 2);
-    assert!(config.validate().is_ok());
-}
-
-#[test]
-fn v5_config_migrates_to_current_dropping_retired_cards() {
-    let directory = test_directory("v5-migration");
-    let path = directory.path().join("config.json");
-    let store = ConfigStore::new(&path);
-    fs::write(&path, include_bytes!("fixtures/v5-roundtrip.json")).unwrap();
-
-    let outcome = store.load();
-    assert_eq!(outcome.origin(), ConfigOrigin::MigratedV5);
-    assert!(outcome.recovery().is_none());
-
-    let migrated = outcome.config();
-    assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
-
-    assert_eq!(
-        migrated
-            .cards
-            .iter()
-            .map(CardSettings::id)
-            .collect::<Vec<_>>(),
-        ["analog", "focus"]
-    );
-    assert!(migrated.image_sources.is_empty());
-
-    assert!(migrated.validate().is_ok());
-}
-
-#[test]
-fn a_v6_document_migrates_to_current_with_no_image_sources_and_loses_nothing() {
-    // A real v6 document: no `image_sources` key at all. It must parse, not fail.
-    let v6 = serde_json::json!({
-        "schema_version": 6,
-        "preferences": { "timezone": "UTC", "autostart": false, "paused": false },
-        "cards": [{
-            "kind": "clock",
-            "id": "clock",
-            "title": "Desk",
-            "show_seconds": true,
-            "template": { "kind": "digital-clock" },
-            "tap_action": { "kind": "none" },
-            "refresh": { "kind": "device-local" },
-            "alert": { "kind": "none" }
-        }],
-        "assets": [],
-        "playlists": [{
-            "id": "my-playlist",
-            "name": "My playlist",
-            "advance": { "kind": "manual" },
-            "entries": [{ "card_id": "clock", "dwell_seconds": null }]
-        }],
-        "active_playlist_id": "my-playlist",
-        "updater": { "channel": "stable", "checks": "notify" }
-    });
-
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("config.json");
-    std::fs::write(&path, serde_json::to_vec_pretty(&v6).expect("encode")).expect("write");
-
-    let store = app_core::ConfigStore::new(path);
-    let loaded = store.load();
-    let config = loaded.config();
-
-    assert_eq!(loaded.origin(), ConfigOrigin::MigratedV6);
-    assert_eq!(config.schema_version, app_core::CURRENT_SCHEMA_VERSION);
-    assert_eq!(config.schema_version, 10);
-    assert!(config.image_sources.is_empty(), "v6 knew no sources");
-    // Lossless: everything else survived untouched.
-    assert_eq!(config.cards.len(), 1);
-    assert_eq!(config.cards[0].id(), "clock");
-}
-
-#[test]
-fn v7_document_migrates_to_current_dropping_retired_cards_and_entries() {
-    let directory = test_directory("v7-migration");
-    let path = directory.path().join("config.json");
-    let store = ConfigStore::new(&path);
-    fs::write(&path, include_bytes!("fixtures/v7-roundtrip.json")).unwrap();
-
-    let outcome = store.load();
-    assert_eq!(outcome.origin(), ConfigOrigin::MigratedV7);
-    assert!(outcome.recovery().is_none());
-    let config = outcome.config();
-    assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
-    assert_eq!(
-        config
-            .cards
-            .iter()
-            .map(CardSettings::id)
-            .collect::<Vec<_>>(),
-        ["clock", "pomodoro"]
-    );
-    config.validate().unwrap();
-}
-
-#[test]
-fn v8_document_migrates_to_current_dropping_plugin_cards_and_entries() {
-    let directory = test_directory("v8-migration");
-    let path = directory.path().join("config.json");
-    let store = ConfigStore::new(&path);
-    fs::write(&path, include_bytes!("fixtures/plugin-card.json")).unwrap();
-
-    let outcome = store.load();
-    assert_eq!(outcome.origin(), ConfigOrigin::MigratedV8);
-    assert!(outcome.recovery().is_none());
-    let config = outcome.config();
-    assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
-    assert_eq!(
-        config
-            .cards
-            .iter()
-            .map(CardSettings::id)
-            .collect::<Vec<_>>(),
-        ["clock"]
-    );
-    config.validate().unwrap();
-}
-
-#[test]
-fn v8_roundtrip_fixture_preserves_every_surviving_card() {
-    let directory = test_directory("v8-roundtrip");
-    let path = directory.path().join("config.json");
-    let store = ConfigStore::new(&path);
-    fs::write(&path, include_bytes!("fixtures/v8-roundtrip.json")).unwrap();
-
-    let outcome = store.load();
-    assert_eq!(outcome.origin(), ConfigOrigin::MigratedV8);
-    assert_eq!(
-        outcome
-            .config()
-            .cards
-            .iter()
-            .map(CardSettings::id)
-            .collect::<Vec<_>>(),
-        ["clock", "pomodoro"]
-    );
-}
-
-#[test]
-fn an_all_retired_v7_document_gets_the_default_clock() {
-    let directory = test_directory("v7-all-retired");
-    let path = directory.path().join("config.json");
-    let store = ConfigStore::new(&path);
-    let document = br#"{
-      "schema_version": 7,
-      "preferences": { "timezone": "UTC", "autostart": false, "paused": false, "orientation": "landscape" },
-      "cards": [
-        { "kind": "calendar", "id": "agenda", "title": "Agenda", "source": { "kind": "url", "value": "https://example.test/a.ics" }, "template": { "kind": "row-list" }, "tap_action": { "kind": "none" }, "refresh": { "kind": "interval", "minutes": 15 }, "alert": { "kind": "none" } },
-        { "kind": "weather", "id": "outside", "title": "Outside", "location": "Tbilisi", "units": "metric", "template": { "kind": "icon-badge-text", "icon_asset_id": null }, "tap_action": { "kind": "none" }, "refresh": { "kind": "interval", "minutes": 30 }, "alert": { "kind": "none" } },
-        { "kind": "json-feed", "id": "metric", "title": "Metric", "url": "https://example.test/data.json", "mappings": [], "template": { "kind": "big-number-label" }, "tap_action": { "kind": "none" }, "refresh": { "kind": "manual" }, "alert": { "kind": "none" } },
-        { "kind": "rss", "id": "news", "title": "News", "url": "https://example.test/feed.xml", "max_items": 3, "template": { "kind": "row-list" }, "tap_action": { "kind": "none" }, "refresh": { "kind": "interval", "minutes": 30 }, "alert": { "kind": "none" } }
-      ],
-      "assets": [],
-      "playlists": [
-        { "id": "active", "name": "Active", "advance": { "kind": "manual" }, "entries": [{ "card_id": "agenda", "dwell_seconds": null }, { "card_id": "outside", "dwell_seconds": null }] },
-        { "id": "inactive", "name": "Inactive", "advance": { "kind": "manual" }, "entries": [{ "card_id": "metric", "dwell_seconds": null }, { "card_id": "news", "dwell_seconds": null }] }
-      ],
-      "active_playlist_id": "active",
-      "updater": { "channel": "stable", "checks": "notify" }
-    }"#;
-    fs::write(&path, document).unwrap();
-
-    let outcome = store.load();
-    assert_eq!(outcome.origin(), ConfigOrigin::MigratedV7);
-    let config = outcome.config();
-    let defaults = AppConfig::default();
-    // Every card was a retired kind, so the loop would have been empty. It
-    // gets exactly the fallback card `AppConfig::default()` ships, never an
-    // empty panel.
-    assert_eq!(config.cards, defaults.cards);
-    config.validate().unwrap();
 }
 
 #[test]

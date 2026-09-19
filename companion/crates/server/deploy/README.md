@@ -65,8 +65,10 @@ device's firmware check, which is useful while diagnosing updates.
 
 Provisioned identities survive normal process and host restarts. The registry
 lives at `$DESKMATE_CONFIG_DIR/device-identities.json`, alongside the per-device
-config files (currently [schema v10](../../../../docs/config/v10.md); v4-v9 files
-are migrated on load). It is a versioned JSON document containing each
+config files ([schema v10](../../../../docs/config/v10.md)). Schema v10 is the only
+readable application-config version. Any other `schema_version` is refused without
+rewriting the file; that device continues on its safe fallback and exposes the load
+error until an explicit successful save. It is a versioned JSON document containing each
 `dev-NNNN` id and the lowercase SHA-256 digest of that device's bearer token.
 Its historical schema-v1 field `next_sequence` stores the **last issued**
 sequence; minting adds one. That counterintuitive field name is retained so an

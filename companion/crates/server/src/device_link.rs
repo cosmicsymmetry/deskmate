@@ -126,7 +126,7 @@ async fn load_config(
     let load = tokio::task::spawn_blocking(move || store.store.load()).await;
     match load {
         Ok(LoadOutcome::Loaded { config, origin }) => {
-            device_config.record_load(origin, None);
+            device_config.record_load(origin, None, None);
             Some(config)
         }
         Ok(LoadOutcome::Recovered {
@@ -134,7 +134,11 @@ async fn load_config(
             origin,
             error,
         }) => {
-            device_config.record_load(origin, Some(crate::store::ConfigFallbackReason::Recovery));
+            device_config.record_load(
+                origin,
+                Some(crate::store::ConfigFallbackReason::Recovery),
+                Some(error.clone()),
+            );
             tracing::warn!(
                 device_id = %device_id,
                 ?origin,
@@ -151,6 +155,9 @@ async fn load_config(
             device_config.record_load(
                 origin,
                 Some(crate::store::ConfigFallbackReason::ValidationFailed),
+                Some(app_core::StoreError::Validation {
+                    issues: issues.clone(),
+                }),
             );
             if origin == ConfigOrigin::LastGood {
                 tracing::warn!(

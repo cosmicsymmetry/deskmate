@@ -27,6 +27,36 @@ fn default_fixture_is_the_canonical_default() {
 }
 
 #[test]
+fn v10_omissions_keep_the_frozen_defaults_and_serialize_explicitly() {
+    let mut value: serde_json::Value = serde_json::from_str(DEFAULT_JSON).unwrap();
+    assert!(
+        value.get("image_sources").is_none(),
+        "the canonical v10 fixture must exercise the accepted omission"
+    );
+    value["preferences"]
+        .as_object_mut()
+        .unwrap()
+        .remove("orientation");
+    value["cards"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("dwell_seconds");
+
+    let config: AppConfig = serde_json::from_value(value).unwrap();
+    assert!(config.image_sources.is_empty());
+    assert_eq!(config.preferences.orientation.rotation_degrees(), 90);
+    assert_eq!(config.cards[0].dwell_seconds(), None);
+
+    let normalized = serde_json::to_value(config).unwrap();
+    assert_eq!(normalized["image_sources"], serde_json::json!([]));
+    assert_eq!(normalized["preferences"]["orientation"], "landscape");
+    assert_eq!(
+        normalized["cards"][0].get("dwell_seconds"),
+        Some(&serde_json::Value::Null)
+    );
+}
+
+#[test]
 fn full_fixture_compiles_deterministically_to_the_current_wire_contract() {
     let config: AppConfig = serde_json::from_str(FULL_JSON).unwrap();
     let first = config.compile(42).unwrap();
@@ -99,7 +129,7 @@ fn invalid_fixture_reports_all_domain_boundaries_before_compile() {
 }
 
 #[test]
-fn future_schema_establishes_a_clean_migration_boundary() {
+fn future_schema_establishes_a_clean_refusal_boundary() {
     let config: AppConfig = serde_json::from_str(FUTURE_JSON).unwrap();
     let error = config.validate().unwrap_err();
     assert!(error.issues.iter().any(|issue| {

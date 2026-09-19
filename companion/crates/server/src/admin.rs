@@ -183,18 +183,22 @@ async fn get_device(
     if !state.registry().contains_device(&device_id) {
         return Err(AdminError::NotFound);
     }
+    let device_config = state.configs().for_device(&device_id);
+    let _update = device_config.update.lock().await;
     let link = state.device_link(&device_id);
     let connected = link.as_ref().is_some_and(|link| link.is_live());
     let last_seen_unix_ms = link.as_ref().and_then(|link| link.last_seen_unix_ms());
     let last_ota_error = link.as_ref().and_then(|link| link.last_ota_error());
     let runtime = link.and_then(|link| link.runtime());
-    let config = state.configs().for_device(&device_id).status();
+    let config = device_config.status();
     let snapshot = if let Some(runtime) = runtime {
+        let mut snapshot = tokio::task::spawn_blocking(move || runtime.snapshot())
+            .await
+            .map_err(|_| AdminError::WorkerFailed)?
+            .map_err(AdminError::from)?;
+        device_config.apply_load_diagnostic(&mut snapshot);
         Some(AdminSnapshot {
-            snapshot: tokio::task::spawn_blocking(move || runtime.snapshot())
-                .await
-                .map_err(|_| AdminError::WorkerFailed)?
-                .map_err(AdminError::from)?,
+            snapshot,
             last_ota_error,
             observed_age_seconds: observed_age_seconds(last_seen_unix_ms, now_unix_ms()),
         })

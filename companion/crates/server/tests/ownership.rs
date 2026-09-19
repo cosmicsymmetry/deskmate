@@ -682,6 +682,181 @@ async fn admin_status_reports_defaults_used_after_stored_config_validation_failu
 }
 
 #[tokio::test]
+async fn linked_config_recovery_remains_visible_until_explicit_save() {
+    const ADMIN_TOKEN: &str = "linked-recovery-admin-token";
+
+    let temp = tempfile::tempdir().expect("config test temp dir");
+    let config_root = temp.path().join("configs");
+    std::fs::create_dir_all(&config_root).expect("create config root");
+    let state = ServerState::new(
+        ADMIN_TOKEN.to_string(),
+        server::firmware::FirmwareCatalog::in_memory(),
+        config_root.clone(),
+    );
+    let refused = state
+        .registry()
+        .mint()
+        .expect("mint refused-config identity");
+    let healthy = state.registry().mint().expect("mint healthy identity");
+    let refused_path = config_root.join(format!("{}.json", refused.device_id));
+    let refused_bytes = br#"{"schema_version":11,"future_body":true}"#;
+    std::fs::write(&refused_path, refused_bytes).expect("write unsupported config");
+    let healthy_path = config_root.join(format!("{}.json", healthy.device_id));
+    let valid = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/one-clock-card.json"
+    ))
+    .expect("valid fixture");
+    std::fs::write(&healthy_path, &valid).expect("write healthy config");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app(state)).await.unwrap();
+    });
+    let host = format!("127.0.0.1:{}", address.port());
+    let client = reqwest::Client::new();
+
+    let mut refused_socket = connect_device(&host, &refused.token)
+        .await
+        .expect("refused-config device still links on safe fallback");
+    let refused_apply = support::drive_until_config(&mut refused_socket, "clock").await;
+    assert_eq!(refused_apply.cards[0].card_id, "clock");
+
+    let mut healthy_socket = connect_device(&host, &healthy.token)
+        .await
+        .expect("healthy device links alongside refused-config device");
+    let healthy_apply = support::drive_until_config(&mut healthy_socket, "clock-1").await;
+    assert_eq!(healthy_apply.cards[0].card_id, "clock-1");
+
+    let refused_snapshot =
+        companion_snapshot(&client, &host, &refused.device_id, ADMIN_TOKEN).await;
+    assert_recoverable_unsupported(&refused_snapshot);
+    let healthy_snapshot =
+        companion_snapshot(&client, &host, &healthy.device_id, ADMIN_TOKEN).await;
+    assert_eq!(healthy_snapshot["persistence"]["kind"], "clean");
+
+    let status = admin_status(&client, &host, &refused.device_id, ADMIN_TOKEN).await;
+    assert_eq!(status["config"]["origin"], "defaults");
+    assert_eq!(status["config"]["using_fallback"], true);
+    assert_eq!(status["config"]["fallback_reason"], "recovery");
+    assert_recoverable_unsupported(&status["snapshot"]);
+
+    let event = first_app_state_event(&client, &host, &refused.device_id, ADMIN_TOKEN).await;
+    assert_recoverable_unsupported(&event);
+
+    drop(refused_socket);
+    let mut refused_socket = connect_after_release(&host, &refused.token).await;
+    support::bootstrap_runtime(&mut refused_socket).await;
+    let after_reconnect = companion_snapshot(&client, &host, &refused.device_id, ADMIN_TOKEN).await;
+    assert_recoverable_unsupported(&after_reconnect);
+    assert_eq!(std::fs::read(&refused_path).unwrap(), refused_bytes);
+    assert_eq!(std::fs::read_to_string(&healthy_path).unwrap(), valid);
+
+    let save = client
+        .put(format!(
+            "http://{host}/v1/devices/{}/config",
+            refused.device_id
+        ))
+        .bearer_auth(ADMIN_TOKEN)
+        .header("Content-Type", "application/json")
+        .body(valid.clone())
+        .send();
+    let (saved, applied) = tokio::join!(
+        save,
+        support::drive_until_config(&mut refused_socket, "clock-1")
+    );
+    assert_eq!(saved.expect("explicit save").status(), 200);
+    assert_eq!(applied.cards[0].card_id, "clock-1");
+
+    let cleared = companion_snapshot(&client, &host, &refused.device_id, ADMIN_TOKEN).await;
+    assert_eq!(cleared["persistence"]["kind"], "clean");
+    let status = admin_status(&client, &host, &refused.device_id, ADMIN_TOKEN).await;
+    assert_eq!(status["config"]["origin"], "current");
+    assert_eq!(status["config"]["using_fallback"], false);
+    assert!(status["config"]["fallback_reason"].is_null());
+    assert_eq!(status["snapshot"]["persistence"]["kind"], "clean");
+}
+
+async fn companion_snapshot(
+    client: &reqwest::Client,
+    host: &str,
+    device_id: &str,
+    admin_token: &str,
+) -> serde_json::Value {
+    let response = client
+        .get(format!("http://{host}/v1/app/{device_id}/snapshot"))
+        .bearer_auth(admin_token)
+        .send()
+        .await
+        .expect("companion snapshot");
+    assert_eq!(response.status(), 200);
+    serde_json::from_str(&response.text().await.expect("companion snapshot body"))
+        .expect("companion snapshot JSON")
+}
+
+async fn admin_status(
+    client: &reqwest::Client,
+    host: &str,
+    device_id: &str,
+    admin_token: &str,
+) -> serde_json::Value {
+    let response = client
+        .get(format!("http://{host}/v1/devices/{device_id}"))
+        .bearer_auth(admin_token)
+        .send()
+        .await
+        .expect("admin status");
+    assert_eq!(response.status(), 200);
+    serde_json::from_str(&response.text().await.expect("admin status body"))
+        .expect("admin status JSON")
+}
+
+fn assert_recoverable_unsupported(snapshot: &serde_json::Value) {
+    assert_eq!(snapshot["persistence"]["kind"], "recoverable-error");
+    assert_eq!(
+        snapshot["persistence"]["message"],
+        "config schema version 11 is unsupported; expected 10"
+    );
+}
+
+async fn first_app_state_event(
+    client: &reqwest::Client,
+    host: &str,
+    device_id: &str,
+    admin_token: &str,
+) -> serde_json::Value {
+    let mut response = client
+        .get(format!("http://{host}/v1/app/{device_id}/events"))
+        .bearer_auth(admin_token)
+        .send()
+        .await
+        .expect("event stream");
+    assert_eq!(response.status(), 200);
+    let mut bytes = Vec::new();
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while !bytes.windows(2).any(|window| window == b"\n\n") {
+            bytes.extend(
+                response
+                    .chunk()
+                    .await
+                    .expect("event stream chunk")
+                    .expect("first app-state event"),
+            );
+        }
+    })
+    .await
+    .expect("first app-state event deadline");
+    let text = std::str::from_utf8(&bytes).expect("event stream UTF-8");
+    assert!(text.lines().any(|line| line == "event: app-state"));
+    let data = text
+        .lines()
+        .find_map(|line| line.strip_prefix("data: "))
+        .expect("app-state data");
+    serde_json::from_str(data).expect("app-state JSON")
+}
+
+#[tokio::test]
 async fn ownership_slot_is_released_after_disconnect() {
     // Catches a leaked ownership reservation that would strand a real device
     // after WiFi/NAT reconnect despite correctly refusing concurrent sockets.

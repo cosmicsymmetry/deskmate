@@ -567,6 +567,27 @@ test("validation-failed persistence shows the saved-settings banner and issue me
   }
 });
 
+test("unsupported saved settings use the generic recoverable-error banner", async () => {
+  const message = "config schema version 11 is unsupported; expected 10";
+  backendMocks.snapshotImpl = async () => ({
+    ...(structuredClone(snapshot) as AppSnapshot),
+    has_saved_config: true,
+    persistence: { kind: "recoverable-error", message },
+  });
+
+  const { container, root, cleanup } = await mount();
+  try {
+    await act(async () => root.render(<App />));
+    await waitFor(() => expect(container.textContent).toContain("Settings file needs attention"));
+    expect(container.textContent).toContain(message);
+    expect(container.textContent).toContain("The unreadable file was left untouched");
+    expect(container.textContent).not.toContain("Make the display yours");
+  } finally {
+    await cleanup();
+    backendMocks.snapshotImpl = async () => snapshot;
+  }
+});
+
 test("a display speaking the server's own protocol raises nothing", async () => {
   // Compatibility compares the device with the server-reported version rather
   // than a client literal, so matching peers never produce a false warning.

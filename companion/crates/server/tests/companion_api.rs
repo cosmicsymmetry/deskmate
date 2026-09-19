@@ -96,6 +96,24 @@ async fn direct_snapshot(state: &ServerState, device_id: &str) -> serde_json::Va
     serde_json::from_slice(&body).expect("snapshot JSON")
 }
 
+async fn direct_device_list(state: &ServerState) -> serde_json::Value {
+    let response = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/app/devices")
+                .header("authorization", format!("Bearer {ADMIN_TOKEN}"))
+                .body(Body::empty())
+                .expect("device-list request"),
+        )
+        .await
+        .expect("device-list response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("device-list body");
+    serde_json::from_slice(&body).expect("device-list JSON")
+}
+
 #[tokio::test]
 async fn event_stream_ends_when_shutdown_begins_without_a_socket() {
     use futures_util::{FutureExt as _, StreamExt as _};
@@ -448,6 +466,96 @@ async fn an_unlinked_device_reports_invalid_saved_settings_without_rewriting_the
         std::fs::read(path).expect("saved settings after GET"),
         saved
     );
+}
+
+#[tokio::test]
+async fn unsupported_device_config_does_not_block_startup_listing_or_other_devices() {
+    let root = tempfile::tempdir().expect("config root");
+    let initial = ServerState::new(
+        ADMIN_TOKEN.to_owned(),
+        FirmwareCatalog::in_memory(),
+        root.path().to_path_buf(),
+    );
+    let valid = initial.registry().mint().expect("mint valid device");
+    let unsupported = initial.registry().mint().expect("mint unsupported device");
+    let malformed = initial.registry().mint().expect("mint malformed device");
+    let unreadable = initial.registry().mint().expect("mint unreadable device");
+
+    let mut valid_config = app_core::AppConfig::default();
+    valid_config.preferences.timezone = "Asia/Tbilisi".into();
+    let valid_bytes = serde_json::to_vec_pretty(&valid_config).expect("encode valid config");
+    let valid_path = root.path().join(format!("{}.json", valid.device_id));
+    std::fs::write(&valid_path, &valid_bytes).expect("write valid config");
+
+    let unsupported_bytes = br#"{"schema_version":11,"future_body":true}"#;
+    let unsupported_path = root.path().join(format!("{}.json", unsupported.device_id));
+    std::fs::write(&unsupported_path, unsupported_bytes).expect("write unsupported config");
+
+    let malformed_bytes = b"{ definitely not json";
+    let malformed_path = root.path().join(format!("{}.json", malformed.device_id));
+    std::fs::write(&malformed_path, malformed_bytes).expect("write malformed config");
+
+    let unreadable_path = root.path().join(format!("{}.json", unreadable.device_id));
+    std::fs::create_dir(&unreadable_path).expect("create unreadable stand-in");
+    drop(initial);
+
+    let state = ServerState::new(
+        ADMIN_TOKEN.to_owned(),
+        FirmwareCatalog::in_memory(),
+        root.path().to_path_buf(),
+    );
+    let rows = direct_device_list(&state).await;
+    assert_eq!(rows.as_array().map(Vec::len), Some(4));
+    for id in [
+        &valid.device_id,
+        &unsupported.device_id,
+        &malformed.device_id,
+        &unreadable.device_id,
+    ] {
+        let row = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == *id)
+            .unwrap_or_else(|| panic!("{id} missing from device list"));
+        assert_eq!(row["has_saved_config"], true, "{id}");
+    }
+
+    let valid_snapshot = direct_snapshot(&state, &valid.device_id).await;
+    assert_eq!(valid_snapshot["persistence"]["kind"], "clean");
+    assert_eq!(
+        valid_snapshot["config"]["preferences"]["timezone"],
+        "Asia/Tbilisi"
+    );
+
+    let unsupported_snapshot = direct_snapshot(&state, &unsupported.device_id).await;
+    assert_eq!(
+        unsupported_snapshot["persistence"],
+        serde_json::json!({
+            "kind": "recoverable-error",
+            "message": "config schema version 11 is unsupported; expected 10",
+        })
+    );
+    assert_eq!(
+        unsupported_snapshot["config"],
+        serde_json::to_value(app_core::AppConfig::default()).unwrap()
+    );
+
+    let malformed_snapshot = direct_snapshot(&state, &malformed.device_id).await;
+    assert_eq!(
+        malformed_snapshot["persistence"]["kind"],
+        "recoverable-error"
+    );
+    let unreadable_snapshot = direct_snapshot(&state, &unreadable.device_id).await;
+    assert_eq!(
+        unreadable_snapshot["persistence"]["kind"],
+        "recoverable-error"
+    );
+
+    assert_eq!(std::fs::read(&valid_path).unwrap(), valid_bytes);
+    assert_eq!(std::fs::read(&unsupported_path).unwrap(), unsupported_bytes);
+    assert_eq!(std::fs::read(&malformed_path).unwrap(), malformed_bytes);
+    assert!(unreadable_path.is_dir());
 }
 
 #[tokio::test]

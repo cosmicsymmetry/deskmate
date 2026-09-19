@@ -299,10 +299,13 @@ async fn read_snapshot(
     state: &ServerState,
     device_id: String,
 ) -> Result<CompanionSnapshot, AppApiError> {
+    let device_config = state.configs().for_device(&device_id);
+    let _update = device_config.update.lock().await;
     if let Some(runtime) = live_runtime(state, &device_id) {
-        let app = tokio::task::spawn_blocking(move || runtime.snapshot())
+        let mut app = tokio::task::spawn_blocking(move || runtime.snapshot())
             .await
             .map_err(|_| worker_failed())??;
+        device_config.apply_load_diagnostic(&mut app);
         return Ok(CompanionSnapshot {
             app,
             has_saved_config: true,
@@ -310,10 +313,10 @@ async fn read_snapshot(
         });
     }
 
-    let device_config = state.configs().for_device(&device_id);
+    let store = Arc::clone(&device_config);
     tokio::task::spawn_blocking(move || {
-        let has_saved_config = device_config.store.path().exists();
-        let (config, persistence) = match device_config.store.load() {
+        let has_saved_config = store.store.path().exists();
+        let (config, persistence) = match store.store.load() {
             LoadOutcome::Loaded { config, .. } => (config, PersistenceState::Clean),
             LoadOutcome::Recovered { config, error, .. } => (
                 config,

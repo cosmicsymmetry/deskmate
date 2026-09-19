@@ -58,6 +58,35 @@ test("HTTP teardown records handler assertions and JSON parsing failures", async
   expect(() => http.assertNoFailures()).toThrow();
 });
 
+test("a linked display outranks a newer refused-config row unless it was explicitly remembered", async () => {
+  const client = await import("../src/lib/backendClient.ts?production-client");
+  const remembered = window.localStorage.getItem("deskmate.device_id");
+  const devices = [
+    { id: "refused", connected: false, has_saved_config: true, configured_at: 200 },
+    { id: "healthy", connected: true, has_saved_config: true, configured_at: 100 },
+  ];
+  httpHandlers.set("POST /v1/app/session", (_body, init) => {
+    expectJsonRequest(init);
+    return new Response(null, { status: 204 });
+  });
+  httpHandlers.set("GET /v1/app/devices", () => new Response(JSON.stringify(devices)));
+
+  try {
+    window.localStorage.removeItem("deskmate.device_id");
+    expect(await client.signInAndSelectDevice("", "session-token")).toMatchObject({
+      device_id: "healthy",
+    });
+
+    window.localStorage.setItem("deskmate.device_id", "refused");
+    expect(await client.signInAndSelectDevice("", "session-token")).toMatchObject({
+      device_id: "refused",
+    });
+  } finally {
+    if (remembered === null) window.localStorage.removeItem("deskmate.device_id");
+    else window.localStorage.setItem("deskmate.device_id", remembered);
+  }
+});
+
 test("real event streams preserve selection, credentials, parsing and stale-source cleanup", async () => {
   const { startAppStateSubscription } = await import("../src/lib/useAppState");
   const { snapshot } = await import("./support/fixtures");

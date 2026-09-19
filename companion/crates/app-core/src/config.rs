@@ -295,10 +295,8 @@ pub struct AppConfig {
     pub schema_version: u32,
     pub preferences: AppPreferences,
     pub cards: Vec<CardSettings>,
-    /// Named image sources. `#[serde(default)]` is load-bearing: the migration
-    /// path parses a v4/v5/v6 document straight into this struct, and those
-    /// documents have no such key. Without the default every saved config on
-    /// earth fails to parse and the user is told their settings are invalid.
+    /// Named image sources. The frozen v10 input contract accepts this field's
+    /// omission as an empty source list.
     #[serde(default)]
     pub image_sources: Vec<ImageSource>,
     pub assets: Vec<AssetSettings>,
@@ -1156,8 +1154,7 @@ pub enum AssetSource {
 }
 
 /// The device rasterizes glyphs at any size from a TTF/OTF at runtime (`tiny_ttf`),
-/// so unlike v4's `Icon { width, height }` / `Font { pixel_size, glyph_ranges }`, no
-/// v5 variant pins a size or a pre-baked glyph set.
+/// so font kinds do not pin a size or a pre-baked glyph set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum AssetKind {

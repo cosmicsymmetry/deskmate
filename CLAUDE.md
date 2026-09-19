@@ -171,6 +171,13 @@ Each of these cost this project real time at least once.
   honest check for the preview; **driving the real build in Chrome is the honest check for
   the window**, and it is cheap now that the product is a web page. Two defects were found
   that way in one sitting, both invisible to 122 passing frontend tests.
+- **The DOM suite cannot see a stylesheet, so every CSS mutation survives it.** happy-dom
+  never applies one: deleting a selected-state rule, swapping an error colour and breaking
+  a transform origin each left all component tests green. For a CSS or markup refactor
+  the check is `tools/webcheck/pixelab.py` (is build B pixel-identical to build A across
+  252 states); for anything that needs the server it is `tools/webcheck/smoke.sh`. Both
+  READMEs say why a naive screenshot diff lies: capture A and B in ONE browser launch,
+  and drive the clock rather than merely setting it.
 - **A harness must not offer what the shipped app does not have.** When the cable
   operations were removed, they were removed from `src/dev/backendClient.ts` too. A mock
   that still answers `provision_device` lets the UI be built against an affordance nobody
@@ -181,6 +188,12 @@ Each of these cost this project real time at least once.
   opens serial ports. A stalled session reports
   `Transport(Disconnected)`, never `Timeout`, because `is_disconnect` is what makes the
   runtime reconnect.
+- **Two assertions that look like proof and are not.** `value["key"].is_null()` on a
+  `serde_json::Value` is true for a MISSING key, so it cannot pin "serialized as an
+  explicit null" -- assert `value.get("key") == Some(&Value::Null)`. And a `tracing`
+  macro takes its target from the enclosing module, so MOVING a `warn!` silently changes
+  its target and any filter keyed on it -- pass `target:` explicitly when moving one.
+  Both survived green suites during the 2026-09-19 sweep and were caught only by mutation.
 - **Green tests say nothing about whether OTA still works**, and `make -C
   firmware/host_tests sanitize` is not optional: two `core/scene_decode.c` bounds guard
   out-of-bounds *writes* that `scene_model_validate()` then reports with the same error
@@ -388,6 +401,9 @@ cargo test --workspace --doc
 cd apps/deskmate && bun test && bun run check && bun run format:check && bun run build
 ```
 
+`bun run check` type-checks the tests as well as the app (`tsconfig.tests.json`), so a
+test still passing a prop the component dropped is a type error, not a silent pass.
+
 Both test invocations are required: `--all-targets` adds example and integration
 targets but removes doctests, so neither invocation alone covers the workspace.
 Keep them as separate lines so a failure names the missing coverage directly; do
@@ -402,8 +418,9 @@ it, point `DESKMATE_WEB_DIR` at the `dist/`, and drive it in Chrome -- the
 mock harness is blind to everything that needs the server, and the product is a
 web page now, so this costs a minute. See the trap about the harness above.
 
-Budget for this, measured 2026-09-18: **the warm suite is about 28 seconds**, nearly
-all of it `cargo test --all-targets` (23-25 s, of which 24 s is test execution). The
+Budget for this, re-measured 2026-09-19 at 852 Rust and 171 frontend tests: **the warm
+suite is about 28 seconds**, nearly all of it `cargo test --all-targets` (23 s, all of
+it test execution). The
 35-minute figure this section used to quote is a *cold* run, and it is compilation,
 not tests -- quoting it as the everyday cost sent one session at the wrong target.
 
@@ -414,14 +431,14 @@ Where the test time actually goes, so the next person does not have to find out 
 
 | target | seconds | tests |
 |---|---|---|
-| `app-core/tests/runtime.rs` | 16.1 | 59 |
-| `server/tests/ownership.rs` | 3.2 | 31 |
-| `server/tests/store.rs` | 2.0 | 28 |
-| everything else | < 2 each | |
+| `app-core/tests/runtime.rs` (bodies in `tests/runtime/`) | 16.1 | 65 |
+| `server/tests/ownership.rs` (bodies in `tests/ownership/`) | 2.2 | 30 |
+| `server` unit tests (`src/lib.rs`) | 2.0 | 347 |
+| everything else | about 1 or less each | |
 
-`runtime.rs` dominates because each of its 59 tests starts, drives and stops a real
+`runtime.rs` dominates because each of its 65 tests starts, drives and stops a real
 threaded runtime; that is the thing being tested, not waste. `ownership.rs` is named
-here because this section used to blame it for the whole cost -- it is 8% of it.
+here because this section used to blame it for the whole cost -- it is under 10% of it.
 
 **A test that waits on production pacing is the failure mode to watch for.**
 `server/tests/hostile_device.rs` was 14 seconds -- a third of the entire suite -- for

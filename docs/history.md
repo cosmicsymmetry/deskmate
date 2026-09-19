@@ -1449,3 +1449,56 @@ to remove it mirrored `DeviceError` as parallel types in `app-core`, and an opti
 feature is the cheaper route if it is wanted; the `light-dark()` palette rewrite was a
 theming-mechanism change for 29 lines. The systemd `DynamicUser` secret-file permissions
 finding is real but could not be reproduced on macOS, so the unit file was not touched.
+
+## 2026-09-19 (later) — subtracting the product that was never shipped
+
+The owner's complaint after the sweep was simply that 66,000 lines is too much for what
+Deskmate does. Measuring took the number apart first: production code was about 26,000
+lines (21,000 Rust, 5,000 web), tests about 33,000 -- more than the code they test -- and
+comments the rest. And the morning's sweep had already shown the code was not bloated line
+by line: two models hunting for dead code and duplication found about 3%. No feature
+dominated; the largest was 16%.
+
+What the size actually came from was generality nobody was using. The live server had one
+real panel, no Google configuration, and two dead identities whose saved configs were at
+schema v4 and v5 -- the only reason a six-version migration chain still existed. So the
+work was subtraction of capability, not tidying, and three of four proposed subtractions
+survived investigation:
+
+- **Config versions v4-v9 are retired.** v10 is the only readable version. Two things had
+  to become true first: a refused file had to be VISIBLY refused (a linked panel's snapshot
+  reported "clean" once its fallback runtime started, inviting a save over the file it had
+  just declined to read), and recovery defaults could never be recorded as a genuine
+  last-good. The two dead configs were moved aside on the server, not deleted.
+- **The serial `DeviceSession` lost what only the deleted desktop host used** -- reconnect
+  replay, the event router, keepalives, diagnostics, revision allocation -- along with the
+  one hardware harness that consumed them. It was done by subtraction on purpose: one model
+  proposed a freshly written replacement for the CLI's cable path, and that was overruled,
+  because the worker and its stall protection are the code a panel was actually provisioned
+  through and there was no board on the desk to verify a rewrite against.
+- **The test suite was consolidated** under two mechanical gates -- production code
+  byte-identical above every `#[cfg(test)]` line, and zero production lines lost from
+  coverage -- plus a second model breaking production behaviour to see whether a table row
+  still failed AND named itself.
+- **The "two HTTP APIs" were not two APIs.** That premise was the orchestrator's and the
+  investigation refuted it: the operator extractor already accepted either credential, there
+  were four bearer-only routes, three did things the page has no equivalent for, and the
+  fourth is the owner's own operator tool with deliberately different side effects. Dropped.
+
+The instruments lied three times and each lie was informative. Sharing one instrumented
+build directory across worktrees let cargo-llvm-cov pick up test binaries built from other
+checkouts with the same crate names, which can MASK a loss. Inline `#[cfg(test)]` modules
+were counted as production lines, which invents one. And a coverage snapshot taken while a
+reviewer was mid-mutation measured the reviewer's sabotage. The last false alarm was fed
+to an implementer as a real failure, and it dutifully reverted its whole batch. A gate
+that is wrong is worse than no gate, because people obey it.
+
+Honest accounting. Across the whole day production code fell by about 1,000 lines (21,643
+to 20,651 of Rust) and the codebase still GREW by about 4,200, because the morning's sweep
+added some 6,700 lines of tests -- 43 defects each got a regression test, and a lot of
+behaviour turned out not to be pinned by anything. The afternoon took 1,900 code lines and
+1,100 lines of contract documents back out. For the test consolidation itself the estimate was 3,000-5,000 lines and the
+result was about a third of that. The repetition was in the scaffolding; the bodies are
+distinct interaction sequences, and table-driving those would have traded lines for
+failures nobody can read. OAuth, secrets and the management pages -- about 4,500 lines
+with their tests, unconfigured on the live server -- were deliberately left for the owner.

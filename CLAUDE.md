@@ -174,6 +174,11 @@ Each of these cost this project real time at least once.
   honest check for the preview; **driving the real build in Chrome is the honest check for
   the window**, and it is cheap now that the product is a web page. Two defects were found
   that way in one sitting, both invisible to 122 passing frontend tests.
+- **For a tests-only change, "the suite passes" proves nothing -- the change IS the suite.**
+  `tools/testgate/` has the two gates that carried the 2026-09-19 consolidation: production
+  byte-identical above every `#[cfg(test)]`, and zero production lines lost from coverage
+  (deterministic here, so the threshold is zero). Its README lists three ways that gate lied
+  first; read it before trusting a number from it.
 - **The DOM suite cannot see a stylesheet, so every CSS mutation survives it.** happy-dom
   never applies one: deleting a selected-state rule, swapping an error colour and breaking
   a transform origin each left all component tests green. For a CSS or markup refactor

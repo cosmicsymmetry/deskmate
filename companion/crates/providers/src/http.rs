@@ -28,10 +28,7 @@ mod tests {
     fn rejects_non_http_and_credential_bearing_urls_without_echoing_them() {
         assert!(validate_http_url("file:///etc/passwd").is_err());
         let error = validate_http_url("https://secret:token@example.test/feed").unwrap_err();
-        assert_eq!(
-            error.category(),
-            crate::ProviderErrorCategory::InvalidConfiguration
-        );
+        assert!(matches!(&error, ProviderError::InvalidConfiguration(_)));
         assert!(!error.to_string().contains("secret"));
         assert!(!error.to_string().contains("token"));
     }

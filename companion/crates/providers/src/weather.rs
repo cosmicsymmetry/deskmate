@@ -1,13 +1,9 @@
-use std::time::Duration;
-
-use chrono::{DateTime, Utc};
 use protocol::truncate_utf8_to_bytes;
 use serde_json::Value;
 
 use crate::http::HttpClient;
-use crate::{LastGood, Provider, ProviderError, ProviderSnapshot, RefreshPolicy};
+use crate::{LastGood, ProviderError, ProviderSnapshot};
 
-pub const MIN_WEATHER_REFRESH_INTERVAL: Duration = Duration::from_mins(10);
 const GEOCODING_ENDPOINT: &str = "https://geocoding-api.open-meteo.com/v1/search";
 const FORECAST_ENDPOINT: &str = "https://api.open-meteo.com/v1/forecast";
 /// Rejects implausible provider data before it enters the application state.
@@ -16,7 +12,7 @@ const MAX_TEMPERATURE_DEGREES: f64 = 200.0;
 /// How many hours the strip can show. The face draws six columns; asking
 /// for a couple more costs nothing and lets a narrower future layout use
 /// them without another round trip.
-pub const MAX_HOURLY_STEPS: usize = 8;
+const MAX_HOURLY_STEPS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeatherUnits {
@@ -28,7 +24,6 @@ pub enum WeatherUnits {
 pub struct WeatherOptions {
     pub location: String,
     pub units: WeatherUnits,
-    pub refresh_interval: Duration,
 }
 
 /// One hour of the forecast strip.
@@ -45,7 +40,6 @@ pub struct WeatherHour {
 pub struct WeatherReading {
     pub location: String,
     pub temperature_tenths: i64,
-    pub apparent_temperature_tenths: i64,
     pub summary: String,
     /// The raw WMO code lets the face choose day/night visuals while preserving
     /// distinctions such as freezing rain versus rain.
@@ -73,22 +67,10 @@ impl<C: HttpClient> WeatherProvider<C> {
             state: LastGood::default(),
         }
     }
-}
 
-impl<C: HttpClient> Provider for WeatherProvider<C> {
-    type Output = WeatherReading;
-
-    fn refresh_policy(&self) -> RefreshPolicy {
-        RefreshPolicy::Interval(
-            self.options
-                .refresh_interval
-                .max(MIN_WEATHER_REFRESH_INTERVAL),
-        )
-    }
-
-    fn refresh(&mut self, now: DateTime<Utc>) -> ProviderSnapshot<Self::Output> {
+    pub fn refresh(&mut self) -> ProviderSnapshot<WeatherReading> {
         let result = fetch_weather(&mut self.client, &self.options);
-        self.state.complete(now, result)
+        self.state.complete(result)
     }
 }
 
@@ -178,11 +160,14 @@ fn parse_forecast(body: &str, location: &str) -> Result<WeatherReading, Provider
     // today. A forecast that omits them is not an error: the face falls back
     // to the current reading for both, which is true if uninformative.
     let (high, low) = daily_extremes(&document).unwrap_or((temperature, temperature));
+    let temperature_tenths = to_tenths(temperature)?;
+    // Apparent temperature still validates the forecast even though the face
+    // does not display it; malformed data must retain the last good reading.
+    to_tenths(apparent)?;
 
     Ok(WeatherReading {
         location: truncate_utf8_to_bytes(location, 64).to_owned(),
-        temperature_tenths: to_tenths(temperature)?,
-        apparent_temperature_tenths: to_tenths(apparent)?,
+        temperature_tenths,
         summary: summary.into(),
         weather_code,
         is_day,
@@ -346,8 +331,6 @@ fn weather_summary(code: u16) -> &'static str {
 mod tests {
     use std::collections::VecDeque;
 
-    use chrono::TimeZone;
-
     use super::*;
 
     struct FakeClient {
@@ -366,7 +349,6 @@ mod tests {
         WeatherOptions {
             location: "Tbilisi".into(),
             units,
-            refresh_interval: Duration::from_mins(1),
         }
     }
 
@@ -380,15 +362,12 @@ mod tests {
             urls: Vec::new(),
         };
         let mut provider = WeatherProvider::new(client, options(WeatherUnits::Imperial));
-        assert_eq!(
-            provider.refresh_policy(),
-            RefreshPolicy::Interval(MIN_WEATHER_REFRESH_INTERVAL)
-        );
-        let snapshot = provider.refresh(Utc.with_ymd_and_hms(2026, 8, 5, 10, 0, 0).unwrap());
-        assert!(!snapshot.stale);
-        assert_eq!(snapshot.value.location, "Tbilisi, Georgia");
-        assert_eq!(snapshot.value.temperature_tenths, 725);
-        assert_eq!(snapshot.value.summary, "Partly cloudy");
+        let snapshot = provider.refresh();
+        assert!(snapshot.error.is_none());
+        let reading = snapshot.value.expect("the forecast arrived");
+        assert_eq!(reading.location, "Tbilisi, Georgia");
+        assert_eq!(reading.temperature_tenths, 725);
+        assert_eq!(reading.summary, "Partly cloudy");
         assert!(provider.client.urls[0].contains("name=Tbilisi"));
         assert!(provider.client.urls[1].contains("temperature_unit=fahrenheit"));
         assert!(
@@ -408,8 +387,8 @@ mod tests {
                 urls: Vec::new(),
             };
             let mut provider = WeatherProvider::new(client, options(WeatherUnits::Metric));
-            let snapshot = provider.refresh(Utc::now());
-            assert!(snapshot.stale);
+            let snapshot = provider.refresh();
+            assert!(snapshot.value.is_none());
             assert!(
                 snapshot
                     .error
@@ -429,13 +408,57 @@ mod tests {
         };
         let accepted = parse_forecast(&forecast(200.0), "Nowhere").unwrap();
         assert_eq!(accepted.temperature_tenths, 2000);
-        assert_eq!(accepted.apparent_temperature_tenths, 2000);
 
         for outside in [200.1, -200.1, 240.0] {
             assert!(
                 parse_forecast(&forecast(outside), "Nowhere").is_err(),
                 "{outside} is implausible provider data and must be rejected"
             );
+        }
+    }
+
+    #[test]
+    fn apparent_temperature_is_required_numeric_and_bounded() {
+        let forecast = |apparent: Option<Value>| {
+            let mut document: Value =
+                serde_json::from_str(include_str!("../tests/fixtures/weather-current.json"))
+                    .unwrap();
+            let current = document["current"].as_object_mut().unwrap();
+            current.insert("temperature_2m".into(), Value::from(20));
+            if let Some(value) = apparent {
+                current.insert("apparent_temperature".into(), value);
+            } else {
+                current.remove("apparent_temperature");
+            }
+            document.to_string()
+        };
+        for (apparent, message) in [
+            (None, "weather numeric field is invalid"),
+            (Some(Value::Null), "weather numeric field is invalid"),
+            (
+                Some(Value::from("warm")),
+                "weather numeric field is invalid",
+            ),
+            (
+                Some(Value::from(200.1)),
+                "weather temperature is outside supported bounds",
+            ),
+            (
+                Some(Value::from(-200.1)),
+                "weather temperature is outside supported bounds",
+            ),
+        ] {
+            let error = parse_forecast(&forecast(apparent), "Nowhere").unwrap_err();
+            assert_eq!(error, ProviderError::MalformedFeed(message.into()));
+            assert_eq!(
+                error.to_string(),
+                format!("malformed provider data: {message}")
+            );
+        }
+        for apparent in [-200.0, 18.5, 200.0] {
+            let reading = parse_forecast(&forecast(Some(Value::from(apparent))), "Nowhere")
+                .expect("a valid apparent temperature is accepted");
+            assert_eq!(reading.temperature_tenths, 200);
         }
     }
 }

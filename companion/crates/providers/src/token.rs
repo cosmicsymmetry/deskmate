@@ -11,24 +11,17 @@
 //! a worse face but a true one; refusing the whole refresh would replace a
 //! correct price with a stale badge because a decoration was unavailable.
 
-use std::time::Duration;
-
-use chrono::{DateTime, Utc};
 use protocol::truncate_utf8_to_bytes;
 use serde_json::Value;
 
 use crate::http::HttpClient;
-use crate::{LastGood, Provider, ProviderError, ProviderSnapshot, RefreshPolicy};
+use crate::{LastGood, ProviderError, ProviderSnapshot};
 
-/// `CoinGecko`'s free tier permits a handful of calls a minute and each refresh
-/// spends two. A panel that updates a price once a minute is already faster
-/// than anybody reads it.
-pub const MIN_TOKEN_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const MARKETS_ENDPOINT: &str = "https://api.coingecko.com/api/v3/coins/markets";
 const CHART_ENDPOINT_PREFIX: &str = "https://api.coingecko.com/api/v3/coins/";
 /// The sparkline is drawn across 400 pixels, so more than this many samples
 /// buys sub-pixel detail at the cost of path bytes in every push.
-pub const MAX_SERIES_SAMPLES: usize = 96;
+const MAX_SERIES_SAMPLES: usize = 96;
 /// A price outside this window is a decoding mistake, not a market.
 const MAX_PRICE: f64 = 1e12;
 
@@ -39,7 +32,6 @@ pub struct TokenOptions {
     pub coin_id: String,
     /// Quote currency code, e.g. `usd`.
     pub currency: String,
-    pub refresh_interval: Duration,
     /// An optional `CoinGecko` demo key, passed as a query parameter.
     ///
     /// A query parameter rather than the documented header because the shared
@@ -79,22 +71,10 @@ impl<C: HttpClient> TokenProvider<C> {
             state: LastGood::default(),
         }
     }
-}
 
-impl<C: HttpClient> Provider for TokenProvider<C> {
-    type Output = TokenQuote;
-
-    fn refresh_policy(&self) -> RefreshPolicy {
-        RefreshPolicy::Interval(
-            self.options
-                .refresh_interval
-                .max(MIN_TOKEN_REFRESH_INTERVAL),
-        )
-    }
-
-    fn refresh(&mut self, now: DateTime<Utc>) -> ProviderSnapshot<Self::Output> {
+    pub fn refresh(&mut self) -> ProviderSnapshot<TokenQuote> {
         let result = fetch_quote(&mut self.client, &self.options);
-        self.state.complete(now, result)
+        self.state.complete(result)
     }
 }
 
@@ -313,7 +293,6 @@ mod tests {
         TokenOptions {
             coin_id: "solana".to_owned(),
             currency: "usd".to_owned(),
-            refresh_interval: Duration::from_secs(300),
             api_key: None,
         }
     }
@@ -350,7 +329,7 @@ mod tests {
     fn an_unknown_token_is_a_typed_refusal() {
         let mut client = FakeClient::new(vec![Ok("[]".into())]);
         let error = fetch_quote(&mut client, &options()).expect_err("an empty array is refused");
-        assert_eq!(error.category(), crate::ProviderErrorCategory::Malformed);
+        assert!(matches!(&error, ProviderError::MalformedFeed(_)));
     }
 
     #[test]
@@ -370,9 +349,8 @@ mod tests {
             bad.coin_id = hostile.to_owned();
             let error =
                 fetch_quote(&mut client, &bad).expect_err(&format!("{hostile:?} must be refused"));
-            assert_eq!(
-                error.category(),
-                crate::ProviderErrorCategory::InvalidConfiguration,
+            assert!(
+                matches!(&error, ProviderError::InvalidConfiguration(_)),
                 "{hostile:?} was refused for the wrong reason"
             );
         }
@@ -384,10 +362,7 @@ mod tests {
         let mut bad = options();
         bad.coin_id = "solana/../../bitcoin".to_owned();
         let error = fetch_quote(&mut client, &bad).expect_err("a path-bearing id is refused");
-        assert_eq!(
-            error.category(),
-            crate::ProviderErrorCategory::InvalidConfiguration
-        );
+        assert!(matches!(&error, ProviderError::InvalidConfiguration(_)));
         assert!(
             client.requested.is_empty(),
             "the refusal happens before the request, not after"
@@ -472,18 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn the_refresh_interval_has_a_floor() {
-        let mut eager = options();
-        eager.refresh_interval = Duration::from_secs(1);
-        let provider = TokenProvider::new(FakeClient::new(Vec::new()), eager);
-        assert_eq!(
-            provider.refresh_policy(),
-            RefreshPolicy::Interval(MIN_TOKEN_REFRESH_INTERVAL)
-        );
-    }
-
-    #[test]
-    fn a_failed_refresh_keeps_the_last_good_price_and_marks_it_stale() {
+    fn a_failed_refresh_keeps_the_last_good_price_and_reports_the_error() {
         let mut provider = TokenProvider::new(
             FakeClient::new(vec![
                 Ok(MARKETS.into()),
@@ -492,13 +456,16 @@ mod tests {
             ]),
             options(),
         );
-        let now = Utc::now();
-        let first = provider.refresh(now);
-        assert!(!first.stale);
-        let second = provider.refresh(now);
-        assert!(second.stale, "the second refresh failed");
+        let first = provider.refresh();
+        assert!(first.value.is_some());
+        assert!(first.error.is_none());
+        let second = provider.refresh();
+        assert_eq!(
+            second.value, first.value,
+            "the complete last reading survives"
+        );
         assert!(
-            (second.value.price - 142.37).abs() < f64::EPSILON,
+            (second.value.as_ref().unwrap().price - 142.37).abs() < f64::EPSILON,
             "the panel keeps showing the last price it knew"
         );
         assert!(second.error.is_some());

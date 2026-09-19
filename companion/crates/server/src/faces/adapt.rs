@@ -148,7 +148,6 @@ mod tests {
         let reading = WeatherReading {
             location: "Amsterdam, Netherlands".to_owned(),
             temperature_tenths: 112,
-            apparent_temperature_tenths: 98,
             summary: "Rain".to_owned(),
             weather_code: 63,
             is_day: true,

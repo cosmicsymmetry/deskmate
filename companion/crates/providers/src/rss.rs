@@ -1,17 +1,14 @@
-use std::time::Duration;
-
-use chrono::{DateTime, Utc};
 use protocol::truncate_utf8_to_bytes;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
 use crate::http::{HttpClient, validate_http_url};
-use crate::{LastGood, Provider, ProviderError, ProviderSnapshot, RefreshPolicy};
+use crate::{LastGood, ProviderError, ProviderSnapshot};
 
-pub const MAX_RSS_ITEMS: usize = 5;
-pub const MAX_XML_DEPTH: usize = 32;
-pub const MAX_XML_EVENTS: usize = 100_000;
-pub const MAX_ITEM_TEXT_BYTES: usize = 4_096;
+const MAX_RSS_ITEMS: usize = 5;
+const MAX_XML_DEPTH: usize = 32;
+const MAX_XML_EVENTS: usize = 100_000;
+const MAX_ITEM_TEXT_BYTES: usize = 4_096;
 const ACTIVE_MARKERS: [&str; 23] = [
     "<script",
     "</script",
@@ -42,7 +39,6 @@ const ACTIVE_MARKERS: [&str; 23] = [
 pub struct RssOptions {
     pub url: String,
     pub maximum_items: usize,
-    pub refresh_interval: Duration,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -71,26 +67,18 @@ impl<C: HttpClient> RssProvider<C> {
             state: LastGood::default(),
         }
     }
-}
 
-impl<C: HttpClient> Provider for RssProvider<C> {
-    type Output = RssFeed;
-
-    fn refresh_policy(&self) -> RefreshPolicy {
-        RefreshPolicy::Interval(self.options.refresh_interval)
-    }
-
-    fn refresh(&mut self, now: DateTime<Utc>) -> ProviderSnapshot<Self::Output> {
+    pub fn refresh(&mut self) -> ProviderSnapshot<RssFeed> {
         let result = self
             .client
             .get_text(&self.options.url)
             .and_then(|body| parse_rss(&body, self.options.maximum_items.min(MAX_RSS_ITEMS)));
-        self.state.complete(now, result)
+        self.state.complete(result)
     }
 }
 
 #[allow(clippy::too_many_lines)]
-pub fn parse_rss(body: &str, maximum_items: usize) -> Result<RssFeed, ProviderError> {
+fn parse_rss(body: &str, maximum_items: usize) -> Result<RssFeed, ProviderError> {
     if maximum_items == 0 || maximum_items > MAX_RSS_ITEMS {
         return Err(ProviderError::InvalidConfiguration(
             "RSS item count is outside the supported range".into(),
@@ -384,10 +372,10 @@ mod tests {
             r#"<rss><channel><item><title onclick="bad()">ok</title></item></channel></rss>"#,
             r#"<rss><channel><item><title>ok<img src="https://example.test/pixel"/></title></item></channel></rss>"#,
         ] {
-            assert_eq!(
-                parse_rss(unsafe_feed, 1).unwrap_err().category(),
-                crate::ProviderErrorCategory::UnsafeContent
-            );
+            assert!(matches!(
+                &parse_rss(unsafe_feed, 1).unwrap_err(),
+                ProviderError::UnsafeContent
+            ));
         }
     }
 

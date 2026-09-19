@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use chrono::Utc;
-use providers::Provider as _;
+use providers::http::HttpClient;
 use providers::rss::{RssOptions, RssProvider};
 use providers::token::{TokenOptions, TokenProvider};
 use providers::weather::{WeatherOptions, WeatherProvider, WeatherUnits};
@@ -14,8 +14,7 @@ use crate::face_render::frame_from_svg;
 use crate::faces::{adapt, rss, token, weather};
 use crate::image_sources::AcceptOutcome;
 
-/// A refresh no faster than this, whatever a spec asks for. The individual
-/// providers have their own floors too; this one bounds the whole loop.
+/// A refresh no faster than this, whatever a spec asks for, for every provider.
 const MIN_REFRESH: Duration = Duration::from_secs(60);
 /// An unreachable source is retried on its own interval, but never slower than
 /// this, so a card that failed once during a network blip does not sit stale
@@ -36,8 +35,12 @@ pub(super) fn spawn_refresher(
     state: ServerState,
     spec: DataCardSpec,
 ) -> JoinHandle<()> {
-    let refresh = Duration::from_secs(spec.refresh_seconds).clamp(MIN_REFRESH, MAX_REFRESH);
+    let refresh = clamped_refresh(spec.refresh_seconds);
     runtime.spawn(async move { refresh_loop(state, spec, refresh).await })
+}
+
+fn clamped_refresh(refresh_seconds: u64) -> Duration {
+    Duration::from_secs(refresh_seconds).clamp(MIN_REFRESH, MAX_REFRESH)
 }
 
 /// Renders one spec's face, fetching whatever it needs.
@@ -47,59 +50,61 @@ pub(super) fn spawn_refresher(
 /// provider is passed in and handed back so its last-good state survives
 /// across refreshes: without that, one failed fetch would blank a face that
 /// has a perfectly good previous reading.
-fn render_face(provider: &mut FaceProvider) -> Result<(String, Option<String>), String> {
+fn render_face<C: HttpClient>(
+    provider: &mut FaceProvider<C>,
+) -> Result<(String, Option<String>), String> {
     let now = Utc::now();
     match provider {
         FaceProvider::Weather { provider } => {
-            let snapshot = provider.refresh(now);
-            let face = adapt::weather_face(&snapshot.value);
+            let snapshot = provider.refresh();
             // A refresh that failed with no previous reading has nothing to
-            // draw: the location is empty and the temperature is zero, which
-            // would render a confident "0°" for a card that has never worked.
-            if snapshot.error.is_some() && snapshot.refreshed_at.is_none() {
+            // draw: a default reading would render a confident "0°" for a
+            // card that has never worked.
+            let Some(value) = snapshot.value else {
                 return Err(snapshot.error.unwrap_or_default());
-            }
+            };
+            let face = adapt::weather_face(&value);
             Ok((weather::render(&face), snapshot.error))
         }
         FaceProvider::Rss { provider, title } => {
-            let snapshot = provider.refresh(now);
-            if snapshot.error.is_some() && snapshot.refreshed_at.is_none() {
+            let snapshot = provider.refresh();
+            let Some(value) = snapshot.value else {
                 return Err(snapshot.error.unwrap_or_default());
-            }
-            let face = adapt::rss_face(&snapshot.value, title, now);
+            };
+            let face = adapt::rss_face(&value, title, now);
             Ok((rss::render(&face), snapshot.error))
         }
         FaceProvider::Token { provider } => {
-            let snapshot = provider.refresh(now);
-            if snapshot.error.is_some() && snapshot.refreshed_at.is_none() {
+            let snapshot = provider.refresh();
+            let Some(value) = snapshot.value else {
                 return Err(snapshot.error.unwrap_or_default());
-            }
-            let face = adapt::token_face(&snapshot.value);
+            };
+            let face = adapt::token_face(&value);
             Ok((token::render(&face), snapshot.error))
         }
     }
 }
 
 /// One live provider, with the extra the adapter needs beside it.
-enum FaceProvider {
+enum FaceProvider<C> {
     Weather {
-        provider: Box<WeatherProvider<EgressHttpClient>>,
+        provider: Box<WeatherProvider<C>>,
     },
     Rss {
-        provider: Box<RssProvider<EgressHttpClient>>,
+        provider: Box<RssProvider<C>>,
         title: String,
     },
     Token {
-        provider: Box<TokenProvider<EgressHttpClient>>,
+        provider: Box<TokenProvider<C>>,
     },
 }
 
-impl FaceProvider {
+impl FaceProvider<EgressHttpClient> {
     /// Builds the provider for a spec.
     ///
     /// Constructed inside the runtime because [`EgressHttpClient::new`]
     /// captures the current handle.
-    fn build(spec: &DataCardSpec, refresh: Duration) -> Self {
+    fn build(spec: &DataCardSpec) -> Self {
         match &spec.face {
             FaceSpec::Weather { location, units } => Self::Weather {
                 provider: Box::new(WeatherProvider::new(
@@ -107,7 +112,6 @@ impl FaceProvider {
                     WeatherOptions {
                         location: location.clone(),
                         units: (*units).into(),
-                        refresh_interval: refresh,
                     },
                 )),
             },
@@ -120,7 +124,6 @@ impl FaceProvider {
                         // followers. Asking for more would parse items nothing
                         // draws.
                         maximum_items: 4,
-                        refresh_interval: refresh,
                     },
                 )),
                 title: title.clone(),
@@ -135,7 +138,6 @@ impl FaceProvider {
                     TokenOptions {
                         coin_id: coin_id.clone(),
                         currency: currency.clone(),
-                        refresh_interval: refresh,
                         api_key: api_key.clone(),
                     },
                 )),
@@ -153,7 +155,7 @@ impl FaceProvider {
 }
 
 async fn refresh_loop(state: ServerState, spec: DataCardSpec, refresh: Duration) {
-    let mut provider = FaceProvider::build(&spec, refresh);
+    let mut provider = FaceProvider::build(&spec);
     let source_id = spec.source_id.clone();
     let kind = provider.label();
     tracing::info!(target: "server::data_cards",
@@ -263,13 +265,159 @@ async fn refresh_loop(state: ServerState, spec: DataCardSpec, refresh: Duration)
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
+    use providers::ProviderError;
+
     use super::*;
+
+    struct FakeClient {
+        responses: VecDeque<Result<String, ProviderError>>,
+    }
+
+    impl HttpClient for FakeClient {
+        fn get_text(&mut self, _url: &str) -> Result<String, ProviderError> {
+            self.responses.pop_front().expect("a response is queued")
+        }
+    }
+
+    fn assert_cached_face_retains_error(mut provider: FaceProvider<FakeClient>, expected: &str) {
+        let (first_face, first_error) =
+            render_face(&mut provider).expect("the first fetch succeeds");
+        assert!(first_error.is_none());
+        frame_from_svg(&first_face).expect("the reading renders a valid frame");
+
+        let (cached_face, error) =
+            render_face(&mut provider).expect("a failed fetch still renders the cached reading");
+        assert_eq!(cached_face, first_face);
+        assert_eq!(error.as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn cached_weather_renders_with_the_refresh_error() {
+        let client = FakeClient {
+            responses: VecDeque::from([
+                Ok(include_str!("../../../providers/tests/fixtures/weather-location.json").into()),
+                Ok(include_str!("../../../providers/tests/fixtures/weather-current.json").into()),
+                Err(ProviderError::Timeout),
+            ]),
+        };
+        assert_cached_face_retains_error(
+            FaceProvider::Weather {
+                provider: Box::new(WeatherProvider::new(
+                    client,
+                    WeatherOptions {
+                        location: "Tbilisi".into(),
+                        units: WeatherUnits::Metric,
+                    },
+                )),
+            },
+            "provider request timed out",
+        );
+    }
+
+    #[test]
+    fn cached_rss_renders_with_the_refresh_error() {
+        let client = FakeClient {
+            responses: VecDeque::from([
+                Ok(
+                    "<rss><channel><item><title>Cached headline</title></item></channel></rss>"
+                        .into(),
+                ),
+                Err(ProviderError::HttpStatus(503)),
+            ]),
+        };
+        assert_cached_face_retains_error(
+            FaceProvider::Rss {
+                provider: Box::new(RssProvider::new(
+                    client,
+                    RssOptions {
+                        url: "https://example.test/feed".into(),
+                        maximum_items: 4,
+                    },
+                )),
+                title: "News".into(),
+            },
+            "provider returned HTTP 503",
+        );
+    }
+
+    #[test]
+    fn cached_token_renders_with_the_refresh_error() {
+        let client = FakeClient {
+            responses: VecDeque::from([
+                Ok(r#"[{"symbol":"sol","name":"Solana","current_price":142.37}]"#.into()),
+                Ok(r#"{"prices":[[1,140.0],[2,142.37]]}"#.into()),
+                Err(ProviderError::HttpStatus(429)),
+            ]),
+        };
+        assert_cached_face_retains_error(
+            FaceProvider::Token {
+                provider: Box::new(TokenProvider::new(
+                    client,
+                    TokenOptions {
+                        coin_id: "solana".into(),
+                        currency: "usd".into(),
+                        api_key: None,
+                    },
+                )),
+            },
+            "provider returned HTTP 429",
+        );
+    }
 
     #[test]
     fn the_refresh_interval_is_clamped_at_both_ends() {
-        let fast = Duration::from_secs(1).clamp(MIN_REFRESH, MAX_REFRESH);
-        let slow = Duration::from_secs(999_999).clamp(MIN_REFRESH, MAX_REFRESH);
-        assert_eq!(fast, MIN_REFRESH);
-        assert_eq!(slow, MAX_REFRESH);
+        for (seconds, expected) in [
+            (0, 60),
+            (1, 60),
+            (60, 60),
+            (900, 900),
+            (21_600, 21_600),
+            (999_999, 21_600),
+            (u64::MAX, 21_600),
+        ] {
+            assert_eq!(clamped_refresh(seconds), Duration::from_secs(expected));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn first_refresh_failures_return_the_existing_error_without_a_face() {
+        for (face, expected) in [
+            (
+                FaceSpec::Weather {
+                    location: String::new(),
+                    units: Units::Metric,
+                },
+                "invalid provider configuration: weather location is empty",
+            ),
+            (
+                FaceSpec::Token {
+                    coin_id: "Solana".into(),
+                    currency: "usd".into(),
+                    api_key: None,
+                },
+                "invalid provider configuration: the token's coin id may use only lowercase letters, digits and h",
+            ),
+            (
+                FaceSpec::Rss {
+                    url: "http://192.168.1.1/feed.xml".into(),
+                    title: "News".into(),
+                },
+                "invalid provider configuration: RFC1918 private",
+            ),
+        ] {
+            let result = tokio::task::spawn_blocking(move || {
+                let spec = DataCardSpec {
+                    source_id: "test".into(),
+                    refresh_seconds: 900,
+                    face,
+                };
+                render_face(&mut FaceProvider::build(&spec))
+            })
+            .await
+            .expect("the blocking refresh runs");
+            assert_eq!(result, Err(expected.to_owned()));
+        }
     }
 }

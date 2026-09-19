@@ -18,10 +18,7 @@
 
 #![cfg(test)]
 
-use std::time::Duration;
-
 use chrono::Utc;
-use providers::Provider as _;
 use providers::rss::{RssOptions, RssProvider};
 use providers::token::{TokenOptions, TokenProvider};
 use providers::weather::{WeatherOptions, WeatherProvider, WeatherUnits};
@@ -65,10 +62,9 @@ async fn a_live_weather_card_renders() {
                 location: std::env::var("DESKMATE_LIVE_PLACE")
                     .unwrap_or_else(|_| "Dubai".to_owned()),
                 units: WeatherUnits::Metric,
-                refresh_interval: Duration::from_mins(15),
             },
         )
-        .refresh(Utc::now())
+        .refresh()
     })
     .await
     .expect("the blocking refresh runs");
@@ -78,7 +74,10 @@ async fn a_live_weather_card_renders() {
         "the live weather fetch failed: {:?}",
         snapshot.error
     );
-    let reading = &snapshot.value;
+    let reading = snapshot
+        .value
+        .as_ref()
+        .expect("the live fetch returned a value");
     println!(
         "weather: {} {}\u{b0} code {} day {} H{} L{} hours {}",
         reading.location,
@@ -124,11 +123,10 @@ async fn a_live_token_card_renders() {
                 coin_id: std::env::var("DESKMATE_LIVE_COIN")
                     .unwrap_or_else(|_| "solana".to_owned()),
                 currency: "usd".to_owned(),
-                refresh_interval: Duration::from_mins(5),
                 api_key: std::env::var("DESKMATE_COINGECKO_KEY").ok(),
             },
         )
-        .refresh(Utc::now())
+        .refresh()
     })
     .await
     .expect("the blocking refresh runs");
@@ -138,7 +136,10 @@ async fn a_live_token_card_renders() {
         "the live token fetch failed: {:?}",
         snapshot.error
     );
-    let quote = &snapshot.value;
+    let quote = snapshot
+        .value
+        .as_ref()
+        .expect("the live fetch returned a value");
     println!(
         "token: {} ({}) {} {:.6} {:+.2}% L{:.6} H{:.6} samples {}",
         quote.symbol,
@@ -180,10 +181,9 @@ async fn a_live_rss_card_renders() {
             RssOptions {
                 url: feed_url,
                 maximum_items: 5,
-                refresh_interval: Duration::from_mins(15),
             },
         )
-        .refresh(Utc::now())
+        .refresh()
     })
     .await
     .expect("the blocking refresh runs");
@@ -193,7 +193,10 @@ async fn a_live_rss_card_renders() {
         "the live feed fetch failed: {:?}",
         snapshot.error
     );
-    let feed = &snapshot.value;
+    let feed = snapshot
+        .value
+        .as_ref()
+        .expect("the live fetch returned a value");
     println!("rss: {} items from {url}", feed.items.len());
     for item in &feed.items {
         println!("  {:?} {:?}", item.published, item.title);

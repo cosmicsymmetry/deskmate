@@ -4,96 +4,45 @@ pub mod token;
 pub mod weather;
 
 use std::fmt;
-use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use protocol::truncate_utf8_to_bytes;
 
 pub const MAX_PROVIDER_RESPONSE_BYTES: usize = 1_048_576;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RefreshPolicy {
-    Interval(Duration),
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderSnapshot<T> {
-    pub value: T,
-    pub refreshed_at: Option<DateTime<Utc>>,
-    pub age: Option<Duration>,
-    pub stale: bool,
+    pub value: Option<T>,
     pub error: Option<String>,
-}
-
-pub trait Provider {
-    type Output;
-
-    fn refresh_policy(&self) -> RefreshPolicy;
-
-    fn refresh(&mut self, now: DateTime<Utc>) -> ProviderSnapshot<Self::Output>;
 }
 
 /// Shared bounded last-good state used by every network/file provider.
 #[derive(Debug, Clone)]
-pub struct LastGood<T> {
+pub(crate) struct LastGood<T> {
     value: Option<T>,
-    refreshed_at: Option<DateTime<Utc>>,
 }
 
 impl<T> Default for LastGood<T> {
     fn default() -> Self {
-        Self {
-            value: None,
-            refreshed_at: None,
-        }
+        Self { value: None }
     }
 }
 
-impl<T: Clone + Default> LastGood<T> {
-    pub fn complete(
-        &mut self,
-        now: DateTime<Utc>,
-        result: Result<T, ProviderError>,
-    ) -> ProviderSnapshot<T> {
+impl<T: Clone> LastGood<T> {
+    pub(crate) fn complete(&mut self, result: Result<T, ProviderError>) -> ProviderSnapshot<T> {
         match result {
             Ok(value) => {
                 self.value = Some(value.clone());
-                self.refreshed_at = Some(now);
                 ProviderSnapshot {
-                    value,
-                    refreshed_at: Some(now),
-                    age: Some(Duration::ZERO),
-                    stale: false,
+                    value: Some(value),
                     error: None,
                 }
             }
-            Err(error) => {
-                let age = self
-                    .refreshed_at
-                    .and_then(|success| now.signed_duration_since(success).to_std().ok());
-                ProviderSnapshot {
-                    value: self.value.clone().unwrap_or_default(),
-                    refreshed_at: self.refreshed_at,
-                    age,
-                    stale: true,
-                    error: Some(truncate_utf8_to_bytes(&error.to_string(), 96).to_owned()),
-                }
-            }
+            Err(error) => ProviderSnapshot {
+                value: self.value.clone(),
+                error: Some(truncate_utf8_to_bytes(&error.to_string(), 96).to_owned()),
+            },
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProviderErrorCategory {
-    Io,
-    Timeout,
-    Redirect,
-    HttpStatus,
-    Oversized,
-    Encoding,
-    Malformed,
-    UnsafeContent,
-    InvalidConfiguration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,22 +56,6 @@ pub enum ProviderError {
     MalformedFeed(String),
     UnsafeContent,
     InvalidConfiguration(String),
-}
-
-impl ProviderError {
-    pub const fn category(&self) -> ProviderErrorCategory {
-        match self {
-            Self::Io(_) => ProviderErrorCategory::Io,
-            Self::Timeout => ProviderErrorCategory::Timeout,
-            Self::RedirectLimit => ProviderErrorCategory::Redirect,
-            Self::HttpStatus(_) => ProviderErrorCategory::HttpStatus,
-            Self::ResponseTooLarge => ProviderErrorCategory::Oversized,
-            Self::InvalidEncoding => ProviderErrorCategory::Encoding,
-            Self::MalformedFeed(_) => ProviderErrorCategory::Malformed,
-            Self::UnsafeContent => ProviderErrorCategory::UnsafeContent,
-            Self::InvalidConfiguration(_) => ProviderErrorCategory::InvalidConfiguration,
-        }
-    }
 }
 
 impl fmt::Display for ProviderError {
@@ -144,3 +77,59 @@ impl fmt::Display for ProviderError {
 }
 
 impl std::error::Error for ProviderError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn last_good_preserves_complete_values_through_failures_and_recovers() {
+        let mut state = LastGood::<Vec<String>>::default();
+        let first = state.complete(Err(ProviderError::Timeout));
+        assert!(first.value.is_none());
+        assert_eq!(first.error.as_deref(), Some("provider request timed out"));
+
+        let value = vec!["headline".to_owned(), "second row".to_owned()];
+        let success = state.complete(Ok(value.clone()));
+        assert_eq!(success.value.as_ref(), Some(&value));
+        assert!(success.error.is_none());
+
+        for (error, expected) in [
+            (ProviderError::Timeout, "provider request timed out"),
+            (ProviderError::HttpStatus(429), "provider returned HTTP 429"),
+        ] {
+            let mut failure = state.complete(Err(error));
+            assert_eq!(failure.value.as_ref(), Some(&value));
+            assert_eq!(failure.error.as_deref(), Some(expected));
+            failure.value.as_mut().unwrap().clear();
+        }
+
+        let recovered = vec!["replacement".to_owned()];
+        let recovery = state.complete(Ok(recovered.clone()));
+        assert_eq!(recovery.value, Some(recovered.clone()));
+        assert!(recovery.error.is_none());
+        assert_eq!(
+            state.complete(Err(ProviderError::Timeout)).value,
+            Some(recovered)
+        );
+    }
+
+    #[test]
+    fn provider_errors_are_truncated_at_96_bytes_on_a_utf8_boundary() {
+        let mut state = LastGood::<String>::default();
+        for (message, expected) in [
+            (
+                format!("{}érest", "a".repeat(89)),
+                format!("I/O: {}é", "a".repeat(89)),
+            ),
+            (
+                format!("{}érest", "a".repeat(90)),
+                format!("I/O: {}", "a".repeat(90)),
+            ),
+        ] {
+            let snapshot = state.complete(Err(ProviderError::Io(message)));
+            assert_eq!(snapshot.error.as_deref(), Some(expected.as_str()));
+            assert!(expected.len() <= 96);
+        }
+    }
+}

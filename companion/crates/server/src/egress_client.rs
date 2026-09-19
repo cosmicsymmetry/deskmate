@@ -17,7 +17,7 @@
 //!
 //! # The sync/async seam
 //!
-//! `providers::Provider::refresh` is synchronous and [`crate::egress::fetch`]
+//! Provider refreshes are synchronous and [`crate::egress::fetch`]
 //! is not. The bridge is [`tokio::runtime::Handle::block_on`], which is legal
 //! from a `spawn_blocking` thread and panics from an async one -- so this
 //! client must only ever be driven from inside `spawn_blocking`. The
@@ -132,9 +132,8 @@ mod tests {
         .await
         .expect("the blocking task runs")
         .expect_err("a private address is denied");
-        assert_eq!(
-            error.category(),
-            providers::ProviderErrorCategory::InvalidConfiguration,
+        assert!(
+            matches!(&error, ProviderError::InvalidConfiguration(_)),
             "a denied address is the owner's URL to fix, not a transient fault"
         );
     }
@@ -147,10 +146,7 @@ mod tests {
         .await
         .expect("the blocking task runs")
         .expect_err("the metadata endpoint is denied");
-        assert_eq!(
-            error.category(),
-            providers::ProviderErrorCategory::InvalidConfiguration
-        );
+        assert!(matches!(&error, ProviderError::InvalidConfiguration(_)));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -160,10 +156,7 @@ mod tests {
                 .await
                 .expect("the blocking task runs")
                 .expect_err("a file URL is refused");
-        assert_eq!(
-            error.category(),
-            providers::ProviderErrorCategory::InvalidConfiguration
-        );
+        assert!(matches!(&error, ProviderError::InvalidConfiguration(_)));
     }
 
     #[tokio::test(flavor = "multi_thread")]

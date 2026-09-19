@@ -150,7 +150,7 @@ function PictureFaceSettings({ sourceId }: { sourceId: string }) {
   }
   if (error && !descriptor) {
     return (
-      <p className="data-note data-note--bad" role="alert">
+      <p className="data-note" role="alert">
         <span>{error.message}</span>
       </p>
     );
@@ -249,7 +249,7 @@ function PictureFaceSettings({ sourceId }: { sourceId: string }) {
         )}
       </div>
       {error && (
-        <p className="data-note data-note--bad" role="alert">
+        <p className="data-note" role="alert">
           <span>{error.message}</span>
         </p>
       )}
@@ -312,7 +312,7 @@ export function CardEditor({
       </div>
 
       {cardError && (
-        <p className="data-note data-note--bad" role="alert">
+        <p className="data-note" role="alert">
           <span>
             <strong>
               {cardError.kind === "scene-refused"

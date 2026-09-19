@@ -28,9 +28,8 @@
  *    system face without a font download. Every duration, time, count and index
  *    uses it so digits hold their columns while they tick.
  *
- * 5. NO STATE IS BEHIND A DISCLOSURE. No tabs, no accordions, no settings drawer.
- *    Focus is by luminance; context stays legible. The one menu — the add-card slot's —
- *    holds choices, never state (see DESIGN.md, Composition).
+ * 5. EXACTLY ONE DISCLOSURE HOLDS STATE: the SettingsSheet. The add-card menu holds
+ *    choices rather than state (see DESIGN.md, Composition).
  */
 
 :root {
@@ -132,8 +131,7 @@
   color: var(--ink);
 }
 
-input,
-textarea {
+input {
   caret-color: var(--act);
 }
 
@@ -163,8 +161,7 @@ body {
 
 button,
 input,
-select,
-textarea {
+select {
   font: inherit;
   color: inherit;
 }
@@ -188,8 +185,7 @@ h2,
 h3,
 p,
 ul,
-ol,
-figure {
+ol {
   margin: 0;
 }
 
@@ -240,6 +236,11 @@ h3 {
 .tile-label {
   display: block;
   margin: 0;
+}
+
+.tile-label,
+fieldset legend,
+.network-status dt {
   color: var(--ink-3);
   font-size: 0.625rem;
   font-weight: 700;
@@ -470,7 +471,6 @@ h3 {
   place-items: center;
   width: 448px;
   height: 368px;
-  transform-origin: top left;
   border-radius: 22px;
   overflow: hidden;
   background: var(--stage);
@@ -533,8 +533,12 @@ h3 {
 
 .loop__pacing {
   display: flex;
-  gap: 1px;
   margin: 0;
+}
+
+.loop__pacing,
+.source-settings__segments {
+  gap: 1px;
   padding: 2px;
   border: 1px solid var(--hairline);
   border-radius: var(--r-pill);
@@ -543,16 +547,21 @@ h3 {
 
 .loop__pace {
   padding: 3px 9px;
+  font-size: 0.68rem;
+}
+
+.loop__pace,
+.source-settings__segment {
   border: 0;
   border-radius: var(--r-pill);
   background: none;
   color: var(--ink-2);
-  font-size: 0.68rem;
   font-weight: 600;
   transition: background 150ms var(--ease);
 }
 
-.loop__pace[aria-pressed="true"] {
+.loop__pace[aria-pressed="true"],
+.source-settings__segment[aria-pressed="true"] {
   background: var(--tile);
   color: var(--ink);
   font-weight: 640;
@@ -838,11 +847,6 @@ fieldset {
 
 fieldset legend {
   padding: 0 6px;
-  color: var(--ink-3);
-  font-size: 0.625rem;
-  font-weight: 700;
-  letter-spacing: 0.085em;
-  text-transform: uppercase;
 }
 
 /* ── Card tiles ────────────────────────────────────────────────────────── */
@@ -919,7 +923,7 @@ fieldset legend {
   color: var(--act);
 }
 
-/* The owner's own words for the card, under the template that names it. */
+/* The optional owner-set Pomodoro label shown beneath its countdown. */
 .card-tile__name {
   overflow: hidden;
   color: var(--ink-2);
@@ -1153,7 +1157,6 @@ fieldset legend {
 
 .menu__item:disabled {
   background: none;
-  cursor: not-allowed;
   opacity: 0.5;
 }
 
@@ -1202,28 +1205,11 @@ fieldset legend {
 .source-settings__segments {
   display: inline-flex;
   align-self: flex-start;
-  gap: 1px;
-  padding: 2px;
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-pill);
-  background: var(--tile-2);
 }
 
 .source-settings__segment {
   padding: 5px 11px;
-  border: 0;
-  border-radius: var(--r-pill);
-  background: none;
-  color: var(--ink-2);
   font-size: 0.72rem;
-  font-weight: 600;
-  transition: background 150ms var(--ease);
-}
-
-.source-settings__segment[aria-pressed="true"] {
-  background: var(--tile);
-  color: var(--ink);
-  font-weight: 640;
 }
 
 .source-settings__actions {
@@ -1256,8 +1242,7 @@ fieldset legend {
 }
 
 .field input,
-.field select,
-.field textarea {
+.field select {
   padding: 8px 11px;
   width: 100%;
   border: 1px solid var(--hairline);
@@ -1292,15 +1277,15 @@ fieldset legend {
   line-height: 1.45;
 }
 
-/* Feed trouble for the card being edited, with its one recovery action inline. */
+/* Card and source failures keep long server explanations contained within the editor. */
 .data-note {
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 8px 12px;
   border-radius: var(--r-control);
-  background: color-mix(in srgb, var(--warn) 12%, var(--tile));
-  color: var(--warn);
+  background: color-mix(in srgb, var(--bad) 10%, var(--tile));
+  color: var(--bad);
   font-size: 0.74rem;
   font-weight: 560;
 }
@@ -1309,11 +1294,6 @@ fieldset legend {
   flex: 1;
   min-width: 0;
   overflow-wrap: anywhere;
-}
-
-.data-note--bad {
-  background: color-mix(in srgb, var(--bad) 10%, var(--tile));
-  color: var(--bad);
 }
 
 .check-field {
@@ -1481,14 +1461,6 @@ fieldset legend {
   background: var(--tile-2);
 }
 
-.network-status dt {
-  color: var(--ink-3);
-  font-size: 0.625rem;
-  font-weight: 700;
-  letter-spacing: 0.085em;
-  text-transform: uppercase;
-}
-
 .network-status dd {
   margin: 2px 0 0;
   overflow: hidden;
@@ -1499,7 +1471,7 @@ fieldset legend {
   text-overflow: ellipsis;
 }
 
-/* A serial-port path is three times the width of "Connected"; it takes the row. */
+/* A link identifier or connection explanation can need the full row. */
 .network-status__wide {
   grid-column: 1 / -1;
 }
@@ -1626,7 +1598,6 @@ fieldset legend {
 .first-run__steps li.is-done {
   color: var(--ink-3);
   text-decoration: line-through;
-  text-decoration-color: var(--ink-3);
 }
 
 .first-run__pip {
@@ -1689,16 +1660,6 @@ fieldset legend {
   background: color-mix(in srgb, var(--act) 85%, #000);
 }
 
-.button--danger {
-  background: color-mix(in srgb, var(--bad) 14%, transparent);
-  color: var(--bad);
-}
-
-.button--danger:hover:not(:disabled) {
-  background: var(--bad);
-  color: #fff;
-}
-
 /*
  * A barred control is drawn as barred, not merely faded: the hatch says a
  * condition is holding it, which a lower opacity alone never communicates.
@@ -1726,14 +1687,6 @@ fieldset legend {
   background: none;
   font-size: 0.72rem;
   font-weight: 570;
-}
-
-.data-note .text-button {
-  display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  gap: 5px;
-  color: var(--ink);
 }
 
 .text-button--danger {
@@ -1764,8 +1717,6 @@ fieldset legend {
   position: sticky;
   bottom: -20px;
   margin: 4px -20px -20px;
-  border-top: 1px solid var(--hairline);
-  border-radius: 0;
   background: var(--ground);
 }
 

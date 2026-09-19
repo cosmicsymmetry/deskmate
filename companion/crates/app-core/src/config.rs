@@ -274,7 +274,6 @@ pub(crate) const MAX_POMODORO_SECONDS: u32 = 86_400;
 pub const MIN_CARD_REFRESH_MINUTES: u16 = 1;
 pub const MAX_CARD_REFRESH_MINUTES: u16 = 1_440;
 pub const MAX_CONFIG_CARDS: usize = 8;
-pub const MAX_PLAYLIST_NAME_LEN: usize = 48;
 /// How many named image sources one configuration may declare.
 ///
 /// Eight frames is about 2.6 MB of the 6 MB `assets` partition and eight of the
@@ -709,15 +708,6 @@ impl<'de> Deserialize<'de> for RefreshPolicy {
     }
 }
 
-impl RefreshPolicy {
-    pub const fn interval_minutes(self) -> Option<u16> {
-        match self {
-            Self::Interval { minutes } => Some(minutes),
-            Self::DeviceLocal | Self::Manual => None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum AlertHold {
@@ -767,10 +757,6 @@ impl<'de> Deserialize<'de> for CardAlert {
 }
 
 impl CardAlert {
-    pub const fn is_none(self) -> bool {
-        matches!(self, Self::None)
-    }
-
     pub const fn hold(self) -> Option<AlertHold> {
         match self {
             Self::None => None,
@@ -938,14 +924,6 @@ impl CardSettings {
             Self::Clock { alert, .. }
             | Self::Pomodoro { alert, .. }
             | Self::Picture { alert, .. } => *alert,
-        }
-    }
-
-    pub const fn refresh(&self) -> RefreshPolicy {
-        match self {
-            Self::Clock { refresh, .. }
-            | Self::Pomodoro { refresh, .. }
-            | Self::Picture { refresh, .. } => *refresh,
         }
     }
 
@@ -1389,18 +1367,16 @@ fn validate_composition(
     issues: &mut Vec<ValidationIssue>,
 ) {
     // `template` is `None` only for picture cards: they render from a host-built
-    // scene, not one of the six built-in `DisplayTemplate`s, so there
+    // scene, not a `DisplayTemplate`, so there
     // is no template/card field-compatibility pairing to check and no
     // template-gated tap-action rule to enforce here. The card-gated tap-action
     // and refresh-policy checks below still apply to every kind.
     if let Some(template) = template {
-        // A pairing is allowed only when the card actually populates the fields
-        // the template declares (`firmware/main/core/template_fields.c`). A template
-        // whose renderable fields the card never sends draws its placeholders
-        // forever, and every field the card sends that the template does not
-        // declare is counted in the device's `unknown_field_count` on EVERY refresh —
-        // degrading the diagnostic that exists to catch real host/firmware schema
-        // drift.
+        // A pairing is allowed only when the card produces the fields the
+        // template's host scene builder reads. In
+        // `runtime/scene.rs::build_template_card_scene`, the clock builders read
+        // `show_seconds`, and the progress-ring builder reads `label` and
+        // `duration_seconds`.
         let template_supported = match behavior {
             // Clock scenes can render either clock face.
             CardBehavior::Clock => matches!(

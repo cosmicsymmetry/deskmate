@@ -1,10 +1,10 @@
 use app_core::config::ImageSource;
 use app_core::{
-    AlertHold, AppConfig, AppSnapshot, AssetKind, AssetSettings, AssetSource,
-    CURRENT_SCHEMA_VERSION, CardAlert, CardDataSnapshot, CardError, CardErrorKind, CardField,
-    CardFieldValue, CardSettings, CarouselAdvance, ConnectionState, DeviceCounters, DeviceSnapshot,
-    DisplayTemplate, MAX_ASSET_BYTES, PersistenceState, PomodoroSnapshot, PomodoroState,
-    RefreshPolicy, RuntimeDiagnostics, RuntimeState, ValidationCode, WidgetTapAction,
+    AlertHold, AppConfig, AppSnapshot, AssetKind, AssetSettings, AssetSource, CardAlert,
+    CardDataSnapshot, CardError, CardErrorKind, CardField, CardFieldValue, CardSettings,
+    CarouselAdvance, ConnectionState, DeviceCounters, DeviceSnapshot, DisplayTemplate,
+    MAX_ASSET_BYTES, PersistenceState, PomodoroSnapshot, PomodoroState, RefreshPolicy,
+    RuntimeDiagnostics, RuntimeState, ValidationCode, WidgetTapAction,
 };
 use protocol::{CAPABILITY_ASSET_TRANSFER, Message, TapAction, encode_message};
 
@@ -15,18 +15,9 @@ const FUTURE_JSON: &str = include_str!("fixtures/future-version.json");
 const MALFORMED_JSON: &str = include_str!("fixtures/malformed.json");
 const CARD_SURFACE_JSON: &str = include_str!("fixtures/card-surface.json");
 
-// These frozen pre-v7 fixtures intentionally have no `image_sources` key. Parse
-// them through the new default, then move only the version to the contract under
-// test rather than rewriting fixtures outside this task's ownership.
-fn current_config(json: &str) -> AppConfig {
-    let mut config: AppConfig = serde_json::from_str(json).unwrap();
-    config.schema_version = CURRENT_SCHEMA_VERSION;
-    config
-}
-
 #[test]
 fn default_fixture_is_the_canonical_default() {
-    let from_fixture = current_config(DEFAULT_JSON);
+    let from_fixture: AppConfig = serde_json::from_str(DEFAULT_JSON).unwrap();
     assert_eq!(from_fixture, AppConfig::default());
     from_fixture.validate().unwrap();
 
@@ -37,7 +28,7 @@ fn default_fixture_is_the_canonical_default() {
 
 #[test]
 fn full_fixture_compiles_deterministically_to_the_current_wire_contract() {
-    let config = current_config(FULL_JSON);
+    let config: AppConfig = serde_json::from_str(FULL_JSON).unwrap();
     let first = config.compile(42).unwrap();
     let second = config.compile(42).unwrap();
     assert_eq!(first, second);
@@ -76,7 +67,7 @@ fn full_fixture_compiles_deterministically_to_the_current_wire_contract() {
 
 #[test]
 fn invalid_fixture_reports_all_domain_boundaries_before_compile() {
-    let config = current_config(INVALID_JSON);
+    let config: AppConfig = serde_json::from_str(INVALID_JSON).unwrap();
     let error = config.compile(1).unwrap_err();
 
     // Match on (path, code) pairs, not code membership: several of these codes
@@ -118,7 +109,7 @@ fn future_schema_establishes_a_clean_migration_boundary() {
 
 #[test]
 fn card_surface_is_closed_bounded_and_capability_gated() {
-    let config = current_config(CARD_SURFACE_JSON);
+    let config: AppConfig = serde_json::from_str(CARD_SURFACE_JSON).unwrap();
     config.validate().unwrap();
     assert_eq!(
         serde_json::from_str::<AppConfig>(&serde_json::to_string(&config).unwrap()).unwrap(),
@@ -411,9 +402,6 @@ fn card_behaviour_types_round_trip_as_closed_tagged_json() {
     assert_eq!(json["kind"], "on-timer-finish");
     assert_eq!(json["hold"]["kind"], "seconds");
     assert_eq!(serde_json::from_value::<CardAlert>(json).unwrap(), alert);
-
-    assert!(CardAlert::None.is_none());
-    assert!(!alert.is_none());
 
     let advance = CarouselAdvance::Timed {
         default_dwell_seconds: 20,
@@ -723,7 +711,7 @@ fn a_picture_card_naming_an_unknown_source_is_a_typed_missing_reference() {
 }
 
 #[test]
-fn a_picture_card_compiles_to_the_digital_clock_wire_template() {
+fn a_picture_card_compiles_to_an_ordinary_wire_card_with_no_tap_action() {
     // The device learns nothing new: picture content arrives through the durable asset path.
     let mut config = AppConfig {
         image_sources: vec![ImageSource {

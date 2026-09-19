@@ -269,11 +269,11 @@ fn loading_repairs_a_permissive_existing_config_mode() {
 }
 
 #[test]
-fn v4_config_migrates_to_v9_with_surviving_cards_unchanged() {
-    // config.rs's compile step has always rejected a non-empty `assets` array, so no
-    // saved v4 config has ever contained one: migration to the current schema is a
-    // version bump with no data transformation (v4 -> v7 directly, not chained
-    // through intermediate schemas).
+fn v4_config_migrates_to_current_with_surviving_cards_unchanged() {
+    // At v4 the compile step rejected a non-empty `assets` array, so saved v4
+    // configs need no asset transformation. The shared legacy migration strips
+    // retired cards and their playlist entries, folds the active playlist into
+    // card order, and defaults the missing `image_sources`.
     let directory = test_directory("v4-migration");
     let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
@@ -293,7 +293,7 @@ fn v4_config_migrates_to_v9_with_surviving_cards_unchanged() {
 }
 
 #[test]
-fn v5_config_migrates_to_v9_dropping_retired_cards() {
+fn v5_config_migrates_to_current_dropping_retired_cards() {
     let directory = test_directory("v5-migration");
     let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
@@ -320,7 +320,7 @@ fn v5_config_migrates_to_v9_dropping_retired_cards() {
 }
 
 #[test]
-fn a_v6_document_migrates_to_v9_with_no_image_sources_and_loses_nothing() {
+fn a_v6_document_migrates_to_current_with_no_image_sources_and_loses_nothing() {
     // A real v6 document: no `image_sources` key at all. It must parse, not fail.
     let v6 = serde_json::json!({
         "schema_version": 6,
@@ -364,7 +364,7 @@ fn a_v6_document_migrates_to_v9_with_no_image_sources_and_loses_nothing() {
 }
 
 #[test]
-fn v7_document_migrates_to_v9_dropping_retired_cards_and_entries() {
+fn v7_document_migrates_to_current_dropping_retired_cards_and_entries() {
     let directory = test_directory("v7-migration");
     let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
@@ -387,7 +387,7 @@ fn v7_document_migrates_to_v9_dropping_retired_cards_and_entries() {
 }
 
 #[test]
-fn v8_document_migrates_to_v9_dropping_plugin_cards_and_entries() {
+fn v8_document_migrates_to_current_dropping_plugin_cards_and_entries() {
     let directory = test_directory("v8-migration");
     let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
@@ -505,15 +505,20 @@ fn malformed_truncated_and_oversized_files_preserve_bytes_and_last_good() {
 #[test]
 fn failed_replace_preserves_last_good() {
     let directory = test_directory("replace-failure");
-    let target = directory.path().join("target-is-a-directory");
-    fs::create_dir(&target).unwrap();
-    let store = ConfigStore::new(&target);
-    let before = store.last_good().unwrap();
+    let path = directory.path().join("config.json");
+    let store = ConfigStore::new(&path);
+    let mut seeded = AppConfig::default();
+    seeded.preferences.timezone = "Europe/Paris".into();
+    store.save(&seeded).unwrap();
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
 
-    let error = store.save(&AppConfig::default()).unwrap_err();
+    let mut attempted = AppConfig::default();
+    attempted.preferences.timezone = "Asia/Tbilisi".into();
+    let error = store.save(&attempted).unwrap_err();
     assert!(matches!(error, StoreError::Io { .. }));
-    assert_eq!(store.last_good().unwrap(), before);
-    assert!(target.is_dir());
+    assert_eq!(store.last_good().unwrap(), seeded);
+    assert!(path.is_dir());
 }
 
 #[test]

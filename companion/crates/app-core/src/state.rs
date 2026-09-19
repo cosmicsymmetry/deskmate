@@ -30,7 +30,9 @@ pub struct CardError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CardErrorKind {
-    /// The display rejected an otherwise valid `PushData` payload.
+    /// The display rejected a `PushTimer` for this card. The name is protocol v1's
+    /// (`PushData`); it is kept because the serialized `data-refused` is part of
+    /// the browser contract.
     DataRefused,
     /// The host could not build, or the display could not render, the complete scene.
     SceneRefused,
@@ -351,9 +353,7 @@ pub enum PomodoroState {
 /// One live value a card's scene builder reads. Protocol v2 removed the wire's
 /// generic field bag, so this is now purely a HOST-side type: it is what the
 /// runtime keeps per card, what the settings UI renders, and what
-/// `build_card_scene` reads. The wire type deliberately does not derive
-/// `Serialize` (it must stay free of presentation concerns), so this DTO
-/// carries the same last-good values through the companion API instead.
+/// `build_card_scene` reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum CardFieldValue {

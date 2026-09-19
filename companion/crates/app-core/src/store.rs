@@ -169,14 +169,6 @@ impl LoadOutcome {
             }),
         }
     }
-
-    pub fn into_config(self) -> AppConfig {
-        match self {
-            Self::Loaded { config, .. }
-            | Self::Recovered { config, .. }
-            | Self::ValidationFailed { config, .. } => config,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -407,21 +399,15 @@ fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> 
     let (config, origin) = match header.schema_version {
         CURRENT_SCHEMA_VERSION => (parse_json(text)?, ConfigOrigin::Current),
         version @ (4..=9) => {
-            // v4's asset variants (`icon { width, height }`, `font { pixel_size,
-            // glyph_ranges }`) encoded the pre-tiny_ttf design where glyphs were
-            // baked at a fixed size. `config.rs`'s compile step has always
-            // rejected a non-empty `assets` array, so no saved v4 config has ever
-            // contained one, which makes this migration a version bump with no
-            // data transformation: the current `AppConfig` shape parses a v4
-            // document unchanged because `assets` is always empty, and the v5->v6
-            // change (a new card kind no v4 document could contain either) adds
-            // nothing that shape lacks. v4 therefore migrates directly to the
-            // current schema in one step, not chained through v5. v5 likewise differs
-            // only by adding the plugin card kind, and v6->v7 adds `image_sources`,
-            // which `#[serde(default)]` supplies for older documents. v8 and v9 are
-            // subtractive bumps: remove retired card objects and their playlist
-            // references while the JSON still has enough information to recognize
-            // them, then deserialize the surviving current shape strictly.
+            // Every readable legacy version takes the same path:
+            // `drop_retired_cards_from_json` strips retired card kinds and their
+            // playlist entries, then folds the active playlist into the card
+            // order for schema v10. This runs on the raw `Value` because strict
+            // current-shape deserialization would refuse the retired keys.
+            // `#[serde(default)]` supplies `image_sources` for older documents.
+            // v4's old asset variants need no transformation: at v4 the compile
+            // step rejected a non-empty `assets` array, so no saved v4 document
+            // contained them (see `docs/config/v4.md`).
             let legacy = drop_retired_cards_from_json(text)?;
             let origin = match version {
                 4 => ConfigOrigin::MigratedV4,

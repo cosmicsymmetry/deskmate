@@ -68,10 +68,6 @@ pub(crate) enum RuntimeCommand {
         digest: [u8; 32],
         reply: CommandReply,
     },
-    ActivateCard {
-        card_id: String,
-        reply: CommandReply,
-    },
     PushScene {
         push: PushScene,
         reply: CommandReply,

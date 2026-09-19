@@ -175,30 +175,6 @@ pub(super) fn runtime_command_device_error(
     }
 }
 
-pub(super) fn run_runtime_device_command(
-    state: &mut WorkerState,
-    reconnect_interval: Duration,
-    operation: impl FnOnce() -> Result<(), DeviceError>,
-) -> Result<(), RuntimeError> {
-    if !state.connected {
-        return Err(RuntimeError::DeviceDisconnected);
-    }
-    operation().map_err(|error| runtime_command_device_error(state, &error, reconnect_interval))
-}
-
-pub(super) fn reply_to_runtime_device_command(
-    reply: &CommandReply,
-    state: &mut WorkerState,
-    reconnect_interval: Duration,
-    operation: impl FnOnce() -> Result<(), DeviceError>,
-) {
-    let _ = reply.send(run_runtime_device_command(
-        state,
-        reconnect_interval,
-        operation,
-    ));
-}
-
 pub(super) fn update_device_status(
     state: &mut WorkerState,
     port_name: &str,

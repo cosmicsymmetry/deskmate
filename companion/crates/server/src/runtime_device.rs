@@ -1080,6 +1080,19 @@ mod tests {
     }
 
     #[test]
+    fn asset_release_timeout_ladder_reaches_the_http_boundary() {
+        let message = Message::AssetRelease(protocol::AssetRelease {
+            digests: Vec::new(),
+        });
+
+        assert!(
+            super::response_wait_timeout(&message)
+                < app_core::runtime::SYNCHRONIZING_COMMAND_TIMEOUT
+        );
+        assert!(app_core::runtime::SYNCHRONIZING_COMMAND_TIMEOUT < crate::REQUEST_TIMEOUT);
+    }
+
+    #[test]
     fn asset_release_gets_longer_than_a_normal_request_but_less_than_the_idle_reap() {
         // Its handler compacts the flash blob region, so two seconds is the
         // wrong budget -- but a value past the idle timeout would have the

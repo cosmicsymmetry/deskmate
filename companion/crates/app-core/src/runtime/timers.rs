@@ -18,7 +18,7 @@ pub(super) fn update_pomodoros(state: &mut WorkerState, now: Instant) {
             state.dirty_cards.insert(card_id.clone());
         }
         if completion_interrupt {
-            let _ = state.interrupts.schedule(card_id.clone(), "Timer finished");
+            let _ = state.interrupts.schedule_timer_finished(card_id.clone());
         }
     }
 }
@@ -48,7 +48,7 @@ pub(super) fn control_pomodoro(
     if completion_interrupt {
         state
             .interrupts
-            .schedule(card_id, "Timer finished")
+            .schedule_timer_finished(card_id)
             .map_err(|error| RuntimeError::Device {
                 message: error.to_string(),
             })?;
@@ -69,7 +69,7 @@ pub(super) fn control_pomodoro(
 /// lives, keeping timer mechanics independent of presentation fields.
 pub(super) fn pomodoro_fields(
     label: &str,
-    update: &crate::engine::pomodoro::PomodoroUpdate,
+    update: &crate::pomodoro::PomodoroUpdate,
 ) -> Vec<CardField> {
     vec![
         CardField {
@@ -93,7 +93,7 @@ pub(super) fn pomodoro_fields(
         CardField {
             key: "running".into(),
             value: CardFieldValue::Boolean {
-                value: update.state == EnginePomodoroState::Running,
+                value: update.state == PomodoroState::Running,
             },
         },
         CardField {
@@ -112,7 +112,7 @@ pub(super) fn pomodoro_fields(
 pub(super) fn record_pomodoro_update(
     state: &mut WorkerState,
     card_id: &str,
-    update: &crate::engine::pomodoro::PomodoroUpdate,
+    update: &crate::pomodoro::PomodoroUpdate,
     fields: Vec<CardField>,
 ) -> bool {
     let completion_interrupt =
@@ -122,7 +122,7 @@ pub(super) fn record_pomodoro_update(
         card_id.into(),
         PomodoroSnapshot {
             card_id: card_id.into(),
-            state: pomodoro_state(update.state),
+            state: update.state,
             duration_seconds: update.duration_seconds,
             remaining_seconds: update.remaining_seconds,
         },
@@ -271,24 +271,10 @@ pub(super) fn flush_interrupts(
                 return Ok(());
             }
             Err(DeviceError::Rejected(error)) if error.code == protocol::ErrorCode::Busy => {
-                state
-                    .interrupts
-                    .mark_busy_for_retry(interrupt.token)
-                    .map_err(|error| RuntimeError::Device {
-                        message: error.to_string(),
-                    })?;
+                // It stays queued and unacknowledged, so the next flush re-sends it unchanged.
                 return Ok(());
             }
             Err(error) => return Err(device_runtime_error(&error)),
         }
-    }
-}
-
-pub(super) fn pomodoro_state(state: EnginePomodoroState) -> PomodoroState {
-    match state {
-        EnginePomodoroState::Idle => PomodoroState::Idle,
-        EnginePomodoroState::Running => PomodoroState::Running,
-        EnginePomodoroState::Paused => PomodoroState::Paused,
-        EnginePomodoroState::Completed => PomodoroState::Completed,
     }
 }

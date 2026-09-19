@@ -148,12 +148,7 @@ impl SnapshotPublisher {
 /// offline view and a starting runtime cannot drift apart.
 pub fn initial_snapshot(config: &AppConfig, diagnostics: RuntimeDiagnostics) -> AppSnapshot {
     let mut pomodoros = Vec::new();
-    let compiled_card_ids: BTreeSet<&str> = config.compiled_card_ids().into_iter().collect();
-    for card in config
-        .cards
-        .iter()
-        .filter(|card| compiled_card_ids.contains(card.id()))
-    {
+    for card in &config.cards {
         match card {
             CardSettings::Pomodoro {
                 id,

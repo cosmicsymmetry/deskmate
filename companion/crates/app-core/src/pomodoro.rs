@@ -2,26 +2,19 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use crate::config::{MAX_POMODORO_SECONDS, MIN_POMODORO_SECONDS};
+use crate::state::PomodoroState;
 use protocol::truncate_utf8_to_bytes;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PomodoroState {
-    Idle,
-    Running,
-    Paused,
-    Completed,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PomodoroUpdate {
-    pub state: PomodoroState,
-    pub duration_seconds: u32,
-    pub remaining_seconds: u32,
-    pub completion_interrupt: bool,
+pub(crate) struct PomodoroUpdate {
+    pub(crate) state: PomodoroState,
+    pub(crate) duration_seconds: u32,
+    pub(crate) remaining_seconds: u32,
+    pub(crate) completion_interrupt: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PomodoroError {
+pub(crate) enum PomodoroError {
     InvalidDuration,
 }
 
@@ -38,7 +31,7 @@ impl fmt::Display for PomodoroError {
 
 impl std::error::Error for PomodoroError {}
 
-pub struct Pomodoro {
+pub(crate) struct Pomodoro {
     label: String,
     duration: Duration,
     state: PomodoroState,
@@ -48,7 +41,10 @@ pub struct Pomodoro {
 }
 
 impl Pomodoro {
-    pub fn new(label: impl Into<String>, duration_seconds: u32) -> Result<Self, PomodoroError> {
+    pub(crate) fn new(
+        label: impl Into<String>,
+        duration_seconds: u32,
+    ) -> Result<Self, PomodoroError> {
         if !(MIN_POMODORO_SECONDS..=MAX_POMODORO_SECONDS).contains(&duration_seconds) {
             return Err(PomodoroError::InvalidDuration);
         }
@@ -67,16 +63,16 @@ impl Pomodoro {
 
     /// The truncated label this timer was created with. A host builds the
     /// card's face from it; protocol v2's device never sees it.
-    pub fn label(&self) -> &str {
+    pub(crate) fn label(&self) -> &str {
         &self.label
     }
 
-    pub fn matches_settings(&self, label: &str, duration_seconds: u32) -> bool {
+    pub(crate) fn matches_settings(&self, label: &str, duration_seconds: u32) -> bool {
         self.label == truncate_utf8_to_bytes(label, 64)
             && self.duration == Duration::from_secs(u64::from(duration_seconds))
     }
 
-    pub fn start(&mut self, now: Instant) -> PomodoroUpdate {
+    pub(crate) fn start(&mut self, now: Instant) -> PomodoroUpdate {
         if matches!(self.state, PomodoroState::Idle | PomodoroState::Paused) {
             self.state = PomodoroState::Running;
             self.running_since = Some(now);
@@ -84,7 +80,7 @@ impl Pomodoro {
         self.update(now)
     }
 
-    pub fn pause(&mut self, now: Instant) -> PomodoroUpdate {
+    pub(crate) fn pause(&mut self, now: Instant) -> PomodoroUpdate {
         self.settle(now);
         if self.state == PomodoroState::Running {
             self.accumulated = self.elapsed(now);
@@ -94,7 +90,7 @@ impl Pomodoro {
         self.update(now)
     }
 
-    pub fn toggle(&mut self, now: Instant) -> PomodoroUpdate {
+    pub(crate) fn toggle(&mut self, now: Instant) -> PomodoroUpdate {
         match self.state {
             PomodoroState::Idle | PomodoroState::Paused => self.start(now),
             PomodoroState::Running => self.pause(now),
@@ -102,7 +98,7 @@ impl Pomodoro {
         }
     }
 
-    pub fn reset(&mut self, now: Instant) -> PomodoroUpdate {
+    pub(crate) fn reset(&mut self, now: Instant) -> PomodoroUpdate {
         self.state = PomodoroState::Idle;
         self.accumulated = Duration::ZERO;
         self.running_since = None;
@@ -110,7 +106,7 @@ impl Pomodoro {
         self.update(now)
     }
 
-    pub fn update(&mut self, now: Instant) -> PomodoroUpdate {
+    pub(crate) fn update(&mut self, now: Instant) -> PomodoroUpdate {
         self.settle(now);
         let elapsed = self.elapsed(now).min(self.duration);
         let remaining = self.duration.saturating_sub(elapsed);
@@ -229,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn duration_is_bounded_by_the_wire_template_contract() {
+    fn duration_is_bounded_by_the_config_limits() {
         assert!(Pomodoro::new("bad", 0).is_err());
         assert!(Pomodoro::new("bad", MAX_POMODORO_SECONDS + 1).is_err());
     }

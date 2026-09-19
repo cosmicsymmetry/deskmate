@@ -444,7 +444,8 @@ impl AppConfig {
                 ));
             }
         }
-        if self.compiled_card_ids().len() > MAX_CONFIG_CARDS {
+        // Keep this second issue: the server's 422 response exposes the full issue list.
+        if self.cards.len() > MAX_CONFIG_CARDS {
             issues.push(ValidationIssue::new(
                 "cards",
                 ValidationCode::TooMany,
@@ -488,15 +489,6 @@ impl AppConfig {
         } else {
             Err(ConfigValidationError { issues })
         }
-    }
-
-    /// Card ids the compiled widget set will contain, in loop order.
-    ///
-    /// Since schema v10 that is simply the card order: `cards` IS the loop, so
-    /// there is no longer a set of cards inside it and a set of alert-capable
-    /// cards outside it to concatenate.
-    pub fn compiled_card_ids(&self) -> Vec<&str> {
-        self.cards.iter().map(CardSettings::id).collect()
     }
 
     pub fn compile(&self, revision: u32) -> Result<CompiledAppConfig, ConfigValidationError> {

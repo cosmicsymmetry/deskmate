@@ -148,20 +148,23 @@ enum Phase {
 #[allow(clippy::too_many_lines)] // linear phase script; splitting it would obscure the sequence
 fn main() {
     let mut config = AppConfig::default();
-    config.cards.push(CardSettings::Pomodoro {
-        id: "focus".into(),
-        label: "Replay check".into(),
-        duration_seconds: POMODORO_SECONDS,
-        template: DisplayTemplate::ProgressRing,
-        tap_action: WidgetTapAction::StartPause,
-        refresh: RefreshPolicy::DeviceLocal,
-        alert: CardAlert::OnTimerFinish {
-            hold: AlertHold::Seconds {
-                value: HOLD_SECONDS,
+    config.cards.insert(
+        0,
+        CardSettings::Pomodoro {
+            id: "focus".into(),
+            label: "Replay check".into(),
+            duration_seconds: POMODORO_SECONDS,
+            template: DisplayTemplate::ProgressRing,
+            tap_action: WidgetTapAction::StartPause,
+            refresh: RefreshPolicy::DeviceLocal,
+            alert: CardAlert::OnTimerFinish {
+                hold: AlertHold::Seconds {
+                    value: HOLD_SECONDS,
+                },
             },
+            dwell_seconds: None,
         },
-        dwell_seconds: None,
-    });
+    );
     config.validate().expect("harness config must validate");
 
     let handle = RuntimeHandle::start(
@@ -237,7 +240,6 @@ fn main() {
 
         match phase {
             Phase::AwaitConnect if online => {
-                handle.activate_card("focus").expect("activate focus");
                 phase = Phase::AwaitUnplug;
                 println!();
                 println!(">>> Connected; the pomodoro card is on the panel (idle ring).");

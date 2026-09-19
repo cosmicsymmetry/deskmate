@@ -902,29 +902,6 @@ fn a_cards_own_dwell_bounds_are_enforced() {
     }));
 }
 
-/// Since v10 every card is in the loop, so the compiled set is simply the card
-/// order -- there is no longer a set inside the loop and a set of alert-capable
-/// cards outside it to concatenate.
-#[test]
-fn compiled_card_ids_are_the_card_order() {
-    let config = AppConfig {
-        cards: vec![
-            clock_card("b"),
-            clock_card("a"),
-            pomodoro_card(
-                "c",
-                CardAlert::OnTimerFinish {
-                    hold: AlertHold::UntilDismissed,
-                },
-            ),
-            clock_card("d"),
-        ],
-        advance: CarouselAdvance::Manual,
-        ..AppConfig::default()
-    };
-    assert_eq!(config.compiled_card_ids(), vec!["b", "a", "c", "d"]);
-}
-
 fn set_card_dwell(card: CardSettings, dwell_seconds: Option<u16>) -> CardSettings {
     match card {
         CardSettings::Clock {

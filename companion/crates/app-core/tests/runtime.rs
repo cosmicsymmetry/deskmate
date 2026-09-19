@@ -1396,7 +1396,16 @@ fn scenes_push_on_config_and_navigation_events_but_not_clock_or_pomodoro_ticks()
     wait_for(Duration::from_secs(1), || scene_count() > initial);
     let after_config = scene_count();
 
-    runtime.activate_card("pomodoro").unwrap();
+    control.push_event(DeviceEvent {
+        sequence: 1,
+        kind: EventKind::Navigation,
+        card_id: "pomodoro".into(),
+        action: EventAction::NavigateNext,
+        interrupt_token: None,
+    });
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.active_card_id.as_deref() == Some("pomodoro")
+    });
     wait_for(Duration::from_secs(1), || {
         control.operations().iter().rev().any(
             |operation| matches!(operation, Operation::PushScene(push) if push.card_id == "pomodoro"),
@@ -1906,7 +1915,6 @@ fn subscribers_are_bounded_and_coalesce_pressure_to_the_latest_snapshot() {
     assert!(matches!(runtime.subscribe(), Err(RuntimeError::QueueFull)));
     apply_paused_preference(&runtime, true).unwrap();
     apply_paused_preference(&runtime, false).unwrap();
-    runtime.activate_card("clock").unwrap();
     wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
         snapshot.device.active_card_id.as_deref() == Some("clock")
             && snapshot.runtime == RuntimeState::Running
@@ -2111,7 +2119,10 @@ fn command_queue_rejects_pressure_without_growing() {
     let second_runtime = Arc::clone(&runtime);
     let second = thread::spawn(move || apply_paused_preference(&second_runtime, true));
     thread::sleep(Duration::from_millis(20));
-    assert_eq!(runtime.activate_card("clock"), Err(RuntimeError::QueueFull));
+    assert_eq!(
+        runtime.control_pomodoro("pomodoro", PomodoroAction::Reset),
+        Err(RuntimeError::QueueFull)
+    );
     gate.open();
     first.join().unwrap().unwrap();
     second.join().unwrap().unwrap();
@@ -2134,10 +2145,6 @@ fn invalid_commands_do_not_mutate_runtime_state() {
         .iter()
         .filter(|operation| matches!(operation, Operation::ApplyLayout(_)))
         .count();
-    assert!(matches!(
-        runtime.activate_card("missing"),
-        Err(RuntimeError::UnknownCard { .. })
-    ));
     assert!(matches!(
         runtime.control_pomodoro("missing", PomodoroAction::Reset),
         Err(RuntimeError::UnknownCard { .. })
@@ -2171,7 +2178,13 @@ fn config_and_preference_edits_preserve_live_timer_and_screen() {
     runtime
         .control_pomodoro("pomodoro", PomodoroAction::Start)
         .unwrap();
-    runtime.activate_card("pomodoro").unwrap();
+    control.push_event(DeviceEvent {
+        sequence: 1,
+        kind: EventKind::Navigation,
+        card_id: "pomodoro".into(),
+        action: EventAction::NavigateNext,
+        interrupt_token: None,
+    });
     let before = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
         snapshot
             .pomodoros
@@ -2449,17 +2462,17 @@ fn manual_advance_playlist_has_no_rotation_deadline() {
     runtime.shutdown().unwrap();
 }
 
-// Rotation's pure logic (per-card dwell resolution, manual-mode disarming, in-rotation
-// ordering/skipping/wrap-around, and the swipe/API index-resolution edge cases) is
-// covered by instant unit tests in `companion/crates/app-core/src/runtime.rs`'s inline
-// `mod tests`, which call `current_dwell`, `rotation_card_ids`, `advance_rotation`,
-// `drain_device_events`, and `process_command` directly with synthetic `Instant`s — no
+// Rotation's pure logic (per-card dwell resolution, manual-mode disarming,
+// ordering/wrap-around, and swipe index resolution) is covered by instant unit tests
+// in `companion/crates/app-core/src/runtime/mod.rs`'s inline `mod tests`, which call
+// `current_dwell`, `card_index`, `advance_rotation`, and `drain_device_events` directly
+// with synthetic `Instant`s — no
 // sleeping required. This file keeps exactly one real-time rotation test: an end-to-end
 // wiring proof that `scheduler.rotation_due` firing inside the real `run_runtime` loop
 // actually reaches the mock device via `ActivateCard`, through
 // `advance_rotation` -> `active_card_dirty` -> `send_screen`. One dwell period (the
 // validated minimum, 5s) is enough to prove the wiring; it does not re-prove ordering or
-// skipping, which the unit tests already pin.
+// ordering, which the unit tests already pin.
 #[test]
 fn timed_advance_wiring_reaches_the_device_after_one_dwell() {
     let control = MockDeviceControl::default();
@@ -2484,7 +2497,7 @@ fn timed_advance_wiring_reaches_the_device_after_one_dwell() {
     wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
         snapshot.device.connection == ConnectionState::Online
     });
-    // The initial full sync activates the first in-rotation card ("first"),
+    // The initial full sync activates the first card ("first"),
     // independent of rotation.
     wait_for(Duration::from_secs(1), || {
         activated_card_ids(&control) == ["first"]

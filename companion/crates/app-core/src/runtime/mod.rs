@@ -5,8 +5,8 @@ use std::sync::{Arc, Condvar, Mutex, RwLock, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::engine::interrupts::InterruptArbiter;
-use crate::engine::pomodoro::{Pomodoro, PomodoroState as EnginePomodoroState};
+use crate::interrupts::InterruptArbiter;
+use crate::pomodoro::Pomodoro;
 use chrono::Utc;
 use chrono_tz::Tz;
 use device::{DeviceError, ReceivedEvent, SessionDiagnostics};
@@ -39,7 +39,7 @@ pub use scene::*;
 pub use snapshot::*;
 // These two export nothing public, so they are imported by name.
 use sync::{
-    clear_asset_sync_refusals, push_dirty_widgets, send_screen, send_time_sync, synchronize_full,
+    clear_asset_sync_refusals, push_dirty_widgets, send_time_sync, synchronize_full,
     synchronize_pending,
 };
 use timers::{
@@ -178,13 +178,6 @@ impl RuntimeHandle {
         })
     }
 
-    pub fn activate_card(&self, card_id: impl Into<String>) -> Result<(), RuntimeError> {
-        self.request(|reply| RuntimeCommand::ActivateCard {
-            card_id: card_id.into(),
-            reply,
-        })
-    }
-
     pub fn push_scene(&self, push: PushScene) -> Result<(), RuntimeError> {
         self.request(|reply| RuntimeCommand::PushScene { push, reply })
     }
@@ -239,10 +232,10 @@ impl RuntimeHandle {
         result
     }
 
-    fn request<T>(
+    fn request(
         &self,
-        command: impl FnOnce(SyncSender<Result<T, RuntimeError>>) -> RuntimeCommand,
-    ) -> Result<T, RuntimeError> {
+        command: impl FnOnce(CommandReply) -> RuntimeCommand,
+    ) -> Result<(), RuntimeError> {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
         let command = command(reply_sender);
         // Chosen before the command is moved into the channel, so the budget
@@ -283,9 +276,9 @@ impl RuntimeHandle {
 /// twenty, so those two commands reported a timeout for work that was still
 /// legitimately in progress and would go on to succeed.
 ///
-/// It stays under the server's 30 s HTTP timeout so the caller above still
-/// bounds it; a test pins both ends of that ordering.
-pub(crate) const SYNCHRONIZING_COMMAND_TIMEOUT: Duration = Duration::from_secs(25);
+/// It stays above the WebSocket caller's 22-second `AssetRelease` wait and
+/// under the server's 30-second HTTP timeout; a cross-crate test pins both ends.
+pub const SYNCHRONIZING_COMMAND_TIMEOUT: Duration = Duration::from_secs(25);
 
 /// Whether this command drives a full device synchronize, and therefore needs
 /// the longer budget above.
@@ -307,7 +300,6 @@ struct WorkerState {
     config: AppConfig,
     runtime: RuntimeState,
     device: DeviceSnapshot,
-    persistence: PersistenceState,
     latest_fields: BTreeMap<String, Vec<CardField>>,
     /// Card ID -> the exact durable picture face most recently accepted by
     /// the device. Comparing this pair with the host detects cadence-driven
@@ -362,7 +354,6 @@ impl WorkerState {
             config: config.clone(),
             runtime: RuntimeState::Starting,
             device: empty_device(ConnectionState::Connecting),
-            persistence: PersistenceState::Clean,
             latest_fields: BTreeMap::new(),
             last_picture_face: BTreeMap::new(),
             image_source_host,
@@ -391,7 +382,7 @@ impl WorkerState {
     #[allow(clippy::too_many_lines)] // one linear config swap; splitting would scatter its invariants
     fn replace_config(&mut self, config: AppConfig, now: Instant, scheduler: &mut Scheduler) {
         let previous_active_card = self.active_card.clone();
-        let _previous_fields = std::mem::take(&mut self.latest_fields);
+        self.latest_fields.clear();
         let mut previous_pomodoros = std::mem::take(&mut self.pomodoros);
         self.config = config;
         self.dirty_cards.clear();
@@ -400,32 +391,22 @@ impl WorkerState {
         // Owned, not borrowed: `prune_alert_state_for_live_widgets` needs
         // `&mut self`, which cannot coexist with a set still borrowing from
         // `self.config`.
-        let live_widget_ids: BTreeSet<String> = self
+        let live_card_ids: BTreeSet<String> = self
             .config
-            .compiled_card_ids()
-            .into_iter()
-            .map(str::to_owned)
+            .cards
+            .iter()
+            .map(|card| card.id().to_owned())
             .collect();
-        self.prune_alert_state_for_live_widgets(&live_widget_ids, scheduler, now);
-        let configured_card_ids: BTreeSet<&str> =
-            self.config.cards.iter().map(CardSettings::id).collect();
+        self.prune_alert_state_for_live_widgets(&live_card_ids, scheduler, now);
         self.last_picture_face
-            .retain(|card_id, _| configured_card_ids.contains(card_id.as_str()));
+            .retain(|card_id, _| live_card_ids.contains(card_id));
 
         for card in &self.config.cards {
             self.latest_fields
                 .insert(card.id().to_owned(), card.initial_fields());
         }
 
-        let compiled_card_ids: BTreeSet<&str> =
-            self.config.compiled_card_ids().into_iter().collect();
-        let cards: Vec<CardSettings> = self
-            .config
-            .cards
-            .iter()
-            .filter(|card| compiled_card_ids.contains(card.id()))
-            .cloned()
-            .collect();
+        let cards: Vec<CardSettings> = self.config.cards.clone();
         for card in &cards {
             match card {
                 CardSettings::Pomodoro {
@@ -458,12 +439,11 @@ impl WorkerState {
                 CardSettings::Clock { .. } => {}
             }
         }
-        let rotation_card_ids = rotation_card_ids(&self.config);
         // Stay on the card the panel is showing when it survives the new
         // configuration, so an unrelated edit does not jump the loop.
         self.active_card = previous_active_card
-            .filter(|active| rotation_card_ids.contains(active))
-            .or_else(|| rotation_card_ids.first().cloned());
+            .filter(|active| self.config.cards.iter().any(|card| card.id() == active))
+            .or_else(|| self.config.cards.first().map(|card| card.id().to_owned()));
         self.active_card_dirty = self.active_card.is_some();
         self.active_scene_dirty = self.active_card.is_some();
         self.rearm_rotation_for_active_screen(scheduler, now);
@@ -504,8 +484,8 @@ impl WorkerState {
     }
 
     /// Dwell is per-card: arm the deadline from whichever card ended up
-    /// active (the preserved screen if it is still in rotation, otherwise the
-    /// first in-rotation card), not blindly from index 0.
+    /// active (the preserved card if it is still in the loop, otherwise the
+    /// first card), not blindly from index 0.
     ///
     /// Called from `replace_config`, i.e. at config install time, which runs
     /// before the device connects. The clock therefore starts on the boot
@@ -514,11 +494,10 @@ impl WorkerState {
     /// than its configured dwell. Noted, not restructured — connect is
     /// normally fast and this only shortens one card's first showing.
     fn rearm_rotation_for_active_screen(&mut self, scheduler: &mut Scheduler, now: Instant) {
-        let rotation_ids = rotation_card_ids(&self.config);
         let active_rotation_index = self
             .active_card
             .as_ref()
-            .and_then(|active| rotation_ids.iter().position(|id| id == active))
+            .and_then(|active| card_index(&self.config, active))
             .unwrap_or(0);
         scheduler.set_rotation(current_dwell(&self.config, active_rotation_index), now);
     }
@@ -540,7 +519,7 @@ impl WorkerState {
         let update = timer.update(now);
         let fields = pomodoro_fields(timer.label(), &update);
         if record_pomodoro_update(self, id, &update, fields) {
-            let _ = self.interrupts.schedule(id, "Timer finished");
+            let _ = self.interrupts.schedule_timer_finished(id);
         }
         self.pomodoros.insert(id.into(), timer);
     }
@@ -559,7 +538,7 @@ impl WorkerState {
                 .map(|(card_id, fields)| CardDataSnapshot::new(card_id, fields))
                 .collect(),
             card_errors: self.push_rejections.values().cloned().collect(),
-            persistence: self.persistence.clone(),
+            persistence: PersistenceState::Clean,
             diagnostics: diagnostics.snapshot(),
         }
     }
@@ -586,14 +565,8 @@ impl WorkerState {
     }
 }
 
-/// Active-playlist card IDs in entry order. Screen IDs equal card IDs (see
-/// `AppConfig::compile`), so this doubles as the rotation's screen order.
-fn rotation_card_ids(config: &AppConfig) -> Vec<String> {
-    config
-        .cards
-        .iter()
-        .map(|card| card.id().to_owned())
-        .collect()
+fn card_index(config: &AppConfig, card_id: &str) -> Option<usize> {
+    config.cards.iter().position(|card| card.id() == card_id)
 }
 
 /// The dwell for the card at `index`, resolved against the document's default.
@@ -613,19 +586,18 @@ fn current_dwell(config: &AppConfig, index: usize) -> Option<Duration> {
 /// Advances the rotation by one step (wrapping) and queues the resulting
 /// screen through the existing `active_card_dirty` flush path, then
 /// re-arms the deadline from the card just moved to, since dwell is per-card.
-/// With fewer than two in-rotation cards there is nothing to rotate to, so the
+/// With fewer than two cards in the loop there is nothing to rotate to, so the
 /// deadline is disarmed instead of waking the loop again for a no-op; the next
 /// config replace re-evaluates it (see `WorkerState::replace_config`).
 fn advance_rotation(state: &mut WorkerState, scheduler: &mut Scheduler, now: Instant) {
-    let ids = rotation_card_ids(&state.config);
-    if ids.len() > 1 {
+    if state.config.cards.len() > 1 {
         let current_index = state
             .active_card
             .as_ref()
-            .and_then(|active| ids.iter().position(|id| id == active))
+            .and_then(|active| card_index(&state.config, active))
             .unwrap_or(0);
-        let next_index = (current_index + 1) % ids.len();
-        state.active_card = Some(ids[next_index].clone());
+        let next_index = (current_index + 1) % state.config.cards.len();
+        state.active_card = Some(state.config.cards[next_index].id().to_owned());
         state.active_card_dirty = true;
         state.active_scene_dirty = true;
         scheduler.set_rotation(current_dwell(&state.config, next_index), now);
@@ -713,13 +685,7 @@ fn run_runtime(
         // face drawn by an already-owned device, not a prerequisite for Online.
         state.publish_if_changed(publisher, diagnostics);
         if state.connected && !state.config.preferences.paused {
-            push_active_scene(
-                &mut state,
-                &mut scheduler,
-                device.as_mut(),
-                now,
-                options.reconnect_interval,
-            );
+            push_active_scene(&mut state, device.as_mut(), options.reconnect_interval);
         }
         run_scheduled_work(&mut state, &mut scheduler, device.as_mut(), now, &options);
         state.publish_if_changed(publisher, diagnostics);
@@ -765,24 +731,19 @@ fn process_command(
             digest,
             reply,
         } => {
-            let result = apply_image_source_update(
-                state,
-                scheduler,
-                device,
-                &source_id,
-                digest,
-                reconnect_interval,
-            );
-            let _ = reply.send(result);
-        }
-        RuntimeCommand::ActivateCard { card_id, reply } => {
-            let result = activate_card_command(state, scheduler, device, card_id);
+            let result =
+                apply_image_source_update(state, device, &source_id, digest, reconnect_interval);
             let _ = reply.send(result);
         }
         RuntimeCommand::PushScene { push, reply } => {
-            reply_to_runtime_device_command(&reply, state, reconnect_interval, || {
-                device.push_scene(push)
-            });
+            let result = if state.connected {
+                device.push_scene(push).map_err(|error| {
+                    runtime_command_device_error(state, &error, reconnect_interval)
+                })
+            } else {
+                Err(RuntimeError::DeviceDisconnected)
+            };
+            let _ = reply.send(result);
         }
         RuntimeCommand::Shutdown { reply } => {
             let _ = reply.send(Ok(()));
@@ -794,7 +755,6 @@ fn process_command(
 
 fn apply_image_source_update(
     state: &mut WorkerState,
-    scheduler: &mut Scheduler,
     device: &mut dyn RuntimeDevice,
     source_id: &str,
     digest: [u8; protocol::ASSET_DIGEST_LEN],
@@ -883,33 +843,9 @@ fn apply_image_source_update(
     // the next ordinary rotation onto their card.
     if visible_uses_source {
         state.active_scene_dirty = true;
-        push_active_scene(state, scheduler, device, Instant::now(), reconnect_interval);
+        push_active_scene(state, device, reconnect_interval);
     }
     Ok(())
-}
-
-fn activate_card_command(
-    state: &mut WorkerState,
-    scheduler: &mut Scheduler,
-    device: &mut dyn RuntimeDevice,
-    card_id: String,
-) -> Result<(), RuntimeError> {
-    let ids = rotation_card_ids(&state.config);
-    let Some(index) = ids.iter().position(|id| *id == card_id) else {
-        return Err(RuntimeError::UnknownCard { card_id });
-    };
-    state.active_card = Some(card_id.clone());
-    state.active_card_dirty = true;
-    state.active_scene_dirty = true;
-    // An explicit activation is a manual override, same as a physical
-    // swipe: restart the dwell from the card just landed on instead of
-    // advancing early from wherever rotation last left off.
-    scheduler.set_rotation(current_dwell(&state.config, index), Instant::now());
-    if state.connected && !state.config.preferences.paused {
-        send_screen(state, device)
-    } else {
-        Ok(())
-    }
 }
 
 fn attempt_connect(
@@ -1059,8 +995,7 @@ fn drain_device_events(
     while let Some(received) = device.try_recv_event() {
         match (received.event.kind, received.event.action) {
             (EventKind::Navigation, EventAction::NavigatePrevious | EventAction::NavigateNext) => {
-                let ids = rotation_card_ids(&state.config);
-                if let Some(index) = ids.iter().position(|id| *id == received.event.card_id) {
+                if let Some(index) = card_index(&state.config, &received.event.card_id) {
                     state.active_card = Some(received.event.card_id.clone());
                     // The gesture already changed the physical display. Remember it for
                     // future replay without issuing a redundant activation now.
@@ -1122,34 +1057,9 @@ fn drain_device_events(
 
 #[cfg(test)]
 mod tests {
-
-    /// The budgets form a ladder, and every rung has to contain the one below.
-    /// `AssetRelease` is 20 s at the device layer, a synchronizing command
-    /// contains that, and the server's HTTP timeout contains the command. When
-    /// the middle rung was 5 s, `ApplyConfig` reported "runtime command
-    /// response timed out" for a save that had already persisted and a sync
-    /// that went on to succeed.
-    #[test]
-    fn a_synchronizing_command_can_contain_an_asset_release() {
-        // Mirrors server::runtime_device::ASSET_RELEASE_TIMEOUT. Restated here
-        // rather than imported because app-core must not depend on the server;
-        // the comment is the link, and this assertion is what notices drift.
-        const DEVICE_ASSET_RELEASE_TIMEOUT: Duration = Duration::from_secs(20);
-        const SERVER_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
-
-        assert!(
-            super::SYNCHRONIZING_COMMAND_TIMEOUT > DEVICE_ASSET_RELEASE_TIMEOUT,
-            "a command that performs an asset reconcile must outlast it"
-        );
-        assert!(
-            super::SYNCHRONIZING_COMMAND_TIMEOUT < SERVER_HTTP_TIMEOUT,
-            "and must still be bounded by the caller above it"
-        );
-        assert!(super::SYNCHRONIZING_COMMAND_TIMEOUT > RuntimeOptions::default().command_timeout);
-    }
-
     #[test]
     fn only_the_commands_that_synchronize_get_the_longer_budget() {
+        assert!(super::SYNCHRONIZING_COMMAND_TIMEOUT > RuntimeOptions::default().command_timeout);
         let (reply, _receiver) = std::sync::mpsc::sync_channel(1);
         assert!(super::command_drives_a_full_sync(
             &RuntimeCommand::ApplyConfig {
@@ -1221,8 +1131,8 @@ mod tests {
     // -- Rotation ------------------------------------------------------------
     //
     // These are the pure/instant counterparts of the single real-time rotation test
-    // in `tests/runtime.rs`. They call `current_dwell`, `rotation_card_ids`,
-    // `advance_rotation`, `drain_device_events`, and `process_command` directly, so
+    // in `tests/runtime.rs`. They call `current_dwell`, `card_index`,
+    // `advance_rotation`, and `drain_device_events` directly, so
     // they run in well under a millisecond instead of sleeping out real dwells.
 
     fn rotation_clock_card(id: &str) -> CardSettings {
@@ -1251,106 +1161,55 @@ mod tests {
         }
     }
 
-    /// The loop, in `entries` order, with each card's own dwell.
-    ///
-    /// `cards` supplies the card bodies by id; `entries` names the loop order,
-    /// which since schema v10 IS the card order, so this reorders `cards` to
-    /// match rather than building a separate list.
-    fn rotation_config(
-        cards: &[CardSettings],
-        advance: CarouselAdvance,
-        entries: &[(&str, Option<u16>)],
-    ) -> AppConfig {
-        let ordered = entries
-            .iter()
-            .filter_map(|(card_id, dwell_seconds)| {
-                let card = cards.iter().find(|card| card.id() == *card_id)?;
-                Some(set_dwell(card.clone(), *dwell_seconds))
-            })
-            .collect();
+    fn rotation_config(cards: Vec<CardSettings>, advance: CarouselAdvance) -> AppConfig {
         AppConfig {
-            cards: ordered,
+            cards,
             advance,
             ..AppConfig::default()
         }
     }
 
-    fn set_dwell(card: CardSettings, dwell_seconds: Option<u16>) -> CardSettings {
-        match card {
-            CardSettings::Clock {
-                id,
-                title,
-                show_seconds,
-                template,
-                tap_action,
-                refresh,
-                alert,
-                ..
-            } => CardSettings::Clock {
-                id,
-                title,
-                show_seconds,
-                template,
-                tap_action,
-                refresh,
-                alert,
-                dwell_seconds,
-            },
-            CardSettings::Pomodoro {
-                id,
-                label,
-                duration_seconds,
-                template,
-                tap_action,
-                refresh,
-                alert,
-                ..
-            } => CardSettings::Pomodoro {
-                id,
-                label,
-                duration_seconds,
-                template,
-                tap_action,
-                refresh,
-                alert,
-                dwell_seconds,
-            },
-            other @ CardSettings::Picture { .. } => other,
+    fn with_dwell(mut card: CardSettings, dwell: Option<u16>) -> CardSettings {
+        match &mut card {
+            CardSettings::Clock { dwell_seconds, .. }
+            | CardSettings::Pomodoro { dwell_seconds, .. }
+            | CardSettings::Picture { dwell_seconds, .. } => *dwell_seconds = dwell,
         }
+        card
     }
 
-    /// Two in-rotation cards, 5s dwell each, `Timed` advance with a 45s default that
+    /// Two cards, 5s dwell each, with a 45s default that
     /// neither card should ever need (both set an explicit dwell).
     fn timed_two_card_config() -> AppConfig {
         rotation_config(
-            &[rotation_clock_card("a"), rotation_clock_card("b")],
-            CarouselAdvance::Timed {
-                default_dwell_seconds: 45,
-            },
-            &[("a", Some(5)), ("b", Some(5))],
-        )
-    }
-
-    /// Two in-rotation cards with an alert-only card sandwiched between them at the
-    /// card-list position that would sit at rotation index 2 if index resolution ever
-    /// (incorrectly) walked *all* cards instead of only in-rotation ones. `rotation_card_ids`
-    /// is `["a", "c"]`; card "c" sits at list position 2 but rotation index 1.
-    fn timed_config_with_alert_only_between_two_in_rotation_cards() -> AppConfig {
-        rotation_config(
-            &[
-                rotation_clock_card("a"),
-                rotation_pomodoro_card(
-                    "b",
-                    CardAlert::OnTimerFinish {
-                        hold: AlertHold::UntilDismissed,
-                    },
-                ),
-                rotation_clock_card("c"),
+            vec![
+                with_dwell(rotation_clock_card("a"), Some(5)),
+                with_dwell(rotation_clock_card("b"), Some(5)),
             ],
             CarouselAdvance::Timed {
                 default_dwell_seconds: 45,
             },
-            &[("a", Some(5)), ("c", Some(5))],
+        )
+    }
+
+    fn timed_three_card_config() -> AppConfig {
+        rotation_config(
+            vec![
+                with_dwell(rotation_clock_card("a"), Some(5)),
+                with_dwell(
+                    rotation_pomodoro_card(
+                        "b",
+                        CardAlert::OnTimerFinish {
+                            hold: AlertHold::UntilDismissed,
+                        },
+                    ),
+                    Some(7),
+                ),
+                with_dwell(rotation_clock_card("c"), Some(11)),
+            ],
+            CarouselAdvance::Timed {
+                default_dwell_seconds: 45,
+            },
         )
     }
 
@@ -1363,6 +1222,8 @@ mod tests {
     #[derive(Default)]
     struct StubDevice {
         queued_event: Option<ReceivedEvent>,
+        busy_interrupts: u32,
+        triggered_interrupts: Vec<TriggerInterrupt>,
     }
 
     impl RuntimeDevice for StubDevice {
@@ -1397,7 +1258,15 @@ mod tests {
         fn push_scene(&mut self, _push: PushScene) -> Result<(), DeviceError> {
             unreachable!("stub device is never connected in these unit tests")
         }
-        fn trigger_interrupt(&mut self, _interrupt: TriggerInterrupt) -> Result<(), DeviceError> {
+        fn trigger_interrupt(&mut self, interrupt: TriggerInterrupt) -> Result<(), DeviceError> {
+            self.triggered_interrupts.push(interrupt);
+            if self.busy_interrupts > 0 {
+                self.busy_interrupts -= 1;
+                return Err(DeviceError::Rejected(protocol::ErrorResponse {
+                    code: protocol::ErrorCode::Busy,
+                    diagnostic: "display is busy".into(),
+                }));
+            }
             Ok(())
         }
         fn send_asset_begin(&mut self, _begin: AssetBegin) -> Result<Ack, DeviceError> {
@@ -1418,6 +1287,36 @@ mod tests {
         fn diagnostics(&self) -> SessionDiagnostics {
             SessionDiagnostics::default()
         }
+    }
+
+    #[test]
+    fn push_scene_while_disconnected_does_not_touch_the_device() {
+        let now = Instant::now();
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(AppConfig::default(), now, &mut scheduler);
+        let mut device = StubDevice::default();
+        let (reply, result) = mpsc::sync_channel(1);
+
+        process_command(
+            RuntimeCommand::PushScene {
+                push: PushScene {
+                    card_id: "clock".into(),
+                    revision: 1,
+                    scene: protocol::Scene::default(),
+                },
+                reply,
+            },
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            &RuntimeDiagnosticCounters::default(),
+            Duration::from_secs(1),
+        );
+
+        assert_eq!(
+            result.recv().unwrap(),
+            Err(RuntimeError::DeviceDisconnected)
+        );
     }
 
     #[derive(Default)]
@@ -1578,11 +1477,8 @@ mod tests {
     #[test]
     fn paused_scheduled_work_leaves_a_real_wait() {
         let now = Instant::now();
-        let mut config = rotation_config(
-            &[rotation_clock_card("clock")],
-            CarouselAdvance::Manual,
-            &[("clock", None)],
-        );
+        let mut config =
+            rotation_config(vec![rotation_clock_card("clock")], CarouselAdvance::Manual);
         config.preferences.paused = true;
         let mut scheduler = fresh_scheduler(now);
         let mut state = WorkerState::new(config, now, &mut scheduler);
@@ -1675,7 +1571,7 @@ mod tests {
     fn current_dwell_is_none_under_manual_advance() {
         let config = AppConfig::default();
         assert!(current_dwell(&config, 0).is_none());
-        // Manual disarms regardless of which in-rotation card index is asked about.
+        // Manual disarms regardless of which card index is asked about.
         let two_card = timed_two_card_config();
         let mut manual_two_card = two_card;
         manual_two_card.advance = CarouselAdvance::Manual;
@@ -1699,20 +1595,19 @@ mod tests {
     #[test]
     fn current_dwell_resolves_each_cards_own_value_before_falling_back_to_the_default() {
         let config = rotation_config(
-            &[
-                rotation_clock_card("explicit"),
-                rotation_clock_card("defaulted"),
+            vec![
+                with_dwell(rotation_clock_card("explicit"), Some(10)),
+                with_dwell(rotation_clock_card("defaulted"), None),
             ],
             CarouselAdvance::Timed {
                 default_dwell_seconds: 45,
             },
-            &[("explicit", Some(10)), ("defaulted", None)],
         );
         assert_eq!(current_dwell(&config, 0), Some(Duration::from_secs(10)));
         assert_eq!(current_dwell(&config, 1), Some(Duration::from_secs(45)));
     }
 
-    // `advance_rotation` walks `rotation_card_ids` in order and wraps at the end.
+    // `advance_rotation` walks the card list in order and wraps at the end.
     //
     // Since schema v10 it walks EVERY card: `cards` is the loop, so there is no
     // longer such a thing as a card that raises alerts without ever being shown.
@@ -1773,12 +1668,11 @@ mod tests {
         assert!(!scheduler.rotation_due(now + Duration::from_hours(1)));
     }
 
-    // A local swipe resolves the reported screen's index within
-    // `rotation_card_ids` and re-arms the dwell from the card it landed on.
+    // A local swipe resolves the reported card's index and re-arms its dwell.
     #[test]
-    fn local_swipe_resolves_the_index_within_rotation_ids_and_rearms_the_dwell() {
+    fn local_swipe_rearms_the_dwell_of_the_card_it_landed_on() {
         let now = Instant::now();
-        let config = timed_config_with_alert_only_between_two_in_rotation_cards();
+        let config = timed_three_card_config();
         let mut scheduler = Scheduler::new(
             now,
             Duration::from_hours(1),
@@ -1788,6 +1682,7 @@ mod tests {
         let mut state = WorkerState::new(config, now, &mut scheduler);
         let mut device = StubDevice {
             queued_event: Some(navigation_event("c")),
+            ..StubDevice::default()
         };
 
         drain_device_events(
@@ -1799,49 +1694,8 @@ mod tests {
         );
 
         assert_eq!(state.active_card.as_deref(), Some("c"));
-        // Re-armed from "c"'s own 5s dwell, not left over from "a".
-        assert!(!scheduler.rotation_due(now + Duration::from_secs(4)));
-        assert!(scheduler.rotation_due(now + Duration::from_secs(5)));
-    }
-
-    // An explicit `RuntimeCommand::ActivateCard` request uses the same index
-    // resolution and dwell re-arm behavior as a swipe.
-    #[test]
-    fn explicit_activate_command_resolves_the_index_within_rotation_ids_and_rearms_the_dwell() {
-        let now = Instant::now();
-        let config = timed_config_with_alert_only_between_two_in_rotation_cards();
-        let mut scheduler = Scheduler::new(
-            now,
-            Duration::from_hours(1),
-            Duration::from_hours(1),
-            Duration::from_hours(1),
-        );
-        let mut state = WorkerState::new(config, now, &mut scheduler);
-        let mut device = StubDevice::default();
-        let diagnostics = RuntimeDiagnosticCounters::default();
-        let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
-        let before = Instant::now();
-
-        let shutting_down = process_command(
-            RuntimeCommand::ActivateCard {
-                card_id: "c".into(),
-                reply: reply_sender,
-            },
-            &mut state,
-            &mut scheduler,
-            &mut device,
-            &diagnostics,
-            Duration::from_secs(1),
-        );
-
-        assert!(!shutting_down);
-        reply_receiver.recv().unwrap().unwrap();
-        assert_eq!(state.active_card.as_deref(), Some("c"));
-        // `process_command`'s `ActivateCard` arm uses `Instant::now()` internally
-        // (there is no injectable clock in this runtime), so assert with a margin
-        // around the 5s dwell rather than pinning it to `before` exactly.
-        assert!(!scheduler.rotation_due(before + Duration::from_millis(4_500)));
-        assert!(scheduler.rotation_due(before + Duration::from_millis(5_500)));
+        assert!(!scheduler.rotation_due(now + Duration::from_secs(10)));
+        assert!(scheduler.rotation_due(now + Duration::from_secs(11)));
     }
 
     // Rotation advances locally while paused, mirroring how pomodoro ticks are
@@ -1901,7 +1755,7 @@ mod tests {
     fn mixed_pomodoro_completion_batch_queues_only_the_alerting_timer() {
         let now = Instant::now();
         let config = rotation_config(
-            &[
+            vec![
                 rotation_pomodoro_card("quiet", CardAlert::None),
                 rotation_pomodoro_card(
                     "loud",
@@ -1911,7 +1765,6 @@ mod tests {
                 ),
             ],
             CarouselAdvance::Manual,
-            &[("quiet", None), ("loud", None)],
         );
         let mut scheduler = fresh_scheduler(now);
         let mut state = WorkerState::new(config, now, &mut scheduler);
@@ -1940,14 +1793,13 @@ mod tests {
     fn a_bounded_alert_hold_auto_dismisses_the_active_interrupt_when_it_expires() {
         let now = Instant::now();
         let config = rotation_config(
-            &[rotation_pomodoro_card(
+            vec![rotation_pomodoro_card(
                 "loud",
                 CardAlert::OnTimerFinish {
                     hold: AlertHold::Seconds { value: 30 },
                 },
             )],
             CarouselAdvance::Manual,
-            &[("loud", None)],
         );
         let mut scheduler = fresh_scheduler(now);
         let mut state = WorkerState::new(config, now, &mut scheduler);
@@ -1995,6 +1847,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn busy_interrupt_delivery_retries_the_identical_message_before_arming_the_hold() {
+        let now = Instant::now();
+        let config = rotation_config(
+            vec![rotation_pomodoro_card(
+                "loud",
+                CardAlert::OnTimerFinish {
+                    hold: AlertHold::Seconds { value: 30 },
+                },
+            )],
+            CarouselAdvance::Manual,
+        );
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        state.pomodoros.get_mut("loud").unwrap().start(now);
+        let delivery_time = now + Duration::from_mins(1);
+        update_pomodoros(&mut state, delivery_time);
+        let expected = state.interrupts.active().unwrap().message.clone();
+        let mut device = StubDevice {
+            busy_interrupts: 1,
+            ..StubDevice::default()
+        };
+
+        flush_interrupts(&mut state, &mut scheduler, &mut device, delivery_time).unwrap();
+        let active = state.interrupts.active().unwrap();
+        assert_eq!(active.message, expected);
+        assert!(!active.acknowledged);
+        assert_eq!(
+            scheduler.alert_hold_due(delivery_time + Duration::from_hours(1)),
+            None
+        );
+
+        flush_interrupts(&mut state, &mut scheduler, &mut device, delivery_time).unwrap();
+        let active = state.interrupts.active().unwrap();
+        assert_eq!(active.message, expected);
+        assert!(active.acknowledged);
+        assert_eq!(
+            device.triggered_interrupts,
+            vec![expected.clone(), expected.clone()]
+        );
+        assert_eq!(
+            scheduler.alert_hold_due(delivery_time + Duration::from_secs(30)),
+            Some(expected.token)
+        );
+    }
+
     // The counterpart to the bounded-hold test above: `AlertHold::UntilDismissed`
     // arms no deadline at all, so `alert_hold_due` never fires and the interrupt
     // only ever leaves via an explicit device dismissal.
@@ -2002,14 +1900,13 @@ mod tests {
     fn an_until_dismissed_alert_hold_never_auto_dismisses() {
         let now = Instant::now();
         let config = rotation_config(
-            &[rotation_pomodoro_card(
+            vec![rotation_pomodoro_card(
                 "loud",
                 CardAlert::OnTimerFinish {
                     hold: AlertHold::UntilDismissed,
                 },
             )],
             CarouselAdvance::Manual,
-            &[("loud", None)],
         );
         let mut scheduler = fresh_scheduler(now);
         let mut state = WorkerState::new(config, now, &mut scheduler);
@@ -2040,7 +1937,7 @@ mod tests {
     // alert queued Pending behind it (the arbiter's Active slot is occupied).
     fn sticky_active_and_bounded_pending_alert(now: Instant) -> (WorkerState, Scheduler) {
         let config = rotation_config(
-            &[
+            vec![
                 rotation_pomodoro_card(
                     "sticky",
                     CardAlert::OnTimerFinish {
@@ -2055,7 +1952,6 @@ mod tests {
                 ),
             ],
             CarouselAdvance::Manual,
-            &[("sticky", None), ("upnext", None)],
         );
         let mut scheduler = fresh_scheduler(now);
         let mut state = WorkerState::new(config, now, &mut scheduler);
@@ -2074,7 +1970,7 @@ mod tests {
         );
 
         // A second timer alert arrives while Active is occupied, so it queues Pending.
-        state.interrupts.schedule("upnext", "upnext").unwrap();
+        state.interrupts.schedule_timer_finished("upnext").unwrap();
         assert_eq!(
             state
                 .interrupts
@@ -2140,6 +2036,7 @@ mod tests {
             &mut scheduler,
             &mut StubDevice {
                 queued_event: Some(interrupt_dismissed_event("sticky", sticky_token)),
+                ..StubDevice::default()
             },
             &RuntimeDiagnosticCounters::default(),
             promotion_time,

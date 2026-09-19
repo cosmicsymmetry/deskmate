@@ -1,7 +1,7 @@
 //! Building and pushing the face of one card.
 //!
 //! The pushed-field accessors, scene construction, render negotiation, the
-//! native and raster push executors, and the durable asset reconciliation a
+//! scene push, and the durable asset reconciliation a
 //! scene's digests require.
 // These runtime internals intentionally share the parent module's worker
 // types and helpers; a glob keeps that internal seam in one place.
@@ -258,9 +258,7 @@ pub(super) fn handle_automatic_scene_error(
     }
 }
 
-/// Rebuilds the active card only after a host-owned event marks it dirty.
-/// Device-side bindings keep clock and pomodoro facts moving between these
-/// event-driven pushes; picture faces change only when their producer pushes.
+/// Validates the scene against the device's render profile.
 pub(super) fn native_requirements(
     state: &mut WorkerState,
     scene: &protocol::Scene,
@@ -288,11 +286,12 @@ pub(super) fn native_requirements(
     Ok(requirements)
 }
 
+/// Rebuilds the active card only after a host-owned event marks it dirty.
+/// Device-side bindings keep clock and pomodoro facts moving between these
+/// event-driven pushes; picture faces change only when their producer pushes.
 pub(super) fn push_active_scene(
     state: &mut WorkerState,
-    _scheduler: &mut Scheduler,
     device: &mut dyn RuntimeDevice,
-    _now: Instant,
     reconnect_interval: Duration,
 ) {
     if ownership_was_refused(state) || state.needs_full_sync || !state.active_scene_dirty {

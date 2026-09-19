@@ -42,20 +42,13 @@ fn reordering_the_loop_replays_and_keeps_the_card_on_the_panel() {
     wait_for(Duration::from_secs(1), || {
         activated_card_ids(&control) == ["shared"]
     });
-    let apply_count_before = control
-        .operations()
-        .iter()
-        .filter(|operation| matches!(operation, Operation::ApplyLayout(_)))
-        .count();
+    let apply_count_before =
+        control.count_operations(|operation| matches!(operation, Operation::ApplyLayout(_)));
 
     config.cards.reverse();
     runtime.apply_config(config.clone()).unwrap();
     wait_for(Duration::from_secs(1), || {
-        control
-            .operations()
-            .iter()
-            .filter(|operation| matches!(operation, Operation::ApplyLayout(_)))
-            .count()
+        control.count_operations(|operation| matches!(operation, Operation::ApplyLayout(_)))
             == apply_count_before + 1
     });
     wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
@@ -170,9 +163,7 @@ fn timed_advance_wiring_reaches_the_device_after_one_dwell() {
         ..AppConfig::default()
     };
     let runtime = start_runtime(config, &control);
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
+    wait_until_online(&runtime);
     // The initial full sync activates the first card ("first"),
     // independent of rotation.
     wait_for(Duration::from_secs(1), || {
@@ -277,9 +268,7 @@ fn an_absent_interrupt_counter_still_takes_the_revision_floor() {
 fn a_dismissal_for_an_untracked_token_is_counted_rather_than_silently_dropped() {
     let control = MockDeviceControl::default();
     let runtime = start_runtime(full_config(), &control);
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
+    wait_until_online(&runtime);
     // No interrupt was ever scheduled, so token 4242 is tracked by nobody.
     control.push_event(DeviceEvent {
         sequence: 1,
@@ -313,33 +302,14 @@ fn a_tap_on_a_completed_pomodoro_still_pushes_authoritative_state() {
     let control = MockDeviceControl::default();
     let config = short_pomodoro_config(CardAlert::None);
     let runtime = start_runtime(config, &control);
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
-    control.push_event(DeviceEvent {
-        sequence: 1,
-        kind: EventKind::Tap,
-        card_id: "pomodoro".into(),
-        action: EventAction::StartPause,
-        interrupt_token: None,
-    });
-    wait_for_snapshot(&runtime, Duration::from_secs(3), |snapshot| {
-        snapshot
-            .pomodoros
-            .first()
-            .is_some_and(|pomodoro| pomodoro.state == PomodoroState::Completed)
-    });
+    wait_until_online(&runtime);
+    control.tap_pomodoro(1);
+    wait_for_pomodoro_state(&runtime, Duration::from_secs(3), PomodoroState::Completed);
 
     let before = control.operations().len();
 
     // The no-op tap.
-    control.push_event(DeviceEvent {
-        sequence: 2,
-        kind: EventKind::Tap,
-        card_id: "pomodoro".into(),
-        action: EventAction::StartPause,
-        interrupt_token: None,
-    });
+    control.tap_pomodoro(2);
     wait_for(Duration::from_secs(2), || {
         control.operations()[before..].iter().any(|operation| {
             matches!(operation, Operation::PushTimer {

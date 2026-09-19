@@ -53,9 +53,7 @@ fn v2_status_and_current_capabilities_survive_into_the_device_snapshot() {
     control.set_status(device_status);
 
     let runtime = start_runtime(full_config(), &control);
-    let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
+    let snapshot = wait_until_online(&runtime);
 
     assert_eq!(snapshot.device.tier, Some(DeviceTier::Networked));
     assert_eq!(snapshot.device.wifi_state, Some(DeviceWifiState::Failed));
@@ -148,12 +146,7 @@ fn networked_status_without_wrong_tier_keeps_websocket_owner_synchronizing() {
     let mut runtime_options = options();
     runtime_options.time_sync_interval = Duration::from_millis(20);
 
-    let runtime = RuntimeHandle::start(
-        full_config(),
-        Box::new(MockDevice::new(control.clone())),
-        runtime_options,
-    )
-    .unwrap();
+    let runtime = start_runtime_with_options(full_config(), &control, runtime_options);
     let networked = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
         snapshot.device.connection == ConnectionState::Online
             && snapshot.device.tier == Some(DeviceTier::Networked)
@@ -175,9 +168,7 @@ fn networked_status_without_wrong_tier_keeps_websocket_owner_synchronizing() {
 fn push_scene_uses_the_runtime_owned_device_without_reconnecting() {
     let control = MockDeviceControl::default();
     let runtime = start_runtime(full_config(), &control);
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
+    wait_until_online(&runtime);
     let connections_before = control.connection_count();
     let push = PushScene {
         card_id: "clock".into(),
@@ -193,11 +184,7 @@ fn push_scene_uses_the_runtime_owned_device_without_reconnecting() {
 
     assert_eq!(control.connection_count(), connections_before);
     assert_eq!(
-        control
-            .operations()
-            .iter()
-            .filter(|operation| **operation == Operation::PushScene(push.clone()))
-            .count(),
+        control.count_operations(|operation| *operation == Operation::PushScene(push.clone())),
         1
     );
     runtime.shutdown().unwrap();
@@ -272,9 +259,7 @@ fn automatic_scene_delivery_does_not_gate_the_online_connection_state() {
     let scene_gate = control.block_next_scene();
     let runtime = start_runtime(full_config(), &control);
 
-    let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
+    let snapshot = wait_until_online(&runtime);
     assert_eq!(snapshot.device.connection, ConnectionState::Online);
     scene_gate.wait_until_entered();
     assert_eq!(
@@ -292,9 +277,7 @@ fn explicit_scene_command_follows_one_automatic_attempt_without_spawning_another
     let control = MockDeviceControl::default();
     let automatic_gate = control.block_next_scene();
     let runtime = start_runtime(full_config(), &control);
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
+    wait_until_online(&runtime);
     automatic_gate.wait_until_entered();
 
     let explicit = PushScene {
@@ -330,11 +313,7 @@ fn explicit_scene_command_follows_one_automatic_attempt_without_spawning_another
     });
     thread::sleep(Duration::from_millis(100));
     assert_eq!(
-        control
-            .operations()
-            .iter()
-            .filter(|operation| matches!(operation, Operation::PushScene(_)))
-            .count(),
+        control.count_operations(|operation| { matches!(operation, Operation::PushScene(_)) }),
         2,
         "one automatic event plus one explicit command must produce exactly two scene attempts"
     );
@@ -416,9 +395,7 @@ fn render_path_is_re_resolved_from_fresh_capabilities_on_every_reconnect() {
     control.set_status(legacy.clone());
     let runtime = start_runtime(full_config(), &control);
 
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
+    wait_until_online(&runtime);
     assert!(
         control
             .operations()
@@ -436,21 +413,14 @@ fn render_path_is_re_resolved_from_fresh_capabilities_on_every_reconnect() {
                 .any(|operation| matches!(operation, Operation::PushScene(_)))
     });
 
-    let scene_count = control
-        .operations()
-        .iter()
-        .filter(|operation| matches!(operation, Operation::PushScene(_)))
-        .count();
+    let scene_count =
+        control.count_operations(|operation| matches!(operation, Operation::PushScene(_)));
     control.set_status(legacy);
     control.force_disconnect(false);
     wait_for(Duration::from_secs(1), || control.connection_count() >= 3);
     thread::sleep(Duration::from_millis(100));
     assert_eq!(
-        control
-            .operations()
-            .iter()
-            .filter(|operation| matches!(operation, Operation::PushScene(_)))
-            .count(),
+        control.count_operations(|operation| { matches!(operation, Operation::PushScene(_)) }),
         scene_count,
         "scene delivery must stop when the device no longer advertises scene rendering"
     );
@@ -475,18 +445,11 @@ fn a_refused_scene_is_card_scoped_visible_and_not_periodically_retried() {
         "one refused scene must not park the whole runtime"
     );
     assert_eq!(snapshot.device.connection, ConnectionState::Online);
-    let attempts = control
-        .operations()
-        .iter()
-        .filter(|operation| matches!(operation, Operation::PushScene(_)))
-        .count();
+    let attempts =
+        control.count_operations(|operation| matches!(operation, Operation::PushScene(_)));
     thread::sleep(Duration::from_millis(100));
     assert_eq!(
-        control
-            .operations()
-            .iter()
-            .filter(|operation| matches!(operation, Operation::PushScene(_)))
-            .count(),
+        control.count_operations(|operation| { matches!(operation, Operation::PushScene(_)) }),
         attempts,
         "a terminal refusal is retried only after a new host event"
     );
@@ -503,12 +466,7 @@ fn busy_scene_is_retried_without_becoming_a_card_fault() {
     let runtime = start_runtime(full_config(), &control);
 
     wait_for(Duration::from_secs(1), || {
-        control
-            .operations()
-            .iter()
-            .filter(|operation| matches!(operation, Operation::PushScene(_)))
-            .count()
-            >= 2
+        control.count_operations(|operation| matches!(operation, Operation::PushScene(_))) >= 2
     });
     assert!(runtime.snapshot().unwrap().card_errors.is_empty());
     runtime.shutdown().unwrap();
@@ -527,12 +485,7 @@ fn scene_transport_failures_retry_without_masquerading_as_card_faults() {
         let runtime = start_runtime(full_config(), &control);
 
         wait_for(Duration::from_secs(1), || {
-            control
-                .operations()
-                .iter()
-                .filter(|operation| matches!(operation, Operation::PushScene(_)))
-                .count()
-                >= 2
+            control.count_operations(|operation| matches!(operation, Operation::PushScene(_))) >= 2
         });
         let snapshot = runtime.snapshot().unwrap();
         assert!(snapshot.card_errors.is_empty());
@@ -548,17 +501,10 @@ fn no_device_scene_failure_enters_reconnect_without_becoming_a_card_fault() {
     let runtime = start_runtime(full_config(), &control);
 
     wait_for(Duration::from_secs(1), || control.connection_count() >= 2);
-    let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
+    let snapshot = wait_until_online(&runtime);
     assert!(snapshot.card_errors.is_empty());
     assert!(
-        control
-            .operations()
-            .iter()
-            .filter(|operation| matches!(operation, Operation::PushScene(_)))
-            .count()
-            >= 2,
+        control.count_operations(|operation| { matches!(operation, Operation::PushScene(_)) }) >= 2,
         "the reconnect did not retry the scene event"
     );
     runtime.shutdown().unwrap();
@@ -583,18 +529,11 @@ fn terminal_scene_session_faults_are_visible_and_never_silently_retried() {
             )
         });
         assert!(snapshot.card_errors.is_empty());
-        let attempts = control
-            .operations()
-            .iter()
-            .filter(|operation| matches!(operation, Operation::PushScene(_)))
-            .count();
+        let attempts =
+            control.count_operations(|operation| matches!(operation, Operation::PushScene(_)));
         thread::sleep(Duration::from_millis(100));
         assert_eq!(
-            control
-                .operations()
-                .iter()
-                .filter(|operation| matches!(operation, Operation::PushScene(_)))
-                .count(),
+            control.count_operations(|operation| { matches!(operation, Operation::PushScene(_)) }),
             attempts,
             "terminal scene session fault was silently retried"
         );
@@ -612,12 +551,7 @@ fn wrong_tier_scene_recovery_replays_the_model_and_rearms_the_scene() {
     let runtime = start_runtime(full_config(), &control);
 
     wait_for(Duration::from_secs(1), || {
-        control
-            .operations()
-            .iter()
-            .filter(|operation| matches!(operation, Operation::PushScene(_)))
-            .count()
-            >= 2
+        control.count_operations(|operation| matches!(operation, Operation::PushScene(_))) >= 2
     });
     let operations = control.operations();
     let second_scene = operations
@@ -637,13 +571,8 @@ fn wrong_tier_scene_recovery_replays_the_model_and_rearms_the_scene() {
 fn scenes_push_on_config_and_navigation_events_but_not_clock_or_pomodoro_ticks() {
     let control = MockDeviceControl::default();
     let runtime = start_runtime(full_config(), &control);
-    let scene_count = || {
-        control
-            .operations()
-            .iter()
-            .filter(|operation| matches!(operation, Operation::PushScene(_)))
-            .count()
-    };
+    let scene_count =
+        || control.count_operations(|operation| matches!(operation, Operation::PushScene(_)));
 
     wait_for(Duration::from_secs(1), || scene_count() >= 1);
     let initial = scene_count();
@@ -663,13 +592,7 @@ fn scenes_push_on_config_and_navigation_events_but_not_clock_or_pomodoro_ticks()
     wait_for(Duration::from_secs(1), || scene_count() > initial);
     let after_config = scene_count();
 
-    control.push_event(DeviceEvent {
-        sequence: 1,
-        kind: EventKind::Navigation,
-        card_id: "pomodoro".into(),
-        action: EventAction::NavigateNext,
-        interrupt_token: None,
-    });
+    control.navigate_next(1, "pomodoro");
     wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
         snapshot.device.active_card_id.as_deref() == Some("pomodoro")
     });

@@ -4,9 +4,7 @@ use super::*;
 fn cold_boot_and_two_power_resets_replay_the_complete_owned_state() {
     let control = MockDeviceControl::default();
     let runtime = start_runtime(full_config(), &control);
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
+    wait_until_online(&runtime);
 
     let operations = control.operations();
     let layout = operations
@@ -75,17 +73,9 @@ fn cold_boot_and_two_power_resets_replay_the_complete_owned_state() {
 fn local_navigation_becomes_the_authoritative_screen_for_reset_replay() {
     let control = MockDeviceControl::default();
     let runtime = start_runtime(full_config(), &control);
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
+    wait_until_online(&runtime);
 
-    control.push_event(DeviceEvent {
-        sequence: 1,
-        kind: EventKind::Navigation,
-        card_id: "pomodoro".into(),
-        action: EventAction::NavigateNext,
-        interrupt_token: None,
-    });
+    control.navigate_next(1, "pomodoro");
     wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
         snapshot.device.active_card_id.as_deref() == Some("pomodoro")
     });
@@ -119,28 +109,10 @@ fn pomodoro_events_complete_once_and_dismissed_interrupts_do_not_replay() {
         hold: AlertHold::UntilDismissed,
     });
     let runtime = start_runtime(config, &control);
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
-    control.push_event(DeviceEvent {
-        sequence: 1,
-        kind: EventKind::Tap,
-        card_id: "pomodoro".into(),
-        action: EventAction::StartPause,
-        interrupt_token: None,
-    });
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot
-            .pomodoros
-            .first()
-            .is_some_and(|pomodoro| pomodoro.state == PomodoroState::Running)
-    });
-    wait_for_snapshot(&runtime, Duration::from_secs(2), |snapshot| {
-        snapshot
-            .pomodoros
-            .first()
-            .is_some_and(|pomodoro| pomodoro.state == PomodoroState::Completed)
-    });
+    wait_until_online(&runtime);
+    control.tap_pomodoro(1);
+    wait_for_pomodoro_state(&runtime, Duration::from_secs(1), PomodoroState::Running);
+    wait_for_pomodoro_state(&runtime, Duration::from_secs(2), PomodoroState::Completed);
     wait_for(Duration::from_secs(1), || {
         control.operations().contains(&Operation::Interrupt(1))
     });
@@ -194,29 +166,11 @@ fn a_bounded_alert_hold_re_sends_the_saved_carousel_screen_activation() {
         hold: AlertHold::Seconds { value: 5 },
     });
     let runtime = start_runtime(config, &control);
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
+    wait_until_online(&runtime);
     let activations_before_completion = activated_card_ids(&control).len();
-    control.push_event(DeviceEvent {
-        sequence: 1,
-        kind: EventKind::Tap,
-        card_id: "pomodoro".into(),
-        action: EventAction::StartPause,
-        interrupt_token: None,
-    });
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot
-            .pomodoros
-            .first()
-            .is_some_and(|pomodoro| pomodoro.state == PomodoroState::Running)
-    });
-    wait_for_snapshot(&runtime, Duration::from_secs(2), |snapshot| {
-        snapshot
-            .pomodoros
-            .first()
-            .is_some_and(|pomodoro| pomodoro.state == PomodoroState::Completed)
-    });
+    control.tap_pomodoro(1);
+    wait_for_pomodoro_state(&runtime, Duration::from_secs(1), PomodoroState::Running);
+    wait_for_pomodoro_state(&runtime, Duration::from_secs(2), PomodoroState::Completed);
     wait_for(Duration::from_secs(1), || {
         control.operations().contains(&Operation::Interrupt(1))
     });
@@ -243,29 +197,17 @@ fn bounded_hold_alert_completing_while_disconnected_survives_to_reconnect() {
         hold: AlertHold::Seconds { value: 5 },
     });
     let runtime = start_runtime(config, &control);
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
+    wait_until_online(&runtime);
 
     runtime
         .control_pomodoro("pomodoro", PomodoroAction::Start)
         .unwrap();
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot
-            .pomodoros
-            .first()
-            .is_some_and(|pomodoro| pomodoro.state == PomodoroState::Running)
-    });
+    wait_for_pomodoro_state(&runtime, Duration::from_secs(1), PomodoroState::Running);
     control.power_off();
     wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
         snapshot.device.connection == ConnectionState::Standalone
     });
-    wait_for_snapshot(&runtime, Duration::from_secs(2), |snapshot| {
-        snapshot
-            .pomodoros
-            .first()
-            .is_some_and(|pomodoro| pomodoro.state == PomodoroState::Completed)
-    });
+    wait_for_pomodoro_state(&runtime, Duration::from_secs(2), PomodoroState::Completed);
 
     // Stay unplugged beyond the bounded hold. The countdown must not start
     // until the interrupt has actually reached the device.
@@ -298,29 +240,17 @@ fn until_dismissed_alert_raised_while_disconnected_reaches_device_on_reconnect()
         hold: AlertHold::UntilDismissed,
     });
     let runtime = start_runtime(config, &control);
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
+    wait_until_online(&runtime);
 
     runtime
         .control_pomodoro("pomodoro", PomodoroAction::Start)
         .unwrap();
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot
-            .pomodoros
-            .first()
-            .is_some_and(|pomodoro| pomodoro.state == PomodoroState::Running)
-    });
+    wait_for_pomodoro_state(&runtime, Duration::from_secs(1), PomodoroState::Running);
     control.power_off();
     wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
         snapshot.device.connection == ConnectionState::Standalone
     });
-    wait_for_snapshot(&runtime, Duration::from_secs(2), |snapshot| {
-        snapshot
-            .pomodoros
-            .first()
-            .is_some_and(|pomodoro| pomodoro.state == PomodoroState::Completed)
-    });
+    wait_for_pomodoro_state(&runtime, Duration::from_secs(2), PomodoroState::Completed);
     assert!(
         !control.operations().contains(&Operation::Interrupt(1)),
         "an unpowered device cannot have received the interrupt"
@@ -342,28 +272,10 @@ fn pomodoro_completion_without_an_alert_does_not_schedule_an_interrupt() {
     let control = MockDeviceControl::default();
     let config = short_pomodoro_config(CardAlert::None);
     let runtime = start_runtime(config, &control);
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
-    control.push_event(DeviceEvent {
-        sequence: 1,
-        kind: EventKind::Tap,
-        card_id: "pomodoro".into(),
-        action: EventAction::StartPause,
-        interrupt_token: None,
-    });
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot
-            .pomodoros
-            .first()
-            .is_some_and(|pomodoro| pomodoro.state == PomodoroState::Running)
-    });
-    wait_for_snapshot(&runtime, Duration::from_secs(2), |snapshot| {
-        snapshot
-            .pomodoros
-            .first()
-            .is_some_and(|pomodoro| pomodoro.state == PomodoroState::Completed)
-    });
+    wait_until_online(&runtime);
+    control.tap_pomodoro(1);
+    wait_for_pomodoro_state(&runtime, Duration::from_secs(1), PomodoroState::Running);
+    wait_for_pomodoro_state(&runtime, Duration::from_secs(2), PomodoroState::Completed);
     // Give the worker plenty of time to have scheduled an interrupt if the gate were
     // missing or inverted, then confirm it never did.
     thread::sleep(Duration::from_millis(200));
@@ -387,12 +299,7 @@ fn subscribers_are_bounded_and_coalesce_pressure_to_the_latest_snapshot() {
     let control = MockDeviceControl::default();
     let mut runtime_options = options();
     runtime_options.maximum_subscribers = 1;
-    let runtime = RuntimeHandle::start(
-        full_config(),
-        Box::new(MockDevice::new(control)),
-        runtime_options,
-    )
-    .unwrap();
+    let runtime = start_runtime_with_options(full_config(), &control, runtime_options);
     let subscription = runtime.subscribe().unwrap();
     assert!(matches!(runtime.subscribe(), Err(RuntimeError::QueueFull)));
     apply_paused_preference(&runtime, true).unwrap();
@@ -416,15 +323,8 @@ fn lagging_subscriber_does_not_cause_a_diagnostic_only_second_snapshot() {
     let mut runtime_options = options();
     runtime_options.pomodoro_interval = Duration::from_hours(1);
     runtime_options.status_interval = Duration::from_hours(1);
-    let runtime = RuntimeHandle::start(
-        AppConfig::default(),
-        Box::new(MockDevice::new(control)),
-        runtime_options,
-    )
-    .unwrap();
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
+    let runtime = start_runtime_with_options(AppConfig::default(), &control, runtime_options);
+    wait_until_online(&runtime);
     let subscription = runtime.subscribe().unwrap();
     subscription
         .recv_timeout(Duration::from_secs(1))
@@ -459,11 +359,9 @@ fn lagging_subscriber_does_not_cause_a_diagnostic_only_second_snapshot() {
 fn paused_config_defers_timer_pushes_until_a_resumed_config_is_applied() {
     let control = MockDeviceControl::default();
     let runtime = start_runtime(full_config(), &control);
-    let pushes_before = control
-        .operations()
-        .iter()
-        .filter(|operation| matches!(operation, Operation::PushTimer { card_id, .. } if card_id == "pomodoro"))
-        .count();
+    let pushes_before = control.count_operations(|operation| {
+        matches!(operation, Operation::PushTimer { card_id, .. } if card_id == "pomodoro")
+    });
 
     apply_paused_preference(&runtime, true).unwrap();
     runtime
@@ -471,22 +369,18 @@ fn paused_config_defers_timer_pushes_until_a_resumed_config_is_applied() {
         .unwrap();
     thread::sleep(Duration::from_millis(40));
     assert_eq!(
-        control
-            .operations()
-            .iter()
-            .filter(|operation| matches!(operation, Operation::PushTimer { card_id, .. } if card_id == "pomodoro"))
-            .count(),
+        control.count_operations(|operation| {
+            matches!(operation, Operation::PushTimer { card_id, .. } if card_id == "pomodoro")
+        }),
         pushes_before
     );
     assert_eq!(runtime.snapshot().unwrap().runtime, RuntimeState::Paused);
 
     apply_paused_preference(&runtime, false).unwrap();
     wait_for(Duration::from_secs(1), || {
-        control
-            .operations()
-            .iter()
-            .filter(|operation| matches!(operation, Operation::PushTimer { card_id, .. } if card_id == "pomodoro"))
-            .count()
+        control.count_operations(|operation| {
+            matches!(operation, Operation::PushTimer { card_id, .. } if card_id == "pomodoro")
+        })
             > pushes_before
     });
     runtime.shutdown().unwrap();
@@ -625,11 +519,9 @@ fn a_refused_push_is_not_retried_and_does_not_starve_other_cards() {
     // The card ordered behind the refused one in the SAME cycle still reached the
     // device, and later cycles still push it.
     let second_pushes = |control: &MockDeviceControl| {
-        control
-            .operations()
-            .iter()
-            .filter(|operation| matches!(operation, Operation::PushTimer { card_id, .. } if card_id == "second"))
-            .count()
+        control.count_operations(|operation| {
+            matches!(operation, Operation::PushTimer { card_id, .. } if card_id == "second")
+        })
     };
     assert!(
         second_pushes(&control) >= 1,
@@ -640,11 +532,9 @@ fn a_refused_push_is_not_retried_and_does_not_starve_other_cards() {
         .unwrap();
     wait_for(Duration::from_secs(2), || second_pushes(&control) >= 2);
 
-    let first_pushes = control
-        .operations()
-        .iter()
-        .filter(|operation| matches!(operation, Operation::PushTimer { card_id, .. } if card_id == "first"))
-        .count();
+    let first_pushes = control.count_operations(
+        |operation| matches!(operation, Operation::PushTimer { card_id, .. } if card_id == "first"),
+    );
     assert_eq!(
         first_pushes, 1,
         "the refused payload must be attempted once, not re-queued every cycle"
@@ -657,17 +547,12 @@ fn command_queue_rejects_pressure_without_growing() {
     let control = MockDeviceControl::default();
     let mut runtime_options = options();
     runtime_options.command_capacity = 1;
-    let runtime = Arc::new(
-        RuntimeHandle::start(
-            full_config(),
-            Box::new(MockDevice::new(control.clone())),
-            runtime_options,
-        )
-        .unwrap(),
-    );
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
+    let runtime = Arc::new(start_runtime_with_options(
+        full_config(),
+        &control,
+        runtime_options,
+    ));
+    wait_until_online(&runtime);
     let gate = control.block_next_push();
     let first_runtime = Arc::clone(&runtime);
     let first =
@@ -695,17 +580,12 @@ fn shutdown_returns_queue_full_without_waiting_for_queue_space() {
     let mut runtime_options = options();
     runtime_options.command_capacity = 1;
     runtime_options.command_timeout = Duration::from_millis(250);
-    let runtime = Arc::new(
-        RuntimeHandle::start(
-            full_config(),
-            Box::new(MockDevice::new(control.clone())),
-            runtime_options,
-        )
-        .unwrap(),
-    );
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
+    let runtime = Arc::new(start_runtime_with_options(
+        full_config(),
+        &control,
+        runtime_options,
+    ));
+    wait_until_online(&runtime);
     let gate = control.block_next_push();
     let first_runtime = Arc::clone(&runtime);
     let first =
@@ -742,17 +622,12 @@ fn accepted_shutdown_times_out_while_device_io_is_blocked_and_retry_reaps() {
     let control = MockDeviceControl::default();
     let mut runtime_options = options();
     runtime_options.command_timeout = Duration::from_millis(50);
-    let runtime = Arc::new(
-        RuntimeHandle::start(
-            full_config(),
-            Box::new(MockDevice::new(control.clone())),
-            runtime_options,
-        )
-        .unwrap(),
-    );
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
+    let runtime = Arc::new(start_runtime_with_options(
+        full_config(),
+        &control,
+        runtime_options,
+    ));
+    wait_until_online(&runtime);
     let gate = control.block_next_push();
     let command_runtime = Arc::clone(&runtime);
     let command =
@@ -794,9 +669,7 @@ fn shutdown_waits_for_actual_device_cleanup_completion() {
         )
         .unwrap(),
     );
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
+    wait_until_online(&runtime);
 
     let shutdown_runtime = Arc::clone(&runtime);
     let (result_sender, result_receiver) = std::sync::mpsc::sync_channel(1);
@@ -831,9 +704,7 @@ fn concurrent_and_repeated_shutdown_are_idempotent() {
         )
         .unwrap(),
     );
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
+    wait_until_online(&runtime);
     let barrier = Arc::new(std::sync::Barrier::new(4));
     let callers: Vec<_> = (0..4)
         .map(|_| {
@@ -866,9 +737,7 @@ fn worker_panic_is_reported_then_reaped_shutdown_is_idempotent() {
         options(),
     )
     .unwrap();
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
+    wait_until_online(&runtime);
 
     assert_eq!(runtime.shutdown(), Err(RuntimeError::WorkerStopped));
     assert_eq!(runtime.shutdown(), Ok(()));
@@ -880,12 +749,7 @@ fn dropping_runtime_does_not_wait_for_a_blocked_worker() {
     let scene_gate = control.block_next_scene();
     let mut runtime_options = options();
     runtime_options.command_timeout = Duration::from_millis(50);
-    let runtime = RuntimeHandle::start(
-        full_config(),
-        Box::new(MockDevice::new(control)),
-        runtime_options,
-    )
-    .unwrap();
+    let runtime = start_runtime_with_options(full_config(), &control, runtime_options);
     scene_gate.wait_until_entered();
     let (dropped_sender, dropped_receiver) = std::sync::mpsc::sync_channel(1);
     let dropper = thread::spawn(move || {
@@ -908,15 +772,10 @@ fn dropping_runtime_does_not_wait_for_a_blocked_worker() {
 fn invalid_commands_do_not_mutate_runtime_state() {
     let control = MockDeviceControl::default();
     let runtime = start_runtime(AppConfig::default(), &control);
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
+    wait_until_online(&runtime);
     let before = runtime.snapshot().unwrap().config;
-    let apply_count = control
-        .operations()
-        .iter()
-        .filter(|operation| matches!(operation, Operation::ApplyLayout(_)))
-        .count();
+    let apply_count =
+        control.count_operations(|operation| matches!(operation, Operation::ApplyLayout(_)));
     assert!(matches!(
         runtime.control_pomodoro("missing", PomodoroAction::Reset),
         Err(RuntimeError::UnknownCard { .. })
@@ -930,11 +789,7 @@ fn invalid_commands_do_not_mutate_runtime_state() {
     ));
     assert_eq!(runtime.snapshot().unwrap().config, before);
     assert_eq!(
-        control
-            .operations()
-            .iter()
-            .filter(|operation| matches!(operation, Operation::ApplyLayout(_)))
-            .count(),
+        control.count_operations(|operation| { matches!(operation, Operation::ApplyLayout(_)) }),
         apply_count
     );
     runtime.shutdown().unwrap();
@@ -944,19 +799,11 @@ fn invalid_commands_do_not_mutate_runtime_state() {
 fn config_and_preference_edits_preserve_live_timer_and_screen() {
     let control = MockDeviceControl::default();
     let runtime = start_runtime(full_config(), &control);
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
+    wait_until_online(&runtime);
     runtime
         .control_pomodoro("pomodoro", PomodoroAction::Start)
         .unwrap();
-    control.push_event(DeviceEvent {
-        sequence: 1,
-        kind: EventKind::Navigation,
-        card_id: "pomodoro".into(),
-        action: EventAction::NavigateNext,
-        interrupt_token: None,
-    });
+    control.navigate_next(1, "pomodoro");
     let before = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
         snapshot
             .pomodoros
@@ -1003,19 +850,12 @@ fn runtime_restart_intentionally_resets_transient_timer_state_to_idle() {
     first
         .control_pomodoro("pomodoro", PomodoroAction::Start)
         .unwrap();
-    wait_for_snapshot(&first, Duration::from_secs(1), |snapshot| {
-        snapshot
-            .pomodoros
-            .first()
-            .is_some_and(|timer| timer.state == PomodoroState::Running)
-    });
+    wait_for_pomodoro_state(&first, Duration::from_secs(1), PomodoroState::Running);
     first.shutdown().unwrap();
 
     let second_control = MockDeviceControl::default();
     let second = start_runtime(config, &second_control);
-    let restarted = wait_for_snapshot(&second, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
+    let restarted = wait_until_online(&second);
     let timer = restarted.pomodoros.first().unwrap();
     assert_eq!(timer.state, PomodoroState::Idle);
     assert_eq!(timer.remaining_seconds, timer.duration_seconds);

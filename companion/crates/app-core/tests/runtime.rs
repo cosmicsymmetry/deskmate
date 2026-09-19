@@ -209,6 +209,33 @@ impl MockDeviceControl {
         self.state.lock().unwrap().operations.clone()
     }
 
+    fn count_operations(&self, predicate: impl Fn(&Operation) -> bool) -> usize {
+        self.operations()
+            .iter()
+            .filter(|operation| predicate(operation))
+            .count()
+    }
+
+    fn tap_pomodoro(&self, sequence: u64) {
+        self.push_event(DeviceEvent {
+            sequence,
+            kind: EventKind::Tap,
+            card_id: "pomodoro".into(),
+            action: EventAction::StartPause,
+            interrupt_token: None,
+        });
+    }
+
+    fn navigate_next(&self, sequence: u64, card_id: &str) {
+        self.push_event(DeviceEvent {
+            sequence,
+            kind: EventKind::Navigation,
+            card_id: card_id.into(),
+            action: EventAction::NavigateNext,
+            interrupt_token: None,
+        });
+    }
+
     fn connection_count(&self) -> u64 {
         self.state.lock().unwrap().connection_count
     }
@@ -742,16 +769,8 @@ fn assert_next_interrupt_token(
         hold: AlertHold::UntilDismissed,
     });
     let runtime = start_runtime(config, &control);
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
-    });
-    control.push_event(DeviceEvent {
-        sequence: 1,
-        kind: EventKind::Tap,
-        card_id: "pomodoro".into(),
-        action: EventAction::StartPause,
-        interrupt_token: None,
-    });
+    wait_until_online(&runtime);
+    control.tap_pomodoro(1);
     wait_for(Duration::from_secs(2), || {
         control
             .operations()
@@ -809,11 +828,21 @@ fn start_picture_runtime(
     .unwrap()
 }
 
+#[track_caller]
 fn start_runtime(config: AppConfig, control: &MockDeviceControl) -> RuntimeHandle {
+    start_runtime_with_options(config, control, options())
+}
+
+#[track_caller]
+fn start_runtime_with_options(
+    config: AppConfig,
+    control: &MockDeviceControl,
+    runtime_options: RuntimeOptions,
+) -> RuntimeHandle {
     RuntimeHandle::start(
         config,
         Box::new(MockDevice::new(control.clone())),
-        options(),
+        runtime_options,
     )
     .unwrap()
 }
@@ -824,6 +853,28 @@ fn apply_paused_preference(runtime: &RuntimeHandle, paused: bool) -> Result<(), 
     runtime.apply_config(config)
 }
 
+#[track_caller]
+fn wait_until_online(runtime: &RuntimeHandle) -> app_core::AppSnapshot {
+    wait_for_snapshot(runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    })
+}
+
+#[track_caller]
+fn wait_for_pomodoro_state(
+    runtime: &RuntimeHandle,
+    timeout: Duration,
+    state: PomodoroState,
+) -> app_core::AppSnapshot {
+    wait_for_snapshot(runtime, timeout, |snapshot| {
+        snapshot
+            .pomodoros
+            .first()
+            .is_some_and(|timer| timer.state == state)
+    })
+}
+
+#[track_caller]
 fn wait_for_snapshot(
     runtime: &RuntimeHandle,
     timeout: Duration,
@@ -840,6 +891,7 @@ fn wait_for_snapshot(
     }
 }
 
+#[track_caller]
 fn wait_for(timeout: Duration, predicate: impl Fn() -> bool) {
     let deadline = Instant::now() + timeout;
     while !predicate() {
@@ -864,28 +916,11 @@ fn clock_card(id: &str) -> CardSettings {
 /// A copy of `card` that stays on the panel for `seconds` instead of taking
 /// the document's default dwell.
 fn with_dwell(card: CardSettings, seconds: u16) -> CardSettings {
-    match card {
-        CardSettings::Clock {
-            id,
-            title,
-            show_seconds,
-            template,
-            tap_action,
-            refresh,
-            alert,
-            ..
-        } => CardSettings::Clock {
-            id,
-            title,
-            show_seconds,
-            template,
-            tap_action,
-            refresh,
-            alert,
-            dwell_seconds: Some(seconds),
-        },
-        other => other,
+    let mut card = card;
+    if let CardSettings::Clock { dwell_seconds, .. } = &mut card {
+        *dwell_seconds = Some(seconds);
     }
+    card
 }
 
 fn pomodoro_card(id: &str, alert: CardAlert) -> CardSettings {

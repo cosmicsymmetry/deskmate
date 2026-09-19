@@ -139,13 +139,9 @@ fn a_refused_picture_scene_is_retried_only_for_a_new_digest() {
         })
     });
     let picture_attempts = || {
-        control
-            .operations()
-            .iter()
-            .filter(|operation| {
-                matches!(operation, Operation::PushScene(push) if push.card_id == "picture-card")
-            })
-            .count()
+        control.count_operations(|operation| {
+            matches!(operation, Operation::PushScene(push) if push.card_id == "picture-card")
+        })
     };
     assert_eq!(picture_attempts(), 1);
     thread::sleep(Duration::from_millis(100));
@@ -275,19 +271,15 @@ fn a_staleness_flip_on_the_visible_card_rebuilds_its_scene() {
     wait_for(Duration::from_secs(1), || {
         latest_picture_push(&control.operations()).is_some_and(|push| push.scene.nodes.len() == 1)
     });
-    let pushes_before = control
-        .operations()
-        .iter()
-        .filter(|operation| matches!(operation, Operation::PushScene(push) if push.card_id == "picture-card"))
-        .count();
+    let pushes_before = control.count_operations(|operation| {
+        matches!(operation, Operation::PushScene(push) if push.card_id == "picture-card")
+    });
 
     host.set_picture_stale("camera", true);
     wait_for(Duration::from_secs(1), || {
-        control
-            .operations()
-            .iter()
-            .filter(|operation| matches!(operation, Operation::PushScene(push) if push.card_id == "picture-card"))
-            .count()
+        control.count_operations(|operation| {
+            matches!(operation, Operation::PushScene(push) if push.card_id == "picture-card")
+        })
             > pushes_before
     });
     let push = latest_picture_push(&control.operations()).expect("the stale face was rebuilt");

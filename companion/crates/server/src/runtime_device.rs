@@ -499,10 +499,12 @@ impl WebSocketRuntimeDevice {
             require_ack(&response, protocol::TYPE_TRIGGER_INTERRUPT, None)?;
         }
 
-        *self
+        let mut live = self
             .replay
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = replay;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        live.config = replay.config;
+        live.pushes = replay.pushes;
         Ok(())
     }
 }
@@ -1274,6 +1276,91 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_preserves_navigation_received_during_replay() {
+        let replayed = replay_after_concurrent_event(navigation(1, "calendar"));
+        assert!(
+            replayed.contains(&Message::ActivateCard(ActivateCard {
+                card_id: "calendar".into(),
+            })),
+            "next replay must activate the navigated-to card"
+        );
+    }
+
+    #[test]
+    fn reconnect_preserves_interrupt_dismissal_received_during_replay() {
+        let replayed = replay_after_concurrent_event(DeviceEvent {
+            sequence: 1,
+            kind: EventKind::InterruptDismissed,
+            card_id: "timer".into(),
+            action: EventAction::DismissInterrupt,
+            interrupt_token: Some(5),
+        });
+        assert!(
+            !replayed.iter().any(|message| matches!(message,
+                Message::TriggerInterrupt(interrupt) if interrupt.token == 5
+            )),
+            "next replay must not resend the dismissed interrupt"
+        );
+    }
+
+    fn replay_after_concurrent_event(event: DeviceEvent) -> Vec<Message> {
+        let (mut device, connector) = super::WebSocketRuntimeDevice::channel("dev-1".into());
+        let first_actor = spawn_test_actor(connector.attach());
+        device.connect().expect("first connect");
+        device
+            .apply_layout(
+                90,
+                vec![
+                    CardConfig {
+                        card_id: "timer".into(),
+                        tap_action: TapAction::StartPause,
+                    },
+                    CardConfig {
+                        card_id: "calendar".into(),
+                        tap_action: TapAction::None,
+                    },
+                ],
+            )
+            .expect("initial layout");
+        device
+            .push_timer("timer".into(), 60_000, 30_000, false)
+            .unwrap();
+        device.activate_card("timer".into()).unwrap();
+        device.trigger_interrupt(interrupt(5)).unwrap();
+
+        let mut status = sample_status();
+        status.config_revision = device.latest_config_revision + 10;
+        status.latest_revision = device.latest_data_revision + 10;
+        let second_actor =
+            spawn_test_actor_with_event(connector.attach(), status.clone(), Some(event));
+        device.connect().expect("replay with concurrent event");
+        {
+            let replay = device.replay.lock().unwrap();
+            assert_eq!(
+                replay.config.as_ref().unwrap().revision,
+                status.config_revision + 1
+            );
+            assert_eq!(replay.pushes[0].revision, status.latest_revision + 1);
+        }
+
+        status.config_revision += 1;
+        status.latest_revision += 1;
+        let third_actor = spawn_test_actor_with_status(connector.attach(), status);
+        device.connect().expect("next replay");
+        connector.detach();
+        first_actor.join().unwrap();
+        second_actor.join().unwrap();
+        let replayed = third_actor.join().unwrap();
+        assert!(
+            !replayed
+                .iter()
+                .any(|message| matches!(message, Message::ApplyConfig(_) | Message::PushTimer(_))),
+            "acknowledged rebased revisions must not be resent"
+        );
+        replayed
+    }
+
+    #[test]
     fn push_scene_delegates_to_the_connected_websocket_transport() {
         let (mut device, connector) = super::WebSocketRuntimeDevice::channel("dev-1".into());
         let actor = spawn_test_actor(connector.attach());
@@ -1384,8 +1471,16 @@ mod tests {
     }
 
     fn spawn_test_actor_with_status(
+        peer: super::SocketPeer,
+        status: StatusResponse,
+    ) -> std::thread::JoinHandle<Vec<Message>> {
+        spawn_test_actor_with_event(peer, status, None)
+    }
+
+    fn spawn_test_actor_with_event(
         mut peer: super::SocketPeer,
         status: StatusResponse,
+        mut event: Option<DeviceEvent>,
     ) -> std::thread::JoinHandle<Vec<Message>> {
         std::thread::spawn(move || {
             let mut requests = Vec::new();
@@ -1412,6 +1507,17 @@ mod tests {
                         revision: None,
                         already_present: None,
                     }),
+                    Message::TriggerInterrupt(_) => {
+                        // The replay snapshot exists, and its final ACK is still pending.
+                        if let Some(event) = event.take() {
+                            peer.event_router.route(event);
+                        }
+                        Message::Ack(Ack {
+                            acknowledged_type: protocol::TYPE_TRIGGER_INTERRUPT,
+                            revision: None,
+                            already_present: None,
+                        })
+                    }
                     Message::PushScene(push) => Message::Ack(Ack {
                         acknowledged_type: protocol::TYPE_PUSH_SCENE,
                         revision: Some(push.revision),

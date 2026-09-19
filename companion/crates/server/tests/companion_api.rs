@@ -79,6 +79,166 @@ async fn json_body(response: reqwest::Response) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn event_stream_ends_when_shutdown_begins_without_a_socket() {
+    use futures_util::{FutureExt as _, StreamExt as _};
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let state = ServerState::in_memory();
+    let device = state.registry().mint().expect("mint device");
+    let response = app(state.clone())
+        .oneshot(event_request(&device.device_id))
+        .await
+        .expect("event response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+    let first = timeout(Duration::from_secs(3), body.next())
+        .await
+        .expect("initial event deadline")
+        .expect("initial event")
+        .expect("event bytes");
+    assert_app_state_event(&first);
+
+    let next = body.next();
+    tokio::pin!(next);
+    assert!(
+        next.as_mut().now_or_never().is_none(),
+        "stream is waiting for another event"
+    );
+    state.begin_shutdown();
+    assert!(
+        timeout(Duration::from_millis(250), next)
+            .await
+            .expect("SSE body must end promptly on shutdown")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn event_stream_opened_after_shutdown_ends_immediately() {
+    use futures_util::StreamExt as _;
+    use std::time::Duration;
+
+    let state = ServerState::in_memory();
+    let device = state.registry().mint().expect("mint device");
+    state.begin_shutdown();
+    let response = app(state)
+        .oneshot(event_request(&device.device_id))
+        .await
+        .expect("late event response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), body.next())
+            .await
+            .expect("late SSE body must end immediately")
+            .is_none()
+    );
+}
+
+fn event_request(device_id: &str) -> Request<Body> {
+    Request::builder()
+        .uri(format!("/v1/app/{device_id}/events"))
+        .header("authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .body(Body::empty())
+        .expect("event request")
+}
+
+fn assert_app_state_event(bytes: &[u8]) -> serde_json::Value {
+    let text = std::str::from_utf8(bytes).expect("SSE text");
+    assert!(text.lines().any(|line| line == "event: app-state"));
+    let data = text
+        .lines()
+        .find_map(|line| line.strip_prefix("data: "))
+        .expect("snapshot data");
+    let snapshot: serde_json::Value = serde_json::from_str(data).expect("snapshot JSON");
+    assert_eq!(snapshot["device"]["connection"]["kind"], "disconnected");
+    assert_eq!(snapshot["runtime"]["kind"], "running");
+    assert_eq!(snapshot["has_saved_config"], false);
+    assert_eq!(
+        snapshot["host_protocol_version"],
+        protocol::PROTOCOL_VERSION
+    );
+    assert!(snapshot["config"]["schema_version"].is_number());
+    snapshot
+}
+
+#[tokio::test]
+async fn open_event_stream_allows_graceful_server_shutdown() {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let state = ServerState::in_memory();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind shutdown test server");
+    let server = TestServer {
+        base_url: format!("http://{}", listener.local_addr().unwrap()),
+    };
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let shutdown_state = state.clone();
+    let serving = tokio::spawn(async move {
+        axum::serve(listener, app(state))
+            .with_graceful_shutdown(async move {
+                stopped.await.expect("shutdown requested");
+                shutdown_state.begin_shutdown();
+            })
+            .await
+            .expect("serve until drained");
+    });
+    let client = Client::new();
+    let device = mint_device(&client, &server).await;
+    let cookie = session_cookie(&client, &server).await;
+    let expected = snapshot(&client, &server, &device.device_id).await;
+    let mut response = timeout(
+        Duration::from_secs(3),
+        client
+            .get(format!(
+                "{}/v1/app/{}/events",
+                server.base_url, device.device_id
+            ))
+            .header("cookie", cookie)
+            .send(),
+    )
+    .await
+    .expect("event response deadline")
+    .expect("event response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let mut initial = Vec::new();
+    timeout(Duration::from_secs(3), async {
+        while !initial.windows(2).any(|bytes| bytes == b"\n\n") {
+            initial.extend(
+                response
+                    .chunk()
+                    .await
+                    .expect("body chunk")
+                    .expect("initial event"),
+            );
+        }
+    })
+    .await
+    .expect("initial event deadline");
+    assert_eq!(assert_app_state_event(&initial), expected);
+
+    stop.send(()).expect("request shutdown");
+    timeout(Duration::from_secs(3), async {
+        while response
+            .chunk()
+            .await
+            .expect("body remains readable")
+            .is_some()
+        {}
+    })
+    .await
+    .expect("SSE body EOF during graceful shutdown");
+    timeout(Duration::from_secs(3), serving)
+        .await
+        .expect("Axum must finish draining")
+        .expect("server task");
+}
+
+#[tokio::test]
 async fn every_companion_route_refuses_an_anonymous_caller() {
     let (server, _state) = spawn().await;
     let client = Client::new();

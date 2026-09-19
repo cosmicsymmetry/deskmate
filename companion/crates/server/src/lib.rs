@@ -147,6 +147,7 @@ struct StateInner {
     /// Keeps the dedicated config root alive for [`ServerState::in_memory`].
     /// Production paths are operator-owned and leave this as `None`.
     _config_temp_dir: Option<tempfile::TempDir>,
+    shutdown: tokio::sync::watch::Sender<bool>,
     device_links: Mutex<HashMap<registry::DeviceId, Arc<LiveLink>>>,
     /// Bounds concurrent `/v1/device/link` connections. `Arc`-wrapped
     /// separately from `StateInner` because `Semaphore::try_acquire_owned`
@@ -210,6 +211,7 @@ impl ServerState {
                 configs: store::DeviceConfigStores::new(config_directory),
                 integrations: OnceLock::new(),
                 _config_temp_dir: config_temp_dir,
+                shutdown: tokio::sync::watch::channel(false).0,
                 device_links: Mutex::new(HashMap::new()),
                 link_slots: Arc::new(tokio::sync::Semaphore::new(
                     device_link::MAX_CONCURRENT_LINKS,
@@ -403,6 +405,15 @@ impl ServerState {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(device_id)
             .cloned()
+    }
+
+    /// Ends long-lived browser streams before Axum waits for connections to drain.
+    pub fn begin_shutdown(&self) {
+        self.inner.shutdown.send_replace(true);
+    }
+
+    pub(crate) fn subscribe_shutdown(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.inner.shutdown.subscribe()
     }
 
     /// Stops every per-device runtime retained by this server. The operation

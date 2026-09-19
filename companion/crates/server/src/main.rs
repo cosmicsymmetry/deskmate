@@ -341,7 +341,7 @@ async fn main() {
     }
 
     axum::serve(listener, app_with_web(state, web_dir))
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(shutdown_state.clone()))
         .await
         .expect("server exited with an error");
     tokio::task::spawn_blocking(move || shutdown_state.shutdown())
@@ -367,7 +367,7 @@ fn data_card_spec_path(config_dir: &Path) -> PathBuf {
 }
 
 /// `axum::serve` can drain in-flight connections before the process exits.
-async fn shutdown_signal() {
+async fn shutdown_signal(state: ServerState) {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
@@ -390,6 +390,7 @@ async fn shutdown_signal() {
         () = terminate => {}
     }
 
+    state.begin_shutdown();
     tracing::info!("shutdown signal received, draining connections");
 }
 

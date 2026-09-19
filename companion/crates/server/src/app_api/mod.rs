@@ -364,31 +364,48 @@ async fn events(
     Path(device_id): Path<String>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, AppApiError> {
     known_device(&state, &device_id)?;
+    let shutdown = state.subscribe_shutdown();
     let start = (
         state,
         device_id,
         None::<String>,
         tokio::time::Instant::now(),
+        shutdown,
     );
-    let stream = stream::unfold(start, |(state, device_id, last, last_sent)| async move {
-        loop {
-            tokio::time::sleep(EVENT_POLL).await;
-            let Ok(snapshot) = read_snapshot(&state, device_id.clone()).await else {
-                continue;
-            };
-            let Ok(value) = serde_json::to_value(&snapshot) else {
-                continue;
-            };
-            let key = change_key(&value);
-            let due = last_sent.elapsed() >= EVENT_HEARTBEAT;
-            if !due && last.as_ref() == Some(&key) {
-                continue;
+    let stream = stream::unfold(
+        start,
+        |(state, device_id, last, last_sent, mut shutdown)| async move {
+            loop {
+                if *shutdown.borrow() {
+                    return None;
+                }
+                tokio::select! {
+                    biased;
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() {
+                            return None;
+                        }
+                        continue;
+                    }
+                    () = tokio::time::sleep(EVENT_POLL) => {}
+                }
+                let Ok(snapshot) = read_snapshot(&state, device_id.clone()).await else {
+                    continue;
+                };
+                let Ok(value) = serde_json::to_value(&snapshot) else {
+                    continue;
+                };
+                let key = change_key(&value);
+                let due = last_sent.elapsed() >= EVENT_HEARTBEAT;
+                if !due && last.as_ref() == Some(&key) {
+                    continue;
+                }
+                let event = Event::default().event("app-state").data(value.to_string());
+                let now = tokio::time::Instant::now();
+                return Some((Ok(event), (state, device_id, Some(key), now, shutdown)));
             }
-            let event = Event::default().event("app-state").data(value.to_string());
-            let now = tokio::time::Instant::now();
-            return Some((Ok(event), (state, device_id, Some(key), now)));
-        }
-    });
+        },
+    );
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 

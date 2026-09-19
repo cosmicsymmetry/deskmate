@@ -243,18 +243,11 @@ mod tests {
     fn an_rgba_png_is_accepted_and_composited_over_black() {
         // A fully transparent RGBA frame composites to black, not to white and
         // not to the decoder's uninitialised buffer.
-        let mut out = Vec::new();
-        {
-            let mut encoder = png::Encoder::new(&mut out, W, H);
-            encoder.set_color(png::ColorType::Rgba);
-            encoder.set_depth(png::BitDepth::Eight);
-            let mut writer = encoder.write_header().expect("header");
-            // Opaque white pixels at zero alpha.
-            let data: Vec<u8> = std::iter::repeat_n([255u8, 255, 255, 0], (W * H) as usize)
-                .flatten()
-                .collect();
-            writer.write_image_data(&data).expect("data");
-        }
+        // Opaque white pixels at zero alpha.
+        let out = png_with_pixels(
+            png::ColorType::Rgba,
+            &vec![[255, 255, 255, 0]; (W * H) as usize],
+        );
         let frame = canonical_frame_from_png(&out).expect("accepted");
         let first_pixel = u16::from_le_bytes([frame.bytes[12], frame.bytes[13]]);
         assert_eq!(first_pixel, 0, "alpha zero must composite to black");
@@ -314,28 +307,21 @@ mod tests {
     }
 
     #[test]
-    fn one_pixel_narrow_is_rejected() {
-        let error =
-            canonical_frame_from_png(&png_of(447, H, png::ColorType::Rgb, png::BitDepth::Eight))
-                .expect_err("447 wide");
-        assert!(matches!(
-            error,
-            ImageIngestError::WrongDimensions {
-                width: 447,
-                height: 368
-            }
-        ));
-    }
-
-    #[test]
-    fn one_pixel_wide_is_rejected() {
-        let error =
-            canonical_frame_from_png(&png_of(449, H, png::ColorType::Rgb, png::BitDepth::Eight))
-                .expect_err("449 wide");
-        assert!(matches!(
-            error,
-            ImageIngestError::WrongDimensions { width: 449, .. }
-        ));
+    fn off_by_one_widths_are_rejected() {
+        for (name, width) in [("one_pixel_narrow", 447), ("one_pixel_wide", 449)] {
+            let error = canonical_frame_from_png(&png_of(
+                width,
+                H,
+                png::ColorType::Rgb,
+                png::BitDepth::Eight,
+            ))
+            .expect_err(name);
+            assert_eq!(
+                error,
+                ImageIngestError::WrongDimensions { width, height: H },
+                "{name}"
+            );
+        }
     }
 
     #[test]

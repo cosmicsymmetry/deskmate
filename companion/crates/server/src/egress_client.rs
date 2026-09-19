@@ -125,38 +125,21 @@ mod tests {
     /// matters here is only that a refusal survives the mapping into the
     /// provider vocabulary, and that it does so *without a request*.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_private_address_is_refused_as_a_configuration_error() {
-        let error = tokio::task::spawn_blocking(|| {
-            EgressHttpClient::new().get_text("http://192.168.1.1/feed.xml")
-        })
-        .await
-        .expect("the blocking task runs")
-        .expect_err("a private address is denied");
-        assert!(
-            matches!(&error, ProviderError::InvalidConfiguration(_)),
-            "a denied address is the owner's URL to fix, not a transient fault"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn the_cloud_metadata_endpoint_is_refused() {
-        let error = tokio::task::spawn_blocking(|| {
-            EgressHttpClient::new().get_text("http://169.254.169.254/latest/meta-data/")
-        })
-        .await
-        .expect("the blocking task runs")
-        .expect_err("the metadata endpoint is denied");
-        assert!(matches!(&error, ProviderError::InvalidConfiguration(_)));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_non_http_scheme_is_refused_before_the_guard_is_consulted() {
-        let error =
-            tokio::task::spawn_blocking(|| EgressHttpClient::new().get_text("file:///etc/passwd"))
+    async fn invalid_provider_urls_are_refused_as_configuration_errors() {
+        for (name, url) in [
+            ("private_address", "http://192.168.1.1/feed.xml"),
+            ("cloud_metadata", "http://169.254.169.254/latest/meta-data/"),
+            ("non_http_scheme", "file:///etc/passwd"),
+        ] {
+            let error = tokio::task::spawn_blocking(move || EgressHttpClient::new().get_text(url))
                 .await
                 .expect("the blocking task runs")
-                .expect_err("a file URL is refused");
-        assert!(matches!(&error, ProviderError::InvalidConfiguration(_)));
+                .expect_err(name);
+            assert!(
+                matches!(&error, ProviderError::InvalidConfiguration(_)),
+                "{name}: a denied address is the owner's URL to fix, not a transient fault"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

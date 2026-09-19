@@ -962,22 +962,38 @@ mod tests {
         }
     }
 
+    fn replay_cards() -> Vec<CardConfig> {
+        vec![
+            CardConfig {
+                card_id: "timer".into(),
+                tap_action: TapAction::StartPause,
+            },
+            CardConfig {
+                card_id: "calendar".into(),
+                tap_action: TapAction::None,
+            },
+        ]
+    }
+
+    fn sample_scene() -> protocol::PushScene {
+        protocol::PushScene {
+            card_id: "clock".into(),
+            revision: 7,
+            scene: protocol::Scene {
+                revision: 7,
+                background: 0,
+                nodes: Vec::new(),
+            },
+        }
+    }
+
     #[test]
     fn duplicate_navigation_does_not_change_socket_replay_state() {
         let replay = Arc::new(Mutex::new(ReplayState {
             config: Some(ApplyConfig {
                 revision: 1,
                 rotation: 90,
-                cards: vec![
-                    CardConfig {
-                        card_id: "timer".into(),
-                        tap_action: TapAction::StartPause,
-                    },
-                    CardConfig {
-                        card_id: "calendar".into(),
-                        tap_action: TapAction::None,
-                    },
-                ],
+                cards: replay_cards(),
             }),
             active_card: Some(ActivateCard {
                 card_id: "timer".into(),
@@ -1001,16 +1017,7 @@ mod tests {
             config: Some(ApplyConfig {
                 revision: 1,
                 rotation: 90,
-                cards: vec![
-                    CardConfig {
-                        card_id: "timer".into(),
-                        tap_action: TapAction::StartPause,
-                    },
-                    CardConfig {
-                        card_id: "calendar".into(),
-                        tap_action: TapAction::None,
-                    },
-                ],
+                cards: replay_cards(),
             }),
             active_card: Some(ActivateCard {
                 card_id: "timer".into(),
@@ -1307,19 +1314,7 @@ mod tests {
         let first_actor = spawn_test_actor(connector.attach());
         device.connect().expect("first connect");
         device
-            .apply_layout(
-                90,
-                vec![
-                    CardConfig {
-                        card_id: "timer".into(),
-                        tap_action: TapAction::StartPause,
-                    },
-                    CardConfig {
-                        card_id: "calendar".into(),
-                        tap_action: TapAction::None,
-                    },
-                ],
-            )
+            .apply_layout(90, replay_cards())
             .expect("initial layout");
         device
             .push_timer("timer".into(), 60_000, 30_000, false)
@@ -1364,15 +1359,7 @@ mod tests {
         let (mut device, connector) = super::WebSocketRuntimeDevice::channel("dev-1".into());
         let actor = spawn_test_actor(connector.attach());
         device.connect().expect("connect");
-        let push = protocol::PushScene {
-            card_id: "clock".into(),
-            revision: 7,
-            scene: protocol::Scene {
-                revision: 7,
-                background: 0,
-                nodes: Vec::new(),
-            },
-        };
+        let push = sample_scene();
 
         device.push_scene(push.clone()).expect("push scene");
         connector.detach();
@@ -1392,15 +1379,7 @@ mod tests {
         device.connect().expect("connect");
 
         assert_eq!(
-            device.push_scene(protocol::PushScene {
-                card_id: "clock".into(),
-                revision: 7,
-                scene: protocol::Scene {
-                    revision: 7,
-                    background: 0,
-                    nodes: Vec::new(),
-                },
-            }),
+            device.push_scene(sample_scene()),
             Err(DeviceError::MissingCapabilities {
                 required: protocol::CAPABILITY_SCENE_RENDER,
                 available: without_scene_render.capabilities,
@@ -1426,15 +1405,7 @@ mod tests {
         let first_actor =
             spawn_test_actor_with_status(connector.attach(), without_scene_render.clone());
         device.connect().expect("scene-incapable connect");
-        let push = protocol::PushScene {
-            card_id: "clock".into(),
-            revision: 7,
-            scene: protocol::Scene {
-                revision: 7,
-                background: 0,
-                nodes: Vec::new(),
-            },
-        };
+        let push = sample_scene();
         assert!(matches!(
             device.push_scene(push.clone()),
             Err(DeviceError::MissingCapabilities { .. })
@@ -1476,6 +1447,14 @@ mod tests {
         spawn_test_actor_with_event(peer, status, None)
     }
 
+    fn ack(acknowledged_type: u8, revision: Option<u32>) -> Message {
+        Message::Ack(Ack {
+            acknowledged_type,
+            revision,
+            already_present: None,
+        })
+    }
+
     fn spawn_test_actor_with_event(
         mut peer: super::SocketPeer,
         status: StatusResponse,
@@ -1486,42 +1465,20 @@ mod tests {
             while let Some(command) = peer.commands.blocking_recv() {
                 let response = match &command.message {
                     Message::StatusRequest => Message::StatusResponse(status.clone()),
-                    Message::TimeSync(_) => Message::Ack(Ack {
-                        acknowledged_type: protocol::TYPE_TIME_SYNC,
-                        revision: None,
-                        already_present: None,
-                    }),
-                    Message::ApplyConfig(config) => Message::Ack(Ack {
-                        acknowledged_type: protocol::TYPE_APPLY_CONFIG,
-                        revision: Some(config.revision),
-                        already_present: None,
-                    }),
-                    Message::PushTimer(push) => Message::Ack(Ack {
-                        acknowledged_type: protocol::TYPE_PUSH_TIMER,
-                        revision: Some(push.revision),
-                        already_present: None,
-                    }),
-                    Message::ActivateCard(_) => Message::Ack(Ack {
-                        acknowledged_type: protocol::TYPE_ACTIVATE_CARD,
-                        revision: None,
-                        already_present: None,
-                    }),
+                    Message::TimeSync(_) => ack(protocol::TYPE_TIME_SYNC, None),
+                    Message::ApplyConfig(config) => {
+                        ack(protocol::TYPE_APPLY_CONFIG, Some(config.revision))
+                    }
+                    Message::PushTimer(push) => ack(protocol::TYPE_PUSH_TIMER, Some(push.revision)),
+                    Message::ActivateCard(_) => ack(protocol::TYPE_ACTIVATE_CARD, None),
                     Message::TriggerInterrupt(_) => {
                         // The replay snapshot exists, and its final ACK is still pending.
                         if let Some(event) = event.take() {
                             peer.event_router.route(event);
                         }
-                        Message::Ack(Ack {
-                            acknowledged_type: protocol::TYPE_TRIGGER_INTERRUPT,
-                            revision: None,
-                            already_present: None,
-                        })
+                        ack(protocol::TYPE_TRIGGER_INTERRUPT, None)
                     }
-                    Message::PushScene(push) => Message::Ack(Ack {
-                        acknowledged_type: protocol::TYPE_PUSH_SCENE,
-                        revision: Some(push.revision),
-                        already_present: None,
-                    }),
+                    Message::PushScene(push) => ack(protocol::TYPE_PUSH_SCENE, Some(push.revision)),
                     unexpected => panic!("unexpected test actor request: {unexpected:?}"),
                 };
                 requests.push(command.message);

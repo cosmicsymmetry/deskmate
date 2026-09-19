@@ -257,42 +257,34 @@ fn select_pinned_address_picks_the_only_permitted_candidate() {
 }
 
 #[test]
-fn select_pinned_address_denies_if_any_candidate_is_denied() {
+fn select_pinned_address_denies_mixed_candidates_in_either_order() {
     // Simulates a resolver answer that mixes a public address with a
     // rebound / internal one: fail closed rather than picking "the good
     // one", because an attacker choosing which answer the HTTP client's
     // own connect step prefers is exactly the rebinding attack.
-    let good: IpAddr = "93.184.216.34".parse().unwrap();
-    let bad: IpAddr = "127.0.0.1".parse().unwrap();
-    assert!(matches!(
-        select_pinned_address("evil.example", &[good, bad]),
-        Err(EgressError::Denied {
-            reason: DenyReason::Loopback,
-            ..
-        })
-    ));
-    // Order must not matter.
-    assert!(matches!(
-        select_pinned_address("evil.example", &[bad, good]),
-        Err(EgressError::Denied {
-            reason: DenyReason::Loopback,
-            ..
-        })
-    ));
-}
-
-#[test]
-fn select_pinned_address_denies_3fff_documentation_in_either_order() {
-    let public: IpAddr = "2606:4700:4700::1111".parse().unwrap();
-    let documentation: IpAddr = "3fff::1".parse().unwrap();
-    for candidates in [[public, documentation], [documentation, public]] {
-        assert!(matches!(
-            select_pinned_address("docs.example", &candidates),
-            Err(EgressError::Denied {
-                reason: DenyReason::Documentation,
-                ..
-            })
-        ));
+    for (name, host, addresses, expected) in [
+        (
+            "loopback",
+            "evil.example",
+            ["93.184.216.34", "127.0.0.1"],
+            DenyReason::Loopback,
+        ),
+        (
+            "3fff_documentation",
+            "docs.example",
+            ["2606:4700:4700::1111", "3fff::1"],
+            DenyReason::Documentation,
+        ),
+    ] {
+        let [public, denied] =
+            addresses.map(|ip| ip.parse::<IpAddr>().expect("table IP must parse"));
+        // Order must not matter.
+        for candidates in [[public, denied], [denied, public]] {
+            assert!(
+                matches!(select_pinned_address(host, &candidates), Err(EgressError::Denied { reason, .. }) if reason == expected),
+                "{name}: {candidates:?} must be denied as {expected:?}"
+            );
+        }
     }
 }
 
@@ -315,27 +307,19 @@ fn body_limiter_accepts_exactly_the_cap() {
 }
 
 #[test]
-fn body_limiter_rejects_one_byte_past_the_cap() {
-    let mut limiter = BodyLimiter::new(10);
-    assert!(limiter.push(10).is_ok());
-    assert!(matches!(
-        limiter.push(1),
-        Err(EgressError::ResponseTooLarge { limit: 10 })
-    ));
-}
-
-#[test]
-fn max_response_body_bytes_cap_is_enforced_by_the_same_limiter_fetch_uses() {
-    let mut limiter = BodyLimiter::new(MAX_RESPONSE_BODY_BYTES);
-    let cap =
-        usize::try_from(MAX_RESPONSE_BODY_BYTES).expect("cap fits in usize on any real target");
-    assert!(limiter.push(cap).is_ok());
-    assert!(matches!(
-        limiter.push(1),
-        Err(EgressError::ResponseTooLarge {
-            limit: MAX_RESPONSE_BODY_BYTES
-        })
-    ));
+fn body_limiter_rejects_one_byte_past_each_cap() {
+    for (name, limit) in [("small_cap", 10), ("fetch_cap", MAX_RESPONSE_BODY_BYTES)] {
+        let mut limiter = BodyLimiter::new(limit);
+        let cap = usize::try_from(limit).expect("cap fits in usize on any real target");
+        assert!(
+            limiter.push(cap).is_ok(),
+            "{name}: exactly the cap is accepted"
+        );
+        assert!(
+            matches!(limiter.push(1), Err(EgressError::ResponseTooLarge { limit: actual }) if actual == limit),
+            "{name}: one byte past the cap must report its exact limit"
+        );
+    }
 }
 
 /// Drives the credential-bearing POST path against a real loopback server.

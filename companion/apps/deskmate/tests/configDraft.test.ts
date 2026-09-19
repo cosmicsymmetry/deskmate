@@ -14,10 +14,8 @@ import {
   issuesForPath,
   loopAdvance,
   loopDeadline,
-  loopEntries,
   loopSeconds,
   loopSegments,
-  moveCard,
   moveEntry,
   nextCardName,
   nextLoopCardId,
@@ -139,8 +137,7 @@ describe("configuration draft helpers", () => {
     expect(config.cards.at(-1)).toEqual({
       kind: "picture",
       id: "picture",
-      // The card carries the name, not just the source. A blank title left the
-      // Name field empty and made the source the only thing actually named.
+      // The schema title is frozen at creation; visible identity comes from the source.
       title: "Claude limits",
       source_id: "limits",
       tap_action: { kind: "none" },
@@ -206,11 +203,6 @@ describe("configuration draft helpers", () => {
     // onto the live snapshot `config` was copied from.
     expect(next.cards[0]).not.toBe(original);
     expect(next.cards[0]).toEqual(original);
-  });
-
-  test("the loop is the card list, in order", () => {
-    const withCards = addCard(addCard(initialConfig(), "pomodoro").config, "clock").config;
-    expect(loopEntries(withCards)).toEqual(withCards.cards.map((card, index) => ({ index, card })));
   });
 
   test("moves cards with clamped targets and index-safe source boundaries", () => {
@@ -378,7 +370,7 @@ describe("configuration draft helpers", () => {
     expect(issuesForPath(issues, "cards[0].size")).toEqual([]);
   });
 
-  test("issues follow the card across a reorder", () => {
+  test("matches card paths from each corresponding validation revision", () => {
     const base = initialConfig();
     const config: AppConfig = {
       ...base,
@@ -394,13 +386,13 @@ describe("configuration draft helpers", () => {
     expect(issuesForCard(issues, config, "b")).toHaveLength(1);
     expect(issuesForCard(issues, config, "a")).toHaveLength(0);
 
-    // After dragging "b" to the front, the SAME issue list must still attach to "b".
-    const reordered = moveCard(config, "b", 0);
-    const rebased: ValidationIssue[] = [
+    // After moving "b" to the front, use issues from validation of that new order.
+    const reordered = moveEntry(config, 1, 0);
+    const revalidatedIssues: ValidationIssue[] = [
       { path: "cards[0].title", code: "out-of-range", message: "card title is required" },
     ];
-    expect(issuesForCard(rebased, reordered, "b")).toHaveLength(1);
-    expect(issuesForCard(rebased, reordered, "a")).toHaveLength(0);
+    expect(issuesForCard(revalidatedIssues, reordered, "b")).toHaveLength(1);
+    expect(issuesForCard(revalidatedIssues, reordered, "a")).toHaveLength(0);
   });
 
   test("cardsContainerIssues isolates issues whose path is exactly cards", () => {
@@ -494,44 +486,44 @@ describe("configuration draft helpers", () => {
   });
 });
 
-describe("moveCard", () => {
+describe("moveEntry", () => {
   test("moves a card down", () => {
     const config = cardsConfig(["a", "b", "c"]);
-    const next = moveCard(config, "a", 1);
+    const next = moveEntry(config, 0, 1);
     expect(next.cards.map((card) => card.id)).toEqual(["b", "a", "c"]);
   });
 
   test("moves a card up", () => {
     const config = cardsConfig(["a", "b", "c"]);
-    const next = moveCard(config, "c", 1);
+    const next = moveEntry(config, 2, 1);
     expect(next.cards.map((card) => card.id)).toEqual(["a", "c", "b"]);
   });
 
   test("moves a card to index 0", () => {
     const config = cardsConfig(["a", "b", "c"]);
-    const next = moveCard(config, "c", 0);
+    const next = moveEntry(config, 2, 0);
     expect(next.cards.map((card) => card.id)).toEqual(["c", "a", "b"]);
   });
 
   test("clamps a target index beyond the end to the last position", () => {
     const config = cardsConfig(["a", "b", "c"]);
-    const next = moveCard(config, "a", 99);
+    const next = moveEntry(config, 0, 99);
     expect(next.cards.map((card) => card.id)).toEqual(["b", "c", "a"]);
   });
 
   test("is a no-op with a single card", () => {
     const config = cardsConfig(["only"]);
-    expect(moveCard(config, "only", 5)).toBe(config);
+    expect(moveEntry(config, 0, 5)).toBe(config);
   });
 
   test("is a no-op when the target index matches the source index", () => {
     const config = cardsConfig(["a", "b", "c"]);
-    expect(moveCard(config, "b", 1)).toBe(config);
+    expect(moveEntry(config, 1, 1)).toBe(config);
   });
 
-  test("is a no-op for an unknown card id", () => {
+  test("is a no-op for an invalid source index", () => {
     const config = cardsConfig(["a", "b", "c"]);
-    expect(moveCard(config, "missing", 0)).toBe(config);
+    expect(moveEntry(config, -1, 0)).toBe(config);
   });
 });
 

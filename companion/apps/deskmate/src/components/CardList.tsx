@@ -15,7 +15,6 @@ import {
   cardMoveFromKey,
   cardsContainerIssues,
   issuesForCard,
-  loopEntries,
   MAX_CARDS,
   MAX_IMAGE_SOURCES,
   moveEntry,
@@ -108,7 +107,6 @@ export function CardList({
   onChange,
   onRemove,
 }: CardListProps) {
-  const entries = loopEntries(config);
   // One list, one bound: adding a card IS joining the loop.
   const atCapacity = config.cards.length >= MAX_CARDS;
   const capacityDescription = atCapacity ? `The limit is ${MAX_CARDS} cards.` : null;
@@ -133,7 +131,7 @@ export function CardList({
     (source) => !referencedSourceIds.has(source.id),
   );
   const canMintPictureSource = config.image_sources.length < MAX_IMAGE_SOURCES;
-  const entryOrder = entries.map(({ card }) => card.id).join("\u0000");
+  const entryOrder = config.cards.map((card) => card.id).join("\u0000");
   const pendingNewCardId = pendingNewCardIdsRef.current
     ? (config.cards.find((card) => !pendingNewCardIdsRef.current?.has(card.id))?.id ?? null)
     : null;
@@ -395,7 +393,7 @@ export function CardList({
           <button
             type="button"
             aria-label={`Move ${label} later`}
-            disabled={index === entries.length - 1}
+            disabled={index === config.cards.length - 1}
             onClick={() => moveBy(card.id, 1)}
           >
             <Icon name="right" />
@@ -423,7 +421,7 @@ export function CardList({
       <FieldIssues issues={containerIssues} />
 
       <ul className="card-grid" aria-label="Cards, loop order first">
-        {entries.map(({ index, card }) => renderCardTile(card, index))}
+        {config.cards.map(renderCardTile)}
         <li
           className="card-tile card-tile--add"
           ref={menuRootRef}

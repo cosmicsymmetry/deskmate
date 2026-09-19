@@ -25,12 +25,9 @@ import { FieldIssues } from "./FieldIssues";
 interface CardEditorProps {
   card: CardSettings | null;
   config: AppConfig;
-  /// Already scoped to this card by the caller via `issuesForCard` —
-  /// CardEditor never resolves a card index itself, which is what makes
-  /// dragging a card in the list safe: there is no stale index here for a
-  /// reorder to invalidate.
+  /// Card-scoped by the caller via `issuesForCard`, with absolute paths retained
+  /// for field matching.
   issues: ValidationIssue[];
-  /// Issues scoped to this card's active-loop entry. Empty for a card outside
   /// A typed device refusal for this card's last data or scene update.
   cardError: CardError | null;
   pomodoro: PomodoroSnapshot | null;

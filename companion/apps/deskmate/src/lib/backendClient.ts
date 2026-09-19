@@ -24,6 +24,10 @@ import type {
   PreviewFrame,
 } from "./types";
 
+import { DeskmateApiError, SESSION_REQUIRED_MESSAGE } from "./apiErrors";
+
+export { DeskmateApiError, SESSION_REQUIRED_MESSAGE, isSessionMissing } from "./apiErrors";
+
 const APP_STATE_EVENT = "app-state";
 const MAX_DRAFT_BYTES = 64 * 1024;
 
@@ -37,16 +41,6 @@ const API_ERROR_CATEGORIES = new Set<ApiError["category"]>([
   "device",
   "internal",
 ]);
-
-export class DeskmateApiError extends Error {
-  readonly details: ApiError;
-
-  constructor(details: ApiError) {
-    super(details.message);
-    this.name = "DeskmateApiError";
-    this.details = details;
-  }
-}
 
 export function toApiError(error: unknown): ApiError {
   if (
@@ -71,27 +65,6 @@ export function toApiError(error: unknown): ApiError {
 
 function fail(details: ApiError): never {
   throw new DeskmateApiError(details);
-}
-
-/**
- * What a missing session reads as.
- *
- * A 401 arrives with no body -- the server answers bare, so it never echoes what
- * was presented -- so the client is what turns it into a message.
- */
-export const SESSION_REQUIRED_MESSAGE =
-  "This browser is not signed in. Enter the admin token to continue.";
-
-/**
- * Whether this failure is "no session" rather than anything else.
- *
- * Exported because the page has to tell the two apart: every other failure is
- * answered by retrying, and this one is answered by signing in. Asking the
- * module that constructed the error keeps that knowledge in one place instead of
- * spreading a string comparison through the UI.
- */
-export function isSessionMissing(error: ApiError): boolean {
-  return error.category === "runtime-unavailable" && error.message === SESSION_REQUIRED_MESSAGE;
 }
 
 /** Signs this browser in with the admin token, without selecting a display. */

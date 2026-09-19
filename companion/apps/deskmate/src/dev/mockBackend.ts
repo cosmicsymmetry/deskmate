@@ -15,10 +15,14 @@
 import type {
   AppConfig,
   AppSnapshot,
+  ConfigApplyResult,
   DraftValidation,
   FaceDescriptor,
   ImageSourceDescriptor,
   NetworkSettings,
+  MintedImageSource,
+  PomodoroAction,
+  PreviewFrame,
   ValidationIssue,
 } from "../lib/types";
 import { mockCardData, mockConfig, mockNetworkSettings, mockSnapshot } from "./fixture";
@@ -216,125 +220,118 @@ window.setInterval(() => {
   }
 }, 1000);
 
-/**
- * The mock's argument bag. Every operation that reads arguments is always called with
- * them by `src/dev/backendClient.ts`, so a missing bag is a harness bug — surfaced as the
- * same structured error shape the real backend would return, not a TypeError.
- */
-function requireArgs(args: Record<string, unknown> | undefined): Record<string, unknown> {
-  if (!args) {
-    throw { category: "invalid-payload", message: "mock backend received no arguments" };
-  }
-  return args;
-}
-
 const delay = <T>(value: T, ms = 90): Promise<T> =>
   new Promise((resolve) => window.setTimeout(() => resolve(value), ms));
 
-export async function dispatchMockOperation<T>(
-  operation: string,
-  args?: Record<string, unknown>,
-): Promise<T> {
-  switch (operation) {
-    case "get_app_snapshot":
-      return delay(snapshot) as Promise<T>;
-    case "get_network_settings":
-      return delay(network) as Promise<T>;
-    case "mint_image_source": {
-      const sourceNumber = config.image_sources.length + 1;
-      const token = `dev-picture-token-${sourceNumber}`;
-      return delay({
-        source_id: `picture-source-${sourceNumber}`,
-        token,
-        push_url: `${network.server_url.replace(/\/$/, "")}/v1/images/${token}`,
-      }) as Promise<T>;
-    }
-    case "list_image_sources":
-      return delay(imageSourceDescriptors()) as Promise<T>;
-    case "update_image_source_face": {
-      const request = requireArgs(args).request as {
-        source_id: string;
-        fields: Record<string, string>;
-      };
-      if (!config.image_sources.some((source) => source.id === request.source_id)) {
-        throw { category: "not-found", message: "This picture source no longer exists." };
-      }
-      mockFace = {
-        ...mockFace,
-        fields: mockFace.fields.map((field) => ({
-          ...field,
-          value: request.fields[field.key] ?? field.value,
-        })),
-      };
-      return delay(mockFace) as Promise<T>;
-    }
-    case "validate_config_draft": {
-      const draft = JSON.parse((requireArgs(args).draft as { json: string }).json) as AppConfig;
-      return delay(validate(draft), 40) as Promise<T>;
-    }
-    case "save_config": {
-      const fields = requireArgs(args);
-      const raw = (fields.draft ?? (fields.request as { draft: unknown }).draft) as {
-        json: string;
-      };
-      config = JSON.parse(raw.json) as AppConfig;
-      publish();
-      return delay({ save: { generation: 1, warning: null } }, 350) as Promise<T>;
-    }
-    case "resume_pushing":
-      config = {
-        ...config,
-        preferences: { ...config.preferences, paused: false },
-      };
-      snapshot.runtime = { kind: "running" };
-      publish();
-      return delay(undefined as T);
-    case "control_pomodoro": {
-      const timer = snapshot.pomodoros[0];
-      const action = args?.action as string;
-      if (timer) {
-        if (action === "start") timer.state = "running";
-        if (action === "pause") timer.state = "paused";
-        if (action === "reset") {
-          timer.state = "idle";
-          timer.remaining_seconds = timer.duration_seconds;
-        }
-      }
-      publish();
-      return delay(undefined as T);
-    }
-    case "render_card_preview": {
-      const cardId = args?.cardId as string;
-      const card = config.cards.find((candidate) => candidate.id === cardId);
-      if (!card) throw { category: "not-found", message: "No such card." };
-      const timer = snapshot.pomodoros.find((candidate) => candidate.card_id === cardId);
-      return {
-        png_base64: renderMockFrame(
-          card,
-          config.preferences.timezone,
-          timer?.remaining_seconds ?? null,
-        ),
-        sample: true,
-        state: null,
-      } as T;
-    }
-    case "sign_in_and_select_device": {
-      const request = requireArgs(args).request as { device_id: string };
-      network = {
-        ...network,
-        // A blank selection keeps the harness's automatically selected display.
-        device_id: request.device_id.trim() === "" ? network.device_id : request.device_id,
-      };
-      return delay(network) as Promise<T>;
-    }
-    default:
-      throw { category: "not-found", message: `mock backend has no operation \`${operation}\`` };
-  }
+export function mockGetAppSnapshot(): Promise<AppSnapshot> {
+  return delay(snapshot);
 }
 
-export function mockListen(handler: (payload: AppSnapshot) => void): () => void {
+export function getNetworkSettings(): Promise<NetworkSettings> {
+  return delay(network);
+}
+
+export function mintImageSource(_name: string, _faceKind?: string): Promise<MintedImageSource> {
+  const sourceNumber = config.image_sources.length + 1;
+  const token = `dev-picture-token-${sourceNumber}`;
+  return delay({
+    source_id: `picture-source-${sourceNumber}`,
+    token,
+    push_url: `${network.server_url.replace(/\/$/, "")}/v1/images/${token}`,
+  });
+}
+
+export async function listCreatableFaces(): Promise<FaceDescriptor[]> {
+  throw { category: "not-found", message: "mock backend has no operation `list_creatable_faces`" };
+}
+
+export function listImageSources(): Promise<ImageSourceDescriptor[]> {
+  return delay(imageSourceDescriptors());
+}
+
+export async function updateImageSourceFace(
+  sourceId: string,
+  fields: Record<string, string>,
+): Promise<FaceDescriptor> {
+  if (!config.image_sources.some((source) => source.id === sourceId)) {
+    throw { category: "not-found", message: "This picture source no longer exists." };
+  }
+  mockFace = {
+    ...mockFace,
+    fields: mockFace.fields.map((field) => ({
+      ...field,
+      value: fields[field.key] ?? field.value,
+    })),
+  };
+  return delay(mockFace);
+}
+
+export function validateConfigDraft(draft: AppConfig): Promise<DraftValidation> {
+  return delay(validate(JSON.parse(JSON.stringify(draft)) as AppConfig), 40);
+}
+
+export function saveConfig(draft: AppConfig): Promise<ConfigApplyResult> {
+  config = JSON.parse(JSON.stringify(draft)) as AppConfig;
+  try {
+    publish();
+  } catch (error) {
+    // Serialization fails synchronously; subscriber failures reject the save promise.
+    return Promise.reject(error);
+  }
+  return delay({ save: { generation: 1, warning: null } }, 350);
+}
+
+export async function resumePushing(): Promise<void> {
+  config = {
+    ...config,
+    preferences: { ...config.preferences, paused: false },
+  };
+  snapshot.runtime = { kind: "running" };
+  publish();
+  return delay(undefined);
+}
+
+export async function controlPomodoro(_cardId: string, action: PomodoroAction): Promise<void> {
+  const timer = snapshot.pomodoros[0];
+  if (timer) {
+    if (action === "start") timer.state = "running";
+    if (action === "pause") timer.state = "paused";
+    if (action === "reset") {
+      timer.state = "idle";
+      timer.remaining_seconds = timer.duration_seconds;
+    }
+  }
+  publish();
+  return delay(undefined);
+}
+
+export async function renderCardPreview(cardId: string): Promise<PreviewFrame> {
+  const card = config.cards.find((candidate) => candidate.id === cardId);
+  if (!card) throw { category: "not-found", message: "No such card." };
+  const timer = snapshot.pomodoros.find((candidate) => candidate.card_id === cardId);
+  return {
+    png_base64: renderMockFrame(
+      card,
+      config.preferences.timezone,
+      timer?.remaining_seconds ?? null,
+    ),
+    sample: true,
+    state: null,
+  };
+}
+
+export function selectMockDevice(deviceId: string): Promise<NetworkSettings> {
+  network = {
+    ...network,
+    // A blank selection keeps the harness's automatically selected display.
+    device_id: deviceId.trim() === "" ? network.device_id : deviceId,
+  };
+  return delay(network);
+}
+
+export function listenToAppState(handler: (payload: AppSnapshot) => void): Promise<() => void> {
   listeners.add(handler);
-  return () => listeners.delete(handler);
+  return Promise.resolve(() => listeners.delete(handler));
 }
 
 if (scenario === "default") {

@@ -147,10 +147,8 @@ export type AddCardRequest =
   | AddableCardKind
   | { kind: "picture"; sourceId: string; sourceName: string };
 
-/// Appends a new card with sane defaults for its kind and enrols it at the end
-/// of the active loop in the same draft. Both card-library limits are checked before
-/// either collection changes, so adding is atomic even when a legacy card
-/// outside the loop has filled only one limit.
+/// Appends a new card with defaults for its kind to the single ordered cards list,
+/// which is the loop. At MAX_CARDS, the draft is returned unchanged.
 export function addCard(
   config: AppConfig,
   request: AddCardRequest,
@@ -178,10 +176,8 @@ export function addCard(
     card = {
       kind: request.kind,
       ...common,
-      // The name the caller already chose, not blank. A card added from the menu
-      // arrived with an empty title and leaned on the tile falling back to the
-      // source name, which left the Name field empty and put the owner's only
-      // visible name on the SOURCE rather than on the card.
+      // The schema title keeps its creation value; the picture's visible identity
+      // comes from its source.
       title: request.sourceName,
       source_id: request.sourceId,
       refresh: { kind: "manual" },
@@ -265,17 +261,6 @@ export function removeCard(config: AppConfig, cardId: string): AppConfig {
       ? config.image_sources.filter((source) => source.id !== removed.source_id)
       : config.image_sources;
   return { ...config, cards, image_sources };
-}
-
-export interface LoopEntry {
-  index: number;
-  card: CardSettings;
-}
-
-/// The loop, in order. In schema v10 the card list is the loop, so every position
-/// necessarily contains a card.
-export function loopEntries(config: AppConfig): LoopEntry[] {
-  return config.cards.map((card, index) => ({ index, card }));
 }
 
 export function moveEntry(config: AppConfig, from: number, to: number): AppConfig {
@@ -480,8 +465,8 @@ export function cardsContainerIssues(issues: ValidationIssue[]): ValidationIssue
 /// Every issue an existing surface already claims and renders: the cards container
 /// banner (`cardsContainerIssues`), each card's own row-scoped issues (`issuesForCard`,
 /// checked for every card in the draft — not just whichever one is currently selected,
-/// since selection is a UI-only concern this must not depend on), the active loop's
-/// entries and pacing control, and the timezone field. Returns the actual issue objects (by
+/// since selection is a UI-only concern this must not depend on), the loop's
+/// pacing control, and the timezone field. Returns the actual issue objects (by
 /// reference into `issues`) rather than paths, so `unclaimedIssues` can compute an exact
 /// set difference without re-deriving path-matching rules of its own.
 function claimedIssues(issues: ValidationIssue[], config: AppConfig): ValidationIssue[] {
@@ -524,16 +509,10 @@ export function numberValue(value: string): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-/// Resolves `cardId` to its CURRENT index in `config.cards` and returns only
-/// the issues whose backend path targets that card (`cards[i]` itself, or
-/// any `cards[i].*` field beneath it). Backend validation paths are
-/// array-index based (`cards[2].title`) and `cards[]` is user-reorderable,
-/// so an index captured at validation time is not a stable identity — this
-/// re-resolves the index from the current config on every call instead of
-/// trusting a caller-supplied index, which is what keeps an issue attached
-/// to the same card across a drag reorder rather than sliding onto whatever
-/// card now occupies its old slot. Returns an empty array for an unknown
-/// card id (e.g. one just removed) rather than throwing.
+/// Resolves `cardId` to its index in `config.cards` and returns issues targeting
+/// `cards[i]` or its fields, retaining their absolute paths. Issues and config must
+/// represent the same validation revision: this does not rebase stale index-based
+/// paths after a reorder. Returns an empty array for an unknown card id.
 export function issuesForCard(
   issues: ValidationIssue[],
   config: AppConfig,
@@ -546,17 +525,10 @@ export function issuesForCard(
   return issuesForPath(issues, `cards[${index}]`);
 }
 
-/// Narrows a card's already-scoped issues (see `issuesForCard`) down to a
-/// single field, matched on the path SUFFIX after the `cards[i].` prefix
-/// rather than the absolute path. This is what lets `CardEditor` look up
-/// per-field errors without ever knowing the card's numeric index — the
-/// index-stripping already happened in `issuesForCard`, so the field name
-/// alone is enough to identify the right issues regardless of where the
-/// card currently sits in `config.cards`. Matching is exact (not
-/// prefix-based) because every backend field path used here is a leaf: two
-/// unrelated fields never share a dotted prefix (e.g. `alert` and
-/// `alert.lead_minutes` are deliberately queried separately so a nested
-/// error is not double-reported at the parent field too).
+/// Narrows a card's already-scoped issues (see `issuesForCard`) to one field.
+/// `issuesForCard` retains absolute paths; this helper extracts the suffix after
+/// `cards[i].` so the editor does not need the numeric index. Matching is exact,
+/// not prefix-based, so a nested error is not also reported at its parent field.
 export function issuesForField(cardIssues: ValidationIssue[], field: string): ValidationIssue[] {
   return cardIssues.filter((issue) => {
     const dot = issue.path.indexOf(".");
@@ -586,27 +558,6 @@ export function tapActionDescription(card: CardSettings): string {
     case "open-application":
       return "Tapping this card opens an application.";
   }
-}
-
-/// Reorders `config.cards` by moving the card identified by `cardId` to
-/// `targetIndex`, clamped into range. No-ops (returning the same `config`
-/// reference) when the card is unknown, there are fewer than two cards, or
-/// the target index resolves to the card's current position. Pure: never
-/// mutates `config` or its `cards` array.
-export function moveCard(config: AppConfig, cardId: string, targetIndex: number): AppConfig {
-  const cards = config.cards;
-  const sourceIndex = cards.findIndex((card) => card.id === cardId);
-  if (sourceIndex < 0 || cards.length < 2) {
-    return config;
-  }
-  const boundedTarget = Math.max(0, Math.min(targetIndex, cards.length - 1));
-  if (sourceIndex === boundedTarget) {
-    return config;
-  }
-  const reordered = [...cards];
-  const [moved] = reordered.splice(sourceIndex, 1);
-  reordered.splice(boundedTarget, 0, moved);
-  return { ...config, cards: reordered };
 }
 
 export function cardMoveFromKey(key: string, altKey: boolean): -1 | 0 | 1 {

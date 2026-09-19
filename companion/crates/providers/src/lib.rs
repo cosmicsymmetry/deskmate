@@ -15,30 +15,15 @@ pub struct ProviderSnapshot<T> {
     pub error: Option<String>,
 }
 
-/// Shared bounded last-good state used by every network/file provider.
-#[derive(Debug, Clone)]
-pub(crate) struct LastGood<T> {
-    value: Option<T>,
-}
-
-impl<T> Default for LastGood<T> {
-    fn default() -> Self {
-        Self { value: None }
-    }
-}
-
-impl<T: Clone> LastGood<T> {
-    pub(crate) fn complete(&mut self, result: Result<T, ProviderError>) -> ProviderSnapshot<T> {
+impl<T> ProviderSnapshot<T> {
+    pub(crate) fn from_result(result: Result<T, ProviderError>) -> Self {
         match result {
-            Ok(value) => {
-                self.value = Some(value.clone());
-                ProviderSnapshot {
-                    value: Some(value),
-                    error: None,
-                }
-            }
-            Err(error) => ProviderSnapshot {
-                value: self.value.clone(),
+            Ok(value) => Self {
+                value: Some(value),
+                error: None,
+            },
+            Err(error) => Self {
+                value: None,
                 error: Some(truncate_utf8_to_bytes(&error.to_string(), 96).to_owned()),
             },
         }
@@ -83,40 +68,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn last_good_preserves_complete_values_through_failures_and_recovers() {
-        let mut state = LastGood::<Vec<String>>::default();
-        let first = state.complete(Err(ProviderError::Timeout));
-        assert!(first.value.is_none());
-        assert_eq!(first.error.as_deref(), Some("provider request timed out"));
-
-        let value = vec!["headline".to_owned(), "second row".to_owned()];
-        let success = state.complete(Ok(value.clone()));
-        assert_eq!(success.value.as_ref(), Some(&value));
-        assert!(success.error.is_none());
-
-        for (error, expected) in [
-            (ProviderError::Timeout, "provider request timed out"),
-            (ProviderError::HttpStatus(429), "provider returned HTTP 429"),
-        ] {
-            let mut failure = state.complete(Err(error));
-            assert_eq!(failure.value.as_ref(), Some(&value));
-            assert_eq!(failure.error.as_deref(), Some(expected));
-            failure.value.as_mut().unwrap().clear();
-        }
-
-        let recovered = vec!["replacement".to_owned()];
-        let recovery = state.complete(Ok(recovered.clone()));
-        assert_eq!(recovery.value, Some(recovered.clone()));
-        assert!(recovery.error.is_none());
-        assert_eq!(
-            state.complete(Err(ProviderError::Timeout)).value,
-            Some(recovered)
-        );
-    }
-
-    #[test]
     fn provider_errors_are_truncated_at_96_bytes_on_a_utf8_boundary() {
-        let mut state = LastGood::<String>::default();
         for (message, expected) in [
             (
                 format!("{}érest", "a".repeat(89)),
@@ -127,7 +79,8 @@ mod tests {
                 format!("I/O: {}", "a".repeat(90)),
             ),
         ] {
-            let snapshot = state.complete(Err(ProviderError::Io(message)));
+            let snapshot = ProviderSnapshot::<String>::from_result(Err(ProviderError::Io(message)));
+            assert!(snapshot.value.is_none());
             assert_eq!(snapshot.error.as_deref(), Some(expected.as_str()));
             assert!(expected.len() <= 96);
         }

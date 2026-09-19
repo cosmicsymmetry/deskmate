@@ -47,9 +47,9 @@ fn clamped_refresh(refresh_seconds: u64) -> Duration {
 ///
 /// Synchronous and network-touching, so it must be called from
 /// `spawn_blocking` -- [`EgressHttpClient`] blocks on the runtime. The
-/// provider is passed in and handed back so its last-good state survives
-/// across refreshes. Failed refreshes do not publish: the durable image source
-/// retains the previous frame without renewing its freshness.
+/// provider is passed in and handed back so the same instance can move into
+/// the next blocking task. Failed refreshes do not publish: the durable image
+/// source retains the previous frame without renewing its freshness.
 fn render_face<C: HttpClient>(provider: &mut FaceProvider<C>) -> Result<String, String> {
     let now = Utc::now();
     match provider {
@@ -252,119 +252,6 @@ mod tests {
         fn get_text(&mut self, _url: &str) -> Result<String, ProviderError> {
             self.responses.pop_front().expect("a response is queued")
         }
-    }
-
-    fn assert_cached_face_retains_error(mut provider: FaceProvider<FakeClient>, expected: &str) {
-        let first_face = render_face(&mut provider).expect("the first fetch succeeds");
-        frame_from_svg(&first_face).expect("the reading renders a valid frame");
-        assert_eq!(render_face(&mut provider), Err(expected.to_owned()));
-
-        // The cached reading remains renderable, but the publication gate refuses it.
-        let (cached_face, error) = match &mut provider {
-            FaceProvider::Weather { provider } => {
-                let snapshot = provider.refresh();
-                (
-                    weather::render(&adapt::weather_face(&snapshot.value.unwrap())),
-                    snapshot.error,
-                )
-            }
-            FaceProvider::Rss { provider, title } => {
-                let snapshot = provider.refresh();
-                (
-                    rss::render(&adapt::rss_face(
-                        &snapshot.value.unwrap(),
-                        title,
-                        Utc::now(),
-                    )),
-                    snapshot.error,
-                )
-            }
-            FaceProvider::Token { provider } => {
-                let snapshot = provider.refresh();
-                (
-                    token::render(&adapt::token_face(&snapshot.value.unwrap())),
-                    snapshot.error,
-                )
-            }
-        };
-        assert_eq!(cached_face, first_face);
-        assert_eq!(error.as_deref(), Some(expected));
-    }
-
-    #[test]
-    fn cached_weather_renders_with_the_refresh_error() {
-        let client = FakeClient {
-            responses: VecDeque::from([
-                Ok(include_str!("../../../providers/tests/fixtures/weather-location.json").into()),
-                Ok(include_str!("../../../providers/tests/fixtures/weather-current.json").into()),
-                Err(ProviderError::Timeout),
-                Err(ProviderError::Timeout),
-            ]),
-        };
-        assert_cached_face_retains_error(
-            FaceProvider::Weather {
-                provider: Box::new(WeatherProvider::new(
-                    client,
-                    WeatherOptions {
-                        location: "Tbilisi".into(),
-                        units: WeatherUnits::Metric,
-                    },
-                )),
-            },
-            "provider request timed out",
-        );
-    }
-
-    #[test]
-    fn cached_rss_renders_with_the_refresh_error() {
-        let client = FakeClient {
-            responses: VecDeque::from([
-                Ok(
-                    "<rss><channel><item><title>Cached headline</title></item></channel></rss>"
-                        .into(),
-                ),
-                Err(ProviderError::HttpStatus(503)),
-                Err(ProviderError::HttpStatus(503)),
-            ]),
-        };
-        assert_cached_face_retains_error(
-            FaceProvider::Rss {
-                provider: Box::new(RssProvider::new(
-                    client,
-                    RssOptions {
-                        url: "https://example.test/feed".into(),
-                        maximum_items: 4,
-                    },
-                )),
-                title: "News".into(),
-            },
-            "provider returned HTTP 503",
-        );
-    }
-
-    #[test]
-    fn cached_token_renders_with_the_refresh_error() {
-        let client = FakeClient {
-            responses: VecDeque::from([
-                Ok(r#"[{"symbol":"sol","name":"Solana","current_price":142.37}]"#.into()),
-                Ok(r#"{"prices":[[1,140.0],[2,142.37]]}"#.into()),
-                Err(ProviderError::HttpStatus(429)),
-                Err(ProviderError::HttpStatus(429)),
-            ]),
-        };
-        assert_cached_face_retains_error(
-            FaceProvider::Token {
-                provider: Box::new(TokenProvider::new(
-                    client,
-                    TokenOptions {
-                        coin_id: "solana".into(),
-                        currency: "usd".into(),
-                        api_key: None,
-                    },
-                )),
-            },
-            "provider returned HTTP 429",
-        );
     }
 
     #[test]

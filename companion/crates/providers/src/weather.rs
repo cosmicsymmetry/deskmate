@@ -2,7 +2,7 @@ use protocol::truncate_utf8_to_bytes;
 use serde_json::Value;
 
 use crate::http::HttpClient;
-use crate::{LastGood, ProviderError, ProviderSnapshot};
+use crate::{ProviderError, ProviderSnapshot};
 
 const GEOCODING_ENDPOINT: &str = "https://geocoding-api.open-meteo.com/v1/search";
 const FORECAST_ENDPOINT: &str = "https://api.open-meteo.com/v1/forecast";
@@ -56,21 +56,16 @@ pub struct WeatherReading {
 pub struct WeatherProvider<C> {
     client: C,
     options: WeatherOptions,
-    state: LastGood<WeatherReading>,
 }
 
 impl<C: HttpClient> WeatherProvider<C> {
     pub fn new(client: C, options: WeatherOptions) -> Self {
-        Self {
-            client,
-            options,
-            state: LastGood::default(),
-        }
+        Self { client, options }
     }
 
     pub fn refresh(&mut self) -> ProviderSnapshot<WeatherReading> {
         let result = fetch_weather(&mut self.client, &self.options);
-        self.state.complete(result)
+        ProviderSnapshot::from_result(result)
     }
 }
 
@@ -164,7 +159,7 @@ fn parse_forecast(body: &str, location: &str) -> Result<WeatherReading, Provider
     let low = bounded_temperature(low)?;
     let temperature_tenths = to_tenths(temperature)?;
     // Apparent temperature still validates the forecast even though the face
-    // does not display it; malformed data must retain the last good reading.
+    // does not display it; malformed data must fail the refresh.
     to_tenths(apparent)?;
 
     Ok(WeatherReading {
@@ -540,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_complete_daily_extrema_keep_the_last_good_reading() {
+    fn invalid_complete_daily_extrema_fail_without_a_value() {
         let location = include_str!("../tests/fixtures/weather-location.json");
         let client = FakeClient {
             responses: VecDeque::from([
@@ -555,7 +550,7 @@ mod tests {
         let first = provider.refresh();
         assert!(first.error.is_none());
         let second = provider.refresh();
-        assert_eq!(second.value, first.value);
+        assert!(second.value.is_none());
         assert_eq!(
             second.error.as_deref(),
             Some("malformed provider data: weather temperature is outside supported bounds")

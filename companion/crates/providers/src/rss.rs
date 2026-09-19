@@ -3,7 +3,7 @@ use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
 use crate::http::{HttpClient, validate_http_url};
-use crate::{LastGood, ProviderError, ProviderSnapshot};
+use crate::{ProviderError, ProviderSnapshot};
 
 const MAX_RSS_ITEMS: usize = 5;
 const MAX_XML_DEPTH: usize = 32;
@@ -62,16 +62,11 @@ pub struct RssFeed {
 pub struct RssProvider<C> {
     client: C,
     options: RssOptions,
-    state: LastGood<RssFeed>,
 }
 
 impl<C: HttpClient> RssProvider<C> {
     pub fn new(client: C, options: RssOptions) -> Self {
-        Self {
-            client,
-            options,
-            state: LastGood::default(),
-        }
+        Self { client, options }
     }
 
     pub fn refresh(&mut self) -> ProviderSnapshot<RssFeed> {
@@ -79,7 +74,7 @@ impl<C: HttpClient> RssProvider<C> {
             .client
             .get_text(&self.options.url)
             .and_then(|body| parse_rss(&body, self.options.maximum_items.min(MAX_RSS_ITEMS)));
-        self.state.complete(result)
+        ProviderSnapshot::from_result(result)
     }
 }
 

@@ -15,7 +15,7 @@ use protocol::truncate_utf8_to_bytes;
 use serde_json::Value;
 
 use crate::http::HttpClient;
-use crate::{LastGood, ProviderError, ProviderSnapshot};
+use crate::{ProviderError, ProviderSnapshot};
 
 const MARKETS_ENDPOINT: &str = "https://api.coingecko.com/api/v3/coins/markets";
 const CHART_ENDPOINT_PREFIX: &str = "https://api.coingecko.com/api/v3/coins/";
@@ -60,21 +60,16 @@ pub struct TokenQuote {
 pub struct TokenProvider<C> {
     client: C,
     options: TokenOptions,
-    state: LastGood<TokenQuote>,
 }
 
 impl<C: HttpClient> TokenProvider<C> {
     pub fn new(client: C, options: TokenOptions) -> Self {
-        Self {
-            client,
-            options,
-            state: LastGood::default(),
-        }
+        Self { client, options }
     }
 
     pub fn refresh(&mut self) -> ProviderSnapshot<TokenQuote> {
         let result = fetch_quote(&mut self.client, &self.options);
-        self.state.complete(result)
+        ProviderSnapshot::from_result(result)
     }
 }
 
@@ -447,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_refresh_keeps_the_last_good_price_and_reports_the_error() {
+    fn a_failed_refresh_has_no_value_and_reports_the_error() {
         let mut provider = TokenProvider::new(
             FakeClient::new(vec![
                 Ok(MARKETS.into()),
@@ -460,14 +455,7 @@ mod tests {
         assert!(first.value.is_some());
         assert!(first.error.is_none());
         let second = provider.refresh();
-        assert_eq!(
-            second.value, first.value,
-            "the complete last reading survives"
-        );
-        assert!(
-            (second.value.as_ref().unwrap().price - 142.37).abs() < f64::EPSILON,
-            "the panel keeps showing the last price it knew"
-        );
+        assert!(second.value.is_none());
         assert!(second.error.is_some());
     }
 }

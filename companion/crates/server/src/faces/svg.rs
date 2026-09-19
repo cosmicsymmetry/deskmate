@@ -360,18 +360,9 @@ pub(crate) fn tracked_width(text: &str, size: f64, weight: u16, tracking: f64) -
     text_width(text, size, weight) + tracking * count(text.chars().count())
 }
 
-/// [`ellipsize`], accounting for tracking.
-pub(crate) fn ellipsize_tracked(
-    text: &str,
-    size: f64,
-    weight: u16,
-    tracking: f64,
-    max_width: f64,
-) -> String {
+/// Trims overflowing text until the ellipsis fits, tracking included.
+fn trim_with_ellipsis(text: &str, size: f64, weight: u16, tracking: f64, max_width: f64) -> String {
     const ELLIPSIS: char = '\u{2026}';
-    if tracked_width(text, size, weight, tracking) <= max_width {
-        return text.to_owned();
-    }
     let mut characters: Vec<char> = text.chars().collect();
     while !characters.is_empty() {
         characters.pop();
@@ -400,7 +391,7 @@ pub(crate) fn fit_tracked(
     if tracked_width(text, size, weight, tracking) <= max_width {
         return text.to_owned();
     }
-    ellipsize_tracked(text, size, weight, tracking, max_width)
+    trim_with_ellipsis(text, size, weight, tracking, max_width)
 }
 
 /// Returns `text` unchanged when it fits, otherwise truncates it with an
@@ -422,21 +413,7 @@ fn ellipsize(text: &str, size: f64, weight: u16, max_width: f64) -> String {
             return ellipsized;
         }
     }
-    let mut characters: Vec<char> = text.chars().collect();
-    while !characters.is_empty() {
-        characters.pop();
-        let candidate: String = characters
-            .iter()
-            .collect::<String>()
-            .trim_end()
-            .chars()
-            .chain(std::iter::once(ELLIPSIS))
-            .collect();
-        if text_width(&candidate, size, weight) <= max_width {
-            return candidate;
-        }
-    }
-    String::from(ELLIPSIS)
+    trim_with_ellipsis(text, size, weight, 0.0, max_width)
 }
 
 /// Splits an unbreakable word at the last character that fits.
@@ -579,6 +556,28 @@ mod tests {
         assert!(tracked_width(&fitted, 15.0, 600, 1.4) <= 120.0);
         // A run that already fits is returned untouched, not ellipsized.
         assert_eq!(fit_tracked("DUBAI", 15.0, 600, 1.4, 200.0), "DUBAI");
+    }
+
+    #[test]
+    fn ellipsizing_marks_fitting_text_but_tracked_fitting_keeps_it() {
+        assert_eq!(ellipsize("DUBAI", 15.0, 600, 200.0), "DUBAI…");
+        assert_eq!(fit_tracked("DUBAI", 15.0, 600, 1.4, 200.0), "DUBAI");
+    }
+
+    #[test]
+    fn ordinary_and_tracked_overflow_keep_the_marker_inside_the_box() {
+        let text = "DUBAI, UNITED ARAB EMIRATES";
+        let ordinary = ellipsize(text, 15.0, 600, 120.0);
+        assert!(ordinary.ends_with('…'));
+        assert!(text_width(&ordinary, 15.0, 600) <= 120.0);
+        for tracking in [0.0, 1.4] {
+            let fitted = fit_tracked(text, 15.0, 600, tracking, 120.0);
+            assert!(fitted.ends_with('…'));
+            assert!(tracked_width(&fitted, 15.0, 600, tracking) <= 120.0);
+            if tracking == 0.0 {
+                assert_eq!(fitted, ordinary);
+            }
+        }
     }
 
     #[test]

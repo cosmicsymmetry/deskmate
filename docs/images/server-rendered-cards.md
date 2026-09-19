@@ -17,23 +17,24 @@ draw.
 
 ## Setting one up
 
-Three steps, and the first two are the same as for any picture card.
+1. In the browser companion's add menu, select a server face: Weather, RSS feed or
+   Token price. The server creates its image source and persists a blank face spec.
+2. Fill in the fields supplied by the server's descriptor, such as the location,
+   feed URL and title, or coin ID and currency.
+3. Save the card/configuration. The card remains an ordinary picture card; its
+   completed face settings start the server refresher without a restart.
 
-1. **Mint an image source** and keep the id. The token is not needed — the server pushes
-   to its own store directly, not over HTTP.
+## Advanced manual settings
 
-   ```sh
-   curl -sX POST https://deskmate.rodi.one/v1/images \
-     -H "Authorization: Bearer $DESKMATE_ADMIN_TOKEN" \
-     -H 'Content-Type: application/json' \
-     -d '{"name": "Weather"}'
-   # {"id":"src_9f3a...","token":"..."}
-   ```
+The server persists specs in `data-cards.json` inside `DESKMATE_CONFIG_DIR`;
+`DESKMATE_DATA_CARDS` overrides that path. Settings such as `refresh_seconds` and
+an optional token `api_key` are deliberately absent from the browser descriptors.
 
-2. **Add a picture card** in the companion window naming that `source_id`.
-
-3. **Write the spec file** and restart the server. The default path is
-   `data-cards.json` inside `DESKMATE_CONFIG_DIR`; `DESKMATE_DATA_CARDS` overrides it.
+To edit an existing persisted spec, stop the server, back up the file, and change
+only the intended entry, retaining every other entry. Then restart the server:
+external edits are read at startup, not hot-reloaded, and browser settings updates
+rewrite the server's retained spec set. The following shows the nested shape;
+do not replace an existing multi-entry file with this example.
 
    ```json
    [
@@ -69,6 +70,19 @@ error. A **malformed** file fails the start, deliberately: a server that came up
 silently missing cards would present as "the panel stopped updating" with nothing in the
 log. Unknown fields are refused too, so `"unit"` does not quietly become the default
 `"units"`.
+
+For a manually created source, the admin bearer remains supported:
+
+```sh
+curl -sX POST https://deskmate.rodi.one/v1/images \
+  -H "Authorization: Bearer $DESKMATE_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "Weather"}'
+```
+
+Use the returned id for the spec's `source_id` and the picture card's source.
+The server writes frames directly to its store, so it does not need the returned
+producer token.
 
 ## The fields
 
@@ -173,13 +187,3 @@ Both are worth keeping in mind before adding a face.
   failed while `curl` to the same URL worked. `egress::USER_AGENT` now identifies the
   server on every request; `tools/picture-producers/claude_limits_png.py` carries the
   same note for urllib.
-
-## What this is not
-
-Native card kinds. A weather card is still a picture card plus a line in a file, so the
-companion window shows it as "Picture — Weather" and has no editor for the location or
-the feed URL. Schema v11 would fix that, and it is a strictly additive change on top of
-this: the providers, the faces, the frames and the delivery do not move. The spec file is
-where the authority honestly sits until the window grows the editors — putting fields in
-the config document that no window can author and no migration can repair is how this
-project came to delete two card families.

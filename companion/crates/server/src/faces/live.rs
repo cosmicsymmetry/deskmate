@@ -30,9 +30,6 @@ use super::{adapt, rss, token, weather};
 use crate::egress_client::EgressHttpClient;
 use crate::face_render::{frame_from_svg, pixmap_from_svg};
 
-/// Six columns, matching what the weather face draws.
-const HOURLY_COLUMNS: usize = 6;
-
 fn enabled() -> bool {
     std::env::var_os("DESKMATE_LIVE_FACES").is_some()
 }
@@ -111,7 +108,7 @@ async fn a_live_weather_card_renders() {
             .collect::<Vec<_>>()
     );
 
-    let face = adapt::weather_face(reading, HOURLY_COLUMNS);
+    let face = adapt::weather_face(reading);
     accept("live--weather", &weather::render(&face));
 }
 
@@ -163,7 +160,7 @@ async fn a_live_token_card_renders() {
         quote.high_24h
     );
 
-    let face = adapt::token_face(quote, "24h");
+    let face = adapt::token_face(quote);
     accept("live--token", &token::render(&face));
 }
 

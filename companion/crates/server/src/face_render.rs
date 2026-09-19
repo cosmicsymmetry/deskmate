@@ -40,12 +40,9 @@ use crate::image_ingest::{CanonicalFrame, encode_rgb565};
 /// The two faces the panel's own baked tiers are subset from, so a rastered
 /// face and a scene-native one are the same typeface.
 ///
-/// They live inside this crate rather than in `tools/`, and that is a deploy
-/// constraint rather than tidiness: `deploy/README.md`'s recipe exports
-/// `git archive HEAD companion`, so an `include_bytes!` path that climbs out of
-/// `companion/` does not exist on the build VM and the release build fails to
-/// compile. Keeping build inputs inside the crate that includes them makes the
-/// documented export self-contained.
+/// The bundled fonts are tracked build inputs inside this crate. The deploy
+/// exports `companion/` plus `firmware/`; `tools/` is outside that payload, so
+/// an `include_bytes!` path into it would fail on the build VM.
 const INTER_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
 const INTER_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Inter-SemiBold.ttf");
 pub(crate) const FONT_FAMILY: &str = "Inter";
@@ -161,6 +158,15 @@ mod tests {
 
     #[test]
     fn an_authored_face_rasterizes_to_a_canonical_frame() {
+        let pixmap = pixmap_from_svg(MINIMAL).expect("the minimal face renders");
+        assert_eq!(
+            pixmap.width(),
+            u32::try_from(SCENE_CANVAS_WIDTH).expect("fixed canvas")
+        );
+        assert_eq!(
+            pixmap.height(),
+            u32::try_from(SCENE_CANVAS_HEIGHT).expect("fixed canvas")
+        );
         let frame = frame_from_svg(MINIMAL).expect("the minimal face renders");
         // 12-byte LVGL header plus two bytes per pixel: byte-identical in shape
         // to what the PNG ingest path produces, because it is the same encoder.

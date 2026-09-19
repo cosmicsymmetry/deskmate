@@ -14,11 +14,9 @@ use crate::face_render::{frame_from_svg, pixmap_from_svg};
 use protocol::{SCENE_CANVAS_HEIGHT, SCENE_CANVAS_WIDTH};
 
 /// Writes every case as a PNG when `DESKMATE_FACE_DUMP` names a directory.
-///
-/// This is the review loop, not an assertion. It is a normal test so it cannot
-/// rot: if a face stops rendering, this fails alongside everything else.
+/// The optional dump is the review loop; frame validation always runs.
 #[test]
-fn every_case_renders_and_can_be_dumped_for_review() {
+fn every_case_produces_a_frame_the_asset_path_would_accept() {
     let dump = std::env::var_os("DESKMATE_FACE_DUMP").map(std::path::PathBuf::from);
     if let Some(directory) = &dump {
         std::fs::create_dir_all(directory).expect("the dump directory is creatable");
@@ -27,29 +25,11 @@ fn every_case_renders_and_can_be_dumped_for_review() {
     let cases = cases::all();
     assert!(!cases.is_empty(), "there is something to review");
 
-    for case in &cases {
-        let pixmap = pixmap_from_svg(&case.svg)
-            .unwrap_or_else(|error| panic!("case {} did not render: {error}", case.name));
-        assert_eq!(pixmap.width(), u32::try_from(SCENE_CANVAS_WIDTH).unwrap());
-        assert_eq!(pixmap.height(), u32::try_from(SCENE_CANVAS_HEIGHT).unwrap());
-
-        if let Some(directory) = &dump {
-            let path = directory.join(format!("{}.png", case.name));
-            pixmap
-                .save_png(&path)
-                .unwrap_or_else(|error| panic!("writing {}: {error}", path.display()));
-            println!("wrote {}", path.display());
-        }
-    }
-}
-
-#[test]
-fn every_case_produces_a_frame_the_asset_path_would_accept() {
     // The device's decoder reads the 12-byte LVGL header and then exactly
     // width*height*2 bytes. A face that produced anything else would be
     // refused on the wire, long after this test could have caught it.
     let expected = 12 + (SCENE_CANVAS_WIDTH as usize * SCENE_CANVAS_HEIGHT as usize * 2);
-    for case in cases::all() {
+    for case in &cases {
         let frame = frame_from_svg(&case.svg)
             .unwrap_or_else(|error| panic!("case {} did not render: {error}", case.name));
         assert_eq!(
@@ -63,6 +43,16 @@ fn every_case_produces_a_frame_the_asset_path_would_accept() {
             "case {} produced an unhashed frame",
             case.name
         );
+
+        if let Some(directory) = &dump {
+            let pixmap = pixmap_from_svg(&case.svg)
+                .unwrap_or_else(|error| panic!("case {} did not render: {error}", case.name));
+            let path = directory.join(format!("{}.png", case.name));
+            pixmap
+                .save_png(&path)
+                .unwrap_or_else(|error| panic!("writing {}: {error}", path.display()));
+            println!("wrote {}", path.display());
+        }
     }
 }
 

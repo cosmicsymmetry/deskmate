@@ -49,8 +49,6 @@ pub(crate) struct TokenFace {
     pub price: f64,
     /// Change over the window, in percent. Sign carries the direction.
     pub change_percent: f64,
-    /// The window's label, e.g. "24H".
-    pub window: String,
     pub low: f64,
     pub high: f64,
     /// Oldest to newest. Fewer than two points draws no sparkline.
@@ -269,19 +267,17 @@ fn draw_change_chip(canvas: &mut Canvas, face: &TokenFace, top: f64) {
         .weight(WEIGHT_SEMIBOLD),
     );
 
-    if !face.window.is_empty() {
-        canvas.text(
-            &Text::new(
-                MARGIN + chip_width + 1.5 * GRID,
-                baseline_from_center(center, SIZE_EYEBROW),
-                &face.window.to_uppercase(),
-                SIZE_EYEBROW,
-                INK_3,
-            )
-            .weight(WEIGHT_SEMIBOLD)
-            .tracking(TRACKING_EYEBROW),
-        );
-    }
+    canvas.text(
+        &Text::new(
+            MARGIN + chip_width + 1.5 * GRID,
+            baseline_from_center(center, SIZE_EYEBROW),
+            "24H",
+            SIZE_EYEBROW,
+            INK_3,
+        )
+        .weight(WEIGHT_SEMIBOLD)
+        .tracking(TRACKING_EYEBROW),
+    );
 }
 
 /// An equilateral-ish triangle pointing up or down, centred on `(x, cy)`.
@@ -489,7 +485,6 @@ mod tests {
             currency_mark: "$".to_owned(),
             price: 142.37,
             change_percent: 2.41,
-            window: "24h".to_owned(),
             low: 138.02,
             high: 147.6,
             series: (0..96)
@@ -506,6 +501,7 @@ mod tests {
         assert!(svg.contains("142"), "the integer part is set large");
         assert!(svg.contains(".37"), "the cents are kept");
         assert!(svg.contains("+2.41%"));
+        assert!(svg.contains(">24H<"));
         assert!(svg.contains(GOOD), "a rise is the good role");
     }
 

@@ -1,61 +1,27 @@
 //! Server-rendered data cards: the server acting as its own picture producer.
 //!
-//! # What this is, and what it deliberately is not
+//! Weather, RSS and token faces belong to ordinary picture cards. Each face is
+//! an image source the server pushes to itself: a refresh task fetches data,
+//! renders the face, and hands the frame to
+//! [`crate::image_sources::ImageSourceStore::accept`]. Delivery then uses the
+//! same durable assets, device notifications and staleness inference as an
+//! external producer's PNG.
 //!
-//! A weather, RSS or token card here is an **image source the server pushes to
-//! itself**. The owner creates one picture card pointing at the source; a task
-//! in this module fetches the data on an interval, renders the face, and hands
-//! the frame to [`crate::image_sources::ImageSourceStore::accept`] -- the exact
-//! call an external producer's PNG arrives through.
-//!
-//! Everything downstream is therefore already built and already proven on
-//! hardware: the durable asset, the keep-set, the device notify, the
-//! staleness inference, the GC. This module adds a producer, not a delivery
-//! path.
-//!
-//! What it is not is a new card *kind*. `docs/config/v10.md` still has three
-//! (`clock`, `pomodoro`, `picture`) and nothing here changes that. Native
-//! kinds would put these cards in the companion window with their own editors
-//! instead of requiring a hand-written spec file plus a picture card pointed at
-//! a source id -- that is schema v11's job, and it is a strictly cosmetic
-//! improvement on top of this: the fetch, the faces and the frames do not
-//! change.
-//!
-//! # Why the specs live in a file rather than in the config document
-//!
-//! Because the config document is the *companion's* document, and the
-//! companion has no UI for these yet. Putting a half-schema in it -- fields no
-//! window can author and no migration can repair -- is how this repository
-//! ended up deleting two card families. A server-side file is honest about
-//! where the authority currently sits and costs nothing to delete when the
-//! window grows the editors.
+//! The server owns the persisted specs separately from the device config.
+//! The browser creates and edits faces through server-provided descriptors,
+//! so adding a face does not require a new card kind or a config schema change.
+//! Settings absent from those descriptors can be edited in the spec file while
+//! the server is stopped.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
-use chrono::Utc;
-use providers::Provider as _;
-use providers::rss::{RssOptions, RssProvider};
-use providers::token::{TokenOptions, TokenProvider};
-use providers::weather::{WeatherOptions, WeatherProvider, WeatherUnits};
 use serde::{Deserialize, Serialize};
 
 use crate::ServerState;
-use crate::egress_client::EgressHttpClient;
-use crate::face_render::frame_from_svg;
-use crate::faces::{adapt, rss, token, weather};
-use crate::image_sources::AcceptOutcome;
 
-/// The weather face draws six hourly columns.
-const HOURLY_COLUMNS: usize = 6;
-/// A refresh no faster than this, whatever a spec asks for. The individual
-/// providers have their own floors too; this one bounds the whole loop.
-const MIN_REFRESH: Duration = Duration::from_secs(60);
-/// An unreachable source is retried on its own interval, but never slower than
-/// this, so a card that failed once during a network blip does not sit stale
-/// for a day.
-const MAX_REFRESH: Duration = Duration::from_hours(6);
+mod worker;
+
 /// A field value arrives over an internet-facing admin route. This comfortably
 /// covers feed URLs while preventing a tiny settings document from becoming an
 /// unbounded allocation surface.
@@ -72,13 +38,13 @@ const MAX_FACE_FIELD_VALUE_BYTES: usize = 2_048;
 /// forever. Nesting costs one level of braces and keeps both sides strict.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DataCardSpec {
+struct DataCardSpec {
     /// The image source this card pushes to, as `POST /v1/images` minted it.
     /// The owner's picture card names the same id.
-    pub source_id: String,
+    source_id: String,
     #[serde(default = "default_refresh_seconds")]
-    pub refresh_seconds: u64,
-    pub face: FaceSpec,
+    refresh_seconds: u64,
+    face: FaceSpec,
 }
 
 const fn default_refresh_seconds() -> u64 {
@@ -88,7 +54,7 @@ const fn default_refresh_seconds() -> u64 {
 /// Which face, and what it needs to know.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum FaceSpec {
+enum FaceSpec {
     Weather {
         /// A place name, geocoded by the provider. Not coordinates: the owner
         /// types a city, and the geocoder's own display name is what the face
@@ -119,7 +85,7 @@ fn default_currency() -> String {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum Units {
+enum Units {
     #[default]
     Metric,
     Imperial,
@@ -128,15 +94,15 @@ pub enum Units {
 /// The server-owned settings contract rendered by the companion. The app treats
 /// `kind` as opaque metadata and renders only this descriptor's field types.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct FaceDescriptor {
-    pub kind: String,
-    pub label: String,
-    pub fields: Vec<FaceFieldDescriptor>,
+pub(crate) struct FaceDescriptor {
+    pub(crate) kind: String,
+    pub(crate) label: String,
+    pub(crate) fields: Vec<FaceFieldDescriptor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
-pub enum FaceFieldDescriptor {
+pub(crate) enum FaceFieldDescriptor {
     Text {
         key: String,
         label: String,
@@ -166,9 +132,9 @@ impl FaceFieldDescriptor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct FaceFieldOption {
-    pub value: String,
-    pub label: String,
+pub(crate) struct FaceFieldOption {
+    pub(crate) value: String,
+    pub(crate) label: String,
 }
 
 /// The only function that teaches the settings UI about a face. Adding a face
@@ -180,7 +146,7 @@ pub struct FaceFieldOption {
 /// The companion's add menu is built from this list, which is why the menu can
 /// offer "Weather" without the app knowing what a weather face is. Adding a
 /// fourth face here is what makes it appear in the window -- no app change.
-pub fn creatable_faces() -> Vec<FaceDescriptor> {
+pub(crate) fn creatable_faces() -> Vec<FaceDescriptor> {
     ["weather", "rss", "token"]
         .into_iter()
         .filter_map(blank_face)
@@ -215,7 +181,7 @@ fn blank_face(kind: &str) -> Option<FaceSpec> {
 /// errors the owner cannot act on until they type one. So an incomplete face is
 /// stored but not refreshed, and the card shows the ordinary "no frame yet"
 /// state until its settings are filled in.
-pub(crate) fn face_is_complete(face: &FaceSpec) -> bool {
+fn face_is_complete(face: &FaceSpec) -> bool {
     face_descriptor(face)
         .fields
         .iter()
@@ -227,7 +193,7 @@ pub(crate) fn face_is_complete(face: &FaceSpec) -> bool {
         })
 }
 
-pub fn face_descriptor(face: &FaceSpec) -> FaceDescriptor {
+fn face_descriptor(face: &FaceSpec) -> FaceDescriptor {
     let text = |key: &str, label: &str, value: &str, placeholder: &str| FaceFieldDescriptor::Text {
         key: key.to_owned(),
         label: label.to_owned(),
@@ -298,9 +264,9 @@ pub fn face_descriptor(face: &FaceSpec) -> FaceDescriptor {
 /// stay together so an update can atomically replace the persisted spec and the
 /// one refresher that consumes it.
 pub(crate) struct DataCardState {
-    pub(crate) spec_path: PathBuf,
-    pub(crate) specs: Vec<DataCardSpec>,
-    pub(crate) tasks: HashMap<String, tokio::task::JoinHandle<()>>,
+    spec_path: PathBuf,
+    specs: Vec<DataCardSpec>,
+    tasks: HashMap<String, tokio::task::JoinHandle<()>>,
 }
 
 impl DataCardState {
@@ -327,13 +293,17 @@ pub(crate) enum FaceUpdateError {
     Persist(String),
 }
 
-impl From<Units> for WeatherUnits {
-    fn from(units: Units) -> Self {
-        match units {
-            Units::Metric => Self::Metric,
-            Units::Imperial => Self::Imperial,
-        }
+/// Loads the server-owned specs before listener binding and starts their refreshers.
+///
+/// # Errors
+/// Returns the existing load error when the spec file cannot be read or parsed.
+pub fn start_data_cards(state: &ServerState, spec_path: PathBuf) -> Result<(), String> {
+    let specs = load_specs(&spec_path)?;
+    if specs.is_empty() {
+        tracing::info!(target: "server", "no server-rendered data cards configured");
     }
+    spawn_refreshers(state, spec_path, specs);
+    Ok(())
 }
 
 /// Reads the spec file, or returns nothing when there is none.
@@ -342,7 +312,7 @@ impl From<Units> for WeatherUnits {
 /// server-rendered cards -- so it is not an error. A *malformed* file is, and
 /// loudly: silently running with zero cards because a comma was missing would
 /// present as "the panel stopped updating" with nothing in the log.
-pub fn load_specs(path: &Path) -> Result<Vec<DataCardSpec>, String> {
+fn load_specs(path: &Path) -> Result<Vec<DataCardSpec>, String> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -366,123 +336,11 @@ pub fn load_specs(path: &Path) -> Result<Vec<DataCardSpec>, String> {
     Ok(specs)
 }
 
-/// Renders one spec's face, fetching whatever it needs.
-///
-/// Synchronous and network-touching, so it must be called from
-/// `spawn_blocking` -- [`EgressHttpClient`] blocks on the runtime. The
-/// provider is passed in and handed back so its last-good state survives
-/// across refreshes: without that, one failed fetch would blank a face that
-/// has a perfectly good previous reading.
-fn render_face(provider: &mut FaceProvider) -> Result<(String, Option<String>), String> {
-    let now = Utc::now();
-    match provider {
-        FaceProvider::Weather { provider } => {
-            let snapshot = provider.refresh(now);
-            let face = adapt::weather_face(&snapshot.value, HOURLY_COLUMNS);
-            // A refresh that failed with no previous reading has nothing to
-            // draw: the location is empty and the temperature is zero, which
-            // would render a confident "0°" for a card that has never worked.
-            if snapshot.error.is_some() && snapshot.refreshed_at.is_none() {
-                return Err(snapshot.error.unwrap_or_default());
-            }
-            Ok((weather::render(&face), snapshot.error))
-        }
-        FaceProvider::Rss { provider, title } => {
-            let snapshot = provider.refresh(now);
-            if snapshot.error.is_some() && snapshot.refreshed_at.is_none() {
-                return Err(snapshot.error.unwrap_or_default());
-            }
-            let face = adapt::rss_face(&snapshot.value, title, now);
-            Ok((rss::render(&face), snapshot.error))
-        }
-        FaceProvider::Token { provider } => {
-            let snapshot = provider.refresh(now);
-            if snapshot.error.is_some() && snapshot.refreshed_at.is_none() {
-                return Err(snapshot.error.unwrap_or_default());
-            }
-            let face = adapt::token_face(&snapshot.value, "24h");
-            Ok((token::render(&face), snapshot.error))
-        }
-    }
-}
-
-/// One live provider, with the extra the adapter needs beside it.
-enum FaceProvider {
-    Weather {
-        provider: Box<WeatherProvider<EgressHttpClient>>,
-    },
-    Rss {
-        provider: Box<RssProvider<EgressHttpClient>>,
-        title: String,
-    },
-    Token {
-        provider: Box<TokenProvider<EgressHttpClient>>,
-    },
-}
-
-impl FaceProvider {
-    /// Builds the provider for a spec.
-    ///
-    /// Constructed inside the runtime because [`EgressHttpClient::new`]
-    /// captures the current handle.
-    fn build(spec: &DataCardSpec, refresh: Duration) -> Self {
-        match &spec.face {
-            FaceSpec::Weather { location, units } => Self::Weather {
-                provider: Box::new(WeatherProvider::new(
-                    EgressHttpClient::new(),
-                    WeatherOptions {
-                        location: location.clone(),
-                        units: (*units).into(),
-                        refresh_interval: refresh,
-                    },
-                )),
-            },
-            FaceSpec::Rss { url, title } => Self::Rss {
-                provider: Box::new(RssProvider::new(
-                    EgressHttpClient::new(),
-                    RssOptions {
-                        url: url.clone(),
-                        // Four is what the face can show: one lead plus three
-                        // followers. Asking for more would parse items nothing
-                        // draws.
-                        maximum_items: 4,
-                        refresh_interval: refresh,
-                    },
-                )),
-                title: title.clone(),
-            },
-            FaceSpec::Token {
-                coin_id,
-                currency,
-                api_key,
-            } => Self::Token {
-                provider: Box::new(TokenProvider::new(
-                    EgressHttpClient::new(),
-                    TokenOptions {
-                        coin_id: coin_id.clone(),
-                        currency: currency.clone(),
-                        refresh_interval: refresh,
-                        api_key: api_key.clone(),
-                    },
-                )),
-            },
-        }
-    }
-
-    const fn label(&self) -> &'static str {
-        match self {
-            Self::Weather { .. } => "weather",
-            Self::Rss { .. } => "rss",
-            Self::Token { .. } => "token",
-        }
-    }
-}
-
 /// Retains the spec path, parsed specs, and one task handle per source in
 /// [`ServerState`]. Each card gets its own task so a slow feed cannot delay a
 /// token price, and retaining the handles lets a settings update replace only
 /// the source it changed.
-pub fn spawn_refreshers(state: &ServerState, spec_path: PathBuf, specs: Vec<DataCardSpec>) {
+fn spawn_refreshers(state: &ServerState, spec_path: PathBuf, specs: Vec<DataCardSpec>) {
     // Drop specs whose image source no longer exists, before anything is
     // spawned for them. Until `revoke_source` learned to remove a face, every
     // revoke left its spec behind and its refresher fetching on schedule: the
@@ -537,15 +395,11 @@ pub fn spawn_refreshers(state: &ServerState, spec_path: PathBuf, specs: Vec<Data
             );
             continue;
         }
-        data_cards
-            .tasks
-            .insert(spec.source_id.clone(), spawn_refresher(state.clone(), spec));
+        data_cards.tasks.insert(
+            spec.source_id.clone(),
+            worker::spawn_refresher(&tokio::runtime::Handle::current(), state.clone(), spec),
+        );
     }
-}
-
-fn spawn_refresher(state: ServerState, spec: DataCardSpec) -> tokio::task::JoinHandle<()> {
-    let refresh = Duration::from_secs(spec.refresh_seconds).clamp(MIN_REFRESH, MAX_REFRESH);
-    tokio::spawn(async move { refresh_loop(state, spec, refresh).await })
 }
 
 /// Stops every retained data-card refresher. Called from the server's existing
@@ -611,12 +465,7 @@ pub(crate) fn update_face_fields(
         .map_err(|error| FaceUpdateError::Encode(error.to_string()))?;
     let mut updated_specs = data_cards.specs.clone();
     updated_specs[index].face = updated_face;
-    let bytes = serde_json::to_vec_pretty(&updated_specs)
-        .map_err(|error| FaceUpdateError::Encode(error.to_string()))?;
-    app_core::secure_file::write_and_replace(&data_cards.spec_path, &bytes).map_err(|error| {
-        let (operation, message) = error.into_strings("data-card spec");
-        FaceUpdateError::Persist(format!("{operation}: {message}"))
-    })?;
+    persist_specs(&data_cards.spec_path, &updated_specs)?;
 
     let updated_spec = updated_specs[index].clone();
     data_cards.specs = updated_specs;
@@ -625,11 +474,7 @@ pub(crate) fn update_face_fields(
     }
     data_cards.tasks.insert(
         source_id.to_owned(),
-        runtime.spawn(refresh_loop(
-            state.clone(),
-            updated_spec.clone(),
-            Duration::from_secs(updated_spec.refresh_seconds).clamp(MIN_REFRESH, MAX_REFRESH),
-        )),
+        worker::spawn_refresher(runtime, state.clone(), updated_spec.clone()),
     );
     Ok(face_descriptor(&updated_spec.face))
 }
@@ -670,36 +515,20 @@ pub(crate) fn create_face(
     };
     let mut updated_specs = data_cards.specs.clone();
     updated_specs.push(spec.clone());
-    let bytes = serde_json::to_vec_pretty(&updated_specs)
-        .map_err(|error| FaceUpdateError::Encode(error.to_string()))?;
-    app_core::secure_file::write_and_replace(&data_cards.spec_path, &bytes).map_err(|error| {
-        let (operation, message) = error.into_strings("data-card spec");
-        FaceUpdateError::Persist(format!("{operation}: {message}"))
-    })?;
+    persist_specs(&data_cards.spec_path, &updated_specs)?;
     data_cards.specs = updated_specs;
 
     // A blank face is not fetched; see `face_is_complete`.
     if face_is_complete(&spec.face) {
         data_cards.tasks.insert(
             source_id.to_owned(),
-            runtime.spawn(refresh_loop(
-                state.clone(),
-                spec.clone(),
-                Duration::from_secs(spec.refresh_seconds).clamp(MIN_REFRESH, MAX_REFRESH),
-            )),
+            worker::spawn_refresher(runtime, state.clone(), spec.clone()),
         );
     }
     Ok(face_descriptor(&spec.face))
 }
 
 /// Forgets a source's face: drops the persisted spec and stops its refresher.
-///
-/// The mirror of [`create_face`], and it did not exist. `revoke_source` removed
-/// the image source and left the spec behind, so the refresher kept fetching on
-/// its schedule and kept failing to store the frame -- observed on the live
-/// server as a weather fetch every fifteen minutes for
-/// `image-b093daec162d9923ab098206`, a source that had not existed for days.
-/// Outbound HTTP for a face nobody could see.
 ///
 /// Idempotent: a source with no face is not an error, because most sources are
 /// fed by an external producer and never had one.
@@ -729,12 +558,7 @@ pub(crate) fn remove_face(state: &ServerState, source_id: &str) -> Result<(), Fa
         .filter(|spec| spec.source_id != source_id)
         .cloned()
         .collect();
-    let bytes = serde_json::to_vec_pretty(&updated_specs)
-        .map_err(|error| FaceUpdateError::Encode(error.to_string()))?;
-    app_core::secure_file::write_and_replace(&data_cards.spec_path, &bytes).map_err(|error| {
-        let (operation, message) = error.into_strings("data-card spec");
-        FaceUpdateError::Persist(format!("{operation}: {message}"))
-    })?;
+    persist_specs(&data_cards.spec_path, &updated_specs)?;
     // The file is the durable record, so it is replaced before the in-memory
     // copy and the task are -- a crash between the two leaves a spec that is
     // gone from disk and a task that dies with the process.
@@ -743,6 +567,15 @@ pub(crate) fn remove_face(state: &ServerState, source_id: &str) -> Result<(), Fa
         task.abort();
     }
     Ok(())
+}
+
+fn persist_specs(path: &Path, specs: &[DataCardSpec]) -> Result<(), FaceUpdateError> {
+    let bytes = serde_json::to_vec_pretty(specs)
+        .map_err(|error| FaceUpdateError::Encode(error.to_string()))?;
+    app_core::secure_file::write_and_replace(path, &bytes).map_err(|error| {
+        let (operation, message) = error.into_strings("data-card spec");
+        FaceUpdateError::Persist(format!("{operation}: {message}"))
+    })
 }
 
 fn validate_face_fields(
@@ -800,114 +633,10 @@ fn validate_face_fields(
     Ok(())
 }
 
-async fn refresh_loop(state: ServerState, spec: DataCardSpec, refresh: Duration) {
-    let mut provider = FaceProvider::build(&spec, refresh);
-    let source_id = spec.source_id.clone();
-    let kind = provider.label();
-    tracing::info!(
-        source_id = %source_id,
-        kind,
-        refresh_seconds = refresh.as_secs(),
-        "server-rendered card refreshing"
-    );
-
-    let mut ticker = tokio::time::interval(refresh);
-    // The first tick fires immediately, which is what fills a freshly started
-    // server's panels instead of leaving them blank for fifteen minutes.
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-    loop {
-        ticker.tick().await;
-
-        // The whole fetch-and-render is blocking: the egress client blocks on
-        // the runtime, and rasterizing is CPU work that has no business on an
-        // async worker.
-        let outcome =
-            tokio::task::spawn_blocking(move || (render_face(&mut provider), provider)).await;
-        let (rendered, returned) = match outcome {
-            Ok(pair) => pair,
-            Err(error) => {
-                tracing::error!(source_id = %source_id, kind, %error, "the render task panicked");
-                return;
-            }
-        };
-        provider = returned;
-
-        let svg = match rendered {
-            Ok((svg, data_error)) => {
-                if let Some(error) = data_error {
-                    // The face still renders -- from the last good reading --
-                    // and the store's own push history is what marks it stale.
-                    tracing::warn!(
-                        source_id = %source_id,
-                        kind,
-                        %error,
-                        "the data fetch failed; redrawing the last good reading"
-                    );
-                }
-                svg
-            }
-            Err(error) => {
-                tracing::warn!(
-                    source_id = %source_id,
-                    kind,
-                    %error,
-                    "the card has no reading yet; nothing to draw"
-                );
-                continue;
-            }
-        };
-
-        let frame = match frame_from_svg(&svg) {
-            Ok(frame) => frame,
-            Err(error) => {
-                // This is our SVG, so this is our bug, not the feed's.
-                tracing::error!(source_id = %source_id, kind, %error, "the authored face did not rasterize");
-                continue;
-            }
-        };
-
-        let accept_state = state.clone();
-        let accept_source = source_id.clone();
-        let accepted = tokio::task::spawn_blocking(move || {
-            accept_state
-                .image_sources()
-                .accept(&accept_source, frame, Utc::now())
-        })
-        .await;
-
-        match accepted {
-            Ok(Ok(AcceptOutcome::Changed { digest })) => {
-                let runtimes = crate::images::live_runtimes(&state);
-                let notified = source_id.clone();
-                tokio::task::spawn_blocking(move || {
-                    if let Err(error) = crate::images::notify_runtimes(runtimes, &notified, digest)
-                    {
-                        tracing::warn!(
-                            source_id = %notified,
-                            %error,
-                            "the frame is stored but the device was not notified; the next synchronize reconciles it"
-                        );
-                    }
-                });
-            }
-            Ok(Ok(AcceptOutcome::Unchanged)) => {
-                tracing::debug!(source_id = %source_id, kind, "the face is unchanged");
-            }
-            Ok(Err(error)) => {
-                tracing::warn!(source_id = %source_id, kind, %error, "the frame was not stored");
-            }
-            Err(error) => {
-                tracing::error!(source_id = %source_id, kind, %error, "the store task panicked");
-                return;
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use providers::weather::WeatherUnits;
 
     fn write(contents: &str) -> tempfile::TempDir {
         let directory = tempfile::tempdir().expect("a temp directory");
@@ -922,6 +651,75 @@ mod tests {
         let specs = load_specs(Path::new("/nonexistent/deskmate/cards.json"))
             .expect("a missing file is not an error");
         assert!(specs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_file_startup_retains_override_and_clears_previous_state() {
+        let directory = tempfile::tempdir().expect("a temp directory");
+        let path = directory.path().join("override.json");
+        let state = ServerState::in_memory();
+        let task = tokio::spawn(std::future::pending::<()>());
+        let abort = task.abort_handle();
+        {
+            let mut retained = state.inner.data_cards.lock().expect("data cards");
+            retained.specs.push(DataCardSpec {
+                source_id: "old".into(),
+                refresh_seconds: 900,
+                face: blank_face("weather").expect("weather"),
+            });
+            retained.tasks.insert("old".into(), task);
+        }
+
+        start_data_cards(&state, path.clone()).expect("missing specs are valid");
+        tokio::task::yield_now().await;
+        {
+            let retained = state.inner.data_cards.lock().expect("data cards");
+            assert_eq!(retained.spec_path, path);
+            assert!(retained.specs.is_empty());
+            assert!(retained.tasks.is_empty());
+        }
+        assert!(abort.is_finished(), "empty startup still drains old tasks");
+        assert!(!path.exists(), "startup does not create a missing file");
+        state.shutdown();
+    }
+
+    #[tokio::test]
+    async fn malformed_file_startup_leaves_retained_state_and_bytes_unchanged() {
+        let directory = write("[{ malformed");
+        let path = directory.path().join("cards.json");
+        let bytes = std::fs::read(&path).expect("original bytes");
+        let expected_error = load_specs(&path).expect_err("malformed specs");
+        let state = ServerState::in_memory();
+        let original = vec![DataCardSpec {
+            source_id: "old".into(),
+            refresh_seconds: 900,
+            face: blank_face("weather").expect("weather"),
+        }];
+        let task = tokio::spawn(std::future::pending::<()>());
+        let task_id = task.id();
+        let abort = task.abort_handle();
+        let original_path = {
+            let mut retained = state.inner.data_cards.lock().expect("data cards");
+            retained.specs = original.clone();
+            retained.tasks.insert("old".into(), task);
+            retained.spec_path.clone()
+        };
+
+        assert_eq!(start_data_cards(&state, path.clone()), Err(expected_error));
+        tokio::task::yield_now().await;
+        {
+            let retained = state.inner.data_cards.lock().expect("data cards");
+            assert_eq!(retained.spec_path, original_path);
+            assert_eq!(retained.specs, original);
+            assert_eq!(retained.tasks.len(), 1);
+            assert_eq!(retained.tasks["old"].id(), task_id);
+        }
+        assert!(
+            !abort.is_finished(),
+            "malformed startup leaves the task live"
+        );
+        assert_eq!(std::fs::read(&path).expect("preserved bytes"), bytes);
+        state.shutdown();
     }
 
     #[test]
@@ -1012,14 +810,6 @@ mod tests {
     }
 
     #[test]
-    fn the_refresh_interval_is_clamped_at_both_ends() {
-        let fast = Duration::from_secs(1).clamp(MIN_REFRESH, MAX_REFRESH);
-        let slow = Duration::from_secs(999_999).clamp(MIN_REFRESH, MAX_REFRESH);
-        assert_eq!(fast, MIN_REFRESH);
-        assert_eq!(slow, MAX_REFRESH);
-    }
-
-    #[test]
     fn imperial_units_reach_the_provider() {
         let directory = write(
             r#"[{"source_id": "abc", "face": {"kind": "weather", "location": "Austin", "units": "imperial"}}]"#,
@@ -1082,6 +872,77 @@ mod tests {
             validate_face_fields(&descriptor, &fields),
             Err(FaceUpdateError::InvalidField { field, .. }) if field == "url"
         ));
+    }
+
+    async fn assert_failed_mutation_preserves_state(operation: &str) {
+        let directory = tempfile::tempdir().expect("a temp directory");
+        // A regular file cannot contain the spec, even when tests run as root.
+        let blocker = directory.path().join("not-a-directory");
+        std::fs::write(&blocker, b"retained bytes").expect("write blocker");
+        let path = blocker.join("cards.json");
+        let state = ServerState::in_memory();
+        let original = vec![DataCardSpec {
+            source_id: "target".into(),
+            refresh_seconds: 900,
+            face: FaceSpec::Weather {
+                location: "Dubai".into(),
+                units: Units::Metric,
+            },
+        }];
+        let task = tokio::spawn(std::future::pending::<()>());
+        let task_id = task.id();
+        let abort = task.abort_handle();
+        {
+            let mut retained = state.inner.data_cards.lock().expect("data cards");
+            retained.spec_path = path.clone();
+            retained.specs = original.clone();
+            retained.tasks.insert("target".into(), task);
+        }
+        let runtime = tokio::runtime::Handle::current();
+        let result = match operation {
+            "update" => update_face_fields(
+                &state,
+                &runtime,
+                "target",
+                &BTreeMap::from([("location".into(), "Berlin".into())]),
+            )
+            .map(|_| ()),
+            "create" => create_face(&state, &runtime, "new-source", "weather").map(|_| ()),
+            "remove" => remove_face(&state, "target"),
+            _ => panic!("unknown test operation"),
+        };
+        assert!(matches!(result, Err(FaceUpdateError::Persist(_))));
+        tokio::task::yield_now().await;
+        {
+            let retained = state.inner.data_cards.lock().expect("data cards");
+            assert_eq!(retained.spec_path, path);
+            assert_eq!(retained.specs, original);
+            assert_eq!(retained.tasks.len(), 1);
+            assert_eq!(retained.tasks["target"].id(), task_id);
+            assert!(!retained.tasks["target"].is_finished());
+        }
+        assert!(!abort.is_finished(), "the original task was not aborted");
+        assert_eq!(
+            std::fs::read(blocker).expect("read blocker"),
+            b"retained bytes"
+        );
+        assert!(!path.exists());
+        state.shutdown();
+    }
+
+    #[tokio::test]
+    async fn update_persistence_failure_preserves_specs_and_tasks() {
+        assert_failed_mutation_preserves_state("update").await;
+    }
+
+    #[tokio::test]
+    async fn create_persistence_failure_preserves_specs_and_tasks() {
+        assert_failed_mutation_preserves_state("create").await;
+    }
+
+    #[tokio::test]
+    async fn remove_persistence_failure_preserves_specs_and_tasks() {
+        assert_failed_mutation_preserves_state("remove").await;
     }
 
     #[tokio::test]

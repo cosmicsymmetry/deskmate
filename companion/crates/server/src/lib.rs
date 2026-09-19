@@ -21,7 +21,8 @@ mod credential;
 // Server-rendered data cards: the server pushing frames to its own image
 // sources, so a weather/RSS/token face reaches the device through the same
 // picture-card path an external producer's PNG does.
-pub mod data_cards;
+mod data_cards;
+pub use data_cards::start_data_cards;
 mod device_link;
 // The SSRF egress guard, and the one HTTP client the provider layer is
 // allowed to use.

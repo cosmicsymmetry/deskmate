@@ -5,7 +5,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use server::data_cards;
 use server::firmware::FirmwareCatalog;
 use server::{ServerState, app_with_web};
 
@@ -321,12 +320,8 @@ async fn main() {
     // graceful shutdown below drains connections, and an in-flight fetch is
     // abandoned with it. That is safe because a card's durable state is the
     // frame already in the store: losing a refresh loses nothing but the tick.
-    let data_card_specs = data_cards::load_specs(&data_card_spec_path)
+    server::start_data_cards(&state, data_card_spec_path)
         .unwrap_or_else(|error| panic!("DESKMATE_DATA_CARDS is unreadable: {error}"));
-    if data_card_specs.is_empty() {
-        tracing::info!("no server-rendered data cards configured");
-    }
-    data_cards::spawn_refreshers(&state, data_card_spec_path, data_card_specs);
 
     let listener = tokio::net::TcpListener::bind(&bind_address)
         .await

@@ -36,7 +36,7 @@ const STRIP_TOP: f64 = HERO_BOTTOM + 2.0 * GRID;
 const STRIP_BOTTOM: f64 = CANVAS_HEIGHT - MARGIN;
 const STRIP_HEIGHT: f64 = STRIP_BOTTOM - STRIP_TOP;
 /// Six columns is what fits at a legible size across 400px.
-const STRIP_COLUMNS: usize = 6;
+pub(super) const STRIP_COLUMNS: usize = 6;
 const HERO_GLYPH_SCALE: f64 = 52.0;
 const STRIP_GLYPH_SCALE: f64 = 15.0;
 

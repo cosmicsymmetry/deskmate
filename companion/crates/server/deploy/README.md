@@ -117,25 +117,17 @@ account running the agent/daemon.
 
 ### Server-rendered data cards (optional)
 
-If this deployment draws its own weather, RSS or token faces, it also needs a spec
-file. `data-cards.json.example` in this directory is a starting point;
-`docs/images/server-rendered-cards.md` is the reference.
+Create weather, RSS and token faces in the browser companion: select the server
+face from the add menu, fill in its descriptor fields, and save the card/configuration.
+The server persists the spec and starts fetching once its settings are complete.
+See [Setting one up](../../../../docs/images/server-rendered-cards.md#setting-one-up).
 
-```sh
-# One image source per card. Keep the id; the token is only needed by an
-# external producer, and the server pushes to its own store directly.
-curl -sX POST https://deskmate.rodi.one/v1/images \
-  -H "Authorization: Bearer $DESKMATE_ADMIN_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"name": "Weather"}'
-
-sudo install -m 0644 data-cards.json.example \
-  /var/lib/deskmate/configs/data-cards.json
-sudo $EDITOR /var/lib/deskmate/configs/data-cards.json
-```
-
-Then add one `picture` card per source in the browser companion, naming the same
-`source_id`, and restart the server.
+For settings absent from the browser, such as `api_key` and `refresh_seconds`, follow
+[Advanced manual settings](../../../../docs/images/server-rendered-cards.md#advanced-manual-settings):
+stop the server, edit the existing file while retaining all other entries, then
+restart. `data-cards.json.example` illustrates the shape; do not install it over
+an existing spec file. The default is `data-cards.json` under `DESKMATE_CONFIG_DIR`,
+with `DESKMATE_DATA_CARDS` as the override.
 
 Two consequences worth stating before you enable this:
 

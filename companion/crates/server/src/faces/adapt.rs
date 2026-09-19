@@ -31,7 +31,7 @@ fn whole_degrees(tenths: i64) -> i32 {
     i32::try_from(rounded).unwrap_or(if rounded < 0 { i32::MIN } else { i32::MAX })
 }
 
-pub(crate) fn weather_face(reading: &WeatherReading, hourly_columns: usize) -> WeatherFace {
+pub(crate) fn weather_face(reading: &WeatherReading) -> WeatherFace {
     WeatherFace {
         place: reading.location.clone(),
         temperature: whole_degrees(reading.temperature_tenths),
@@ -42,7 +42,7 @@ pub(crate) fn weather_face(reading: &WeatherReading, hourly_columns: usize) -> W
         hourly: reading
             .hourly
             .iter()
-            .take(hourly_columns)
+            .take(super::weather::STRIP_COLUMNS)
             .map(|hour| HourlyStep {
                 // Two digits, zero-padded, in the location's own clock. Not
                 // 12-hour: the strip's columns are 66px wide and "12PM" does
@@ -91,7 +91,7 @@ fn parse_feed_date(raw: &str) -> Option<DateTime<Utc>> {
         .map(|parsed| parsed.with_timezone(&Utc))
 }
 
-pub(crate) fn token_face(quote: &TokenQuote, window: &str) -> TokenFace {
+pub(crate) fn token_face(quote: &TokenQuote) -> TokenFace {
     TokenFace {
         symbol: quote.symbol.clone(),
         name: quote.name.clone(),
@@ -99,7 +99,6 @@ pub(crate) fn token_face(quote: &TokenQuote, window: &str) -> TokenFace {
         currency_mark: currency_mark(&quote.currency).to_owned(),
         price: quote.price,
         change_percent: quote.change_percent_24h,
-        window: window.to_owned(),
         low: quote.low_24h,
         high: quote.high_24h,
         series: quote.series.clone(),
@@ -170,7 +169,7 @@ mod tests {
                 },
             ],
         };
-        let face = weather_face(&reading, 6);
+        let face = weather_face(&reading);
         assert_eq!(face.temperature, 11);
         assert_eq!(face.high, 13);
         assert_eq!(face.low, 8);
@@ -196,7 +195,7 @@ mod tests {
                 .collect(),
             ..WeatherReading::default()
         };
-        assert_eq!(weather_face(&reading, 6).hourly.len(), 6);
+        assert_eq!(weather_face(&reading).hourly.len(), 6);
     }
 
     #[test]
@@ -251,7 +250,7 @@ mod tests {
             low_24h: 136.9,
             series: vec![140.0, 142.0],
         };
-        let face = token_face(&quote, "24h");
+        let face = token_face(&quote);
         assert_eq!(face.currency_mark, "$");
         assert_eq!(face.symbol, "sol");
         assert_eq!(face.series.len(), 2);

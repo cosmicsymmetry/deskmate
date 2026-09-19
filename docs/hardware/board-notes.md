@@ -5300,3 +5300,27 @@ non-mutating dry-run procedure still needs to be settled before that check. The
 initial status handshake in `connect_session` remains synchronous and outside the
 worker's stall protection; this subtraction does not make connection establishment
 bounded.
+
+### 2026-09-19 — the last pre-v10 configs leave the live server (server-side, no hardware)
+
+Config schema versions v4-v9 stopped being readable today (`refactor!: config schema v10 is
+the only readable version`). Before that binary shipped, the only two documents still at
+those versions were removed from docker-vm, on the owner's authorization.
+
+Observed over SSH at 14:44 UTC, with the pre-retirement binary still running:
+
+- `/var/lib/private/deskmate/configs/dev-0003.json` was `schema_version` 5 (cards: clock,
+  pomodoro, calendar) and `dev-0004.json` was `schema_version` 4 (clock, weather, pomodoro).
+  Both belong to identities that have not linked since August. They were MOVED, not deleted,
+  to `/var/lib/private/deskmate/retired-configs-20260919/` (mode 0700, same owner).
+- `dev-0005.json` -- the panel on the desk -- was `schema_version` 10 and its SHA-256 was
+  identical before and after (`e683b3d614f9257c…`). The service was not restarted; it reads
+  configs lazily. `GET /` answered 200 afterwards.
+- The identities `dev-0003` and `dev-0004` are STILL in `device-identities.json`. There is no
+  retirement route, and hand-editing that registry (sequence counter, digests, recovery
+  path) was not worth the risk for two entries that cannot link to anything harmful: if one
+  ever did, it would get the safe fallback config. Retiring them is a separate decision.
+
+To restore one: move its file back. The current binary will refuse it as
+`UnsupportedVersion` (visibly, and without overwriting it); only a pre-2026-09-19 binary can
+migrate it.

@@ -44,9 +44,12 @@ default. This section states only what is true now.
   two. Retired message-type, error-code and capability-bit numbers are never re-issued.
   The device models three things per card and nothing else: its id and tap meaning
   (`ApplyConfig`), its timer (`PushTimer`), and its face (`PushScene`).
-  A `docs/config/vN.md` exists if and only if
-  the store can still read vN, so the set shrinks as migrations retire; v4 is the oldest
-  readable version and a pre-v4 document is a typed `UnsupportedVersion` refusal.
+  **v10 is the only config version the store can read** (v4-v9 were retired on
+  2026-09-19, once the last pre-v10 documents -- two dead identities' configs -- were
+  gone); any other `schema_version` is a typed `UnsupportedVersion` refusal, the refused
+  file is never overwritten on load, and the refusal stays visible in the panel's snapshot
+  until an explicit successful save. The rule that made that cheap still holds for the
+  next bump: a `docs/config/vN.md` exists if and only if the store can still read vN.
 - **Three card kinds: clock, pomodoro, picture.** Clock and pomodoro tick on the device
   between host pushes. A picture card's face is a raster frame, frozen between pushes,
   from one of two producers: an external one POSTing a PNG, or **the server itself**. The
@@ -185,7 +188,10 @@ Each of these cost this project real time at least once.
 - **No caller may wait unboundedly on a thread that can block in an OS read.**
   `SerialTransport::read` can block forever once the USB device behind its fd is gone.
   That can wedge the whole host process: the server links `device`, and `deskmate-cli`
-  opens serial ports. A stalled session reports
+  opens serial ports. The protection lives in `device::session`'s worker (bounded reply wait,
+  stalled-session marking, a Drop that never joins); on 2026-09-19 everything else in that
+  file that only the deleted desktop host used was removed and the worker was left textually
+  alone -- NOT verified on hardware. A stalled session reports
   `Transport(Disconnected)`, never `Timeout`, because `is_disconnect` is what makes the
   runtime reconnect.
 - **Two assertions that look like proof and are not.** `value["key"].is_null()` on a

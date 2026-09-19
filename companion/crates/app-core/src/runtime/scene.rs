@@ -294,6 +294,19 @@ pub(super) fn push_active_scene(
             return;
         }
     };
+    let (is_picture_card, picture_face) = built_picture_face(&state.config, &card_id, &push);
+    if is_picture_card {
+        match picture_face {
+            Some(face) => {
+                state
+                    .last_evaluated_picture_face
+                    .insert(card_id.clone(), face);
+            }
+            None => {
+                state.last_evaluated_picture_face.remove(&card_id);
+            }
+        }
+    }
     // Analyze every freshly-built scene against this device. In particular,
     // a picture digest must be confirmed or installable before its scene can
     // name it; otherwise the panel would accept a face it cannot draw.
@@ -325,7 +338,6 @@ pub(super) fn execute_native_push(
     requirements: &render_negotiation::RenderRequirements,
     reconnect_interval: Duration,
 ) {
-    let (is_picture_card, picture_face) = built_picture_face(&state.config, &card_id, &push);
     state.next_scene_revision = revision;
     if !requirements.asset_digests.is_empty()
         && let Err(error) =
@@ -338,16 +350,6 @@ pub(super) fn execute_native_push(
     state.active_scene_dirty = false;
     match device.push_scene(push) {
         Ok(()) => {
-            if is_picture_card {
-                match picture_face {
-                    Some(face) => {
-                        state.last_picture_face.insert(card_id.clone(), face);
-                    }
-                    None => {
-                        state.last_picture_face.remove(&card_id);
-                    }
-                }
-            }
             clear_scene_refusal(state, &card_id);
         }
         Err(error) => {

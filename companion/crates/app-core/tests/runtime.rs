@@ -122,12 +122,20 @@ impl PushGate {
     }
 
     fn enter_and_wait(&self) {
+        self.enter_and_wait_for(Duration::from_secs(1));
+    }
+
+    fn enter_and_wait_for(&self, timeout: Duration) {
         let mut state = self.state.lock().unwrap();
         state.0 = true;
         self.changed.notify_all();
-        while !state.1 {
-            state = self.changed.wait(state).unwrap();
-        }
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(state, timeout, |(_, opened)| !*opened)
+            .unwrap();
+        let opened = state.1;
+        drop(state);
+        assert!(opened, "push gate was not opened within {timeout:?}");
     }
 
     fn open(&self) {
@@ -135,6 +143,30 @@ impl PushGate {
         state.1 = true;
         self.changed.notify_all();
     }
+}
+
+#[test]
+fn push_gate_waiter_panics_when_the_gate_is_not_opened() {
+    let gate = Arc::new(PushGate::default());
+    let waiter_gate = Arc::clone(&gate);
+    let (result_sender, result_receiver) = std::sync::mpsc::sync_channel(1);
+    let waiter = thread::spawn(move || {
+        let panicked = std::panic::catch_unwind(|| {
+            waiter_gate.enter_and_wait_for(Duration::from_millis(20));
+        })
+        .is_err();
+        let _ = result_sender.send(panicked);
+    });
+
+    let while_closed = result_receiver.recv_timeout(Duration::from_millis(100));
+    gate.open();
+    let eventual = while_closed.or_else(|_| result_receiver.recv_timeout(Duration::from_secs(1)));
+    waiter.join().unwrap();
+    assert_eq!(
+        while_closed,
+        Ok(true),
+        "a gate fixture timeout must panic instead of hanging; eventual={eventual:?}"
+    );
 }
 
 #[derive(Clone, Default)]
@@ -254,11 +286,33 @@ impl MockDeviceControl {
 
 struct MockDevice {
     control: MockDeviceControl,
+    drop_gate: Option<Arc<PushGate>>,
+    panic_on_drop: bool,
 }
 
 impl MockDevice {
     fn new(control: MockDeviceControl) -> Self {
-        Self { control }
+        Self {
+            control,
+            drop_gate: None,
+            panic_on_drop: false,
+        }
+    }
+
+    fn with_drop_gate(control: MockDeviceControl, drop_gate: Arc<PushGate>) -> Self {
+        Self {
+            control,
+            drop_gate: Some(drop_gate),
+            panic_on_drop: false,
+        }
+    }
+
+    fn panics_on_drop(control: MockDeviceControl) -> Self {
+        Self {
+            control,
+            drop_gate: None,
+            panic_on_drop: true,
+        }
     }
 
     fn with_connected<R>(
@@ -270,6 +324,18 @@ impl MockDevice {
             return Err(DeviceError::Transport(TransportError::Disconnected));
         }
         Ok(operation(&mut state))
+    }
+}
+
+impl Drop for MockDevice {
+    fn drop(&mut self) {
+        if let Some(gate) = &self.drop_gate {
+            gate.enter_and_wait();
+        }
+        assert!(
+            !self.panic_on_drop,
+            "fixture worker panic during device cleanup"
+        );
     }
 }
 

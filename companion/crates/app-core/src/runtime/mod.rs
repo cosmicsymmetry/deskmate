@@ -78,10 +78,15 @@ impl Default for RuntimeOptions {
 
 pub struct RuntimeHandle {
     sender: SyncSender<RuntimeCommand>,
-    worker: Mutex<Option<JoinHandle<()>>>,
+    worker: Mutex<Option<RuntimeWorker>>,
     publisher: Arc<SnapshotPublisher>,
     diagnostics: Arc<RuntimeDiagnosticCounters>,
     command_timeout: Duration,
+}
+
+struct RuntimeWorker {
+    handle: JoinHandle<()>,
+    shutdown_requested: bool,
 }
 
 impl RuntimeHandle {
@@ -137,7 +142,10 @@ impl RuntimeHandle {
             })?;
         Ok(Self {
             sender,
-            worker: Mutex::new(Some(worker)),
+            worker: Mutex::new(Some(RuntimeWorker {
+                handle: worker,
+                shutdown_requested: false,
+            })),
             publisher,
             diagnostics,
             command_timeout: options.command_timeout,
@@ -196,39 +204,67 @@ impl RuntimeHandle {
     }
 
     pub fn shutdown(&self) -> Result<(), RuntimeError> {
-        let has_worker = self
-            .worker
-            .lock()
-            .map_err(|_| RuntimeError::WorkerStopped)?
-            .is_some();
-        if !has_worker {
-            return Ok(());
-        }
-        let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
-        let result = if self
-            .sender
-            .send(RuntimeCommand::Shutdown {
-                reply: reply_sender,
-            })
-            .is_err()
+        let started = Instant::now();
         {
-            Err(RuntimeError::WorkerStopped)
-        } else {
-            match reply_receiver.recv_timeout(self.command_timeout) {
-                Ok(result) => result,
-                Err(RecvTimeoutError::Timeout) => Err(RuntimeError::ResponseTimeout),
-                Err(RecvTimeoutError::Disconnected) => Err(RuntimeError::WorkerStopped),
+            let mut worker_slot = self
+                .worker
+                .lock()
+                .map_err(|_| RuntimeError::WorkerStopped)?;
+            let Some(worker) = worker_slot.as_mut() else {
+                return Ok(());
+            };
+            if worker.handle.is_finished() {
+                let worker = worker_slot.take().expect("worker was present");
+                drop(worker_slot);
+                let requested = worker.shutdown_requested;
+                return match worker.handle.join() {
+                    Ok(()) if requested => Ok(()),
+                    Ok(()) | Err(_) => Err(RuntimeError::WorkerStopped),
+                };
             }
-        };
-        let worker = self
-            .worker
-            .lock()
-            .map_err(|_| RuntimeError::WorkerStopped)?
-            .take();
-        if let Some(worker) = worker {
-            worker.join().map_err(|_| RuntimeError::WorkerStopped)?;
+            if !worker.shutdown_requested {
+                match self.sender.try_send(RuntimeCommand::Shutdown) {
+                    Ok(()) => worker.shutdown_requested = true,
+                    Err(mpsc::TrySendError::Full(_)) => {
+                        self.diagnostics
+                            .command_queue_full
+                            .fetch_add(1, Ordering::Relaxed);
+                        return Err(RuntimeError::QueueFull);
+                    }
+                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                        return Err(RuntimeError::WorkerStopped);
+                    }
+                }
+            }
         }
-        result
+
+        loop {
+            let finished = {
+                let mut worker_slot = self
+                    .worker
+                    .lock()
+                    .map_err(|_| RuntimeError::WorkerStopped)?;
+                match worker_slot.as_ref() {
+                    None => return Ok(()),
+                    Some(worker) if worker.handle.is_finished() => worker_slot.take(),
+                    Some(_) => None,
+                }
+            };
+            if let Some(worker) = finished {
+                return worker
+                    .handle
+                    .join()
+                    .map_err(|_| RuntimeError::WorkerStopped);
+            }
+
+            let Some(remaining) = self.command_timeout.checked_sub(started.elapsed()) else {
+                return Err(RuntimeError::ResponseTimeout);
+            };
+            if remaining.is_zero() {
+                return Err(RuntimeError::ResponseTimeout);
+            }
+            thread::sleep(remaining.min(Duration::from_millis(1)));
+        }
     }
 
     fn request(
@@ -290,7 +326,20 @@ fn command_drives_a_full_sync(command: &RuntimeCommand) -> bool {
 
 impl Drop for RuntimeHandle {
     fn drop(&mut self) {
-        let _ = self.shutdown();
+        let finished = self.worker.lock().ok().and_then(|mut worker_slot| {
+            let worker = worker_slot.as_mut()?;
+            if !worker.shutdown_requested && self.sender.try_send(RuntimeCommand::Shutdown).is_ok()
+            {
+                worker.shutdown_requested = true;
+            }
+            worker
+                .handle
+                .is_finished()
+                .then(|| worker_slot.take().expect("finished worker was present"))
+        });
+        if let Some(worker) = finished {
+            let _ = worker.handle.join();
+        }
     }
 }
 
@@ -300,10 +349,10 @@ struct WorkerState {
     runtime: RuntimeState,
     device: DeviceSnapshot,
     latest_fields: BTreeMap<String, Vec<CardField>>,
-    /// Card ID -> the exact durable picture face most recently accepted by
-    /// the device. Comparing this pair with the host detects cadence-driven
-    /// stale/fresh flips without a scheduler deadline per source.
-    last_picture_face: BTreeMap<String, ([u8; protocol::ASSET_DIGEST_LEN], bool)>,
+    /// Card ID -> the exact durable picture face most recently evaluated for
+    /// delivery. Comparing this pair with the host detects cadence-driven
+    /// digest/staleness changes without retrying an unchanged terminal refusal.
+    last_evaluated_picture_face: BTreeMap<String, ([u8; protocol::ASSET_DIGEST_LEN], bool)>,
     image_source_host: Option<Box<dyn ImageSourceHost>>,
     dirty_cards: BTreeSet<String>,
     /// Card ID -> the most recent typed refusal for that card. There is deliberately
@@ -354,7 +403,7 @@ impl WorkerState {
             runtime: RuntimeState::Starting,
             device: empty_device(ConnectionState::Connecting),
             latest_fields: BTreeMap::new(),
-            last_picture_face: BTreeMap::new(),
+            last_evaluated_picture_face: BTreeMap::new(),
             image_source_host,
             dirty_cards: BTreeSet::new(),
             push_rejections: BTreeMap::new(),
@@ -397,7 +446,7 @@ impl WorkerState {
             .map(|card| card.id().to_owned())
             .collect();
         self.prune_alert_state_for_live_widgets(&live_card_ids, scheduler, now);
-        self.last_picture_face
+        self.last_evaluated_picture_face
             .retain(|card_id, _| live_card_ids.contains(card_id));
 
         for card in &self.config.cards {
@@ -744,10 +793,7 @@ fn process_command(
             };
             let _ = reply.send(result);
         }
-        RuntimeCommand::Shutdown { reply } => {
-            let _ = reply.send(Ok(()));
-            return true;
-        }
+        RuntimeCommand::Shutdown => return true,
     }
     false
 }
@@ -811,6 +857,13 @@ fn apply_image_source_update(
         }
         desired
     };
+
+    if state.config.preferences.paused {
+        if visible_uses_source {
+            state.active_scene_dirty = true;
+        }
+        return Ok(());
+    }
 
     // This is deliberately the entire host-owned set. AssetRelease is a
     // device-wide KEEP-SET, so reconciling only this source would delete every
@@ -973,8 +1026,8 @@ fn detect_active_picture_face_change(state: &mut WorkerState) {
         .as_deref_mut()
         .and_then(|host| host.image_source_frame(&source_id))
         .map(|frame| (frame.digest, frame.stale));
-    let displayed = state.last_picture_face.get(&card_id).copied();
-    if current != displayed {
+    let evaluated = state.last_evaluated_picture_face.get(&card_id).copied();
+    if current != evaluated {
         state.active_scene_dirty = true;
     }
 }
@@ -1420,6 +1473,101 @@ mod tests {
             display_height: 448,
             ..protocol::test_support::sample_status_response()
         }
+    }
+
+    struct MutablePictureHost {
+        frame: Arc<Mutex<ImageSourceFrame>>,
+    }
+
+    impl ImageSourceHost for MutablePictureHost {
+        fn desired_assets(&mut self) -> Vec<DesiredAsset> {
+            let frame = self.frame.lock().unwrap().clone();
+            vec![DesiredAsset {
+                digest: frame.digest,
+                kind: protocol::AssetKind::Image,
+                bytes: frame.bytes,
+            }]
+        }
+
+        fn image_source_frame(&mut self, source_id: &str) -> Option<ImageSourceFrame> {
+            assert_eq!(source_id, "camera");
+            Some(self.frame.lock().unwrap().clone())
+        }
+    }
+
+    #[test]
+    fn picture_negotiation_refusal_records_each_evaluated_identity_once() {
+        let now = Instant::now();
+        let mut config = AppConfig::default();
+        config.cards = vec![CardSettings::Picture {
+            id: "picture-card".into(),
+            title: "Picture card".into(),
+            source_id: "camera".into(),
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Manual,
+            alert: CardAlert::None,
+            dwell_seconds: None,
+        }];
+        config.image_sources = vec![crate::config::ImageSource {
+            id: "camera".into(),
+            name: "Camera".into(),
+        }];
+        let first_digest = [0x71; protocol::ASSET_DIGEST_LEN];
+        let second_digest = [0x72; protocol::ASSET_DIGEST_LEN];
+        let frame = Arc::new(Mutex::new(ImageSourceFrame {
+            digest: first_digest,
+            bytes: Arc::from(&b"picture bytes"[..]),
+            stale: false,
+        }));
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new_with_image_source_host(
+            config,
+            now,
+            &mut scheduler,
+            Some(Box::new(MutablePictureHost {
+                frame: Arc::clone(&frame),
+            })),
+        );
+        state.connected = true;
+        state.needs_full_sync = false;
+        let mut device = ScheduledWorkDevice::default();
+
+        push_active_scene(&mut state, &mut device, Duration::from_secs(1));
+        assert!(
+            device.scene_pushes.is_empty(),
+            "negotiation refused before I/O"
+        );
+        assert_eq!(
+            state
+                .last_evaluated_picture_face
+                .get("picture-card")
+                .copied(),
+            Some((first_digest, false))
+        );
+        assert!(!state.active_scene_dirty);
+
+        detect_active_picture_face_change(&mut state);
+        assert!(
+            !state.active_scene_dirty,
+            "the unchanged refused candidate must not be evaluated again"
+        );
+
+        frame.lock().unwrap().digest = second_digest;
+        detect_active_picture_face_change(&mut state);
+        assert!(
+            state.active_scene_dirty,
+            "a changed picture identity must request one new evaluation"
+        );
+        push_active_scene(&mut state, &mut device, Duration::from_secs(1));
+        assert_eq!(
+            state
+                .last_evaluated_picture_face
+                .get("picture-card")
+                .copied(),
+            Some((second_digest, false))
+        );
+        assert!(!state.active_scene_dirty);
+        assert!(state.push_rejections.contains_key("picture-card"));
     }
 
     #[test]

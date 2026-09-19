@@ -123,6 +123,56 @@ fn a_picture_card_negotiates_native_once_its_frame_is_installable() {
 }
 
 #[test]
+fn a_refused_picture_scene_is_retried_only_for_a_new_digest() {
+    let control = MockDeviceControl::default();
+    control.refuse_scenes_for("picture-card");
+    let host = FakeImageSourceHostControl::default();
+    let initial_digest = [0x44; protocol::ASSET_DIGEST_LEN];
+    let updated_digest = [0x45; protocol::ASSET_DIGEST_LEN];
+    host.stage_picture_frame("camera", initial_digest, PICTURE_BLOB, false);
+    let runtime =
+        start_picture_runtime(picture_config(true), &control, Some(Box::new(host.host())));
+
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.card_errors.iter().any(|error| {
+            error.kind == CardErrorKind::SceneRefused && error.card_id == "picture-card"
+        })
+    });
+    let picture_attempts = || {
+        control
+            .operations()
+            .iter()
+            .filter(|operation| {
+                matches!(operation, Operation::PushScene(push) if push.card_id == "picture-card")
+            })
+            .count()
+    };
+    assert_eq!(picture_attempts(), 1);
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        picture_attempts(),
+        1,
+        "an unchanged refused picture candidate must stay terminal"
+    );
+
+    host.stage_picture_frame("camera", updated_digest, PICTURE_BLOB, false);
+    runtime
+        .image_source_updated("camera", updated_digest)
+        .unwrap();
+    wait_for(Duration::from_secs(1), || picture_attempts() == 2);
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        picture_attempts(),
+        2,
+        "the new digest is evaluated once and then stays terminal"
+    );
+    assert!(runtime.snapshot().unwrap().card_errors.iter().any(|error| {
+        error.kind == CardErrorKind::SceneRefused && error.card_id == "picture-card"
+    }));
+    runtime.shutdown().unwrap();
+}
+
+#[test]
 fn an_image_source_update_for_a_card_that_is_not_on_screen_pushes_no_scene() {
     let existing_digest = [0x50; protocol::ASSET_DIGEST_LEN];
     let picture_digest = [0x51; protocol::ASSET_DIGEST_LEN];

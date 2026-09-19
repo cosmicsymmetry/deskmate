@@ -492,6 +492,81 @@ fn paused_config_defers_timer_pushes_until_a_resumed_config_is_applied() {
     runtime.shutdown().unwrap();
 }
 
+#[test]
+fn paused_config_defers_picture_assets_and_scene_until_a_resumed_config_is_applied() {
+    let control = MockDeviceControl::default();
+    let host = FakeImageSourceHostControl::default();
+    let initial_digest = [0x61; protocol::ASSET_DIGEST_LEN];
+    let updated_digest = [0x62; protocol::ASSET_DIGEST_LEN];
+    host.stage_picture_frame("camera", initial_digest, PICTURE_BLOB, false);
+    let runtime =
+        start_picture_runtime(picture_config(true), &control, Some(Box::new(host.host())));
+    wait_for(Duration::from_secs(1), || {
+        latest_picture_push(&control.operations()).is_some_and(|push| {
+            push.scene.nodes.iter().any(
+                |node| matches!(node, SceneNode::Image(image) if image.digest == initial_digest),
+            )
+        })
+    });
+
+    apply_paused_preference(&runtime, true).unwrap();
+    let before_update = control.operations().len();
+    host.stage_picture_frame("camera", updated_digest, PICTURE_BLOB, false);
+    runtime
+        .image_source_updated("camera", updated_digest)
+        .unwrap();
+    thread::sleep(Duration::from_millis(30));
+    let paused_operations = control.operations();
+    assert!(
+        paused_operations[before_update..].iter().all(|operation| {
+            !matches!(
+                operation,
+                Operation::AssetBegin(_)
+                    | Operation::AssetChunk(_, _)
+                    | Operation::AssetCommit(_)
+                    | Operation::AssetRelease(_)
+                    | Operation::PushScene(_)
+            )
+        }),
+        "paused picture update touched the device: {:?}",
+        &paused_operations[before_update..]
+    );
+
+    apply_paused_preference(&runtime, false).unwrap();
+    wait_for(Duration::from_secs(1), || {
+        latest_picture_push(&control.operations()).is_some_and(|push| {
+            push.scene.nodes.iter().any(
+                |node| matches!(node, SceneNode::Image(image) if image.digest == updated_digest),
+            )
+        })
+    });
+    let resumed_operations = control.operations();
+    let resumed = &resumed_operations[before_update..];
+    let commit = resumed
+        .iter()
+        .position(|operation| *operation == Operation::AssetCommit(updated_digest))
+        .expect("resume installs the latest picture bytes");
+    let release = resumed
+        .iter()
+        .position(|operation| {
+            matches!(operation, Operation::AssetRelease(digests) if digests == &vec![updated_digest])
+        })
+        .expect("resume sends the complete latest keep-set");
+    let scene = resumed
+        .iter()
+        .position(|operation| {
+            matches!(operation, Operation::PushScene(push) if push.scene.nodes.iter().any(
+                |node| matches!(node, SceneNode::Image(image) if image.digest == updated_digest)
+            ))
+        })
+        .expect("resume pushes the latest picture scene");
+    assert!(
+        commit < release && release < scene,
+        "resume transcript: {resumed:?}"
+    );
+    runtime.shutdown().unwrap();
+}
+
 /// A refusal is terminal for that payload: drop it, record it against its
 /// card, and continue so other dirty cards are not starved.
 ///
@@ -612,6 +687,221 @@ fn command_queue_rejects_pressure_without_growing() {
         snapshot.diagnostics.command_queue_full >= 1
     });
     runtime.shutdown().unwrap();
+}
+
+#[test]
+fn shutdown_returns_queue_full_without_waiting_for_queue_space() {
+    let control = MockDeviceControl::default();
+    let mut runtime_options = options();
+    runtime_options.command_capacity = 1;
+    runtime_options.command_timeout = Duration::from_millis(250);
+    let runtime = Arc::new(
+        RuntimeHandle::start(
+            full_config(),
+            Box::new(MockDevice::new(control.clone())),
+            runtime_options,
+        )
+        .unwrap(),
+    );
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    let gate = control.block_next_push();
+    let first_runtime = Arc::clone(&runtime);
+    let first =
+        thread::spawn(move || first_runtime.control_pomodoro("pomodoro", PomodoroAction::Start));
+    gate.wait_until_entered();
+    let queued_runtime = Arc::clone(&runtime);
+    let queued = thread::spawn(move || apply_paused_preference(&queued_runtime, true));
+    thread::sleep(Duration::from_millis(20));
+
+    let shutdown_runtime = Arc::clone(&runtime);
+    let (result_sender, result_receiver) = std::sync::mpsc::sync_channel(1);
+    let shutdown = thread::spawn(move || {
+        let _ = result_sender.send(shutdown_runtime.shutdown());
+    });
+    let while_closed = result_receiver.recv_timeout(Duration::from_millis(100));
+    gate.open();
+    let _ = first.join().unwrap();
+    let _ = queued.join().unwrap();
+    let eventual = while_closed
+        .clone()
+        .or_else(|_| result_receiver.recv_timeout(Duration::from_secs(1)));
+    shutdown.join().unwrap();
+
+    assert_eq!(
+        while_closed,
+        Ok(Err(RuntimeError::QueueFull)),
+        "shutdown must reject a full queue while the worker remains gated; eventual={eventual:?}"
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn accepted_shutdown_times_out_while_device_io_is_blocked_and_retry_reaps() {
+    let control = MockDeviceControl::default();
+    let mut runtime_options = options();
+    runtime_options.command_timeout = Duration::from_millis(50);
+    let runtime = Arc::new(
+        RuntimeHandle::start(
+            full_config(),
+            Box::new(MockDevice::new(control.clone())),
+            runtime_options,
+        )
+        .unwrap(),
+    );
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    let gate = control.block_next_push();
+    let command_runtime = Arc::clone(&runtime);
+    let command =
+        thread::spawn(move || command_runtime.control_pomodoro("pomodoro", PomodoroAction::Start));
+    gate.wait_until_entered();
+
+    let shutdown_runtime = Arc::clone(&runtime);
+    let (result_sender, result_receiver) = std::sync::mpsc::sync_channel(1);
+    let shutdown = thread::spawn(move || {
+        let _ = result_sender.send(shutdown_runtime.shutdown());
+    });
+    let while_closed = result_receiver.recv_timeout(Duration::from_millis(150));
+    gate.open();
+    let _ = command.join().unwrap();
+    let eventual = while_closed
+        .clone()
+        .or_else(|_| result_receiver.recv_timeout(Duration::from_secs(1)));
+    shutdown.join().unwrap();
+
+    assert_eq!(
+        while_closed,
+        Ok(Err(RuntimeError::ResponseTimeout)),
+        "accepted shutdown must return on its budget while I/O is blocked; eventual={eventual:?}"
+    );
+    assert_eq!(runtime.shutdown(), Ok(()));
+}
+
+#[test]
+fn shutdown_waits_for_actual_device_cleanup_completion() {
+    let control = MockDeviceControl::default();
+    let drop_gate = Arc::new(PushGate::default());
+    let mut runtime_options = options();
+    runtime_options.command_timeout = Duration::from_millis(50);
+    let runtime = Arc::new(
+        RuntimeHandle::start(
+            full_config(),
+            Box::new(MockDevice::with_drop_gate(control, Arc::clone(&drop_gate))),
+            runtime_options,
+        )
+        .unwrap(),
+    );
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+
+    let shutdown_runtime = Arc::clone(&runtime);
+    let (result_sender, result_receiver) = std::sync::mpsc::sync_channel(1);
+    let shutdown = thread::spawn(move || {
+        let _ = result_sender.send(shutdown_runtime.shutdown());
+    });
+    drop_gate.wait_until_entered();
+    let during_cleanup = result_receiver.recv_timeout(Duration::from_millis(100));
+    drop_gate.open();
+    let eventual = during_cleanup
+        .clone()
+        .or_else(|_| result_receiver.recv_timeout(Duration::from_secs(1)));
+    shutdown.join().unwrap();
+
+    assert_eq!(
+        during_cleanup,
+        Ok(Err(RuntimeError::ResponseTimeout)),
+        "command receipt is not worker completion; eventual={eventual:?}"
+    );
+    assert_eq!(runtime.shutdown(), Ok(()));
+}
+
+#[test]
+fn concurrent_and_repeated_shutdown_are_idempotent() {
+    let control = MockDeviceControl::default();
+    let drop_gate = Arc::new(PushGate::default());
+    let runtime = Arc::new(
+        RuntimeHandle::start(
+            full_config(),
+            Box::new(MockDevice::with_drop_gate(control, Arc::clone(&drop_gate))),
+            options(),
+        )
+        .unwrap(),
+    );
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    let barrier = Arc::new(std::sync::Barrier::new(4));
+    let callers: Vec<_> = (0..4)
+        .map(|_| {
+            let runtime = Arc::clone(&runtime);
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                runtime.shutdown()
+            })
+        })
+        .collect();
+    drop_gate.wait_until_entered();
+    thread::sleep(Duration::from_millis(20));
+    drop_gate.open();
+    let results: Vec<_> = callers
+        .into_iter()
+        .map(|caller| caller.join().unwrap())
+        .collect();
+
+    assert_eq!(results, vec![Ok(()), Ok(()), Ok(()), Ok(())]);
+    assert_eq!(runtime.shutdown(), Ok(()));
+}
+
+#[test]
+fn worker_panic_is_reported_then_reaped_shutdown_is_idempotent() {
+    let control = MockDeviceControl::default();
+    let runtime = RuntimeHandle::start(
+        full_config(),
+        Box::new(MockDevice::panics_on_drop(control)),
+        options(),
+    )
+    .unwrap();
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+
+    assert_eq!(runtime.shutdown(), Err(RuntimeError::WorkerStopped));
+    assert_eq!(runtime.shutdown(), Ok(()));
+}
+
+#[test]
+fn dropping_runtime_does_not_wait_for_a_blocked_worker() {
+    let control = MockDeviceControl::default();
+    let scene_gate = control.block_next_scene();
+    let mut runtime_options = options();
+    runtime_options.command_timeout = Duration::from_millis(50);
+    let runtime = RuntimeHandle::start(
+        full_config(),
+        Box::new(MockDevice::new(control)),
+        runtime_options,
+    )
+    .unwrap();
+    scene_gate.wait_until_entered();
+    let (dropped_sender, dropped_receiver) = std::sync::mpsc::sync_channel(1);
+    let dropper = thread::spawn(move || {
+        drop(runtime);
+        let _ = dropped_sender.send(());
+    });
+    let while_closed = dropped_receiver.recv_timeout(Duration::from_millis(100));
+    scene_gate.open();
+    let eventual = while_closed.or_else(|_| dropped_receiver.recv_timeout(Duration::from_secs(1)));
+    dropper.join().unwrap();
+
+    assert_eq!(
+        while_closed,
+        Ok(()),
+        "dropping the handle must detach from blocked worker cleanup; eventual={eventual:?}"
+    );
 }
 
 #[test]

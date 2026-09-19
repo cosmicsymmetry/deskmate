@@ -72,7 +72,5 @@ pub(crate) enum RuntimeCommand {
         push: PushScene,
         reply: CommandReply,
     },
-    Shutdown {
-        reply: CommandReply,
-    },
+    Shutdown,
 }

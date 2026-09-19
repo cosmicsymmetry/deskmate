@@ -172,12 +172,12 @@ mod tests {
         SessionSigner::from_admin_token("admin-token-value")
     }
 
-    fn state_with_integrations() -> ServerState {
+    fn state_with_integrations() -> (tempfile::TempDir, ServerState) {
         let state = ServerState::in_memory();
         let directory = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(
             crate::secrets::IntegrationStore::open(
-                directory.keep().join(crate::secrets::SECRETS_STORE_FILE),
+                directory.path().join(crate::secrets::SECRETS_STORE_FILE),
                 crate::secrets::SecretsKey::from_bytes([7u8; 32]),
             )
             .expect("store"),
@@ -188,7 +188,7 @@ mod tests {
             GoogleOAuthConfig::default(),
         ));
         state.set_integrations(Arc::new(IntegrationRuntime::new(token_manager)));
-        state
+        (directory, state)
     }
 
     async fn operator_sid(operator: OperatorAuthenticated) -> String {
@@ -260,7 +260,7 @@ mod tests {
 
     #[tokio::test]
     async fn operator_gate_accepts_the_admin_bearer_token() {
-        let response = protected_app(state_with_integrations())
+        let response = protected_app(ServerState::in_memory())
             .oneshot(
                 Request::builder()
                     .uri("/operator-test")
@@ -282,7 +282,7 @@ mod tests {
 
     #[tokio::test]
     async fn operator_gate_accepts_a_valid_session_cookie() {
-        let state = state_with_integrations();
+        let state = ServerState::in_memory();
         let cookie = state
             .sessions()
             .mint("cookie-sid", Utc::now(), Duration::hours(1));
@@ -311,7 +311,7 @@ mod tests {
 
     #[tokio::test]
     async fn operator_gate_rejects_absent_and_invalid_cookies_with_a_bare_401() {
-        let state = state_with_integrations();
+        let state = ServerState::in_memory();
         let absent = protected_app(state.clone())
             .oneshot(
                 Request::builder()
@@ -338,7 +338,8 @@ mod tests {
 
     #[tokio::test]
     async fn login_exchanges_the_admin_bearer_for_a_signed_secure_cookie() {
-        let response = app(state_with_integrations())
+        let (_directory, state) = state_with_integrations();
+        let response = app(state)
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -446,7 +447,7 @@ mod tests {
 
     #[tokio::test]
     async fn login_rejects_an_invalid_admin_token_with_a_bare_401() {
-        let response = app(state_with_integrations())
+        let response = app(ServerState::in_memory())
             .oneshot(
                 Request::builder()
                     .method("POST")

@@ -117,10 +117,9 @@ pub async fn drive_until_scene(socket: &mut DeviceSocket) -> protocol::PushScene
     .expect("timed out waiting for the expected scene")
 }
 
-/// Drives a runtime's first connection through full synchronization and the
-/// initial scheduled status/time-sync work. Use [`reattach_runtime`] for a
-/// reconnect: it replays a retained runtime rather than bootstrapping one,
-/// though both now finish the same periodic schedule.
+/// Completes runtime synchronization after either an initial connection or a
+/// reconnect. A reconnect replays retained state, then performs the same
+/// scheduled status/time synchronization as the initial connection.
 pub async fn bootstrap_runtime(socket: &mut DeviceSocket) {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
@@ -149,46 +148,6 @@ pub async fn bootstrap_runtime(socket: &mut DeviceSocket) {
     })
     .await
     .expect("timed out bootstrapping the runtime");
-}
-
-/// Drives a retained runtime's reconnect replay. Replay restores the cached
-/// device model through `ActivateCard`, and is then followed by the same
-/// status and time sync a first connection performs.
-///
-/// That last part changed when the runtime worker's busy-loop was fixed. The
-/// status and time-sync deadlines are now consumed on every tick so they cannot
-/// sit in the past and spin `recv_timeout` on a zero wait, and they are re-armed
-/// at the connect transition instead. A reconnect therefore refreshes promptly,
-/// which is the behaviour a dropped link needs: the device may have rebooted and
-/// its clock may have drifted while it was away.
-pub async fn reattach_runtime(socket: &mut DeviceSocket) {
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            match socket.next().await {
-                Some(Ok(WsMessage::Binary(bytes))) => {
-                    let frame = protocol::decode_wire_frame(&bytes)
-                        .expect("device received a malformed frame during reattach");
-                    let message = protocol::decode_message(&frame)
-                        .expect("device received an undecodable message during reattach");
-                    let complete = matches!(message, Message::ActivateCard(_));
-                    reply(socket, frame.request_id, &message).await;
-                    if complete {
-                        finish_initial_schedule(socket).await;
-                        flush_socket(socket).await;
-                        return;
-                    }
-                }
-                Some(Ok(WsMessage::Ping(payload))) => {
-                    socket.send(WsMessage::Pong(payload)).await.unwrap();
-                }
-                Some(Ok(other)) => panic!("unexpected reattach WebSocket message: {other:?}"),
-                Some(Err(error)) => panic!("reattach WebSocket read failed: {error}"),
-                None => panic!("socket closed before runtime reattach completed"),
-            }
-        }
-    })
-    .await
-    .expect("timed out reattaching the runtime");
 }
 
 async fn finish_initial_schedule(socket: &mut DeviceSocket) {
@@ -241,10 +200,10 @@ pub async fn answer_next_runtime_status(socket: &mut DeviceSocket) {
 
 pub async fn flush_socket(socket: &mut DeviceSocket) {
     const PROBE: &[u8] = b"deskmate-test-flush";
-    socket.send(WsMessage::Ping(PROBE.to_vec())).await.unwrap();
+    socket.send(WsMessage::Ping(PROBE.into())).await.unwrap();
     loop {
         match socket.next().await {
-            Some(Ok(WsMessage::Pong(payload))) if payload.as_slice() == PROBE => return,
+            Some(Ok(WsMessage::Pong(payload))) if payload.as_ref() == PROBE => return,
             Some(Ok(WsMessage::Binary(bytes))) => {
                 let frame = protocol::decode_wire_frame(&bytes).expect("probe frame");
                 let message = protocol::decode_message(&frame).expect("probe message");
@@ -298,7 +257,9 @@ async fn reply(socket: &mut DeviceSocket, request_id: u32, request: &Message) {
     };
     socket
         .send(WsMessage::Binary(
-            protocol::encode_message(request_id, &response).unwrap(),
+            protocol::encode_message(request_id, &response)
+                .unwrap()
+                .into(),
         ))
         .await
         .unwrap();

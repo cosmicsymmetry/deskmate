@@ -64,12 +64,7 @@ zeroize = { version = "=1.9.0", features = ["derive"] }
 
 [dev-dependencies]
 protocol = { path = "../protocol", features = ["test-support"] }
-# Lets the inline producer-credential tests assert POSITIVELY that what lands
-# on disk is SHA-256(token). Asserting only that the plaintext is absent is too
-# weak: a "digest" that copied the token's bytes verbatim would still be
-# hex-encoded on the way out, so the substring check never fires.
-sha2 = "0.10"
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.29"
 http = "1"
 
 [lints]

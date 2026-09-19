@@ -1,40 +1,24 @@
-//! Route-level checks that need a full `ServerState` and Axum. These bind
-//! loopback and therefore CANNOT run under Codex's sandbox (project memory:
-//! sandbox denies loopback binds) -- the controller runs them.
+//! Route-level checks that need a full `ServerState` and Axum, exercised
+//! through in-process `Router::oneshot` requests.
 
 use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
-use server::oauth::{GoogleOAuthConfig, IntegrationRuntime, TokenManager};
+use server::oauth::GoogleOAuthConfig;
+use server::oauth::transport::EgressTransport;
+use server::secrets::IntegrationSecret;
 use server::{ServerState, app};
 use tower::ServiceExt;
 
-fn state_with_integrations() -> ServerState {
-    let state = ServerState::in_memory();
-    // Reuse the server's own in-memory config dir for the secrets file.
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.keep().join("secrets.enc");
-    let store = Arc::new(
-        server::secrets::IntegrationStore::open(
-            path,
-            server::secrets::SecretsKey::from_bytes([1u8; 32]),
-        )
-        .expect("store"),
-    );
-    let token_manager = Arc::new(TokenManager::new(
-        store,
-        Arc::new(server::oauth::transport::EgressTransport),
-        GoogleOAuthConfig::default(),
-    ));
-    let runtime = Arc::new(IntegrationRuntime::new(token_manager));
-    state.set_integrations(runtime);
-    state
-}
+mod oauth_support;
+
+use oauth_support::{FakeTransport, integration_state};
 
 #[tokio::test]
 async fn callback_with_unknown_state_is_rejected_before_any_exchange() {
-    let app = app(state_with_integrations());
+    let fixture = integration_state(Arc::new(EgressTransport), None);
+    let app = app(fixture.state.clone());
     let response = app
         .oneshot(
             Request::builder()
@@ -51,7 +35,8 @@ async fn callback_with_unknown_state_is_rejected_before_any_exchange() {
 
 #[tokio::test]
 async fn oauth_routes_reject_an_unauthenticated_caller_with_a_bare_401() {
-    let app = app(state_with_integrations());
+    let fixture = integration_state(Arc::new(EgressTransport), None);
+    let app = app(fixture.state.clone());
     let response = app
         .oneshot(
             Request::builder()
@@ -73,6 +58,7 @@ async fn oauth_routes_reject_an_unauthenticated_caller_with_a_bare_401() {
 
 #[tokio::test]
 async fn callback_and_revoke_also_reject_unauthenticated_callers_with_bare_401s() {
+    let fixture = integration_state(Arc::new(EgressTransport), None);
     for (method, uri) in [
         (
             "GET",
@@ -80,7 +66,7 @@ async fn callback_and_revoke_also_reject_unauthenticated_callers_with_bare_401s(
         ),
         ("POST", "/v1/integrations/google-primary/revoke"),
     ] {
-        let response = app(state_with_integrations())
+        let response = app(fixture.state.clone())
             .oneshot(
                 Request::builder()
                     .method(method)
@@ -102,7 +88,8 @@ async fn callback_and_revoke_also_reject_unauthenticated_callers_with_bare_401s(
 
 #[tokio::test]
 async fn callback_rejects_a_state_from_another_session_before_exchange() {
-    let state = state_with_integrations();
+    let fixture = integration_state(Arc::new(EgressTransport), None);
+    let state = &fixture.state;
     let login = app(state.clone())
         .oneshot(
             Request::builder()
@@ -168,7 +155,7 @@ async fn callback_rejects_a_state_from_another_session_before_exchange() {
             .unwrap()
             .is_empty()
     );
-    let retry = app(state)
+    let retry = app(state.clone())
         .oneshot(
             Request::builder()
                 .uri(format!(
@@ -193,7 +180,8 @@ async fn callback_rejects_a_state_from_another_session_before_exchange() {
 
 #[tokio::test]
 async fn start_consent_redirects_to_google_for_an_admin_caller() {
-    let app = app(state_with_integrations());
+    let fixture = integration_state(Arc::new(EgressTransport), None);
+    let app = app(fixture.state.clone());
     let response = app
         .oneshot(
             Request::builder()
@@ -217,89 +205,17 @@ async fn start_consent_redirects_to_google_for_an_admin_caller() {
 
 // --- Token vending --------------------------------------------------------
 
-use std::sync::Mutex;
-
-use server::oauth::transport::{FetchResponse, OAuthFuture, OAuthTransport, TransportError};
-use server::secrets::{IntegrationSecret, IntegrationStore, SecretsKey};
-
 const STORED_REFRESH_TOKEN: &str = "stored-refresh-token-value";
 const STORED_CLIENT_SECRET: &str = "stored-client-secret-value";
 
-/// Queued canned responses plus a record of every URL actually posted to, so a
-/// test can assert the server reached exactly the hosts it should have.
-struct FakeTransport {
-    queued: Mutex<Vec<(u16, Vec<u8>)>>,
-    urls: Mutex<Vec<String>>,
-}
-
-impl FakeTransport {
-    fn with(responses: Vec<(u16, &str)>) -> Arc<Self> {
-        Arc::new(Self {
-            queued: Mutex::new(
-                responses
-                    .into_iter()
-                    .rev()
-                    .map(|(status, body)| (status, body.as_bytes().to_vec()))
-                    .collect(),
-            ),
-            urls: Mutex::new(Vec::new()),
-        })
+fn stored_grant() -> IntegrationSecret {
+    IntegrationSecret {
+        provider: "google".to_string(),
+        refresh_token: STORED_REFRESH_TOKEN.to_string(),
+        client_secret: Some(STORED_CLIENT_SECRET.to_string()),
+        scopes: vec!["https://www.googleapis.com/auth/calendar.events.readonly".to_string()],
+        obtained_at: 0,
     }
-
-    fn hosts_called(&self) -> Vec<String> {
-        self.urls
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|url| url::Url::parse(url).ok())
-            .filter_map(|url| url.host_str().map(str::to_owned))
-            .collect()
-    }
-}
-
-impl OAuthTransport for FakeTransport {
-    fn post_form(
-        &self,
-        url: String,
-        _form: Vec<(String, String)>,
-    ) -> OAuthFuture<'_, Result<FetchResponse, TransportError>> {
-        self.urls.lock().unwrap().push(url);
-        let next = self.queued.lock().unwrap().pop();
-        Box::pin(async move {
-            next.map(|(status, body)| FetchResponse { status, body })
-                .ok_or_else(|| TransportError("no queued response".to_string()))
-        })
-    }
-}
-
-fn state_with_stored_grant(transport: Arc<FakeTransport>) -> ServerState {
-    let state = ServerState::in_memory();
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.keep().join("secrets.enc");
-    let store =
-        Arc::new(IntegrationStore::open(path, SecretsKey::from_bytes([1u8; 32])).expect("store"));
-    store
-        .put(
-            "google".to_string(),
-            IntegrationSecret {
-                provider: "google".to_string(),
-                refresh_token: STORED_REFRESH_TOKEN.to_string(),
-                client_secret: Some(STORED_CLIENT_SECRET.to_string()),
-                scopes: vec![
-                    "https://www.googleapis.com/auth/calendar.events.readonly".to_string(),
-                ],
-                obtained_at: 0,
-            },
-        )
-        .expect("put");
-    let token_manager = Arc::new(TokenManager::new(
-        store,
-        transport,
-        GoogleOAuthConfig::default(),
-    ));
-    let runtime = Arc::new(IntegrationRuntime::new(token_manager));
-    state.set_integrations(runtime);
-    state
 }
 
 async fn mint_producer_credential(state: &ServerState, integration_id: &str) -> String {
@@ -346,10 +262,10 @@ async fn a_producer_credential_vends_the_providers_access_token() {
         200,
         r#"{"access_token":"ya29.the-live-token","expires_in":3600}"#,
     )]);
-    let state = state_with_stored_grant(transport);
-    let credential = mint_producer_credential(&state, "google").await;
+    let fixture = integration_state(transport, Some(stored_grant()));
+    let credential = mint_producer_credential(&fixture.state, "google").await;
 
-    let (status, body) = vend(&state, "google", Some(&credential)).await;
+    let (status, body) = vend(&fixture.state, "google", Some(&credential)).await;
 
     assert_eq!(status, StatusCode::OK);
     let parsed: serde_json::Value = serde_json::from_str(&body).expect("json");
@@ -368,10 +284,10 @@ async fn the_vend_response_carries_no_refresh_token_or_client_secret() {
         200,
         r#"{"access_token":"ya29.the-live-token","expires_in":3600,"refresh_token":"rotated-refresh"}"#,
     )]);
-    let state = state_with_stored_grant(transport);
-    let credential = mint_producer_credential(&state, "google").await;
+    let fixture = integration_state(transport, Some(stored_grant()));
+    let credential = mint_producer_credential(&fixture.state, "google").await;
 
-    let (_, body) = vend(&state, "google", Some(&credential)).await;
+    let (_, body) = vend(&fixture.state, "google", Some(&credential)).await;
 
     assert!(!body.contains(STORED_REFRESH_TOKEN));
     assert!(!body.contains(STORED_CLIENT_SECRET));
@@ -381,8 +297,8 @@ async fn the_vend_response_carries_no_refresh_token_or_client_secret() {
 
 #[tokio::test]
 async fn an_unauthenticated_vend_is_refused() {
-    let state = state_with_stored_grant(FakeTransport::with(vec![]));
-    let (status, _) = vend(&state, "google", None).await;
+    let fixture = integration_state(FakeTransport::with(vec![]), Some(stored_grant()));
+    let (status, _) = vend(&fixture.state, "google", None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
@@ -390,8 +306,8 @@ async fn an_unauthenticated_vend_is_refused() {
 async fn the_admin_token_does_not_vend() {
     // An admin credential living in a producer's environment is exactly what
     // the separate producer credential exists to avoid.
-    let state = state_with_stored_grant(FakeTransport::with(vec![]));
-    let (status, _) = vend(&state, "google", Some("in-memory-admin-token")).await;
+    let fixture = integration_state(FakeTransport::with(vec![]), Some(stored_grant()));
+    let (status, _) = vend(&fixture.state, "google", Some("in-memory-admin-token")).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
@@ -399,9 +315,9 @@ async fn the_admin_token_does_not_vend() {
 async fn a_credential_for_another_integration_cannot_vend() {
     // Uniform 401, not 403: a distinguishable rejection would enumerate which
     // integration ids exist.
-    let state = state_with_stored_grant(FakeTransport::with(vec![]));
-    let credential = mint_producer_credential(&state, "google").await;
-    let (status, _) = vend(&state, "dropbox", Some(&credential)).await;
+    let fixture = integration_state(FakeTransport::with(vec![]), Some(stored_grant()));
+    let credential = mint_producer_credential(&fixture.state, "google").await;
+    let (status, _) = vend(&fixture.state, "dropbox", Some(&credential)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
@@ -411,10 +327,10 @@ async fn a_revoked_grant_vends_conflict_naming_reconnection() {
         400,
         r#"{"error":"invalid_grant","error_description":"expired"}"#,
     )]);
-    let state = state_with_stored_grant(transport);
-    let credential = mint_producer_credential(&state, "google").await;
+    let fixture = integration_state(transport, Some(stored_grant()));
+    let credential = mint_producer_credential(&fixture.state, "google").await;
 
-    let (status, body) = vend(&state, "google", Some(&credential)).await;
+    let (status, body) = vend(&fixture.state, "google", Some(&credential)).await;
 
     assert_eq!(
         status,
@@ -426,8 +342,8 @@ async fn a_revoked_grant_vends_conflict_naming_reconnection() {
 
 #[tokio::test]
 async fn minting_a_producer_credential_requires_the_operator() {
-    let state = state_with_stored_grant(FakeTransport::with(vec![]));
-    let response = app(state)
+    let fixture = integration_state(FakeTransport::with(vec![]), Some(stored_grant()));
+    let response = app(fixture.state.clone())
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -446,10 +362,10 @@ async fn revoking_a_producer_credential_stops_it_vending() {
         200,
         r#"{"access_token":"ya29.the-live-token","expires_in":3600}"#,
     )]);
-    let state = state_with_stored_grant(transport);
-    let credential = mint_producer_credential(&state, "google").await;
+    let fixture = integration_state(transport, Some(stored_grant()));
+    let credential = mint_producer_credential(&fixture.state, "google").await;
 
-    let revoked = app(state.clone())
+    let revoked = app(fixture.state.clone())
         .oneshot(
             Request::builder()
                 .method("DELETE")
@@ -462,7 +378,7 @@ async fn revoking_a_producer_credential_stops_it_vending() {
         .unwrap();
     assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
 
-    let (status, _) = vend(&state, "google", Some(&credential)).await;
+    let (status, _) = vend(&fixture.state, "google", Some(&credential)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
@@ -477,10 +393,10 @@ async fn a_producer_supplied_target_is_ignored_entirely() {
         200,
         r#"{"access_token":"ya29.the-live-token","expires_in":3600}"#,
     )]);
-    let state = state_with_stored_grant(transport.clone());
-    let credential = mint_producer_credential(&state, "google").await;
+    let fixture = integration_state(transport.clone(), Some(stored_grant()));
+    let credential = mint_producer_credential(&fixture.state, "google").await;
 
-    let response = app(state)
+    let response = app(fixture.state.clone())
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -515,10 +431,10 @@ async fn revoking_an_integration_also_revokes_its_producer_credential() {
     // the failure surfaces as a 401 loop, which reads like a broken producer
     // rather than the disconnection the operator actually performed.
     let transport = FakeTransport::with(vec![(200, r"{}")]);
-    let state = state_with_stored_grant(transport);
-    let credential = mint_producer_credential(&state, "google").await;
+    let fixture = integration_state(transport, Some(stored_grant()));
+    let credential = mint_producer_credential(&fixture.state, "google").await;
 
-    let revoked = app(state.clone())
+    let revoked = app(fixture.state.clone())
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -531,7 +447,7 @@ async fn revoking_an_integration_also_revokes_its_producer_credential() {
         .unwrap();
     assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
 
-    let (status, _) = vend(&state, "google", Some(&credential)).await;
+    let (status, _) = vend(&fixture.state, "google", Some(&credential)).await;
     assert_eq!(
         status,
         StatusCode::UNAUTHORIZED,
@@ -545,10 +461,10 @@ async fn revoking_an_integration_drops_the_credential_even_when_the_remote_revok
     // provider says, because the operator asked to disconnect. Leaving a live
     // producer credential behind would contradict that.
     let transport = FakeTransport::with(vec![]); // every post_form errors
-    let state = state_with_stored_grant(transport);
-    let credential = mint_producer_credential(&state, "google").await;
+    let fixture = integration_state(transport, Some(stored_grant()));
+    let credential = mint_producer_credential(&fixture.state, "google").await;
 
-    let revoked = app(state.clone())
+    let revoked = app(fixture.state.clone())
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -561,6 +477,6 @@ async fn revoking_an_integration_drops_the_credential_even_when_the_remote_revok
         .unwrap();
     assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
 
-    let (status, _) = vend(&state, "google", Some(&credential)).await;
+    let (status, _) = vend(&fixture.state, "google", Some(&credential)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }

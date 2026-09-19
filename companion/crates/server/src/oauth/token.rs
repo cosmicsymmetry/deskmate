@@ -505,14 +505,14 @@ mod tests {
         })
     }
 
-    fn store() -> Arc<IntegrationStore> {
+    fn store() -> (tempfile::TempDir, Arc<IntegrationStore>) {
         let dir = tempfile::tempdir().expect("tempdir");
-        // Leak the tempdir so the on-disk secrets file outlives the test body.
-        let path = dir.keep().join(crate::secrets::SECRETS_STORE_FILE);
-        Arc::new(
+        let path = dir.path().join(crate::secrets::SECRETS_STORE_FILE);
+        let store = Arc::new(
             IntegrationStore::open(path, crate::secrets::SecretsKey::from_bytes([9u8; 32]))
                 .expect("open store"),
-        )
+        );
+        (dir, store)
     }
 
     fn manager(
@@ -528,9 +528,21 @@ mod tests {
         )
     }
 
+    #[test]
+    fn oauth_fixture_directory_is_removed_when_its_guard_drops() {
+        let (dir, store) = store();
+        let path = dir.path().to_path_buf();
+        let manager = manager(store, FakeTransport::new(vec![]), Utc::now());
+
+        drop(manager);
+        assert!(path.exists(), "the guard must own the fixture directory");
+        drop(dir);
+        assert!(!path.exists(), "dropping the guard must clean the fixture");
+    }
+
     #[tokio::test]
     async fn exchange_persists_refresh_token_and_reports_connected() {
-        let store = store();
+        let (_dir, store) = store();
         let transport = FakeTransport::new(vec![ok(
             r#"{"access_token":"at","expires_in":3600,"refresh_token":"rt"}"#,
         )]);
@@ -568,7 +580,7 @@ mod tests {
 
     #[tokio::test]
     async fn cached_access_token_is_reused_until_near_expiry() {
-        let store = store();
+        let (_dir, store) = store();
         // Only ONE token response is queued: a second network call would panic.
         let transport = FakeTransport::new(vec![ok(
             r#"{"access_token":"at","expires_in":3600,"refresh_token":"rt"}"#,
@@ -596,7 +608,7 @@ mod tests {
     /// check, yields there together, and then posts.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_callers_share_one_refresh_instead_of_stampeding() {
-        let store = store();
+        let (_dir, store) = store();
         let transport = FakeTransport::new(vec![
             ok(r#"{"access_token":"first","expires_in":30,"refresh_token":"rt"}"#),
             ok(r#"{"access_token":"refreshed","expires_in":3600}"#),
@@ -646,7 +658,7 @@ mod tests {
             r#"{"access_token":"at","refresh_token":"rt"}"#,
             r#"{"access_token":"at","expires_in":0,"refresh_token":"rt"}"#,
         ] {
-            let store = store();
+            let (_dir, store) = store();
             let transport = FakeTransport::new(vec![ok(body)]);
             let manager = manager(store, transport, Utc::now());
             let error = manager
@@ -672,7 +684,7 @@ mod tests {
     /// at the wrong cause.
     #[tokio::test]
     async fn a_rotated_client_secret_is_used_for_an_existing_integration() {
-        let store = store();
+        let (_dir, store) = store();
         let transport = FakeTransport::new(vec![
             ok(r#"{"access_token":"first","expires_in":30,"refresh_token":"rt"}"#),
             ok(r#"{"access_token":"second","expires_in":3600}"#),
@@ -715,7 +727,7 @@ mod tests {
 
     #[tokio::test]
     async fn near_expiry_triggers_a_refresh() {
-        let store = store();
+        let (_dir, store) = store();
         let transport = FakeTransport::new(vec![
             ok(r#"{"access_token":"first","expires_in":30,"refresh_token":"rt"}"#),
             ok(r#"{"access_token":"second","expires_in":3600}"#),
@@ -746,7 +758,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_grant_on_refresh_sets_needs_reconnect() {
-        let store = store();
+        let (_dir, store) = store();
         let transport = FakeTransport::new(vec![
             ok(r#"{"access_token":"first","expires_in":10,"refresh_token":"rt"}"#),
             status(400, r#"{"error":"invalid_grant"}"#),
@@ -769,7 +781,7 @@ mod tests {
 
     #[tokio::test]
     async fn transport_failure_on_refresh_sets_error_health() {
-        let store = store();
+        let (_dir, store) = store();
         let transport = FakeTransport::new(vec![
             ok(r#"{"access_token":"first","expires_in":10,"refresh_token":"rt"}"#),
             Err(TransportError("connection reset".to_string())),
@@ -792,7 +804,7 @@ mod tests {
 
     #[tokio::test]
     async fn revoke_clears_the_stored_secret_and_calls_the_endpoint() {
-        let store = store();
+        let (_dir, store) = store();
         let transport = FakeTransport::new(vec![
             ok(r#"{"access_token":"at","expires_in":3600,"refresh_token":"rt"}"#),
             ok(""), // revoke endpoint 200

@@ -4,12 +4,16 @@
 //! `image_routes.rs` does, because the things most likely to break here are not
 //! reachable from a unit test: which gate a route is behind, what a route
 //! answers when the board is absent, and whether the SPA fallback can shadow the
-//! API.
+//! API. The traversal test intentionally drives the router directly so its
+//! request target is not normalized by an HTTP client first.
 
-use reqwest::{Client, StatusCode};
+use axum::body::{Body, to_bytes};
+use axum::http::Request;
+use reqwest::{Client, Method, StatusCode};
 use serde::Deserialize;
 use server::firmware::FirmwareCatalog;
 use server::{ServerState, app, app_with_web};
+use tower::ServiceExt;
 
 const ADMIN_TOKEN: &str = "in-memory-admin-token";
 
@@ -82,20 +86,51 @@ async fn every_companion_route_refuses_an_anonymous_caller() {
     // Asserted as a set rather than one route, because the failure this guards
     // against is a route added later without the extractor -- which would look
     // exactly like a working route in every other test.
-    for path in [
-        "/v1/app/devices",
-        "/v1/app/desk-1/snapshot",
-        "/v1/app/desk-1/events",
+    for (method, path, content_type, body) in [
+        (Method::GET, "/v1/app/devices", None, None),
+        (Method::GET, "/v1/app/desk-1/snapshot", None, None),
+        (Method::GET, "/v1/app/desk-1/events", None, None),
+        (
+            Method::POST,
+            "/v1/app/desk-1/config/validate",
+            Some("application/json"),
+            Some(r#"{"json":"{}"}"#),
+        ),
+        (
+            Method::PUT,
+            "/v1/app/desk-1/config",
+            Some("application/json"),
+            Some(r#"{"json":"{}"}"#),
+        ),
+        (
+            Method::POST,
+            "/v1/app/desk-1/preview",
+            Some("application/json"),
+            Some(r#"{"card_id":"clock-1"}"#),
+        ),
+        (
+            Method::POST,
+            "/v1/app/desk-1/pomodoro",
+            Some("application/json"),
+            Some(r#"{"card_id":"pomodoro","action":"start"}"#),
+        ),
     ] {
-        let response = client
-            .get(format!("{}{path}", server.base_url))
-            .send()
-            .await
-            .expect("anonymous request");
+        let mut request = client.request(method.clone(), format!("{}{path}", server.base_url));
+        if let Some(content_type) = content_type {
+            request = request.header("content-type", content_type);
+        }
+        if let Some(body) = body {
+            request = request.body(body);
+        }
+        let response = request.send().await.expect("anonymous request");
         assert_eq!(
             response.status(),
             StatusCode::UNAUTHORIZED,
-            "{path} answered an anonymous caller"
+            "{method} {path} answered an anonymous caller"
+        );
+        assert!(
+            response.bytes().await.expect("rejection body").is_empty(),
+            "{method} {path} returned content to an anonymous caller"
         );
     }
 }
@@ -214,7 +249,7 @@ async fn saving_a_configuration_persists_it_and_the_next_snapshot_shows_it() {
 }
 
 #[tokio::test]
-async fn an_invalid_draft_is_refused_with_the_issues_that_explain_it() {
+async fn a_malformed_draft_is_an_invalid_payload() {
     let (server, _state) = spawn().await;
     let client = Client::new();
     let device = mint_device(&client, &server).await;
@@ -240,6 +275,64 @@ async fn an_invalid_draft_is_refused_with_the_issues_that_explain_it() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = json_body(response).await;
     assert_eq!(body["category"], "invalid-payload");
+}
+
+#[tokio::test]
+async fn semantic_validation_reports_issues_and_preserves_the_last_good_document() {
+    let (server, _state) = spawn().await;
+    let client = Client::new();
+    let device = mint_device(&client, &server).await;
+    let before = snapshot(&client, &server, &device.device_id).await;
+    let mut config = before["config"].clone();
+    config["cards"][0]["dwell_seconds"] = serde_json::json!(app_core::MIN_DWELL_SECONDS - 1);
+    let envelope = serde_json::json!({ "json": config.to_string() }).to_string();
+
+    let preflight = client
+        .post(format!(
+            "{}/v1/app/{}/config/validate",
+            server.base_url, device.device_id
+        ))
+        .bearer_auth(ADMIN_TOKEN)
+        .header("content-type", "application/json")
+        .body(envelope.clone())
+        .send()
+        .await
+        .expect("validate config");
+    assert_eq!(preflight.status(), StatusCode::OK);
+    let preflight = json_body(preflight).await;
+    assert_eq!(preflight["valid"], false);
+    let issues = preflight["issues"]
+        .as_array()
+        .filter(|issues| !issues.is_empty())
+        .expect("semantic validation issues");
+    assert!(issues.iter().any(|issue| {
+        issue["path"] == "cards[0].dwell_seconds"
+            && issue["code"] == "out-of-range"
+            && issue["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty())
+    }));
+    let expected_issues = preflight["issues"].clone();
+
+    let saved = client
+        .put(format!(
+            "{}/v1/app/{}/config",
+            server.base_url, device.device_id
+        ))
+        .bearer_auth(ADMIN_TOKEN)
+        .header("content-type", "application/json")
+        .body(envelope)
+        .send()
+        .await
+        .expect("save invalid config");
+    assert_eq!(saved.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let saved = json_body(saved).await;
+    assert_eq!(saved["category"], "validation");
+    assert_eq!(saved["issues"], expected_issues);
+
+    let after = snapshot(&client, &server, &device.device_id).await;
+    assert_eq!(after["config"], before["config"]);
+    assert_eq!(after["has_saved_config"], before["has_saved_config"]);
 }
 
 #[tokio::test]
@@ -412,23 +505,32 @@ async fn the_spa_fallback_serves_client_routes_but_never_shadows_the_api() {
 
 #[tokio::test]
 async fn a_traversal_out_of_the_web_root_is_refused_rather_than_served() {
-    let root = tempfile::tempdir().expect("web root");
-    std::fs::write(root.path().join("index.html"), "<!doctype html>shell").expect("write shell");
-    let secret = root.path().parent().expect("parent").join("secret.txt");
-    std::fs::write(&secret, "do not serve me").expect("write secret");
+    let root = tempfile::tempdir().expect("fixture root");
+    let web = root.path().join("web");
+    std::fs::create_dir(&web).expect("web root");
+    let shell = b"<!doctype html>shell";
+    let secret = b"do not serve me";
+    std::fs::write(web.join("index.html"), shell).expect("write shell");
+    std::fs::write(root.path().join("secret.txt"), secret).expect("write secret");
 
-    let server = spawn_with(ServerState::in_memory(), Some(root.path().to_path_buf())).await;
-    let response = Client::new()
-        .get(format!("{}/../secret.txt", server.base_url))
-        .send()
+    let response = app_with_web(ServerState::in_memory(), Some(web))
+        .oneshot(
+            Request::builder()
+                .uri("/../secret.txt")
+                .body(Body::empty())
+                .expect("traversal request"),
+        )
         .await
-        .expect("traversal attempt");
-    let body = response.text().await.expect("body");
+        .expect("traversal response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    assert_eq!(body.as_ref(), shell);
     assert!(
-        !body.contains("do not serve me"),
+        !body.windows(secret.len()).any(|window| window == secret),
         "the web root must not be escapable"
     );
-    let _ = std::fs::remove_file(secret);
 }
 
 #[tokio::test]

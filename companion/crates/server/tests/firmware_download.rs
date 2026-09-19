@@ -10,9 +10,9 @@
 //! tunnel's TLS), so every case here reflects what a fully anonymous
 //! internet client can throw at it.
 //!
-//! Every negative case below *plants a real file at the location the
-//! attack targets* and asserts the response is neither 200 nor that
-//! file's planted bytes. A traversal test that only asserts 404 against a
+//! Five negative cases below *plant a real file at the location the attack
+//! targets* and require a 404 response that excludes those planted bytes. A
+//! traversal test that only asserts 404 against a
 //! target that doesn't exist proves nothing: a completely guard-free
 //! implementation returns 404 there too (`File::open` on a nonexistent
 //! path fails regardless of whether anything upstream tried to stop it),
@@ -22,6 +22,7 @@
 
 use std::path::Path;
 
+use reqwest::StatusCode;
 use server::{ServerState, app};
 
 async fn spawn() -> (String, ServerState) {
@@ -83,14 +84,18 @@ async fn plant(path: &Path, bytes: &[u8]) {
     tokio::fs::write(path, bytes).await.unwrap();
 }
 
-/// Asserts `response` is not the guard-free outcome: not `200`, and its
-/// body (if any) is not `planted`. Removes `cleanup_path` first (best
+/// Asserts `response` is the route's exact 404 rejection and its body (if any)
+/// is not `planted`. Removes `cleanup_path` first (best
 /// effort) so a failing assertion still leaves no stray file behind.
 async fn assert_guard_held(response: reqwest::Response, planted: &[u8], cleanup_path: &Path) {
     let status = response.status();
     let body = response.bytes().await.ok();
     let _ = tokio::fs::remove_file(cleanup_path).await;
-    assert_ne!(status, 200, "the guard-free outcome was reachable");
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "invalid filename must return 404"
+    );
     if let Some(body) = body {
         assert_ne!(
             body.as_ref(),

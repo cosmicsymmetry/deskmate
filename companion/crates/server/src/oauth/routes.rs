@@ -488,13 +488,13 @@ mod tests {
         }
     }
 
-    fn runtime() -> IntegrationRuntime {
+    fn runtime() -> (tempfile::TempDir, IntegrationRuntime) {
         runtime_with_config(GoogleOAuthConfig::default())
     }
 
-    fn runtime_with_config(oauth: GoogleOAuthConfig) -> IntegrationRuntime {
+    fn runtime_with_config(oauth: GoogleOAuthConfig) -> (tempfile::TempDir, IntegrationRuntime) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.keep().join(crate::secrets::SECRETS_STORE_FILE);
+        let path = dir.path().join(crate::secrets::SECRETS_STORE_FILE);
         let store = Arc::new(
             crate::secrets::IntegrationStore::open(
                 path,
@@ -503,7 +503,7 @@ mod tests {
             .expect("store"),
         );
         let token_manager = Arc::new(TokenManager::new(store, Arc::new(NoTransport), oauth));
-        IntegrationRuntime::new(token_manager)
+        (dir, IntegrationRuntime::new(token_manager))
     }
 
     #[test]
@@ -515,7 +515,7 @@ mod tests {
             scopes: vec!["scope-z".to_string(), "scope-a".to_string()],
             ..GoogleOAuthConfig::default()
         };
-        let runtime = runtime_with_config(oauth);
+        let (_dir, runtime) = runtime_with_config(oauth);
         let consent = runtime
             .start_consent("sid", "google-primary")
             .expect("consent");
@@ -552,7 +552,7 @@ mod tests {
 
     #[test]
     fn start_consent_returns_a_google_url_carrying_state_and_challenge() {
-        let runtime = runtime();
+        let (_dir, runtime) = runtime();
         let url = runtime
             .start_consent("sid-1", "google-primary")
             .expect("under the pending limit");
@@ -583,7 +583,7 @@ mod tests {
     /// permanent `invalid_grant` that only Google can see, in production.
     #[test]
     fn the_stashed_verifier_is_the_one_whose_challenge_was_sent_to_google() {
-        let runtime = runtime();
+        let (_dir, runtime) = runtime();
         let url = runtime
             .start_consent("sid-1", "google-primary")
             .expect("under the pending limit");
@@ -634,7 +634,7 @@ mod tests {
     /// expire. The count is what actually bounds it.
     #[test]
     fn pending_consent_flows_are_capped() {
-        let runtime = runtime();
+        let (_dir, runtime) = runtime();
         for index in 0..MAX_PENDING_AUTHS {
             assert!(
                 runtime.start_consent("sid-1", "google-primary").is_some(),
@@ -649,7 +649,7 @@ mod tests {
 
     #[test]
     fn a_stashed_state_is_single_use() {
-        let runtime = runtime();
+        let (_dir, runtime) = runtime();
         let url = runtime
             .start_consent("sid-1", "google-primary")
             .expect("under the pending limit");
@@ -674,12 +674,13 @@ mod tests {
 
     #[test]
     fn an_unknown_state_returns_none() {
-        assert!(runtime().take_pending("never-issued", Utc::now()).is_none());
+        let (_dir, runtime) = runtime();
+        assert!(runtime.take_pending("never-issued", Utc::now()).is_none());
     }
 
     #[test]
     fn an_expired_stash_returns_none() {
-        let runtime = runtime();
+        let (_dir, runtime) = runtime();
         let url = runtime
             .start_consent("sid-1", "google-primary")
             .expect("under the pending limit");

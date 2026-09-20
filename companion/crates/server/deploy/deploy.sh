@@ -68,7 +68,7 @@ ship_faces() {
 	say "shipping the faces"
 	# The gates run here, on the machine that has the sources: a face that does not
 	# type-check or whose golden moved must not reach the panel.
-	(cd companion/faces && bun install --frozen-lockfile >/dev/null && bun run check >/dev/null && bun test >/dev/null 2>&1) ||
+	(cd companion/faces && bun install --frozen-lockfile >/dev/null 2>&1 && bun run check >/dev/null 2>&1 && bun test >/dev/null 2>&1) ||
 		{
 			echo "refusing to ship: companion/faces does not pass its own gates" >&2
 			exit 1

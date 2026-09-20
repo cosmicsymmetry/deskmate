@@ -85,6 +85,20 @@ export interface ImageSourceDescriptor {
   id: string;
   name: string;
   face: FaceDescriptor | null;
+  /** Null exactly when `face` is: an external producer's source has nothing to report. */
+  face_status: FaceStatus | null;
+}
+
+/**
+ * Why a server-drawn face is or is not drawing, in the server's words. This is the only
+ * place the owner learns that a coin ID was not found or an API refused: the panel
+ * just says "Waiting for the first picture".
+ */
+export interface FaceStatus {
+  state: "needs-settings" | "drawing" | "drawn" | "needs-attention" | "retrying" | "unavailable";
+  /** The faces package's own sentence, for `needs-attention` and `retrying`. */
+  message: string | null;
+  at_unix_seconds: number | null;
 }
 
 export interface FaceDescriptor {

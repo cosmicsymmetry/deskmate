@@ -117,6 +117,9 @@ struct ImageSourceDescriptor {
     id: String,
     name: String,
     face: Option<crate::data_cards::FaceDescriptor>,
+    /// Null exactly when `face` is: an external producer's source has no server
+    /// face to report on.
+    face_status: Option<crate::data_cards::FaceStatus>,
 }
 
 #[cfg(test)]
@@ -141,11 +144,27 @@ pub(super) fn contract_image_source_descriptors() -> Vec<serde_json::Value> {
             id: "external-source".into(),
             name: "External picture".into(),
             face: None,
+            face_status: None,
         },
         ImageSourceDescriptor {
             id: "weather-source".into(),
             name: "Weather".into(),
+            face: Some(face.clone()),
+            face_status: Some(crate::data_cards::FaceStatus {
+                state: crate::data_cards::FaceState::NeedsSettings,
+                message: None,
+                at_unix_seconds: None,
+            }),
+        },
+        ImageSourceDescriptor {
+            id: "token-source".into(),
+            name: "Token price".into(),
             face: Some(face),
+            face_status: Some(crate::data_cards::FaceStatus {
+                state: crate::data_cards::FaceState::NeedsAttention,
+                message: Some("the token was not found; check the coin ID".into()),
+                at_unix_seconds: Some(1_790_000_000),
+            }),
         },
     ]
     .into_iter()
@@ -169,6 +188,7 @@ async fn list_sources(
         .into_iter()
         .map(|source| ImageSourceDescriptor {
             face: crate::data_cards::descriptor_for_source(&state, &source.id),
+            face_status: crate::data_cards::status_for_source(&state, &source.id),
             id: source.id,
             name: source.name,
         })

@@ -339,9 +339,9 @@ describe("mock backend contract", () => {
           {
             type: "text",
             key: "coin_id",
-            label: "Coin ID",
+            label: "Coin",
             value: "",
-            placeholder: "solana",
+            placeholder: "Solana",
           },
           {
             type: "text",

@@ -1569,3 +1569,39 @@ Rust fell by about 5,900 lines and TypeScript grew by about 4,300, tests include
 sides. No schema, wire or firmware boundary was crossed. Not verified: any of this on the
 panel, and the Linux build of the goldens -- `deploy.sh` now runs the faces suite on the
 VM before it installs anything, precisely because that is the first place it can be.
+
+## 2026-09-21 — "the token card didn't work on the device"
+
+It had been pronounced working the day before on the strength of a frame in the server's
+store and a preview in headless Chrome. The owner's one-line report was the first
+evidence from the only place that counts. Production was still running the Rust faces --
+the deploy had refused for want of Bun on the VM -- so the failure was not the port's, and
+the live server could not be read from the session. What could be done was to find every
+way the symptom arises and close the ones that were real.
+
+The transfer was ruled out by measuring it, for the first time: a live token frame is
+28 KB of RLE565 in 15 chunks, smaller than the weather face's 32 KB in 17. (The "~10 KB"
+the docs had always quoted was low by 3x, and the new Hacker News face is 61 KB in 33.)
+Asset churn was ruled out by precedent: `claude-limits` pushes a changing frame every ten
+minutes over the same path. That left the server never having a frame at all, which the
+panel renders as "Waiting for the first picture" -- and three ways to get there, all
+invisible to the owner:
+
+- **The window had two saves.** The face's fields had a small grey "Save source settings"
+  beside the prominent "Save to server", and pressing only the latter silently discarded
+  the coin. The session's own first test script had tripped over the mirror image of this
+  the day before and the lesson was not drawn. The fields now save themselves.
+- **A ticker was refused in silence.** The field said "Coin ID", the API wants `solana`,
+  people type `SOL`, and CoinGecko answers an unknown id with `[]`. The face now resolves a
+  name or ticker through search on the miss path -- exact matches only, best rank first.
+- **CoinGecko's keyless tier answers a burst with 429**, observed after about eight
+  requests from one address, and the worker retried only on its full interval: fifteen
+  minutes of blank card for a one-minute refusal. Transient failures now retry after a
+  minute and back off.
+
+And one fix underneath all three: the server reports each face's last outcome and the
+window shows it under the fields, in the faces package's own words. None of the three
+would have needed a session to diagnose if that sentence had been on screen.
+
+Which of the three it was on the owner's panel is not known, and none of the fixes has
+been seen on the device.

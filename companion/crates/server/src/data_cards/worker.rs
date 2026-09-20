@@ -3,8 +3,8 @@ use std::time::Duration;
 use chrono::Utc;
 use tokio::task::JoinHandle;
 
-use super::DataCardSpec;
 use super::faces_package::{self, FaceCommand, FaceRenderError};
+use super::{DataCardSpec, RefreshOutcome, record_outcome};
 use crate::image_ingest::{CanonicalFrame, canonical_frame_from_png};
 use crate::image_sources::AcceptOutcome;
 use crate::{ImageNotificationOrigin, ServerState};
@@ -63,79 +63,122 @@ fn render_frame(
     canonical_frame_from_png(&png).map_err(|error| RefreshFailure::NotAFrame(error.to_string()))
 }
 
+/// How long to wait before the next attempt.
+///
+/// A drawn face waits its whole interval, and so does one whose settings were
+/// refused -- nothing changes until the owner edits them, and an edit restarts this
+/// task. A TRANSIENT failure is retried soon, backing off to the interval: a keyless
+/// API answers a burst with 429 for about a minute, and waiting fifteen for that left
+/// a freshly created card on "Waiting for the first picture" for a quarter of an hour
+/// with nothing wrong that a minute would not fix.
+fn next_attempt(
+    refresh: Duration,
+    outcome: &RefreshOutcome,
+    consecutive_failures: u32,
+) -> Duration {
+    match outcome {
+        RefreshOutcome::Drawn | RefreshOutcome::NeedsAttention(_) => refresh,
+        RefreshOutcome::Retrying(_) => {
+            let doublings = consecutive_failures.saturating_sub(1).min(16);
+            MIN_REFRESH.saturating_mul(1 << doublings).min(refresh)
+        }
+    }
+}
+
+/// One refresh: render, accept, notify. `None` means a blocking task panicked, which
+/// is a bug rather than an outcome, and ends the refresher.
+async fn refresh_once(
+    state: &ServerState,
+    faces: &FaceCommand,
+    spec: &DataCardSpec,
+) -> Option<RefreshOutcome> {
+    let (source_id, kind) = (&spec.source_id, &spec.face.kind);
+    let render_faces = faces.clone();
+    let render_spec = spec.clone();
+    let rendered =
+        tokio::task::spawn_blocking(move || render_frame(&render_faces, &render_spec)).await;
+    let frame = match rendered {
+        Ok(Ok(frame)) => frame,
+        Ok(Err(RefreshFailure::Configuration(error))) => {
+            tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error,
+                "the face's settings need the owner's attention; keeping the stored frame unchanged");
+            return Some(RefreshOutcome::NeedsAttention(error));
+        }
+        Ok(Err(RefreshFailure::Transient(error))) => {
+            tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error,
+                "the data fetch failed; keeping the stored frame unchanged");
+            return Some(RefreshOutcome::Retrying(error));
+        }
+        Ok(Err(RefreshFailure::NotAFrame(error))) => {
+            tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error,
+                "the faces package did not produce an acceptable frame");
+            return Some(RefreshOutcome::Retrying(format!(
+                "the face could not be drawn: {error}"
+            )));
+        }
+        Err(error) => {
+            tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error, "the render task panicked");
+            return None;
+        }
+    };
+
+    let accept_state = state.clone();
+    let accept_source = source_id.clone();
+    let accepted = tokio::task::spawn_blocking(move || {
+        accept_state
+            .image_sources()
+            .accept(&accept_source, frame, Utc::now())
+    })
+    .await;
+    match accepted {
+        Ok(Ok(outcome)) => {
+            if !notify_image_source_outcome(state, source_id, &outcome) {
+                tracing::debug!(target: "server::data_cards", source_id = %source_id, kind, "the face is unchanged");
+            }
+            Some(RefreshOutcome::Drawn)
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error, "the frame was not stored");
+            Some(RefreshOutcome::Retrying(format!(
+                "the frame was not stored: {error}"
+            )))
+        }
+        Err(error) => {
+            tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error, "the store task panicked");
+            None
+        }
+    }
+}
+
 async fn refresh_loop(
     state: ServerState,
     faces: FaceCommand,
     spec: DataCardSpec,
     refresh: Duration,
 ) {
-    let source_id = spec.source_id.clone();
-    let kind = spec.face.kind.clone();
     tracing::info!(target: "server::data_cards",
-        source_id = %source_id,
-        kind,
+        source_id = %spec.source_id,
+        kind = %spec.face.kind,
         refresh_seconds = refresh.as_secs(),
         "server-rendered card refreshing"
     );
-
-    let mut ticker = tokio::time::interval(refresh);
-    // The first tick fires immediately, which is what fills a freshly started
-    // server's panels instead of leaving them blank for fifteen minutes.
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
+    // `record_outcome` checks this id against the retained handle, so a refresher that
+    // was replaced mid-render cannot overwrite its successor's status.
+    let task = tokio::task::id();
+    let mut consecutive_failures = 0_u32;
+    // The first attempt is immediate, which is what fills a freshly started server's
+    // panels instead of leaving them blank for fifteen minutes.
     loop {
-        ticker.tick().await;
-
-        let render_faces = faces.clone();
-        let render_spec = spec.clone();
-        let rendered =
-            tokio::task::spawn_blocking(move || render_frame(&render_faces, &render_spec)).await;
-        let frame = match rendered {
-            Ok(Ok(frame)) => frame,
-            Ok(Err(RefreshFailure::Configuration(error))) => {
-                tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error,
-                    "the face's settings need the owner's attention; keeping the stored frame unchanged");
-                continue;
-            }
-            Ok(Err(RefreshFailure::Transient(error))) => {
-                tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error,
-                    "the data fetch failed; keeping the stored frame unchanged");
-                continue;
-            }
-            Ok(Err(RefreshFailure::NotAFrame(error))) => {
-                tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error,
-                    "the faces package did not produce an acceptable frame");
-                continue;
-            }
-            Err(error) => {
-                tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error, "the render task panicked");
-                return;
-            }
+        let Some(outcome) = refresh_once(&state, &faces, &spec).await else {
+            return;
         };
-
-        let accept_state = state.clone();
-        let accept_source = source_id.clone();
-        let accepted = tokio::task::spawn_blocking(move || {
-            accept_state
-                .image_sources()
-                .accept(&accept_source, frame, Utc::now())
-        })
-        .await;
-
-        match accepted {
-            Ok(Ok(outcome)) => {
-                if !notify_image_source_outcome(&state, &source_id, &outcome) {
-                    tracing::debug!(target: "server::data_cards", source_id = %source_id, kind, "the face is unchanged");
-                }
-            }
-            Ok(Err(error)) => {
-                tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error, "the frame was not stored");
-            }
-            Err(error) => {
-                tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error, "the store task panicked");
-                return;
-            }
-        }
+        consecutive_failures = match outcome {
+            RefreshOutcome::Retrying(_) => consecutive_failures.saturating_add(1),
+            RefreshOutcome::Drawn | RefreshOutcome::NeedsAttention(_) => 0,
+        };
+        let wait = next_attempt(refresh, &outcome, consecutive_failures);
+        record_outcome(&state, &spec.source_id, task, outcome);
+        tokio::time::sleep(wait).await;
     }
 }
 
@@ -287,6 +330,27 @@ mod tests {
             &AcceptOutcome::Unchanged,
         ));
         assert_eq!(state.image_notifications_for_test().len(), 1);
+    }
+
+    #[test]
+    fn a_transient_failure_is_retried_soon_and_backs_off_to_the_interval() {
+        let refresh = Duration::from_mins(15);
+        let retrying = RefreshOutcome::Retrying("HTTP 429".into());
+        let waits: Vec<u64> = (1..=6)
+            .map(|failures| next_attempt(refresh, &retrying, failures).as_secs())
+            .collect();
+        assert_eq!(waits, [60, 120, 240, 480, 900, 900]);
+        assert_eq!(
+            next_attempt(refresh, &retrying, u32::MAX),
+            refresh,
+            "no overflow"
+        );
+        // A refresh faster than the retry floor is never made slower by a failure.
+        assert_eq!(next_attempt(MIN_REFRESH, &retrying, 3), MIN_REFRESH);
+        // Refused settings wait for the owner, not for the clock.
+        let refused = RefreshOutcome::NeedsAttention("no such coin".into());
+        assert_eq!(next_attempt(refresh, &refused, 0), refresh);
+        assert_eq!(next_attempt(refresh, &RefreshOutcome::Drawn, 0), refresh);
     }
 
     #[test]

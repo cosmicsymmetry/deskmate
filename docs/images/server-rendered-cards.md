@@ -158,7 +158,7 @@ outside.
 | `list` | hackernews | `top` (the front page, default), `best`, `new`, `ask` or `show`. |
 | `url` | rss | The feed. RSS 2.0, Atom and RDF all parse. |
 | `title` | rss | The eyebrow. Feeds name themselves inconsistently and often at length, so this is the owner's words. |
-| `coin_id` | token | CoinGecko's **id**, e.g. `solana` — not the ticker. Lowercase letters, digits and hyphens only. |
+| `coin_id` | token | The coin, as a person would type it: a name (`Solana`), a ticker (`SOL`) or CoinGecko's own id (`solana`). It is tried as an id first -- one request -- and resolved through CoinGecko's search only on a miss, accepting an **exact** match on ticker, name or id, best market-cap rank first. `SOL` never quietly becomes Solv Protocol. The face prints the symbol and name it resolved. |
 | `currency` | token | Quote currency, default `usd`. |
 | `api_key` | token | Optional CoinGecko demo key. |
 
@@ -209,11 +209,40 @@ The subprocess gets a **cleared environment**. The server's holds
 `DESKMATE_ADMIN_TOKEN`, and a process whose job is to fetch arbitrary URLs has no
 business with it.
 
+## What the owner is told
+
+`GET /v1/images` carries a `face_status` beside each server face, and the window shows it
+under the face's fields, re-read every five seconds: *Fill in Coin to start this face*,
+*Drawing the first frame*, *Drawn at 12:25*, or -- as an alert -- the faces package's own
+sentence for a refusal (*No coin called "solanna" was found on CoinGecko...*). A
+transient failure is a status, not an alarm: *Couldn't refresh: api.coingecko.com
+returned HTTP 429. The display keeps the last frame and this retries on its own.*
+
+Before 2026-09-21 none of this left the VM's journal. The panel said "Waiting for the
+first picture", the window said "Saved to the server", and a coin typed as a ticker was
+indistinguishable from a broken device. **The face's fields also save themselves** -- on
+blur, on Enter, at once for a choice -- because the separate "Save source settings"
+button they used to have sat beside the window's own "Save to server", and pressing only
+the prominent one silently discarded what had been typed.
+
+A transient failure is retried after a minute, doubling up to the refresh interval,
+rather than after the whole interval: a keyless API answers a burst with 429 for about a
+minute, and waiting fifteen for that left a new card blank for a quarter of an hour.
+Refused settings are not retried early -- nothing changes until the owner edits them, and
+an edit restarts the refresher.
+
 ## Designing against the link, not just the panel
 
 The faces are flat fills and strokes with no gradients, and that is a delivery decision
-as much as a visual one. RLE565 compresses a flat-colour frame to ~10 KB and *expands*
-high-entropy input 2×, so a gradient sky would cost the full ~330 KB raw on every change.
+as much as a visual one. RLE565 *expands* high-entropy input 2×, so a gradient sky would
+cost the full ~330 KB raw on every change, where a flat face is a tenth of that. Measured
+on live frames, 2026-09-21 (wire bytes, and chunks at `MAX_ASSET_CHUNK_BYTES`): token
+28 KB / 15, weather 32 KB / 17, **Hacker News 61 KB / 33**. The "~10 KB" this paragraph
+used to quote was reasoned, never measured, and was low by 3x. Anti-aliased type is what
+a run-length code pays for -- every glyph edge is a run of one -- so the face with the
+most text costs the most, and the Hacker News face is twice the weather face on the
+wire. That has not been tried on the panel; if the tunnel objects, the lever is fewer
+index rows, not flatter colour.
 `Canvas::finish` emits no `<defs>` at all for this reason.
 
 An identical face is a no-op: the store compares digests and moves no bytes, while still

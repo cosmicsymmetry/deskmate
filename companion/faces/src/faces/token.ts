@@ -83,6 +83,7 @@ export interface TokenFace {
 // ---------------------------------------------------------------------------
 
 const MARKETS_ENDPOINT = "https://api.coingecko.com/api/v3/coins/markets";
+const SEARCH_ENDPOINT = "https://api.coingecko.com/api/v3/search";
 const CHART_ENDPOINT_PREFIX = "https://api.coingecko.com/api/v3/coins/";
 const MAX_SERIES_SAMPLES = 96;
 const MAX_PRICE = 1e12;
@@ -124,7 +125,8 @@ function boundedPrice(value: unknown): number | undefined {
     : undefined;
 }
 
-export function parseMarkets(body: string, currency: string): TokenFace {
+/** `undefined` when CoinGecko has no coin with that id: it answers `[]`, not an error. */
+export function parseMarkets(body: string, currency: string): TokenFace | undefined {
   let document: unknown;
   try {
     document = JSON.parse(body);
@@ -133,9 +135,7 @@ export function parseMarkets(body: string, currency: string): TokenFace {
   }
   const entry: unknown = Array.isArray(document) ? document[0] : undefined;
   if (typeof entry !== "object" || entry === null) {
-    // CoinGecko answers an unknown id with an empty array, so this is the owner's
-    // typo far more often than it is an outage.
-    throw new ConfigurationError("the token was not found; check the coin ID");
+    return undefined;
   }
   const fields = entry as Record<string, unknown>;
   const price = boundedPrice(fields.current_price);
@@ -187,34 +187,104 @@ function downsample(prices: number[], target: number): number[] {
   });
 }
 
+interface Coin {
+  id: string;
+  symbol: string;
+  name: string;
+  rank: number;
+}
+
+/**
+ * The coin the owner meant, when what they typed is not an id.
+ *
+ * CoinGecko's API wants its own id -- `solana`, not SOL -- and nobody knows those by
+ * heart. Only an EXACT match on ticker, name or id is accepted, best market-cap rank
+ * first: "SOL" must never quietly become Solv Protocol because it was the closest
+ * thing to a hit. The face prints the symbol and name it resolved, so the owner sees
+ * what they got.
+ */
+export function coinFromSearch(body: string, typed: string): Coin | undefined {
+  let document: unknown;
+  try {
+    document = JSON.parse(body);
+  } catch {
+    throw new TransientError("the token search JSON is invalid");
+  }
+  const listed =
+    typeof document === "object" && document !== null
+      ? (document as Record<string, unknown>).coins
+      : undefined;
+  const wanted = typed.toLowerCase();
+  return (Array.isArray(listed) ? listed : [])
+    .map((raw: unknown): Coin | undefined => {
+      const coin = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
+      return typeof coin.id === "string" && /^[a-z0-9-]+$/.test(coin.id)
+        ? {
+            id: coin.id,
+            symbol: typeof coin.symbol === "string" ? coin.symbol : "",
+            name: typeof coin.name === "string" ? coin.name : "",
+            rank: typeof coin.market_cap_rank === "number" ? coin.market_cap_rank : Infinity,
+          }
+        : undefined;
+    })
+    .filter(
+      (coin): coin is Coin =>
+        coin !== undefined &&
+        [coin.id, coin.symbol.toLowerCase(), coin.name.toLowerCase()].includes(wanted),
+    )
+    .sort((a, b) => a.rank - b.rank)[0];
+}
+
 export async function fetchToken(settings: Settings, get: FetchText): Promise<TokenFace> {
-  const coinId = text(settings, "coin_id");
+  const typed = text(settings, "coin_id").replace(/\s+/g, " ");
   const currency = (text(settings, "currency") || "usd").toLowerCase();
   const apiKey = text(settings, "api_key");
-  if (coinId === "") {
-    throw new ConfigurationError("the coin ID is empty");
+  if (typed === "") {
+    throw new ConfigurationError("the coin is empty");
   }
-  if (!/^[a-z0-9-]+$/.test(coinId)) {
-    throw new ConfigurationError(
-      "the coin ID may use only lowercase letters, digits and hyphens (CoinGecko's id, e.g. solana -- not the ticker)",
-    );
+  if (!/^[\p{L}\p{N} .-]{1,64}$/u.test(typed)) {
+    throw new ConfigurationError("the coin is a name, a ticker or a CoinGecko id, e.g. solana");
   }
   if (!/^[a-z0-9]+$/.test(currency)) {
     throw new ConfigurationError("the currency is a short code such as usd");
   }
 
-  const markets = await get(
-    endpoint(
-      MARKETS_ENDPOINT,
-      [
-        ["vs_currency", currency],
-        ["ids", coinId],
-        ["price_change_percentage", "24h"],
-      ],
-      apiKey,
-    ),
-  );
-  const face = parseMarkets(markets, currency);
+  const quote = async (coinId: string): Promise<TokenFace | undefined> =>
+    parseMarkets(
+      await get(
+        endpoint(
+          MARKETS_ENDPOINT,
+          [
+            ["vs_currency", currency],
+            ["ids", coinId],
+            ["price_change_percentage", "24h"],
+          ],
+          apiKey,
+        ),
+      ),
+      currency,
+    );
+
+  // As an id first: that is one request when the owner typed `solana`, which is what
+  // the placeholder shows. The search is paid for only on a miss.
+  let coinId = typed.toLowerCase().replaceAll(" ", "-");
+  let face = /^[a-z0-9-]+$/.test(coinId) ? await quote(coinId) : undefined;
+  if (face === undefined) {
+    const found = coinFromSearch(
+      await get(endpoint(SEARCH_ENDPOINT, [["query", typed]], apiKey)),
+      typed,
+    );
+    if (found === undefined) {
+      throw new ConfigurationError(
+        `no coin called "${typed}" was found on CoinGecko; try its full name, e.g. Solana`,
+      );
+    }
+    coinId = found.id;
+    face = await quote(coinId);
+    if (face === undefined) {
+      throw new TransientError(`CoinGecko lists ${found.name} but returned no price for it`);
+    }
+  }
 
   try {
     const chart = await get(
@@ -557,7 +627,9 @@ export const token: FaceDefinition = {
   kind: "token",
   label: "Token price",
   fields: [
-    { type: "text", key: "coin_id", label: "Coin ID", placeholder: "solana" },
+    // The key is `coin_id` because that is what spec files already hold. What it accepts
+    // is whatever a person would type: a name, a ticker, or CoinGecko's own id.
+    { type: "text", key: "coin_id", label: "Coin", placeholder: "Solana" },
     { type: "text", key: "currency", label: "Currency", placeholder: "usd", default: "usd" },
   ],
   async render(settings) {

@@ -271,6 +271,23 @@ Each of these cost this project real time at least once.
   using `toFixed` differs in the last digit of a few coordinates. Go through
   `kit/svg.ts`'s `fixed`, never `toFixed`, for anything that reaches the document. A
   deliberate design change is `bun run dump --update`, reviewed as a diff.
+- **A second save control beside "Save to server" silently discards what it guards.** The
+  server faces' fields once had their own small "Save source settings" button. Type a coin,
+  press the prominent save, and the coin was gone: the face stayed blank, was never
+  fetched, the panel said "Waiting for the first picture" and the window said "Saved to
+  the server". Face fields now save themselves (blur, Enter, at once for a choice). **Do
+  not add a control whose unsaved state the window's one save ignores.**
+- **A face that cannot draw must say so in the window, because the panel cannot.** The
+  device has three states for a picture card -- waiting, stale, drawn -- and none of them
+  is "your coin was not found" or "the API said 429". `face_status` on `GET /v1/images`
+  carries the faces package's own sentence to the editor. A new failure mode in a face is
+  a `ConfigurationError` (the owner must act) or a `TransientError` (retried in a minute),
+  never a log line only.
+- **The server's frame store is not the panel.** On 2026-09-20 the token card was driven
+  end to end "against a real server", pronounced working, and did not work on the device.
+  A frame in the store proves the fetch and the drawing. It says nothing about what the
+  owner typed into the live window, what the live VM's IP is allowed to fetch, or what the
+  tunnel carries. Say which of those was checked, in those words.
 - **Waiting for a child's pipe to close is not waiting for the child.** EOF needs every
   holder of the write end gone, and an unrelated process can inherit one: on macOS a pipe
   gains `CLOEXEC` non-atomically, so a concurrent fork elsewhere in the process races it.
@@ -385,8 +402,14 @@ These are decisions, not defaults. Changing one needs the owner, not a judgement
 - A **server-rendered face on the panel**. These frames reach the device over the picture
   card's asset path, which is proven for a producer's PNG but has never carried a frame
   the server drew. Owed: one weather, one Hacker News, one RSS and one token face on
-  `dev-0005` at both mountings, plus the measured RLE565 transfer size per frame -- the flat-fill argument in
-  `docs/images/server-rendered-cards.md` is reasoned, not measured.
+  `dev-0005` at both mountings. The RLE565 sizes are now measured off-panel (token 28 KB /
+  15 chunks, weather 32 KB / 17, Hacker News 61 KB / 33 -- the "~10 KB" once quoted was low
+  by 3x), but whether the tunnel carries the Hacker News face's 33 chunks is not known.
+  **On 2026-09-21 the owner reported that the token card did not work on the device**,
+  after it had been verified only as far as the server's frame store. The cause was not
+  observed. Two defects that produce exactly that symptom were found and fixed in the
+  window and the face (a second save button that discarded the coin; a ticker refused
+  silently), and neither fix has been seen on the panel.
 - The framebuffer matrix has not been run since Wave A moved it to 44 rows and Wave C
   closed the four `field.*` exclusions, leaving **44 rows / 2 excluded / 42 comparable**
   (the one exclusion is the `progress-ring--running-mid-countdown` push-to-capture timing

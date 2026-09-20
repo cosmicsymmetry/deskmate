@@ -126,6 +126,46 @@ pub(crate) struct FaceFieldOption {
     pub(crate) label: String,
 }
 
+/// What the owner needs to know about one face right now, in the window, without
+/// reading the server's journal.
+///
+/// Until 2026-09-21 a face that could not be drawn said so only in a log line on the
+/// VM. The panel showed "Waiting for the first picture", the window showed "Saved to
+/// the server", and a coin ID typed as a ticker looked exactly like a broken device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct FaceStatus {
+    pub(crate) state: FaceState,
+    /// The faces package's own sentence, for the two states that have one.
+    pub(crate) message: Option<String>,
+    /// When the last refresh finished, whatever its outcome, in Unix seconds.
+    pub(crate) at_unix_seconds: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum FaceState {
+    /// A required field is blank, so nothing is being fetched.
+    NeedsSettings,
+    /// A refresher is running and has not finished its first attempt.
+    Drawing,
+    /// The last refresh produced a frame.
+    Drawn,
+    /// The faces package refused the settings; retrying cannot help.
+    NeedsAttention,
+    /// The last refresh failed for a reason that may pass; the stored frame stays.
+    Retrying,
+    /// The faces package does not draw this kind (or there is no package).
+    Unavailable,
+}
+
+/// How one refresh ended, as the worker reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RefreshOutcome {
+    Drawn,
+    NeedsAttention(String),
+    Retrying(String),
+}
+
 /// A catalog face's descriptor with `settings` filled in: what the owner typed
 /// where they typed something, the field's default where they did not.
 fn describe_face(
@@ -232,6 +272,10 @@ pub(crate) struct DataCardState {
     /// listener binds, so no request handler ever pays for the subprocess.
     catalog: Option<Arc<Vec<CatalogFace>>>,
     catalog_reloader: Option<tokio::task::JoinHandle<()>>,
+    /// The last refresh outcome per source. Forgotten whenever that source's
+    /// refresher is replaced or removed, so a status never describes settings that
+    /// are no longer the ones in force.
+    outcomes: HashMap<String, (RefreshOutcome, chrono::DateTime<chrono::Utc>)>,
 }
 
 impl DataCardState {
@@ -243,6 +287,7 @@ impl DataCardState {
             faces,
             catalog: None,
             catalog_reloader: None,
+            outcomes: HashMap::new(),
         }
     }
 
@@ -458,6 +503,7 @@ fn spawn_refreshers(state: &ServerState, spec_path: PathBuf, specs: Vec<DataCard
     for (_, task) in data_cards.tasks.drain() {
         task.abort();
     }
+    data_cards.outcomes.clear();
     data_cards.spec_path = spec_path;
     data_cards.specs = specs;
     // Read fresh at every start, here, so no request handler pays for it later.
@@ -549,6 +595,80 @@ pub(crate) fn descriptor_for_source(
     data_cards.descriptor(&face)
 }
 
+/// What to tell the owner about `source_id`'s face, or `None` for a source that has
+/// no server face (an external producer's).
+pub(crate) fn status_for_source(state: &ServerState, source_id: &str) -> Option<FaceStatus> {
+    let mut data_cards = state
+        .inner
+        .data_cards
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let face = data_cards
+        .specs
+        .iter()
+        .find(|spec| spec.source_id == source_id)?
+        .face
+        .clone();
+    let plain = |state| FaceStatus {
+        state,
+        message: None,
+        at_unix_seconds: None,
+    };
+    let Some(descriptor) = data_cards.descriptor(&face) else {
+        return Some(plain(FaceState::Unavailable));
+    };
+    if !face_is_complete(&descriptor) {
+        return Some(plain(FaceState::NeedsSettings));
+    }
+    Some(match data_cards.outcomes.get(source_id) {
+        None if data_cards.tasks.contains_key(source_id) => plain(FaceState::Drawing),
+        // Complete, drawable, and nothing running: a server with no runtime to spawn
+        // on, which in practice is only a unit test.
+        None => plain(FaceState::Unavailable),
+        Some((RefreshOutcome::Drawn, at)) => FaceStatus {
+            state: FaceState::Drawn,
+            message: None,
+            at_unix_seconds: Some(at.timestamp()),
+        },
+        Some((RefreshOutcome::NeedsAttention(message), at)) => FaceStatus {
+            state: FaceState::NeedsAttention,
+            message: Some(message.clone()),
+            at_unix_seconds: Some(at.timestamp()),
+        },
+        Some((RefreshOutcome::Retrying(message), at)) => FaceStatus {
+            state: FaceState::Retrying,
+            message: Some(message.clone()),
+            at_unix_seconds: Some(at.timestamp()),
+        },
+    })
+}
+
+/// Called by a refresher when one refresh finishes. Ignored for a source whose
+/// refresher has since been replaced or removed: an aborted task can still be
+/// inside its blocking render, and its verdict is about settings no longer in force.
+pub(super) fn record_outcome(
+    state: &ServerState,
+    source_id: &str,
+    task: tokio::task::Id,
+    outcome: RefreshOutcome,
+) {
+    let mut data_cards = state
+        .inner
+        .data_cards
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if data_cards
+        .tasks
+        .get(source_id)
+        .map(tokio::task::JoinHandle::id)
+        == Some(task)
+    {
+        data_cards
+            .outcomes
+            .insert(source_id.to_owned(), (outcome, chrono::Utc::now()));
+    }
+}
+
 /// Validates and persists one face update, then aborts that source's refresher
 /// and replaces it only when complete. The descriptor drives validation, so this
 /// function knows field *types* and nothing about any face.
@@ -588,6 +708,7 @@ pub(crate) fn update_face_fields(
     if let Some(task) = data_cards.tasks.remove(source_id) {
         task.abort();
     }
+    data_cards.outcomes.remove(source_id);
     data_cards.start_if_complete(runtime, state, &updated_spec);
     data_cards
         .descriptor(&updated_spec.face)
@@ -664,6 +785,7 @@ pub(crate) fn remove_face(state: &ServerState, source_id: &str) -> Result<(), Fa
     if let Some(task) = data_cards.tasks.remove(source_id) {
         task.abort();
     }
+    data_cards.outcomes.remove(source_id);
     if !data_cards
         .specs
         .iter()
@@ -964,6 +1086,10 @@ mod tests {
             assert!(retained.tasks.is_empty(), "and nothing refreshes it");
         }
         assert_eq!(descriptor_for_source(&state, &source.id), None);
+        assert_eq!(
+            status_for_source(&state, &source.id).map(|status| status.state),
+            Some(FaceState::Unavailable)
+        );
         assert!(matches!(
             update_face_fields(
                 &state,
@@ -1008,6 +1134,137 @@ mod tests {
             create_face(&state, "source", "weather"),
             Err(FaceUpdateError::UnknownField(kind)) if kind == "weather"
         ));
+        state.shutdown();
+    }
+
+    /// Polls until the face's status satisfies `done`, the way the window does.
+    async fn status_when(
+        state: &ServerState,
+        source_id: &str,
+        done: impl Fn(&FaceStatus) -> bool,
+    ) -> FaceStatus {
+        for _ in 0..200 {
+            if let Some(status) = status_for_source(state, source_id)
+                && done(&status)
+            {
+                return status;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!(
+            "the status never settled: {:?}",
+            status_for_source(state, source_id)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_window_is_told_why_a_face_is_not_drawing() {
+        // The failure this exists for: a coin ID typed as a ticker. The panel said
+        // "Waiting for the first picture", the window said "Saved to the server", and
+        // the reason was a log line on a VM.
+        let state = ServerState::in_memory();
+        let runtime = tokio::runtime::Handle::current();
+        let source = state.image_sources().mint("Token price").expect("a source");
+        let field = |value: &str| BTreeMap::from([("coin_id".to_owned(), value.to_owned())]);
+
+        assert_eq!(
+            status_for_source(&state, "an-external-producers-source"),
+            None
+        );
+        create_face(&state, &source.id, "token").expect("create");
+        assert_eq!(
+            status_for_source(&state, &source.id).map(|status| status.state),
+            Some(FaceState::NeedsSettings),
+            "a blank coin ID is not an error yet, it is an unfinished form"
+        );
+
+        update_face_fields(
+            &state,
+            &runtime,
+            &source.id,
+            &field("refuse-as-configuration"),
+        )
+        .expect("the field is well-formed; only the faces package can judge the coin");
+        let refused =
+            status_when(&state, &source.id, |s| s.state == FaceState::NeedsAttention).await;
+        assert_eq!(
+            refused.message.as_deref(),
+            Some("the coin was not found; check the coin ID"),
+            "the package's own sentence reaches the owner verbatim"
+        );
+        assert!(refused.at_unix_seconds.is_some());
+
+        update_face_fields(&state, &runtime, &source.id, &field("solana")).expect("update");
+        let drawn = status_when(&state, &source.id, |s| s.state == FaceState::Drawn).await;
+        assert_eq!(drawn.message, None);
+
+        // New settings start from a clean slate: "drawn" was about the OLD coin.
+        update_face_fields(&state, &runtime, &source.id, &field("refuse-as-transient"))
+            .expect("update");
+        let first = status_for_source(&state, &source.id).expect("a status");
+        assert_ne!(
+            first.state,
+            FaceState::Drawn,
+            "a stale verdict must not survive new settings"
+        );
+        let retrying = status_when(&state, &source.id, |s| s.state == FaceState::Retrying).await;
+        assert_eq!(
+            retrying.message.as_deref(),
+            Some("api.example returned HTTP 503")
+        );
+        stop_refreshers(&state);
+        state.shutdown();
+    }
+
+    #[tokio::test]
+    async fn a_replaced_refreshers_late_verdict_is_ignored() {
+        // An aborted task can still be inside its blocking render. When it finishes,
+        // its verdict is about settings that are no longer in force.
+        let state = ServerState::in_memory();
+        let current = tokio::spawn(std::future::pending::<()>());
+        let replaced = tokio::spawn(std::future::pending::<()>());
+        let (current_id, replaced_id) = (current.id(), replaced.id());
+        state
+            .inner
+            .data_cards
+            .lock()
+            .expect("data cards")
+            .tasks
+            .insert("target".into(), current);
+
+        record_outcome(&state, "target", replaced_id, RefreshOutcome::Drawn);
+        assert!(
+            state
+                .inner
+                .data_cards
+                .lock()
+                .expect("data cards")
+                .outcomes
+                .is_empty()
+        );
+        record_outcome(&state, "target", current_id, RefreshOutcome::Drawn);
+        assert_eq!(
+            state
+                .inner
+                .data_cards
+                .lock()
+                .expect("data cards")
+                .outcomes
+                .len(),
+            1
+        );
+
+        remove_face(&state, "target").expect("remove");
+        assert!(
+            state
+                .inner
+                .data_cards
+                .lock()
+                .expect("data cards")
+                .outcomes
+                .is_empty()
+        );
+        replaced.abort();
         state.shutdown();
     }
 

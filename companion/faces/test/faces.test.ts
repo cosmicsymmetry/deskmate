@@ -2,7 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { ConfigurationError, TransientError } from "../src/face";
 import { fetchHackerNews, renderHackerNews, storyFromItem } from "../src/faces/hackernews";
 import { fetchRss, parseFeed, renderRss } from "../src/faces/rss";
-import { fetchToken, parseMarkets, renderToken, splitPrice } from "../src/faces/token";
+import {
+  coinFromSearch,
+  fetchToken,
+  parseMarkets,
+  renderToken,
+  splitPrice,
+} from "../src/faces/token";
 import { conditionFromWmo, fetchWeather, parseForecast } from "../src/faces/weather";
 import type { FetchText } from "../src/kit/http";
 import { pngFromSvg } from "../src/kit/raster";
@@ -46,6 +52,13 @@ describe("token", () => {
       [4, 103.5],
     ],
   });
+  const quoted = (body: string, currency: string) => {
+    const face = parseMarkets(body, currency);
+    if (face === undefined) {
+      throw new Error("the fixture lists a coin");
+    }
+    return face;
+  };
 
   test("a quote and its chart are read into one face", async () => {
     const get = fake({ "/coins/markets": MARKETS, "/market_chart": CHART });
@@ -70,13 +83,56 @@ describe("token", () => {
     expect(rendersToAFrame(renderToken(face))).toBe(true);
   });
 
-  test("an unknown coin is the owner's typo, not an outage", async () => {
-    const get = fake({ "/coins/markets": "[]" });
-    expect(fetchToken({ coin_id: "solanna" }, get)).rejects.toBeInstanceOf(ConfigurationError);
+  const SEARCH = JSON.stringify({
+    coins: [
+      { id: "solv-protocol", symbol: "SOLV", name: "Solv Protocol", market_cap_rank: 807 },
+      { id: "wrapped-solana", symbol: "SOL", name: "Wrapped SOL", market_cap_rank: 412 },
+      { id: "solana", symbol: "SOL", name: "Solana", market_cap_rank: 7 },
+    ],
   });
 
-  test("a ticker, an uppercase id and an empty id are refused before any request", async () => {
-    for (const coin_id of ["SOL", "sol ana", "../etc", ""]) {
+  test("a ticker or a name is resolved to the coin the owner meant", async () => {
+    // What people type. CoinGecko answers `ids=sol` with [], and until this existed
+    // that was a log line on the VM and "Waiting for the first picture" on the panel.
+    for (const typed of ["SOL", "sol", "Solana", "  solana  "]) {
+      const get = fake({
+        "ids=solana&": MARKETS,
+        "/coins/markets": "[]",
+        "/search": SEARCH,
+        "/market_chart": CHART,
+      });
+      const face = await fetchToken({ coin_id: typed }, get);
+      expect(face.name).toBe("Solana");
+      expect(get.asked.at(-1)).toContain("/coins/solana/market_chart");
+    }
+  });
+
+  test("the id the placeholder shows costs one quote request and no search", async () => {
+    const get = fake({ "/coins/markets": MARKETS, "/market_chart": CHART });
+    await fetchToken({ coin_id: "solana" }, get);
+    expect(get.asked.filter((url) => url.includes("/search"))).toEqual([]);
+    expect(get.asked).toHaveLength(2);
+  });
+
+  test("only an exact match is accepted, best-ranked first: SOL never becomes Solv Protocol", () => {
+    expect(coinFromSearch(SEARCH, "SOL")?.id).toBe("solana");
+    expect(coinFromSearch(SEARCH, "solv protocol")?.id).toBe("solv-protocol");
+    expect(coinFromSearch(SEARCH, "solv")?.id).toBe("solv-protocol");
+    expect(coinFromSearch(SEARCH, "sola")).toBeUndefined();
+    expect(
+      coinFromSearch('{"coins":[{"id":"../x","symbol":"SOL","name":"x"}]}', "sol"),
+    ).toBeUndefined();
+  });
+
+  test("a coin nobody lists is the owner's to fix, and says what to try", async () => {
+    const get = fake({ "/coins/markets": "[]", "/search": '{"coins":[]}' });
+    const failure = await fetchToken({ coin_id: "solanna" }, get).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ConfigurationError);
+    expect((failure as Error).message).toContain('no coin called "solanna"');
+  });
+
+  test("an empty coin and one that is not a name at all are refused before any request", async () => {
+    for (const coin_id of ["", "   ", "../etc/passwd", "<script>", "x".repeat(65)]) {
       const get = fake({});
       await expect(fetchToken({ coin_id }, get)).rejects.toBeInstanceOf(ConfigurationError);
       expect(get.asked).toEqual([]);
@@ -93,18 +149,15 @@ describe("token", () => {
   });
 
   test("an inverted or missing range falls back rather than drawing nonsense", () => {
-    const face = parseMarkets(
-      JSON.stringify([{ current_price: 5, high_24h: 4, low_24h: 6 }]),
-      "eur",
-    );
+    const face = quoted(JSON.stringify([{ current_price: 5, high_24h: 4, low_24h: 6 }]), "eur");
     expect([face.low, face.high]).toEqual([4, 6]);
     expect(face.currencyMark).toBe("€");
-    const bare = parseMarkets(JSON.stringify([{ current_price: 5 }]), "xyz");
+    const bare = quoted(JSON.stringify([{ current_price: 5 }]), "xyz");
     expect([bare.low, bare.high, bare.changePercent, bare.currencyMark]).toEqual([5, 5, 0, ""]);
   });
 
   test("a fall prints its sign as well as its colour", () => {
-    const face = parseMarkets(MARKETS, "usd");
+    const face = quoted(MARKETS, "usd");
     const falling = renderToken({ ...face, changePercent: -3.08 });
     expect(falling).toContain("-3.08%");
     expect(falling).toContain(BAD);

@@ -121,10 +121,10 @@ const CREATABLE_FACES: FaceDescriptor[] = [
     fields: [
       {
         key: "coin_id",
-        label: "Coin ID",
+        label: "Coin",
         type: "text",
         value: "",
-        placeholder: "solana",
+        placeholder: "Solana",
       },
       {
         key: "currency",
@@ -262,7 +262,20 @@ function reconcilePomodoros(previousConfig: AppConfig, nextConfig: AppConfig) {
 function imageSourceDescriptors(): ImageSourceDescriptor[] {
   return Array.from(imageSources.values(), (source) => {
     const face = imageSourceFaces.get(source.id);
-    return { ...source, face: face ? cloneFace(face) : null };
+    // The real server draws within seconds of the last field being filled in; the
+    // mock says so at once, because it has nothing to draw.
+    const complete = face?.fields.every((field) => field.type === "enum" || field.value.trim());
+    return {
+      ...source,
+      face: face ? cloneFace(face) : null,
+      face_status: face
+        ? {
+            state: complete ? ("drawn" as const) : ("needs-settings" as const),
+            message: null,
+            at_unix_seconds: complete ? Math.floor(Date.now() / 1000) : null,
+          }
+        : null,
+    };
   });
 }
 

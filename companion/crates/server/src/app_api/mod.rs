@@ -736,8 +736,8 @@ pub(crate) struct PreviewFrame {
     pub(crate) state: Option<String>,
 }
 
-const PICTURE_PREVIEW_IS_PUSH_ONLY: &str =
-    "Picture cards show the last frame pushed by their source";
+const PICTURE_HAS_NO_FRAME_YET: &str =
+    "No frame yet \u{2014} this appears once its source draws one";
 
 /// Renders the scene `build_card_scene` would push through the firmware's own
 /// scene decoder and interpreter compiled into lvgl-sim.
@@ -764,12 +764,25 @@ async fn preview(
             message: format!("no card with id {card_id:?}"),
         })?;
 
-    // A picture card's frame belongs to its source, and is not reconstructed here.
-    if matches!(card, CardSettings::Picture { .. }) {
+    // A picture card's face is whatever its source last pushed, so the preview is
+    // that stored frame -- the very bytes the panel holds -- shown as a PNG. Nothing
+    // is rendered or reconstructed here, which keeps "exactly one renderer" true: a
+    // weather or token face is visible in the window without the window knowing how
+    // to draw one.
+    if let CardSettings::Picture { source_id, .. } = card {
+        let source_id = source_id.clone();
+        let png = tokio::task::spawn_blocking(move || {
+            state
+                .image_sources()
+                .frame(&source_id, Utc::now())
+                .and_then(|frame| crate::image_ingest::png_from_canonical_frame(&frame.bytes))
+        })
+        .await
+        .map_err(|_| worker_failed())?;
         return Ok(Json(PreviewFrame {
-            png_base64: None,
+            state: png.is_none().then(|| PICTURE_HAS_NO_FRAME_YET.to_owned()),
+            png_base64: png.map(|png| BASE64_STANDARD.encode(png)),
             sample: false,
-            state: Some(PICTURE_PREVIEW_IS_PUSH_ONLY.to_owned()),
         }));
     }
 

@@ -294,6 +294,25 @@ describe("mock backend contract", () => {
         ],
       },
       {
+        kind: "hackernews",
+        label: "Hacker News",
+        fields: [
+          {
+            type: "enum",
+            key: "list",
+            label: "Stories",
+            value: "top",
+            options: [
+              { value: "top", label: "Front page" },
+              { value: "best", label: "Best" },
+              { value: "new", label: "Newest" },
+              { value: "ask", label: "Ask HN" },
+              { value: "show", label: "Show HN" },
+            ],
+          },
+        ],
+      },
+      {
         kind: "rss",
         label: "RSS feed",
         fields: [

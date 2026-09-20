@@ -15,8 +15,9 @@
 # mtime -- so only the crates actually edited recompile.
 #
 # Usage:
-#   deploy.sh              binary + UI
+#   deploy.sh              binary + UI + faces
 #   deploy.sh --ui-only    just the browser companion (no Rust build, no restart)
+#   deploy.sh --faces-only just the server-rendered faces (no Rust build, no restart)
 #   deploy.sh --dry-run    export and sync, build, but do not install or restart
 set -euo pipefail
 
@@ -27,12 +28,20 @@ VM=rodion@100.93.166.123
 REMOTE=deskmate-build
 IMAGE=rust:1.98-bookworm
 WEB_DIR=/var/lib/private/deskmate/web
+# The faces package (companion/faces): TypeScript the server runs as a subprocess.
+# Like the web dist it is read at use, so shipping a face is an rsync. The unit sees
+# this directory as /var/lib/deskmate/faces -- DynamicUser maps the private path.
+FACES_DIR=/var/lib/private/deskmate/faces
+FACES_DIR_IN_UNIT=/var/lib/deskmate/faces
+BUN=/usr/local/bin/bun
 
 ui_only=false
+faces_only=false
 dry_run=false
 for arg in "$@"; do
 	case "$arg" in
 	--ui-only) ui_only=true ;;
+	--faces-only) faces_only=true ;;
 	--dry-run) dry_run=true ;;
 	*)
 		echo "unknown option: $arg" >&2
@@ -53,6 +62,59 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+
+# --- the faces --------------------------------------------------------------
+ship_faces() {
+	say "shipping the faces"
+	# The gates run here, on the machine that has the sources: a face that does not
+	# type-check or whose golden moved must not reach the panel.
+	(cd companion/faces && bun install --frozen-lockfile >/dev/null && bun run check >/dev/null && bun test >/dev/null 2>&1) ||
+		{
+			echo "refusing to ship: companion/faces does not pass its own gates" >&2
+			exit 1
+		}
+	# shellcheck disable=SC2029  # $BUN is meant to expand here.
+	ssh "$VM" "test -x $BUN" || {
+		cat >&2 <<-MISSING
+			refusing to ship: $BUN is not on the VM. Once, on the VM:
+			  curl -fsSL https://bun.sh/install | bash && sudo install -m 0755 ~/.bun/bin/bun $BUN
+		MISSING
+		exit 1
+	}
+	# node_modules is NOT synced: @resvg/resvg-js ships one native binary per
+	# platform, and the Mac's is darwin-arm64. It is installed on the VM instead, and
+	# `--exclude` keeps rsync's --delete from taking it between deploys.
+	rsync -a --delete --exclude node_modules/ --exclude out/ \
+		companion/faces/ "$VM:/tmp/deskmate-faces/"
+	# shellcheck disable=SC2029  # $BUN is meant to expand here.
+	ssh "$VM" "set -e
+		cd /tmp/deskmate-faces
+		$BUN install --frozen-lockfile --production >/dev/null
+		# The suite again, HERE: the goldens are byte-exact and this is the platform
+		# that draws for the panel, with its own native resvg build. Then the cold
+		# start the server performs. A package that fails either must not replace
+		# one that works.
+		$BUN test >/dev/null 2>&1 || { echo 'the faces suite fails on the VM' >&2; exit 1; }
+		$BUN run src/main.ts describe >/dev/null"
+
+	if [ "$dry_run" = false ]; then
+		# shellcheck disable=SC2029  # the variables are meant to expand here.
+		ssh "$VM" "set -e
+			sudo -n rsync -a --delete --chown=deskmate-server:deskmate-server /tmp/deskmate-faces/ $FACES_DIR/
+			if ! sudo -n grep -q '^DESKMATE_FACES_DIR=' /etc/deskmate/server.env; then
+				echo 'DESKMATE_FACES_DIR=$FACES_DIR_IN_UNIT' | sudo -n tee -a /etc/deskmate/server.env >/dev/null
+				echo '  added DESKMATE_FACES_DIR to /etc/deskmate/server.env -- it takes effect at the next restart'
+			fi"
+		say "faces shipped (run per refresh, catalog re-read every minute -- no restart needed)"
+	fi
+}
+
+if [ "$ui_only" = false ]; then
+	ship_faces
+fi
+if [ "$faces_only" = true ]; then
+	exit 0
+fi
 
 # --- the browser companion -------------------------------------------------
 say "building the companion"

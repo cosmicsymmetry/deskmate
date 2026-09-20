@@ -229,7 +229,7 @@ fn contract_fixtures() -> ContractFixtures {
             },
         },
     };
-    let face_descriptors = crate::data_cards::creatable_faces();
+    let face_descriptors = crate::data_cards::creatable_faces(&crate::ServerState::in_memory());
     let face_fields = face_descriptors
         .iter()
         .flat_map(|descriptor| descriptor.fields.iter())

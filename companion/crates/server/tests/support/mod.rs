@@ -28,6 +28,18 @@ pub async fn spawn_http(router: axum::Router) -> HttpTestServer {
     }
 }
 
+/// Installs the fake faces package (`fake-faces.sh` beside this file), so a test of
+/// the face routes exercises the real subprocess seam without Bun or the network.
+/// The crate's own unit tests get this automatically; an integration target builds
+/// the library without `cfg(test)`, so it has to ask.
+#[allow(dead_code)]
+pub fn with_fake_faces(state: server::ServerState) -> server::ServerState {
+    let script =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake-faces.sh");
+    server::set_faces(&state, server::FaceCommand::program(script));
+    state
+}
+
 pub async fn json_body(response: reqwest::Response) -> serde_json::Value {
     let text = response.text().await.expect("response body");
     serde_json::from_str(&text).unwrap_or_else(|error| panic!("body is not JSON ({error}): {text}"))

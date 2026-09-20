@@ -12,9 +12,17 @@
     "source_id": "replace-with-a-minted-image-source-id",
     "refresh_seconds": 900,
     "face": {
+      "kind": "hackernews",
+      "list": "top"
+    }
+  },
+  {
+    "source_id": "replace-with-a-minted-image-source-id",
+    "refresh_seconds": 900,
+    "face": {
       "kind": "rss",
-      "url": "https://news.ycombinator.com/rss",
-      "title": "Hacker News"
+      "url": "https://github.com/oven-sh/bun/releases.atom",
+      "title": "Bun releases"
     }
   },
   {

@@ -22,17 +22,14 @@ mod credential;
 // sources, so a weather/RSS/token face reaches the device through the same
 // picture-card path an external producer's PNG does.
 mod data_cards;
-pub use data_cards::start_data_cards;
+pub use data_cards::{FaceCommand, set_faces, start_data_cards};
 mod device_link;
 // The SSRF egress guard, and the one HTTP client the provider layer is
 // allowed to use.
 mod egress;
-mod egress_client;
 // The server-authored data-card faces: the SVG authoring (`faces`) and the
 // rasterizer that turns one into the frame a picture producer would have
 // pushed (`face_render`).
-mod face_render;
-mod faces;
 pub mod firmware;
 mod image_ingest;
 mod image_sources;
@@ -164,6 +161,22 @@ struct StateInner {
     >,
 }
 
+/// The faces package a freshly built state starts with.
+///
+/// None: production is told at startup ([`set_faces`]), and a deployment that is
+/// never told has no server faces. Inside this crate's own unit tests every state
+/// gets the fake package instead, so a test about faces need not install one.
+#[cfg(not(test))]
+const fn default_faces() -> Option<FaceCommand> {
+    None
+}
+
+#[cfg(test)]
+#[allow(clippy::unnecessary_wraps)]
+fn default_faces() -> Option<FaceCommand> {
+    Some(data_cards::fake_faces())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ImageNotificationOrigin {
     ExternalProducerPush,
@@ -202,7 +215,10 @@ impl ServerState {
             inner: Arc::new(StateInner {
                 registry,
                 image_sources: Arc::new(image_sources),
-                data_cards: Mutex::new(data_cards::DataCardState::new(data_card_spec_path)),
+                data_cards: Mutex::new(data_cards::DataCardState::new(
+                    data_card_spec_path,
+                    default_faces(),
+                )),
                 producer_credentials: Arc::new(producer_credentials),
                 sessions: oauth::session::SessionSigner::from_admin_token(&admin_token),
                 admin_token,

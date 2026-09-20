@@ -325,6 +325,11 @@ async fn main() {
     // graceful shutdown below drains connections, and an in-flight fetch is
     // abandoned with it. That is safe because a card's durable state is the
     // frame already in the store: losing a refresh loses nothing but the tick.
+    if let Some(faces) = faces_command() {
+        server::set_faces(&state, faces);
+    } else {
+        tracing::info!("no faces package configured (DESKMATE_FACES_DIR unset)");
+    }
     server::start_data_cards(&state, data_card_spec_path)
         .unwrap_or_else(|error| panic!("DESKMATE_DATA_CARDS is unreadable: {error}"));
 
@@ -369,6 +374,37 @@ fn required_firmware_version(value: Result<String, std::env::VarError>) -> Strin
 fn data_card_spec_path(config_dir: &Path) -> PathBuf {
     std::env::var("DESKMATE_DATA_CARDS")
         .map_or_else(|_| config_dir.join("data-cards.json"), PathBuf::from)
+}
+
+/// How to run the faces package, if this deployment has one.
+///
+/// `DESKMATE_FACES_DIR` is a checkout of `companion/faces/` with its
+/// `node_modules` installed. Like `DESKMATE_WEB_DIR` it is read at use, not
+/// embedded, so a face change is an rsync with no Rust build and no restart.
+/// `DESKMATE_BUN` names the runtime; both must be absolute, because the child's
+/// environment is cleared and a relative path would resolve against nothing the
+/// operator chose.
+fn faces_command() -> Option<server::FaceCommand> {
+    let faces_dir = PathBuf::from(std::env::var("DESKMATE_FACES_DIR").ok()?);
+    let bun =
+        std::env::var("DESKMATE_BUN").map_or_else(|_| "/usr/local/bin/bun".into(), PathBuf::from);
+    assert!(
+        faces_dir.is_absolute() && bun.is_absolute(),
+        "DESKMATE_FACES_DIR ({}) and DESKMATE_BUN ({}) must be absolute paths",
+        faces_dir.display(),
+        bun.display()
+    );
+    assert!(
+        faces_dir.join("src/main.ts").is_file(),
+        "DESKMATE_FACES_DIR ({}) has no src/main.ts -- point it at companion/faces",
+        faces_dir.display()
+    );
+    assert!(
+        bun.is_file(),
+        "DESKMATE_BUN ({}) does not exist; the faces package needs the Bun runtime",
+        bun.display()
+    );
+    Some(server::FaceCommand::bun(bun, &faces_dir))
 }
 
 /// `axum::serve` can drain in-flight connections before the process exits.

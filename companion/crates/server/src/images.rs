@@ -132,7 +132,7 @@ pub(super) fn contract_mint_source_responses() -> Vec<serde_json::Value> {
 
 #[cfg(test)]
 pub(super) fn contract_image_source_descriptors() -> Vec<serde_json::Value> {
-    let face = crate::data_cards::creatable_faces()
+    let face = crate::data_cards::creatable_faces(&ServerState::in_memory())
         .into_iter()
         .next()
         .expect("the server exposes at least one creatable face");
@@ -210,10 +210,10 @@ async fn update_face(
 /// The app renders this list verbatim -- it is what lets "Weather" appear in the
 /// window without the app knowing what weather is.
 async fn list_creatable_faces(
-    _state: State<ServerState>,
+    State(state): State<ServerState>,
     _operator: OperatorAuthenticated,
 ) -> Json<Vec<crate::data_cards::FaceDescriptor>> {
-    Json(crate::data_cards::creatable_faces())
+    Json(crate::data_cards::creatable_faces(&state))
 }
 
 async fn mint_source(

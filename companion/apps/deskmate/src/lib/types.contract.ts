@@ -743,6 +743,28 @@ export const apiContractFixtures = {
           "placeholder": "usd"
         }
       ]
+    },
+    {
+      "kind": "headlines",
+      "label": "Headlines",
+      "fields": [
+        {
+          "type": "enum",
+          "key": "list",
+          "label": "Stories",
+          "value": "top",
+          "options": [
+            {
+              "value": "top",
+              "label": "Front page"
+            },
+            {
+              "value": "new",
+              "label": "Newest"
+            }
+          ]
+        }
+      ]
     }
   ],
   "card_error_kinds": [

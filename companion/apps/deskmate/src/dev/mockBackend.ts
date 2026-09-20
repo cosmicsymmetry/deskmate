@@ -77,6 +77,25 @@ const CREATABLE_FACES: FaceDescriptor[] = [
     ],
   },
   {
+    kind: "hackernews",
+    label: "Hacker News",
+    fields: [
+      {
+        key: "list",
+        label: "Stories",
+        type: "enum",
+        value: "top",
+        options: [
+          { value: "top", label: "Front page" },
+          { value: "best", label: "Best" },
+          { value: "new", label: "Newest" },
+          { value: "ask", label: "Ask HN" },
+          { value: "show", label: "Show HN" },
+        ],
+      },
+    ],
+  },
+  {
     kind: "rss",
     label: "RSS feed",
     fields: [

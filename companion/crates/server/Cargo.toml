@@ -14,7 +14,6 @@ device = { path = "../device" }
 # preview path.
 lvgl-sim = { path = "../lvgl-sim" }
 protocol = { path = "../protocol" }
-providers = { path = "../providers" }
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
@@ -30,29 +29,17 @@ hmac = "=0.12.1"
 # Header-first PNG decoding for the image-ingest route. `Pixmap::decode_png` would
 # need no new line here but decodes in one shot; `png::Decoder::read_header_info`
 # reads the IHDR alone, which is what lets a decompression bomb be rejected before
-# anything is allocated. Same version already in the lockfile via tiny-skia.
+# anything is allocated.
 png = "0.17"
-tiny-skia = "0.11"
-# The server authors its own SVG for the data-card faces and rasterizes it into
-# the same RGB565 frame a picture producer would have pushed.
-#
-# `system-fonts` is deliberately OFF. The face renderer loads the two bundled
-# Inter faces into its own `fontdb` and nothing else, so a face rasterizes to
-# identical bytes on the owner's Mac, in CI, and on docker-vm. With system
-# fonts enabled, a golden-image test would pass or fail according to what
-# happened to be installed on the machine running it.
-# Pinned exactly: this is a rasterizer parsing owner-supplied data into a
-# render tree, and a patch bump is a change to that parser.
-resvg = { version = "=0.45.1", default-features = false, features = ["text"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# Shared by production egress and the HTTP-facing tests. `rustls` covers both
-# the OAuth token call and the outbound data fetches behind the server-rendered
-# cards; `form` is the OAuth token POST, whose one-host allowlist lives in
-# `egress::fetch_post_form`.
+# Shared by production egress and the HTTP-facing tests. `rustls` covers the
+# OAuth token call; `form` is that token POST, whose one-host allowlist lives in
+# `egress::fetch_post_form`. The server-rendered faces fetch from their own
+# subprocess (`companion/faces`), not through this.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "form"] }
 url = "2"
 # Backs `FirmwareCatalog::in_memory()`, which is normal library API (used by

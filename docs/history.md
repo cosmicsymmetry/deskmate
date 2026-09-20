@@ -1502,3 +1502,70 @@ result was about a third of that. The repetition was in the scaffolding; the bod
 distinct interaction sequences, and table-driving those would have traded lines for
 failures nobody can read. OAuth, secrets and the management pages -- about 4,500 lines
 with their tests, unconfigured on the live server -- were deliberately left for the owner.
+
+## 2026-09-20 — the faces left Rust
+
+The owner asked for three things in one message: a better Hacker News card, a finished
+token card, and -- "I think we should use python, typescript or node for server-rendered
+cards, for better support and maintenance." The third decided how the first two were
+done, so it went first.
+
+**TypeScript on Bun, run by the server as a subprocess.** Not Python, and the reason was
+measured rather than argued: `@resvg/resvg-js` is the same `resvg` engine the Rust faces
+used, so a spike rasterized the 19 existing faces' SVG both ways -- zero differing pixels
+-- and then checked text measurement, `getBBox` against `abs_layer_bounding_box`, to the
+last digit. That turned "port the faces" from a redesign risk into a byte-equality
+problem: every case was accepted only when its SVG string matched the Rust output
+exactly, and the Rust output is what `companion/faces/test/golden/` holds. The
+owner-approved weather design moved without a pixel changing. The one thing that needed
+care was rounding -- Rust's `{:.2}` takes an exact tie to even, `toFixed` takes it away
+from zero, and an 8px grid produces exact ties -- hence `fixed()`.
+
+**The server kept the bookkeeping and lost the knowledge.** `data_cards.rs` still owns
+the spec file, the settings contract, validation and the schedule, and now names no face
+kind: the catalog comes from the package's `describe`. `FaceSpec` went from a closed enum
+to `{kind, ...settings}`, deliberately the same shape on disk, so the live file loads with
+no migration. Gone: `crates/providers`, `crates/server/src/faces/`, `face_render`,
+`egress_client`, the `resvg` and `tiny-skia` dependencies -- and, for the second time in
+this repository's history, the server's unrestricted outbound GET. `5012663` deleted it on
+2026-09-13 with the argument that an unguarded `fetch` leaves the one-host invariant open
+to the next caller; the Rust faces brought it back; it left again with them.
+
+**The Hacker News face is new, and is not the RSS face pointed at a feed.** That was the
+problem: on Hacker News the title is the content, and the generic layout truncated it at
+every level while showing none of what makes the front page the front page. The new face
+takes the weather face's anatomy -- an ember-orange hero module, a SURFACE index -- reads
+the official API for points, comments and domain, and chooses the lead's size and the
+number of index rows together, so a long headline costs rows before it costs a word.
+
+**"Finish the token card" turned out to mean the window, not the face.** Driven end to
+end against a real server, the token face fetched, drew and published correctly. What was
+unfinished was that the owner could not SEE it: every picture card previewed as a
+sentence on a black rectangle. The preview of a picture card is now its stored frame,
+decoded back to a PNG -- the bytes the panel holds, nothing rendered, so still one
+renderer. That fixed weather, RSS and every external producer's card in the same stroke.
+
+Four things went wrong on the way, each worth the paragraph:
+
+- **A ten-agent workflow died at the session limit having returned nothing** -- three
+  readers, four designers, three judges, 855k tokens in six minutes. Two first-draft
+  designs survived on disk and one became the face. The rest of the day was done by
+  hand with one narrowly-briefed subagent, and was faster.
+- **A layout planner's fallback outbid its own main case.** The lone-lead mode had larger
+  type steps, so it scored above "one index row under a 40px lead" and a real front page
+  with a short top story lost its index. Every fixture lead was long. Found only because
+  the face was run against the live API before it was called done.
+- **A flaky test that was a real bug.** `describe` intermittently failed with its output
+  pipe "left open" -- held by an unrelated `sleep` a concurrently-running test had
+  orphaned, which inherited the pipe because macOS sets `CLOEXEC` non-atomically. Waiting
+  for a pipe to close is not waiting for the child. The runner now trusts the exit status.
+- **An automated review flagged DNS rebinding in the new HTTP guard, correctly.** It had
+  been written down as a deliberate step down from `egress.rs`. It is not one any more:
+  Bun's `node:https` `lookup` override breaks certificate checking, but `fetch` to the IP
+  literal with `tls.serverName` does not -- verified both ways against live hosts, right
+  address connects, swapped address refused -- so the faces pin like the server does.
+
+Rust fell by about 5,900 lines and TypeScript grew by about 4,300, tests included on both
+sides. No schema, wire or firmware boundary was crossed. Not verified: any of this on the
+panel, and the Linux build of the goldens -- `deploy.sh` now runs the faces suite on the
+VM before it installs anything, precisely because that is the first place it can be.

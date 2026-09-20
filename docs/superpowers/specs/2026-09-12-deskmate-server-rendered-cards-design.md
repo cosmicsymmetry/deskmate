@@ -1,5 +1,18 @@
 # Server-rendered data cards
 
+> **AMENDED 2026-09-20, on the owner's direction.** The faces are no longer Rust. Owner,
+> verbatim: "I think we should use python, typescript or node for server-rendered cards,
+> for better support and maintenance." They now live in `companion/faces/` (TypeScript on
+> Bun) and the server runs them as a subprocess. What this spec decided and what still
+> holds: the faces are **server-side** (not external producers), they are image sources
+> the server pushes to itself, never card kinds, and they are rastered rather than
+> composed as scenes. What it describes that is gone: `crates/providers`,
+> `crates/server/src/faces/`, `face_render`, `EgressHttpClient`, and the server's own
+> outbound GET. TypeScript over Python because `@resvg/resvg-js` is the same engine the
+> Rust faces used, which let all 19 cases be ported on byte-identical SVG, and because
+> Bun is already the repository's JS toolchain. The current description is
+> `docs/images/server-rendered-cards.md`; the pipeline diagram below is history.
+
 Status: implemented on `feat/server-side-cards`. Owner direction, 2026-09-12, verbatim:
 
 > Let's create a few new cards in a separate worktree. Fully rendered.

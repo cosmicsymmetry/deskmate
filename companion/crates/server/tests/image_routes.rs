@@ -14,11 +14,11 @@ const ONE_MEBIBYTE: usize = 1024 * 1024;
 
 /// A loopback HTTP harness for producer and admin image routes.
 async fn spawn() -> TestServer {
-    support::spawn_http(app(ServerState::in_memory())).await
+    spawn_with(ServerState::in_memory()).await
 }
 
 async fn spawn_with(state: ServerState) -> TestServer {
-    support::spawn_http(app(state)).await
+    support::spawn_http(app(support::with_fake_faces(state))).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -570,11 +570,11 @@ async fn local_json_request(
 #[tokio::test]
 async fn server_owned_faces_accept_and_persist_partial_settings() {
     let root = tempfile::tempdir().unwrap();
-    let state = ServerState::new(
+    let state = support::with_fake_faces(ServerState::new(
         ADMIN_TOKEN.into(),
         FirmwareCatalog::in_memory(),
         root.path().to_path_buf(),
-    );
+    ));
     let (status, defaults) =
         local_json_request(&state, "GET", "/v1/faces", serde_json::Value::Null).await;
     assert_eq!(status, StatusCode::OK);
@@ -651,7 +651,7 @@ async fn server_owned_faces_accept_and_persist_partial_settings() {
 
 #[tokio::test]
 async fn server_owned_face_updates_keep_existing_rejection_contracts() {
-    let state = ServerState::in_memory();
+    let state = support::with_fake_faces(ServerState::in_memory());
     let (_, minted) = local_json_request(
         &state,
         "POST",

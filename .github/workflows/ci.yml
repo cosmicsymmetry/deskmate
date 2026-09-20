@@ -124,6 +124,41 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+  # The server-rendered faces. Its own job with NO `needs:`, on purpose: from
+  # 2026-08-23 to 2026-09-19 a firmware failure skipped everything that needed its
+  # artifact and no companion gate ran for four weeks. These gates need nothing from
+  # firmware, so nothing in firmware can switch them off. It runs on Linux because
+  # that is where the faces actually run: @resvg/resvg-js ships one native binary
+  # per platform, and the goldens are only worth having if the deployed platform
+  # produces them too.
+  faces:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.8
+      - name: faces install
+        working-directory: companion/faces
+        run: bun install --frozen-lockfile
+      - name: faces format
+        working-directory: companion/faces
+        run: bun run format:check
+      - name: faces lint
+        working-directory: companion/faces
+        run: bun run lint
+      - name: faces typecheck
+        working-directory: companion/faces
+        run: bun run check
+      - name: faces tests
+        working-directory: companion/faces
+        run: bun test
+      # What the server actually runs: the package must describe itself from a cold
+      # start, as the subprocess does, not only under the test runner.
+      - name: faces describe
+        working-directory: companion/faces
+        run: bun run src/main.ts describe
+
   firmware-host-tests:
     needs: firmware
     runs-on: ubuntu-latest

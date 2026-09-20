@@ -1,41 +1,56 @@
 //! Server-rendered data cards: the server acting as its own picture producer.
 //!
-//! Weather, RSS and token faces belong to ordinary picture cards. Each face is
-//! an image source the server pushes to itself: a refresh task fetches data,
-//! renders the face, and hands the frame to
+//! A weather, Hacker News, RSS or token face belongs to an ordinary picture card.
+//! Each is an image source the server pushes to itself: a refresh task asks the
+//! faces package for a frame and hands it to
 //! [`crate::image_sources::ImageSourceStore::accept`]. Delivery then uses the
 //! same durable assets, device notifications and staleness inference as an
 //! external producer's PNG.
 //!
-//! The server owns the persisted specs separately from the device config.
-//! The browser creates and edits faces through server-provided descriptors,
-//! so adding a face does not require a new card kind or a config schema change.
-//! Settings absent from those descriptors can be edited in the spec file while
-//! the server is stopped.
+//! # What lives here and what does not
+//!
+//! The server owns the *bookkeeping*: the persisted specs, the settings contract
+//! the browser edits them through, validation, and the refresh schedule. It does
+//! not know what any face fetches or how it is drawn. That is
+//! `companion/faces/` -- TypeScript, run as a subprocess through
+//! [`faces_package`] -- and it is why this file names no face kind: the catalog
+//! comes from the package's `describe`, so adding a face is adding a file there.
+//! No card kind, no schema change, no Rust change, no binary redeploy.
+//!
+//! Settings absent from a face's descriptor (a token's `api_key`) can be edited in
+//! the spec file while the server is stopped; they are passed through untouched.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::ServerState;
 
+mod faces_package;
 mod worker;
+
+pub use faces_package::FaceCommand;
+use faces_package::{CatalogFace, CatalogField};
 
 /// A field value arrives over an internet-facing admin route. This comfortably
 /// covers feed URLs while preventing a tiny settings document from becoming an
 /// unbounded allocation surface.
 const MAX_FACE_FIELD_VALUE_BYTES: usize = 2_048;
 
+/// How often the catalog is re-read. The faces directory is rsync'd like the web
+/// `dist/`, so a new face appears in the add menu without a restart.
+const CATALOG_RELOAD: Duration = Duration::from_secs(60);
+
 /// One server-rendered card.
 ///
 /// The face config is a nested object rather than flattened into this struct,
 /// and that is not a style choice: serde's `deny_unknown_fields` and
 /// `flatten` do not work together -- the outer struct rejects every flattened
-/// field as unknown. Flattening therefore meant giving up the typo protection,
-/// which is the one thing this file most needs, because a spec is hand-written
-/// and a silently-defaulted field presents as a card that is subtly wrong
-/// forever. Nesting costs one level of braces and keeps both sides strict.
+/// field as unknown. Nesting costs one level of braces and keeps the outer
+/// struct strict, so `"refresh_second"` does not quietly become the default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DataCardSpec {
@@ -51,44 +66,18 @@ const fn default_refresh_seconds() -> u64 {
     900
 }
 
-/// Which face, and what it needs to know.
+/// Which face, and the settings it was given.
+///
+/// Open-ended on purpose. The file shape is unchanged from when this was a closed
+/// Rust enum -- `{"kind": "token", "coin_id": "solana", ...}` -- so a spec file
+/// written by an older server loads without a migration. What changed is who
+/// checks the settings: a mistyped key is no longer a serde refusal at startup
+/// but the faces package's complaint at the first refresh.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
-enum FaceSpec {
-    Weather {
-        /// A place name, geocoded by the provider. Not coordinates: the owner
-        /// types a city, and the geocoder's own display name is what the face
-        /// shows, so the panel says what the forecast is actually for.
-        location: String,
-        #[serde(default)]
-        units: Units,
-    },
-    Rss {
-        url: String,
-        /// The eyebrow. Feeds name themselves inconsistently and often at
-        /// length, so the owner gets to say what this feed is called.
-        title: String,
-    },
-    Token {
-        /// `CoinGecko`'s coin id, e.g. `solana`.
-        coin_id: String,
-        #[serde(default = "default_currency")]
-        currency: String,
-        #[serde(default)]
-        api_key: Option<String>,
-    },
-}
-
-fn default_currency() -> String {
-    "usd".to_owned()
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-enum Units {
-    #[default]
-    Metric,
-    Imperial,
+struct FaceSpec {
+    kind: String,
+    #[serde(flatten)]
+    settings: BTreeMap<String, serde_json::Value>,
 }
 
 /// The server-owned settings contract rendered by the companion. The app treats
@@ -131,46 +120,84 @@ impl FaceFieldDescriptor {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct FaceFieldOption {
     pub(crate) value: String,
     pub(crate) label: String,
 }
 
-/// The only function that teaches the settings UI about a face. Adding a face
-/// means adding one server-side descriptor here; the companion never switches on
-/// `kind` and needs no release of its own.
-#[must_use]
-/// The faces this server knows how to create, as blank defaults.
-///
-/// The companion's add menu is built from this list, which is why the menu can
-/// offer "Weather" without the app knowing what a weather face is. Adding a
-/// fourth face here is what makes it appear in the window -- no app change.
-pub(crate) fn creatable_faces() -> Vec<FaceDescriptor> {
-    ["weather", "rss", "token"]
-        .into_iter()
-        .filter_map(blank_face)
-        .map(|face| face_descriptor(&face))
-        .collect()
+/// A catalog face's descriptor with `settings` filled in: what the owner typed
+/// where they typed something, the field's default where they did not.
+fn describe_face(
+    face: &CatalogFace,
+    settings: &BTreeMap<String, serde_json::Value>,
+) -> FaceDescriptor {
+    let value_of = |field: &CatalogField| {
+        settings
+            .get(field.key())
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| field.default_value())
+            .to_owned()
+    };
+    FaceDescriptor {
+        kind: face.kind.clone(),
+        label: face.label.clone(),
+        fields: face
+            .fields
+            .iter()
+            .map(|field| match field {
+                CatalogField::Text {
+                    key,
+                    label,
+                    placeholder,
+                    ..
+                } => FaceFieldDescriptor::Text {
+                    key: key.clone(),
+                    label: label.clone(),
+                    value: value_of(field),
+                    placeholder: placeholder.clone(),
+                },
+                CatalogField::Url {
+                    key,
+                    label,
+                    placeholder,
+                    ..
+                } => FaceFieldDescriptor::Url {
+                    key: key.clone(),
+                    label: label.clone(),
+                    value: value_of(field),
+                    placeholder: placeholder.clone(),
+                },
+                CatalogField::Enum {
+                    key,
+                    label,
+                    options,
+                    ..
+                } => FaceFieldDescriptor::Enum {
+                    key: key.clone(),
+                    label: label.clone(),
+                    value: value_of(field),
+                    options: options.clone(),
+                },
+            })
+            .collect(),
+    }
 }
 
-/// A blank face of `kind`, or `None` if this server cannot draw that kind.
-fn blank_face(kind: &str) -> Option<FaceSpec> {
-    match kind {
-        "weather" => Some(FaceSpec::Weather {
-            location: String::new(),
-            units: Units::Metric,
-        }),
-        "rss" => Some(FaceSpec::Rss {
-            url: String::new(),
-            title: String::new(),
-        }),
-        "token" => Some(FaceSpec::Token {
-            coin_id: String::new(),
-            currency: default_currency(),
-            api_key: None,
-        }),
-        _ => None,
+/// A blank face of a catalog kind: every field at its default.
+fn blank_face(face: &CatalogFace) -> FaceSpec {
+    FaceSpec {
+        kind: face.kind.clone(),
+        settings: face
+            .fields
+            .iter()
+            .map(|field| {
+                (
+                    field.key().to_owned(),
+                    serde_json::Value::String(field.default_value().to_owned()),
+                )
+            })
+            .collect(),
     }
 }
 
@@ -180,95 +207,15 @@ fn blank_face(kind: &str) -> Option<FaceSpec> {
 /// to ask about. Fetching anyway would fail every cycle and fill the journal with
 /// errors the owner cannot act on until they type one. So an incomplete face is
 /// stored but not refreshed, and the card shows the ordinary "no frame yet"
-/// state until its settings are filled in.
-fn face_is_complete(face: &FaceSpec) -> bool {
-    face_descriptor(face)
-        .fields
-        .iter()
-        .all(|field| match field {
-            FaceFieldDescriptor::Text { value, .. } | FaceFieldDescriptor::Url { value, .. } => {
-                !value.trim().is_empty()
-            }
-            FaceFieldDescriptor::Enum { .. } => true,
-        })
-}
-
-fn face_descriptor(face: &FaceSpec) -> FaceDescriptor {
-    let text = |key: &str, label: &str, value: &str, placeholder: &str| FaceFieldDescriptor::Text {
-        key: key.to_owned(),
-        label: label.to_owned(),
-        value: value.to_owned(),
-        placeholder: placeholder.to_owned(),
-    };
-    let url = |key: &str, label: &str, value: &str, placeholder: &str| FaceFieldDescriptor::Url {
-        key: key.to_owned(),
-        label: label.to_owned(),
-        value: value.to_owned(),
-        placeholder: placeholder.to_owned(),
-    };
-    match face {
-        FaceSpec::Weather { location, units } => FaceDescriptor {
-            kind: "weather".into(),
-            label: "Weather".into(),
-            fields: vec![
-                text("location", "Location", location, "Dubai"),
-                FaceFieldDescriptor::Enum {
-                    key: "units".into(),
-                    label: "Units".into(),
-                    value: match units {
-                        Units::Metric => "metric",
-                        Units::Imperial => "imperial",
-                    }
-                    .into(),
-                    options: vec![
-                        FaceFieldOption {
-                            value: "metric".into(),
-                            label: "Metric".into(),
-                        },
-                        FaceFieldOption {
-                            value: "imperial".into(),
-                            label: "Imperial".into(),
-                        },
-                    ],
-                },
-            ],
-        },
-        FaceSpec::Rss {
-            url: feed_url,
-            title,
-        } => FaceDescriptor {
-            kind: "rss".into(),
-            label: "RSS feed".into(),
-            fields: vec![
-                url("url", "Feed URL", feed_url, "https://example.com/feed.xml"),
-                text("title", "Title", title, "News"),
-            ],
-        },
-        FaceSpec::Token {
-            coin_id, currency, ..
-        } => FaceDescriptor {
-            kind: "token".into(),
-            label: "Token price".into(),
-            // `api_key` is deliberately absent: the descriptor is a readable
-            // response and its field vocabulary has no secret type. An existing
-            // key remains in the spec unchanged when these public fields change.
-            fields: vec![
-                text("coin_id", "Coin ID", coin_id, "solana"),
-                text("currency", "Currency", currency, "usd"),
-            ],
-        },
-    }
-}
-
-fn render_snapshot<T>(
-    snapshot: providers::ProviderSnapshot<T>,
-    render: impl FnOnce(&T) -> String,
-) -> Result<String, String> {
-    if let Some(error) = snapshot.error {
-        return Err(error);
-    }
-    let value = snapshot.value.ok_or_else(String::new)?;
-    Ok(render(&value))
+/// state until its settings are filled in. A face whose fields all have defaults
+/// -- Hacker News -- is complete the moment it is created.
+fn face_is_complete(descriptor: &FaceDescriptor) -> bool {
+    descriptor.fields.iter().all(|field| match field {
+        FaceFieldDescriptor::Text { value, .. } | FaceFieldDescriptor::Url { value, .. } => {
+            !value.trim().is_empty()
+        }
+        FaceFieldDescriptor::Enum { .. } => true,
+    })
 }
 
 /// Server-owned data-card state. The path, parsed specs, and every live task
@@ -278,14 +225,71 @@ pub(crate) struct DataCardState {
     spec_path: PathBuf,
     specs: Vec<DataCardSpec>,
     tasks: HashMap<String, tokio::task::JoinHandle<()>>,
+    /// How to run the faces package. `None` means this deployment has none, and
+    /// then there is no catalog, no add-menu entry and no refresher.
+    faces: Option<FaceCommand>,
+    /// `None` until first needed. Production loads it at startup, before the
+    /// listener binds, so no request handler ever pays for the subprocess.
+    catalog: Option<Arc<Vec<CatalogFace>>>,
+    catalog_reloader: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl DataCardState {
-    pub(crate) fn new(spec_path: PathBuf) -> Self {
+    pub(crate) fn new(spec_path: PathBuf, faces: Option<FaceCommand>) -> Self {
         Self {
             spec_path,
             specs: Vec::new(),
             tasks: HashMap::new(),
+            faces,
+            catalog: None,
+            catalog_reloader: None,
+        }
+    }
+
+    fn catalog(&mut self) -> Arc<Vec<CatalogFace>> {
+        if self.catalog.is_none() {
+            self.catalog = Some(Arc::new(load_catalog(self.faces.as_ref())));
+        }
+        Arc::clone(self.catalog.as_ref().expect("just loaded"))
+    }
+
+    /// The descriptor for one spec, or `None` when the package no longer draws
+    /// that kind -- the spec is kept, because the package can come back.
+    fn descriptor(&mut self, face: &FaceSpec) -> Option<FaceDescriptor> {
+        self.catalog()
+            .iter()
+            .find(|candidate| candidate.kind == face.kind)
+            .map(|candidate| describe_face(candidate, &face.settings))
+    }
+
+    /// Starts the refresher for `spec` if its face is complete and drawable.
+    fn start_if_complete(
+        &mut self,
+        runtime: &tokio::runtime::Handle,
+        state: &ServerState,
+        spec: &DataCardSpec,
+    ) {
+        let Some(faces) = self.faces.clone() else {
+            return;
+        };
+        match self.descriptor(&spec.face) {
+            Some(descriptor) if face_is_complete(&descriptor) => {
+                self.tasks.insert(
+                    spec.source_id.clone(),
+                    worker::spawn_refresher(runtime, state.clone(), faces, spec.clone()),
+                );
+            }
+            // A card added from the menu is stored blank and stays unfetched until
+            // its settings are filled in, so restarting must not start it either.
+            Some(_) => tracing::info!(
+                source_id = %spec.source_id,
+                "a server-rendered card has no settings yet and is not being fetched"
+            ),
+            None => tracing::warn!(
+                source_id = %spec.source_id,
+                kind = %spec.face.kind,
+                "the faces package does not draw this kind; the card is kept but not refreshed"
+            ),
         }
     }
 
@@ -306,6 +310,40 @@ impl DataCardState {
     #[cfg(test)]
     pub(crate) fn has_task_for_test(&self, source_id: &str) -> bool {
         self.tasks.contains_key(source_id)
+    }
+}
+
+/// Tells the server how to run the faces package. Called once at startup, before
+/// [`start_data_cards`]; a deployment that never calls it has no server faces.
+pub fn set_faces(state: &ServerState, faces: FaceCommand) {
+    let mut data_cards = state
+        .inner
+        .data_cards
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    data_cards.faces = Some(faces);
+    data_cards.catalog = None;
+}
+
+#[cfg(test)]
+pub(crate) fn fake_faces() -> FaceCommand {
+    faces_package::fake()
+}
+
+/// Reads the catalog, or returns an empty one and says why. An unreadable
+/// catalog is not fatal: the device link, the clock and every external producer
+/// work without it, and refusing to start would take them down with it.
+fn load_catalog(faces: Option<&FaceCommand>) -> Vec<CatalogFace> {
+    let Some(faces) = faces else {
+        return Vec::new();
+    };
+    match faces_package::describe(faces) {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            tracing::error!(target: "server::data_cards", %error,
+                "the faces package could not be read; no server-rendered face is available");
+            Vec::new()
+        }
     }
 }
 
@@ -354,6 +392,13 @@ fn load_specs(path: &Path) -> Result<Vec<DataCardSpec>, String> {
     for spec in &specs {
         if spec.source_id.trim().is_empty() {
             return Err(format!("{}: a spec has an empty source_id", path.display()));
+        }
+        if spec.face.kind.trim().is_empty() {
+            return Err(format!(
+                "{}: the spec for {:?} has an empty face kind",
+                path.display(),
+                spec.source_id
+            ));
         }
         if !source_ids.insert(spec.source_id.as_str()) {
             return Err(format!(
@@ -404,6 +449,7 @@ fn spawn_refreshers(state: &ServerState, spec_path: PathBuf, specs: Vec<DataCard
         tracing::warn!(%operation, %message, "could not persist the pruned data-card specs");
     }
 
+    let runtime = tokio::runtime::Handle::current();
     let mut data_cards = state
         .inner
         .data_cards
@@ -414,21 +460,40 @@ fn spawn_refreshers(state: &ServerState, spec_path: PathBuf, specs: Vec<DataCard
     }
     data_cards.spec_path = spec_path;
     data_cards.specs = specs;
-    let specs = data_cards.specs.clone();
-    for spec in specs {
-        // A card added from the menu is stored blank and stays unfetched until
-        // its settings are filled in, so restarting must not start it either.
-        if !face_is_complete(&spec.face) {
-            tracing::info!(
-                source_id = %spec.source_id,
-                "a server-rendered card has no settings yet and is not being fetched"
-            );
+    // Read fresh at every start, here, so no request handler pays for it later.
+    data_cards.catalog = None;
+    for spec in data_cards.specs.clone() {
+        data_cards.start_if_complete(&runtime, state, &spec);
+    }
+
+    if let Some(reloader) = data_cards.catalog_reloader.take() {
+        reloader.abort();
+    }
+    if let Some(faces) = data_cards.faces.clone() {
+        data_cards.catalog_reloader = Some(runtime.spawn(reload_catalog(state.clone(), faces)));
+    }
+}
+
+/// Re-reads the catalog on an interval, off the lock, and swaps it in only when
+/// the read succeeded -- a package caught mid-rsync must not empty the add menu.
+async fn reload_catalog(state: ServerState, faces: FaceCommand) {
+    let mut ticker = tokio::time::interval(CATALOG_RELOAD);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ticker.tick().await;
+    loop {
+        ticker.tick().await;
+        let command = faces.clone();
+        let Ok(Ok(catalog)) =
+            tokio::task::spawn_blocking(move || faces_package::describe(&command)).await
+        else {
             continue;
-        }
-        data_cards.tasks.insert(
-            spec.source_id.clone(),
-            worker::spawn_refresher(&tokio::runtime::Handle::current(), state.clone(), spec),
-        );
+        };
+        state
+            .inner
+            .data_cards
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .catalog = Some(Arc::new(catalog));
     }
 }
 
@@ -443,26 +508,50 @@ pub(crate) fn stop_refreshers(state: &ServerState) {
     for (_, task) in data_cards.tasks.drain() {
         task.abort();
     }
+    if let Some(reloader) = data_cards.catalog_reloader.take() {
+        reloader.abort();
+    }
+}
+
+/// The faces this server can create, as blank defaults.
+///
+/// The companion's add menu is built from this list, which is why the menu can
+/// offer "Weather" without the app knowing what a weather face is -- and why a
+/// face added to `companion/faces/` appears in the window with no app change.
+#[must_use]
+pub(crate) fn creatable_faces(state: &ServerState) -> Vec<FaceDescriptor> {
+    state
+        .inner
+        .data_cards
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .catalog()
+        .iter()
+        .map(|face| describe_face(face, &BTreeMap::new()))
+        .collect()
 }
 
 pub(crate) fn descriptor_for_source(
     state: &ServerState,
     source_id: &str,
 ) -> Option<FaceDescriptor> {
-    state
+    let mut data_cards = state
         .inner
         .data_cards
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let face = data_cards
         .specs
         .iter()
-        .find(|spec| spec.source_id == source_id)
-        .map(|spec| face_descriptor(&spec.face))
+        .find(|spec| spec.source_id == source_id)?
+        .face
+        .clone();
+    data_cards.descriptor(&face)
 }
 
 /// Validates and persists one face update, then aborts that source's refresher
-/// and replaces it only when complete. The descriptor drives validation and mutation, so
-/// face-specific knowledge is confined to [`face_descriptor`].
+/// and replaces it only when complete. The descriptor drives validation, so this
+/// function knows field *types* and nothing about any face.
 pub(crate) fn update_face_fields(
     state: &ServerState,
     runtime: &tokio::runtime::Handle,
@@ -479,22 +568,19 @@ pub(crate) fn update_face_fields(
         .iter()
         .position(|spec| spec.source_id == source_id)
         .ok_or(FaceUpdateError::NoFace)?;
-    let current = &data_cards.specs[index];
-    let descriptor = face_descriptor(&current.face);
+    let current = data_cards.specs[index].face.clone();
+    let descriptor = data_cards
+        .descriptor(&current)
+        .ok_or(FaceUpdateError::NoFace)?;
     validate_face_fields(&descriptor, fields)?;
 
-    let mut face_value = serde_json::to_value(&current.face)
-        .map_err(|error| FaceUpdateError::Encode(error.to_string()))?;
-    let object = face_value
-        .as_object_mut()
-        .ok_or_else(|| FaceUpdateError::Encode("a face did not serialize as an object".into()))?;
-    for (key, value) in fields {
-        object.insert(key.clone(), serde_json::Value::String(value.clone()));
-    }
-    let updated_face: FaceSpec = serde_json::from_value(face_value)
-        .map_err(|error| FaceUpdateError::Encode(error.to_string()))?;
     let mut updated_specs = data_cards.specs.clone();
-    updated_specs[index].face = updated_face;
+    for (key, value) in fields {
+        updated_specs[index]
+            .face
+            .settings
+            .insert(key.clone(), serde_json::Value::String(value.clone()));
+    }
     persist_specs(&data_cards.spec_path, &updated_specs)?;
 
     let updated_spec = updated_specs[index].clone();
@@ -502,13 +588,10 @@ pub(crate) fn update_face_fields(
     if let Some(task) = data_cards.tasks.remove(source_id) {
         task.abort();
     }
-    if face_is_complete(&updated_spec.face) {
-        data_cards.tasks.insert(
-            source_id.to_owned(),
-            worker::spawn_refresher(runtime, state.clone(), updated_spec.clone()),
-        );
-    }
-    Ok(face_descriptor(&updated_spec.face))
+    data_cards.start_if_complete(runtime, state, &updated_spec);
+    data_cards
+        .descriptor(&updated_spec.face)
+        .ok_or(FaceUpdateError::NoFace)
 }
 
 /// Attaches a blank face of `kind` to a freshly minted source.
@@ -516,18 +599,24 @@ pub(crate) fn update_face_fields(
 /// Called right after `POST /v1/images` mints the source, so the companion's
 /// "Weather" menu item is one round trip: mint, attach, add a card. The spec is
 /// persisted immediately -- a face that exists only in memory would vanish on the
-/// next restart and leave a card pointing at a source nothing draws.
+/// next restart and leave a card pointing at a source nothing draws. A face that
+/// is complete at birth starts refreshing here; there is no later save to do it.
 pub(crate) fn create_face(
     state: &ServerState,
     source_id: &str,
     kind: &str,
 ) -> Result<FaceDescriptor, FaceUpdateError> {
-    let face = blank_face(kind).ok_or_else(|| FaceUpdateError::UnknownField(kind.to_owned()))?;
     let mut data_cards = state
         .inner
         .data_cards
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let face = data_cards
+        .catalog()
+        .iter()
+        .find(|candidate| candidate.kind == kind)
+        .map(blank_face)
+        .ok_or_else(|| FaceUpdateError::UnknownField(kind.to_owned()))?;
     if data_cards
         .specs
         .iter()
@@ -549,7 +638,15 @@ pub(crate) fn create_face(
     persist_specs(&data_cards.spec_path, &updated_specs)?;
     data_cards.specs = updated_specs;
 
-    Ok(face_descriptor(&spec.face))
+    // Blocking-pool threads keep the runtime context, so this finds the handle
+    // from inside `spawn_blocking`. A plain thread has none, and then the face
+    // simply waits for the next start like any other.
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        data_cards.start_if_complete(&runtime, state, &spec);
+    }
+    data_cards
+        .descriptor(&spec.face)
+        .ok_or_else(|| FaceUpdateError::UnknownField(kind.to_owned()))
 }
 
 /// Forgets a source's face: drops the persisted spec and stops its refresher.
@@ -655,96 +752,45 @@ fn validate_face_fields(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use providers::weather::WeatherUnits;
 
-    #[test]
-    fn failed_snapshots_never_render_cached_values() {
-        for value in [None, Some("last good")] {
-            let mut rendered = false;
-            let result = render_snapshot(
-                providers::ProviderSnapshot {
-                    value,
-                    error: Some("fetch failed".into()),
-                },
-                |value| {
-                    rendered = true;
-                    (*value).to_owned()
-                },
-            );
-            assert!(!rendered, "failed snapshots must not invoke the renderer");
-            assert_eq!(result.unwrap_err(), "fetch failed");
+    /// A face of `kind` with exactly these settings -- the shape a spec file holds.
+    fn face(kind: &str, settings: serde_json::Value) -> FaceSpec {
+        let serde_json::Value::Object(settings) = settings else {
+            panic!("settings are an object");
+        };
+        FaceSpec {
+            kind: kind.to_owned(),
+            settings: settings.into_iter().collect(),
         }
     }
 
-    #[test]
-    fn cached_rss_failures_preserve_stored_frame_and_liveness_until_recovery() {
-        use crate::face_render::frame_from_svg;
-        use crate::faces::{adapt, rss};
-        use crate::image_sources::{AcceptOutcome, ImageSourceStore};
-        use chrono::{Duration, TimeZone, Utc};
-        use providers::rss::{FeedItem, RssFeed};
+    fn weather(location: &str) -> FaceSpec {
+        face(
+            "weather",
+            serde_json::json!({"location": location, "units": "metric"}),
+        )
+    }
 
-        let directory = tempfile::tempdir().expect("temp directory");
-        let store = ImageSourceStore::new(directory.path().to_path_buf()).expect("store");
-        let source = store.mint("News").expect("source");
-        let at = |seconds: i64| Utc.timestamp_opt(1_700_000_000 + seconds, 0).unwrap();
-        let feed = RssFeed {
-            items: vec![FeedItem {
-                title: "Cached headline".into(),
-                published: Some((at(0) - Duration::days(2)).to_rfc3339()),
-                ..FeedItem::default()
-            }],
-        };
-        let publish = |error: Option<String>, now| {
-            render_snapshot(
-                providers::ProviderSnapshot {
-                    value: Some(feed.clone()),
-                    error,
-                },
-                |value| rss::render(&adapt::rss_face(value, "News", now)),
-            )
-            .map(|svg| {
-                store
-                    .accept(&source.id, frame_from_svg(&svg).expect("frame"), now)
-                    .expect("accept")
-            })
-        };
-        for seconds in [0, 60, 120] {
-            publish(None, at(seconds)).expect("successful refresh");
-        }
-        assert!(
-            !store.frame(&source.id, at(100_000)).unwrap().stale,
-            "fewer than four pushes cannot establish a cadence"
-        );
-        assert_eq!(publish(None, at(180)), Ok(AcceptOutcome::Unchanged));
-        let before = store.frame(&source.id, at(180)).unwrap();
-        let disk_before = std::fs::read(directory.path().join("image-sources.json")).unwrap();
-        for seconds in [240, 600, 1_200] {
-            let result = publish(Some("fetch failed".into()), at(seconds));
-            assert_eq!(result, Err("fetch failed".into()));
-        }
-        let after = store.frame(&source.id, at(1_200)).unwrap();
-        assert_eq!(after.digest, before.digest);
-        assert_eq!(after.bytes, before.bytes);
-        assert_eq!(store.summaries(at(1_200))[0].last_push, Some(at(180)));
-        assert_eq!(
-            std::fs::read(directory.path().join("image-sources.json")).unwrap(),
-            disk_before
-        );
-        assert!(after.stale);
-        assert_eq!(publish(None, at(1_300)), Ok(AcceptOutcome::Unchanged));
-        assert_eq!(store.summaries(at(1_300))[0].last_push, Some(at(1_300)));
-        assert!(!store.frame(&source.id, at(1_300)).unwrap().stale);
-        // RSS ages would change after a day, but failed refreshes leave those pixels alone.
-        assert_eq!(
-            publish(Some("fetch failed".into()), at(90_000)),
-            Err("fetch failed".into())
-        );
-        let aged = store.frame(&source.id, at(90_000)).unwrap();
-        assert_eq!(aged.bytes, before.bytes);
-        assert_eq!(aged.digest, before.digest);
-        assert_eq!(store.summaries(at(90_000))[0].last_push, Some(at(1_300)));
-        assert!(aged.stale);
+    /// A blank face of `kind`, as the add menu would create it.
+    fn blank(kind: &str) -> FaceSpec {
+        let catalog = faces_package::describe(&fake_faces()).expect("the fake catalog");
+        blank_face(
+            catalog
+                .iter()
+                .find(|face| face.kind == kind)
+                .expect("a known kind"),
+        )
+    }
+
+    fn descriptor_of(face: &FaceSpec) -> FaceDescriptor {
+        let catalog = faces_package::describe(&fake_faces()).expect("the fake catalog");
+        describe_face(
+            catalog
+                .iter()
+                .find(|candidate| candidate.kind == face.kind)
+                .expect("a known kind"),
+            &face.settings,
+        )
     }
 
     fn write(contents: &str) -> tempfile::TempDir {
@@ -774,7 +820,7 @@ mod tests {
             retained.specs.push(DataCardSpec {
                 source_id: "old".into(),
                 refresh_seconds: 900,
-                face: blank_face("weather").expect("weather"),
+                face: blank("weather"),
             });
             retained.tasks.insert("old".into(), task);
         }
@@ -802,7 +848,7 @@ mod tests {
         let original = vec![DataCardSpec {
             source_id: "old".into(),
             refresh_seconds: 900,
-            face: blank_face("weather").expect("weather"),
+            face: blank("weather"),
         }];
         let task = tokio::spawn(std::future::pending::<()>());
         let task_id = task.id();
@@ -832,64 +878,62 @@ mod tests {
     }
 
     #[test]
-    fn the_three_faces_parse_with_their_defaults() {
-        let directory = write(
-            r#"[
-                {"source_id": "abc", "face": {"kind": "weather", "location": "Dubai"}},
-                {"source_id": "def", "face": {"kind": "rss", "url": "https://example.test/feed", "title": "News"}},
-                {"source_id": "ghi", "face": {"kind": "token", "coin_id": "solana"}}
-            ]"#,
-        );
+    fn a_spec_file_written_by_the_rust_faces_loads_without_a_migration() {
+        // The exact shape the live server's file holds: the closed enum's tag and
+        // fields, `api_key: null` included. It must load, and round-trip unchanged.
+        let written = serde_json::json!([
+            {"source_id": "abc", "refresh_seconds": 900,
+             "face": {"kind": "weather", "location": "Dubai", "units": "imperial"}},
+            {"source_id": "def", "refresh_seconds": 900,
+             "face": {"kind": "rss", "url": "https://example.test/feed", "title": "News"}},
+            {"source_id": "ghi", "refresh_seconds": 300,
+             "face": {"kind": "token", "coin_id": "solana", "currency": "usd", "api_key": null}}
+        ]);
+        let directory = write(&written.to_string());
         let specs = load_specs(&directory.path().join("cards.json")).expect("the specs parse");
         assert_eq!(specs.len(), 3);
+        assert_eq!(specs[2].refresh_seconds, 300);
+        assert_eq!(specs[0].face.settings["units"], "imperial");
+        assert_eq!(specs[2].face.settings["api_key"], serde_json::Value::Null);
+        assert_eq!(
+            serde_json::to_value(&specs).expect("specs serialize"),
+            written
+        );
+    }
+
+    #[test]
+    fn refresh_seconds_defaults_and_an_absent_setting_is_absent_not_blank() {
+        let directory =
+            write(r#"[{"source_id": "ghi", "face": {"kind": "token", "coin_id": "solana"}}]"#);
+        let specs = load_specs(&directory.path().join("cards.json")).expect("the spec parses");
         assert_eq!(specs[0].refresh_seconds, 900);
+        assert_eq!(specs[0].face.settings.get("currency"), None);
+        // ...and the descriptor shows the field's default where nothing was typed.
         assert!(matches!(
-            specs[0].face,
-            FaceSpec::Weather {
-                units: Units::Metric,
-                ..
-            }
+            &descriptor_of(&specs[0].face).fields[1],
+            FaceFieldDescriptor::Text { key, value, .. } if key == "currency" && value == "usd"
         ));
-        match &specs[2].face {
-            FaceSpec::Token {
-                currency, api_key, ..
-            } => {
-                assert_eq!(currency, "usd");
-                assert!(api_key.is_none());
-            }
-            other => panic!("expected a token card, got {other:?}"),
-        }
     }
 
     #[test]
     fn a_malformed_spec_file_is_a_loud_error_rather_than_zero_cards() {
-        let directory = write(r#"[{"source_id": "abc", "face": {"kind": "weather"}}]"#);
-        let error = load_specs(&directory.path().join("cards.json"))
-            .expect_err("a weather card without a location is refused");
-        assert!(
-            error.contains("location"),
-            "the message names the field: {error}"
-        );
+        for contents in [
+            "[{ malformed",
+            r#"[{"source_id": "abc"}]"#,
+            r#"[{"source_id": "abc", "face": {}}]"#,
+        ] {
+            let directory = write(contents);
+            assert!(
+                load_specs(&directory.path().join("cards.json")).is_err(),
+                "{contents} must not load as zero cards"
+            );
+        }
     }
 
     #[test]
-    fn an_unknown_field_is_refused_rather_than_silently_ignored() {
-        // `deny_unknown_fields` is what turns a typo into a startup error
-        // instead of a card that quietly uses a default forever.
-        let directory = write(
-            r#"[{"source_id": "abc", "face": {"kind": "weather", "location": "Dubai", "unit": "imperial"}}]"#,
-        );
-        assert!(
-            load_specs(&directory.path().join("cards.json")).is_err(),
-            "\"unit\" is not \"units\" and must not be accepted"
-        );
-    }
-
-    #[test]
-    fn an_unknown_outer_field_is_refused_too() {
-        // The regression `flatten` caused: with it, `deny_unknown_fields` on
-        // this struct rejected the face's own fields, so it had to be removed
-        // and every typo -- inner and outer -- became a silent default.
+    fn an_unknown_outer_field_is_refused() {
+        // The outer struct stays strict, which is why the face is nested rather
+        // than flattened into it: a typo here would otherwise be a silent default.
         let directory = write(
             r#"[{"source_id": "abc", "refresh_second": 60, "face": {"kind": "weather", "location": "Dubai"}}]"#,
         );
@@ -899,47 +943,97 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_unknown_kind_is_refused() {
-        let directory =
-            write(r#"[{"source_id": "abc", "face": {"kind": "calendar", "url": "x"}}]"#);
-        assert!(
-            load_specs(&directory.path().join("cards.json")).is_err(),
-            "the retired card kinds do not come back through this file"
-        );
-    }
+    #[tokio::test]
+    async fn a_kind_the_package_does_not_draw_is_kept_but_never_refreshed() {
+        // Kinds are the faces package's to define, so the file cannot refuse one. A
+        // spec outliving its face must survive a start untouched -- the package can
+        // come back -- while doing nothing in the meantime.
+        let state = ServerState::in_memory();
+        let source = state.image_sources().mint("Calendar").expect("a source");
+        let directory = write(&format!(
+            r#"[{{"source_id": "{}", "face": {{"kind": "calendar", "url": "https://example.test/cal"}}}}]"#,
+            source.id
+        ));
+        let path = directory.path().join("cards.json");
+        let bytes = std::fs::read(&path).expect("original bytes");
 
-    #[test]
-    fn an_empty_source_id_is_refused() {
-        let directory =
-            write(r#"[{"source_id": "  ", "face": {"kind": "weather", "location": "Dubai"}}]"#);
-        let error = load_specs(&directory.path().join("cards.json"))
-            .expect_err("a blank source id is refused");
-        assert!(error.contains("source_id"));
-    }
-
-    #[test]
-    fn imperial_units_reach_the_provider() {
-        let directory = write(
-            r#"[{"source_id": "abc", "face": {"kind": "weather", "location": "Austin", "units": "imperial"}}]"#,
-        );
-        let specs = load_specs(&directory.path().join("cards.json")).expect("the spec parses");
-        match &specs[0].face {
-            FaceSpec::Weather { units, .. } => {
-                assert!(matches!(WeatherUnits::from(*units), WeatherUnits::Imperial));
-            }
-            other => panic!("expected a weather card, got {other:?}"),
+        start_data_cards(&state, path.clone()).expect("an unknown kind is not a load error");
+        {
+            let retained = state.inner.data_cards.lock().expect("data cards");
+            assert_eq!(retained.specs.len(), 1, "the spec is kept");
+            assert!(retained.tasks.is_empty(), "and nothing refreshes it");
         }
+        assert_eq!(descriptor_for_source(&state, &source.id), None);
+        assert!(matches!(
+            update_face_fields(
+                &state,
+                &tokio::runtime::Handle::current(),
+                &source.id,
+                &BTreeMap::from([("url".into(), "https://example.test/other".into())]),
+            ),
+            Err(FaceUpdateError::NoFace)
+        ));
+        assert_eq!(std::fs::read(&path).expect("preserved bytes"), bytes);
+        state.shutdown();
+    }
+
+    #[test]
+    fn an_empty_source_id_or_kind_is_refused() {
+        for (contents, names) in [
+            (
+                r#"[{"source_id": "  ", "face": {"kind": "weather", "location": "Dubai"}}]"#,
+                "source_id",
+            ),
+            (
+                r#"[{"source_id": "abc", "face": {"kind": " ", "location": "Dubai"}}]"#,
+                "kind",
+            ),
+        ] {
+            let directory = write(contents);
+            let error = load_specs(&directory.path().join("cards.json")).expect_err("refused");
+            assert!(error.contains(names), "the message names {names}: {error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_server_with_no_faces_package_offers_no_faces() {
+        let state = ServerState::in_memory();
+        {
+            let mut retained = state.inner.data_cards.lock().expect("data cards");
+            retained.faces = None;
+            retained.catalog = None;
+        }
+        assert!(creatable_faces(&state).is_empty());
+        assert!(matches!(
+            create_face(&state, "source", "weather"),
+            Err(FaceUpdateError::UnknownField(kind)) if kind == "weather"
+        ));
+        state.shutdown();
+    }
+
+    #[tokio::test]
+    async fn a_face_that_is_complete_at_birth_starts_refreshing_without_a_save() {
+        // Every field of `headlines` has a default, so there is no later settings
+        // save to start it: creating it has to.
+        let state = ServerState::in_memory();
+        let descriptor = create_face(&state, "target", "headlines").expect("create");
+        assert!(face_is_complete(&descriptor));
+        assert!(
+            state
+                .inner
+                .data_cards
+                .lock()
+                .expect("data cards")
+                .tasks
+                .contains_key("target")
+        );
+        stop_refreshers(&state);
+        state.shutdown();
     }
 
     #[test]
     fn descriptor_fields_are_derived_from_a_real_face_spec() {
-        let face = FaceSpec::Weather {
-            location: "Dubai".into(),
-            units: Units::Metric,
-        };
-
-        let descriptor = face_descriptor(&face);
+        let descriptor = descriptor_of(&weather("Dubai"));
 
         assert_eq!(descriptor.kind, "weather");
         assert_eq!(descriptor.label, "Weather");
@@ -957,10 +1051,7 @@ mod tests {
 
     #[test]
     fn an_unknown_face_field_key_is_refused() {
-        let descriptor = face_descriptor(&FaceSpec::Weather {
-            location: "Dubai".into(),
-            units: Units::Metric,
-        });
+        let descriptor = descriptor_of(&weather("Dubai"));
         let fields = BTreeMap::from([("locaton".into(), "Berlin".into())]);
 
         assert!(matches!(
@@ -971,10 +1062,10 @@ mod tests {
 
     #[test]
     fn a_non_http_face_url_is_refused() {
-        let descriptor = face_descriptor(&FaceSpec::Rss {
-            url: "https://example.test/feed".into(),
-            title: "News".into(),
-        });
+        let descriptor = descriptor_of(&face(
+            "rss",
+            serde_json::json!({"url": "https://example.test/feed", "title": "News"}),
+        ));
         let fields = BTreeMap::from([("url".into(), "file:///etc/passwd".into())]);
 
         assert!(matches!(
@@ -997,13 +1088,13 @@ mod tests {
             ),
             (
                 "token",
-                serde_json::json!({"kind":"token", "coin_id":"", "currency":"usd", "api_key":null}),
+                serde_json::json!({"kind":"token", "coin_id":"", "currency":"usd"}),
             ),
         ] {
             let descriptor = create_face(&state, kind, kind).expect("create blank face");
             assert_eq!(
                 descriptor,
-                creatable_faces()
+                creatable_faces(&state)
                     .into_iter()
                     .find(|face| face.kind == kind)
                     .unwrap()
@@ -1100,11 +1191,10 @@ mod tests {
             retained.specs.push(DataCardSpec {
                 source_id: "target".into(),
                 refresh_seconds: 3_600,
-                face: FaceSpec::Token {
-                    coin_id: "solana".into(),
-                    currency: "usd".into(),
-                    api_key: Some("secret".into()),
-                },
+                face: face(
+                    "token",
+                    serde_json::json!({"coin_id": "solana", "currency": "usd", "api_key": "secret"}),
+                ),
             });
         }
         update_face_fields(
@@ -1119,10 +1209,9 @@ mod tests {
             assert_eq!(retained.tasks.len(), 1);
             let persisted = load_specs(&retained.spec_path).unwrap();
             assert_eq!(persisted[0].refresh_seconds, 3_600);
-            assert!(
-                matches!(&persisted[0].face, FaceSpec::Token { currency, api_key, .. }
-                if currency == "eur" && api_key.as_deref() == Some("secret"))
-            );
+            // `api_key` is in no descriptor, so no update can name it -- or drop it.
+            assert_eq!(persisted[0].face.settings["currency"], "eur");
+            assert_eq!(persisted[0].face.settings["api_key"], "secret");
         }
         stop_refreshers(&state);
         state.shutdown();
@@ -1139,10 +1228,7 @@ mod tests {
         let original = vec![DataCardSpec {
             source_id: "target".into(),
             refresh_seconds: 900,
-            face: FaceSpec::Weather {
-                location: "Berlin".into(),
-                units: Units::Metric,
-            },
+            face: weather("Berlin"),
         }];
         persist_specs(&path, &original).unwrap();
         let bytes = std::fs::read(&path).unwrap();
@@ -1188,7 +1274,7 @@ mod tests {
             .map(|id| DataCardSpec {
                 source_id: id.clone(),
                 refresh_seconds: 900,
-                face: blank_face("weather").unwrap(),
+                face: blank("weather"),
             })
             .collect();
         persist_specs(&path, &original).unwrap();
@@ -1299,7 +1385,7 @@ mod tests {
                 .map(|id| DataCardSpec {
                     source_id: id.clone(),
                     refresh_seconds: 900,
-                    face: blank_face("weather").unwrap(),
+                    face: blank("weather"),
                 })
                 .collect();
             persist_specs(&path, &original).unwrap();
@@ -1336,10 +1422,7 @@ mod tests {
         let original = vec![DataCardSpec {
             source_id: "target".into(),
             refresh_seconds: 900,
-            face: FaceSpec::Weather {
-                location: "Dubai".into(),
-                units: Units::Metric,
-            },
+            face: weather("Dubai"),
         }];
         let task = tokio::spawn(std::future::pending::<()>());
         let task_id = task.id();
@@ -1419,20 +1502,19 @@ mod tests {
         let untouched = DataCardSpec {
             source_id: "untouched".into(),
             refresh_seconds: 3_600,
-            face: FaceSpec::Token {
-                coin_id: "solana".into(),
-                currency: "eur".into(),
-                api_key: Some("still-secret".into()),
-            },
+            face: face(
+                "token",
+                serde_json::json!({"coin_id": "solana", "currency": "eur", "api_key": "still-secret"}),
+            ),
         };
         let original = vec![
             DataCardSpec {
                 source_id: "target".into(),
                 refresh_seconds: 600,
-                face: FaceSpec::Rss {
-                    url: "https://example.test/old.xml".into(),
-                    title: "Old title".into(),
-                },
+                face: face(
+                    "rss",
+                    serde_json::json!({"url": "https://example.test/old.xml", "title": "Old title"}),
+                ),
             },
             untouched.clone(),
         ];
@@ -1465,11 +1547,13 @@ mod tests {
         let rewritten = load_specs(&path).expect("rewritten specs parse");
         assert_eq!(rewritten.len(), 2);
         assert_eq!(rewritten[1], untouched);
-        assert!(matches!(
-            &rewritten[0].face,
-            FaceSpec::Rss { url, title }
-                if url == "https://example.test/new.xml" && title == "New title"
-        ));
+        assert_eq!(
+            rewritten[0].face,
+            face(
+                "rss",
+                serde_json::json!({"url": "https://example.test/new.xml", "title": "New title"}),
+            )
+        );
         state.shutdown();
     }
 }

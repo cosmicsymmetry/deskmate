@@ -39,7 +39,6 @@ import {
   fixed,
   normalizeWhitespace,
   textWidth,
-  trackedWidth,
 } from "../kit/svg";
 import {
   BAD,
@@ -53,7 +52,6 @@ import {
   GRID,
   GROUND,
   HAIRLINE,
-  HERO_STEPS,
   INK,
   INK_2,
   INK_3,

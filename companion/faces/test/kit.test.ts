@@ -7,6 +7,7 @@ import {
   fitSize,
   fitTracked,
   fixed,
+  textInk,
   textWidth,
   trackedWidth,
   wrap,
@@ -145,5 +146,21 @@ describe("relativeAge", () => {
 
   test("an item dated in the future reads as now, not as a negative age", () => {
     expect(relativeAge(new Date(now.getTime() + 5 * 3_600_000), now)).toBe("now");
+  });
+});
+
+describe("textInk", () => {
+  test("a dollar sign is taller than its own S, which is why it is aligned by the S", () => {
+    const dollar = textInk("$", 42, 600);
+    const body = textInk("S", 42, 600);
+    expect(dollar.top).toBeLessThan(body.top);
+    expect(dollar.bottom).toBeGreaterThan(body.bottom);
+  });
+
+  test("ink does not start at the pen: every glyph has a bearing, and it scales with size", () => {
+    const small = textInk("1", 42, 600).left;
+    const large = textInk("1", 84, 600).left;
+    expect(small).toBeGreaterThan(0);
+    expect(large).toBeCloseTo(small * 2, 1);
   });
 });

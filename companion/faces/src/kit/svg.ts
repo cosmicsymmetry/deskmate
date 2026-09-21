@@ -4,9 +4,9 @@
 // here fetches or rasterizes; the only thing it leans on is text measurement,
 // because a fixed panel has no scrollbar and text must be fitted before it is drawn.
 
-import { FONT_FAMILY, escapeXml, textWidth } from "./raster";
+import { FONT_FAMILY, escapeXml, textInk, textWidth } from "./raster";
 
-export { escapeXml, textWidth };
+export { escapeXml, textInk, textWidth };
 
 /**
  * Fixed-point formatting with ties to even, matching the Rust `{:.N}` the original

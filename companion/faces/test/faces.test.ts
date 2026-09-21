@@ -12,7 +12,7 @@ import {
 } from "../src/faces/token";
 import { conditionFromWmo, fetchWeather, parseForecast } from "../src/faces/weather";
 import type { FetchText } from "../src/kit/http";
-import { pngFromSvg } from "../src/kit/raster";
+import { pngFromSvg, textInk } from "../src/kit/raster";
 import { BAD, GOOD } from "../src/kit/theme";
 
 const NOW = new Date("2026-09-12T14:00:00Z");
@@ -216,6 +216,18 @@ describe("token", () => {
     });
     expect(svg).toContain(GOOD);
     expect(svg).toContain(BAD);
+  });
+
+  test("the price starts at the module's margin by its ink, whatever digit leads it", () => {
+    // An advance-based layout put the first glyph a bearing inside the margin, so the
+    // price sat right of the symbol above it. The mark's INK must start at the margin
+    // at every size the price is fitted to.
+    for (const price of [118.04, 842.5, 104235.5, 0.004182]) {
+      const svg = renderToken({ ...quoted(MARKETS, "usd"), price });
+      const mark = svg.match(/<text x="([\d.]+)"[^>]*font-size="([\d.]+)"[^>]*>\$<\/text>/);
+      const inkLeft = Number(mark?.[1]) + textInk("$", Number(mark?.[2]), 600).left;
+      expect(inkLeft).toBeCloseTo(24 + 20, 1);
+    }
   });
 
   test("decimals follow the magnitude, and only high precision is trimmed", () => {

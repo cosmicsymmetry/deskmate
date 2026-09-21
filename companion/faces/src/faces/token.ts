@@ -33,16 +33,9 @@ import {
   truncateUtf8,
 } from "../face";
 import { type FetchText, fetchText } from "../kit/http";
-import {
-  Canvas,
-  fitTracked,
-  fixed,
-  normalizeWhitespace,
-  textWidth,
-} from "../kit/svg";
+import { Canvas, fitTracked, fixed, normalizeWhitespace, textInk, textWidth } from "../kit/svg";
 import {
   BAD,
-  baselineFromCapTop,
   baselineFromCenter,
   CANVAS_HEIGHT,
   CANVAS_WIDTH,
@@ -485,21 +478,69 @@ function triangle(x: number, cy: number, width: number, up: boolean): string {
   return `M${f2(x)} ${f2(base)}L${f2(x + half)} ${f2(apex)}L${f2(x + width)} ${f2(base)}Z`;
 }
 
-/** The three runs of a price, and the size each is set at for a given integer size. */
-function priceRuns(
+interface PlacedRun {
+  content: string;
+  size: number;
+  fill: string;
+  /** Pen position relative to the assembly's left INK edge, and baseline relative to the price's. */
+  x: number;
+  dy: number;
+}
+
+/**
+ * The price as placed runs, composed by INK rather than by advance, plus its inked width.
+ *
+ * Three things an advance-based layout gets wrong, all of them visible at 84px:
+ * - The assembly's left edge. A pen at the margin puts a glyph's ink a bearing inside
+ *   it, so the price sat visibly right of the symbol above it. The first run's ink
+ *   starts AT the margin here.
+ * - The gaps. Every glyph carries its own side bearings, so two runs set a fixed
+ *   advance apart are a different distance apart for every price, and at 84px the
+ *   numeral's flag came within a pixel of the mark. Gaps are ink to ink.
+ * - The mark's height. A "$" is taller than its own S -- the stroke overshoots the cap
+ *   line and the baseline -- so hanging its top from the numerals' cap line set the S
+ *   itself low and the stroke proud of everything. The S is what the eye aligns,
+ *   so the S's top meets the numerals' top and the stroke is left to overshoot, the way
+ *   it does in running text.
+ */
+function composePrice(
   face: TokenFace,
   size: number,
-): { content: string; size: number; fill: string }[] {
+  muted: string,
+): { runs: PlacedRun[]; width: number } {
   const [integer, fraction] = splitPrice(face.price);
   // Below a whole unit the integer is the single character "0" and every digit that
   // matters is in the fraction; shrinking it would set the one meaningless glyph large.
   const uniform = Math.abs(face.price) < 1 && fraction !== "";
   const small = size * FRACTION_RATIO;
-  return [
-    { content: face.currencyMark, size: small, fill: INK_2 },
-    { content: uniform ? `${integer}${fraction}` : integer, size, fill: INK },
-    { content: uniform ? "" : fraction, size: small, fill: INK_2 },
-  ].filter((run) => run.content !== "");
+  const numerals = uniform ? `${integer}${fraction}` : integer;
+  const numeralInk = textInk(numerals, size, WEIGHT_SEMIBOLD);
+
+  const runs: PlacedRun[] = [];
+  let cursor = 0; // the right INK edge of what has been placed so far
+  if (face.currencyMark !== "") {
+    const mark = face.currencyMark;
+    const markInk = textInk(mark, small, WEIGHT_SEMIBOLD);
+    // The body the eye aligns: the S of a dollar sign, the mark itself otherwise.
+    const body = textInk(mark === "$" ? "S" : mark, small, WEIGHT_SEMIBOLD);
+    runs.push({
+      content: mark,
+      size: small,
+      fill: muted,
+      x: -markInk.left,
+      dy: textInk("0", size, WEIGHT_SEMIBOLD).top - body.top,
+    });
+    cursor = markInk.right - markInk.left + size * 0.055;
+  }
+  runs.push({ content: numerals, size, fill: INK, x: cursor - numeralInk.left, dy: 0 });
+  cursor += numeralInk.right - numeralInk.left;
+  if (!uniform && fraction !== "") {
+    const fractionInk = textInk(fraction, small, WEIGHT_SEMIBOLD);
+    cursor += size * 0.035;
+    runs.push({ content: fraction, size: small, fill: INK_2, x: cursor - fractionInk.left, dy: 0 });
+    cursor += fractionInk.right - fractionInk.left;
+  }
+  return { runs, width: cursor };
 }
 
 /** Draws the price with its baseline `bottom`, as large as the module's width allows. */
@@ -512,27 +553,19 @@ function drawPrice(
 ): void {
   // Fit the whole assembly, not just the integer: the mark and the fraction are what
   // push a five-figure price over the edge.
-  const width = (size: number): number =>
-    priceRuns(face, size).reduce(
-      (total, run) => total + textWidth(run.content, run.size, WEIGHT_SEMIBOLD) + 2,
-      0,
-    );
-  const size = PRICE_STEPS.find((step) => width(step) <= INNER_WIDTH) ?? PRICE_STEPS.at(-1) ?? 40;
-
-  let x = left;
-  for (const run of priceRuns(face, size)) {
-    const isMark = run.content === face.currencyMark;
+  const size =
+    PRICE_STEPS.find((step) => composePrice(face, step, muted).width <= INNER_WIDTH) ??
+    PRICE_STEPS.at(-1) ??
+    40;
+  for (const run of composePrice(face, size, muted).runs) {
     canvas.text({
-      x,
-      // The mark hangs from the cap line, the superior position every ticker uses; on
-      // the baseline of an 84px numeral it looks dropped.
-      baseline: isMark ? baselineFromCapTop(bottom - size * CAP_HEIGHT, run.size) : bottom,
+      x: left + run.x,
+      baseline: bottom + run.dy,
       content: run.content,
       size: run.size,
-      fill: isMark ? muted : run.fill,
+      fill: run.fill,
       weight: WEIGHT_SEMIBOLD,
     });
-    x += textWidth(run.content, run.size, WEIGHT_SEMIBOLD) + 2;
   }
 }
 

@@ -80,6 +80,55 @@ export function textWidth(text: string, size: number, weight: number): number {
   return width;
 }
 
+/** Where a run's INK is, relative to its origin: x from the pen start, y from the baseline. */
+export interface Ink {
+  left: number;
+  right: number;
+  /** Negative: above the baseline. */
+  top: number;
+  bottom: number;
+}
+
+const inks = new Map<string, Ink>();
+
+/**
+ * The bounding box of what is actually painted, as opposed to `textWidth`'s advance.
+ *
+ * Advances are right for running text and wrong for a composed numeral: every glyph has
+ * its own side bearings, so two runs set an advance apart are a different distance apart
+ * for every price, and a "$" is taller than its own S, because its stroke overshoots
+ * the cap line. Optical alignment needs the ink.
+ */
+export function textInk(text: string, size: number, weight: number): Ink {
+  const key = `${weight}/${size}/${text}`;
+  const cached = inks.get(key);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const originX = 1_000;
+  const originY = Math.ceil(size * 2);
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="20000" height="${Math.ceil(size * 4)}">` +
+    `<text x="${originX}" y="${originY}" font-family="${FONT_FAMILY}" font-size="${size}" ` +
+    `font-weight="${weight}">${escapeXml(text)}</text></svg>`;
+  let ink: Ink = { left: 0, right: 0, top: 0, bottom: 0 };
+  try {
+    const box = new Resvg(svg, options()).getBBox();
+    if (box !== undefined) {
+      ink = {
+        left: box.x - originX,
+        right: box.x + box.width - originX,
+        top: box.y - originY,
+        bottom: box.y + box.height - originY,
+      };
+    }
+  } catch {
+    // A run that cannot be measured is placed as if it had no ink: drawn, unadjusted.
+  }
+  inks.set(key, ink);
+  return ink;
+}
+
 /**
  * Escapes text for an XML text node or attribute value.
  *

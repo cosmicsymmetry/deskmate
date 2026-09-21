@@ -514,7 +514,12 @@ it test execution). The
 35-minute figure this section used to quote is a *cold* run, and it is compilation,
 not tests -- quoting it as the everyday cost sent one session at the wrong target.
 (Counts on 2026-09-21: 721 Rust, 188 window and 192 faces tests -- the Rust faces and
-`crates/providers` left for `companion/faces/`. The timing was NOT re-measured then.)
+`crates/providers` left for `companion/faces/`. The warm timing was NOT re-measured then.)
+**A cold run is about one minute now, not 35**: measured 2026-09-22 after `cargo clean`,
+clippy plus `cargo test --all-targets` from an empty `target/` on the owner's Mac. The
+35 minutes predates the deletion of the Tauri app and the Rust faces. The same clean
+took `target/` from 37 GB to 2.6 GB -- it accumulates artifacts for code that no longer
+exists, so `cargo clean` is cheap and occasionally worth it.
 
 **This is the local gate suite and has nothing to do with the deploy**, which is 3.8 s
 for a no-op and 23 s for a real change (`companion/crates/server/deploy/deploy.sh`).

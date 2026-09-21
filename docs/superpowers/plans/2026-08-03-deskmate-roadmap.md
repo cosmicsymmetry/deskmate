@@ -10,8 +10,9 @@ Spec: `docs/superpowers/specs/2026-08-03-deskmate-design.md`
 
 **Current:** V1 and V2 are EXITED and TAGGED (`v1` at `7abd496`, `v2` at `fdf85ba`) by
 explicit owner direction on 2026-09-06. **V3 (server host) is the current milestone.**
-Its four sub-projects are delivered and merged to `main` (`fb15060`, 2026-09-13);
-`feat/v3-server-host` is fully merged and nothing lives only there any more. V3 is
+Its four sub-projects are delivered and merged to `main` (`fb15060`, 2026-09-13). The
+branch they were built on, `feat/v3-server-host`, was deleted on 2026-09-22 with every
+other merged branch: `main` is the only branch on the remote. V3 is
 schema- and wire-neutral (config v10, protocol v2). What it still owes, in order:
 
 1. **The reference Google Calendar producer** in `tools/picture-producers/` (today that

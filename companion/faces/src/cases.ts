@@ -44,6 +44,7 @@ const sol: Omit<TokenFace, "price" | "changePercent" | "low" | "high" | "series"
   currencyMark: "$",
   candles: [],
   chart: "line",
+  coinId: "solana",
 };
 
 // One real day of SOL/USD half-hour candles (CoinGecko `ohlc`, captured 2026-09-21):
@@ -249,6 +250,46 @@ function tokenCases(): Case[] {
         changePercent: 2.41,
         low: 136.9,
         high: 144.12,
+        series: [],
+      }),
+    },
+    {
+      name: "token--simple-rising",
+      svg: renderToken({
+        ...sol,
+        chart: "none",
+        price: 142.37,
+        changePercent: 2.41,
+        low: 136.9,
+        high: 144.12,
+        series: [],
+      }),
+    },
+    {
+      name: "token--simple-falling-five-figures",
+      svg: renderToken({
+        ...sol,
+        symbol: "BTC",
+        name: "Bitcoin",
+        chart: "none",
+        price: 104_235.5,
+        changePercent: -1.2,
+        low: 103_010,
+        high: 105_700,
+        series: [],
+      }),
+    },
+    {
+      name: "token--simple-sub-cent",
+      svg: renderToken({
+        ...sol,
+        symbol: "BONK",
+        name: "Bonk",
+        chart: "none",
+        price: 0.000_041_82,
+        changePercent: 11.6,
+        low: 0.000_037_1,
+        high: 0.000_043_9,
         series: [],
       }),
     },

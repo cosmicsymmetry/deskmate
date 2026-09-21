@@ -158,9 +158,9 @@ outside.
 | `list` | hackernews | `top` (the front page, default), `best`, `new`, `ask` or `show`. |
 | `url` | rss | The feed. RSS 2.0, Atom and RDF all parse. |
 | `title` | rss | The eyebrow. Feeds name themselves inconsistently and often at length, so this is the owner's words. |
-| `coin_id` | token | The coin, as a person would type it: a name (`Solana`), a ticker (`SOL`) or CoinGecko's own id (`solana`). It is tried as an id first -- one request -- and resolved through CoinGecko's search only on a miss, accepting an **exact** match on ticker, name or id, best market-cap rank first. `SOL` never quietly becomes Solv Protocol. The face prints the symbol and name it resolved. |
+| `coin_id` | token | The **ticker**, and only the ticker: `SOL`, not `Solana` and not CoinGecko's id (owner's direction, 2026-09-21; the key keeps its name because spec files already hold it). Case-insensitive, letters and digits, at most 12. It is looked up with `symbols=` on the markets endpoint, which answers with the best-ranked coin carrying that ticker in the same request that returns the price. A name is refused with *no coin trades as SOLANA; enter the ticker, e.g. SOL for Solana*. |
 | `currency` | token | Quote currency, default `usd`. |
-| `chart` | token | `line` (default): a day of closes, averaged into 40 points and drawn as a smooth curve through them. `candles`: 48 half-hour candles from CoinGecko's `ohlc`, each coloured by its own half hour. Either way it is one optional request, and a refused one leaves a true price over an empty chart. |
+| `chart` | token | `line` (default): a day of closes, averaged into 40 points and drawn as a smooth curve. `candles`: 48 half-hour candles from CoinGecko's `ohlc`, each coloured by its own half hour. `none`: the simple face -- one module, the ticker and the price centred in it, no chart, no change, no range, and one request per refresh instead of two. A refused chart request leaves a true price over an empty chart. |
 | `api_key` | token | Optional CoinGecko demo key. |
 
 ## Where the data comes from
@@ -170,7 +170,7 @@ outside.
 | weather | `api.open-meteo.com` + `geocoding-api.open-meteo.com` | No |
 | hackernews | `hacker-news.firebaseio.com/v0`: the ranked id list, then one request per story shown | No |
 | rss | whatever `url` names | No |
-| token | `api.coingecko.com/api/v3/coins/markets`, then `/market_chart` or `/ohlc` (and `/search` when the coin was typed as a name or ticker) | No, but the free tier is rate-limited |
+| token | `api.coingecko.com/api/v3/coins/markets`, then `/market_chart` or `/ohlc` unless the chart is `none` | No, but the free tier is rate-limited |
 
 The token card spends **two** requests per refresh, and only the first is required. A
 rate-limited or slow `market_chart` leaves a face with a price and no sparkline, which is

@@ -82,7 +82,9 @@ export interface TokenFace {
   series: number[];
   /** Oldest to newest. Drawn instead of the line when `chart` is "candles". */
   candles: Candle[];
-  chart: "line" | "candles";
+  chart: "line" | "candles" | "none";
+  /** CoinGecko's id for the coin the ticker resolved to: what the history requests need. */
+  coinId: string;
 }
 
 export interface Candle {
@@ -100,7 +102,6 @@ export interface Candle {
 // ---------------------------------------------------------------------------
 
 const MARKETS_ENDPOINT = "https://api.coingecko.com/api/v3/coins/markets";
-const SEARCH_ENDPOINT = "https://api.coingecko.com/api/v3/search";
 const CHART_ENDPOINT_PREFIX = "https://api.coingecko.com/api/v3/coins/";
 const MAX_SERIES_SAMPLES = 96;
 const MAX_CANDLES = 48;
@@ -178,6 +179,7 @@ export function parseMarkets(body: string, currency: string): TokenFace | undefi
     series: [],
     candles: [],
     chart: "line",
+    coinId: typeof fields.id === "string" && /^[a-z0-9_.-]+$/i.test(fields.id) ? fields.id : "",
   };
 }
 
@@ -230,108 +232,60 @@ function downsample(prices: number[], target: number): number[] {
   });
 }
 
-interface Coin {
-  id: string;
-  symbol: string;
-  name: string;
-  rank: number;
-}
-
 /**
- * The coin the owner meant, when what they typed is not an id.
+ * The field takes a TICKER and nothing else, on the owner's direction (2026-09-21): SOL,
+ * not "Solana" and not CoinGecko's id. One vocabulary, the one printed on the face.
  *
- * CoinGecko's API wants its own id -- `solana`, not SOL -- and nobody knows those by
- * heart. Only an EXACT match on ticker, name or id is accepted, best market-cap rank
- * first: "SOL" must never quietly become Solv Protocol because it was the closest
- * thing to a hit. The face prints the symbol and name it resolved, so the owner sees
- * what they got.
+ * `symbols=` on the markets endpoint answers with the best-ranked coin carrying that
+ * ticker -- SOL is Solana, never a wrapped or bridged namesake -- in the same single
+ * request that returns the price, so a ticker costs nothing over an id.
  */
-export function coinFromSearch(body: string, typed: string): Coin | undefined {
-  let document: unknown;
-  try {
-    document = JSON.parse(body);
-  } catch {
-    throw new TransientError("the token search JSON is invalid");
-  }
-  const listed =
-    typeof document === "object" && document !== null
-      ? (document as Record<string, unknown>).coins
-      : undefined;
-  const wanted = typed.toLowerCase();
-  return (Array.isArray(listed) ? listed : [])
-    .map((raw: unknown): Coin | undefined => {
-      const coin = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
-      return typeof coin.id === "string" && /^[a-z0-9-]+$/.test(coin.id)
-        ? {
-            id: coin.id,
-            symbol: typeof coin.symbol === "string" ? coin.symbol : "",
-            name: typeof coin.name === "string" ? coin.name : "",
-            rank: typeof coin.market_cap_rank === "number" ? coin.market_cap_rank : Infinity,
-          }
-        : undefined;
-    })
-    .filter(
-      (coin): coin is Coin =>
-        coin !== undefined &&
-        [coin.id, coin.symbol.toLowerCase(), coin.name.toLowerCase()].includes(wanted),
-    )
-    .sort((a, b) => a.rank - b.rank)[0];
-}
-
 export async function fetchToken(settings: Settings, get: FetchText): Promise<TokenFace> {
-  const typed = text(settings, "coin_id").replace(/\s+/g, " ");
+  const ticker = text(settings, "coin_id");
   const currency = (text(settings, "currency") || "usd").toLowerCase();
   const apiKey = text(settings, "api_key");
-  if (typed === "") {
-    throw new ConfigurationError("the coin is empty");
+  if (ticker === "") {
+    throw new ConfigurationError("the ticker is empty");
   }
-  if (!/^[\p{L}\p{N} .-]{1,64}$/u.test(typed)) {
-    throw new ConfigurationError("the coin is a name, a ticker or a CoinGecko id, e.g. solana");
+  if (!/^[A-Za-z0-9]{1,12}$/.test(ticker)) {
+    throw new ConfigurationError(
+      `"${ticker.slice(0, 24)}" is not a ticker; use one like SOL or BTC`,
+    );
   }
   if (!/^[a-z0-9]+$/.test(currency)) {
     throw new ConfigurationError("the currency is a short code such as usd");
   }
 
-  const quote = async (coinId: string): Promise<TokenFace | undefined> =>
-    parseMarkets(
-      await get(
-        endpoint(
-          MARKETS_ENDPOINT,
-          [
-            ["vs_currency", currency],
-            ["ids", coinId],
-            ["price_change_percentage", "24h"],
-          ],
-          apiKey,
-        ),
+  const face = parseMarkets(
+    await get(
+      endpoint(
+        MARKETS_ENDPOINT,
+        [
+          ["vs_currency", currency],
+          ["symbols", ticker.toLowerCase()],
+          ["price_change_percentage", "24h"],
+        ],
+        apiKey,
       ),
-      currency,
+    ),
+    currency,
+  );
+  // An unknown ticker is answered with [], not an error. A NAME lands here too --
+  // "solana" is a well-formed ticker that nothing trades under -- so say what to type.
+  if (face === undefined || face.symbol.toLowerCase() !== ticker.toLowerCase()) {
+    throw new ConfigurationError(
+      `no coin trades as ${ticker.toUpperCase()}; enter the ticker, e.g. SOL for Solana`,
     );
-
-  // As an id first: that is one request when the owner typed `solana`, which is what
-  // the placeholder shows. The search is paid for only on a miss.
-  let coinId = typed.toLowerCase().replaceAll(" ", "-");
-  let face = /^[a-z0-9-]+$/.test(coinId) ? await quote(coinId) : undefined;
-  if (face === undefined) {
-    const found = coinFromSearch(
-      await get(endpoint(SEARCH_ENDPOINT, [["query", typed]], apiKey)),
-      typed,
-    );
-    if (found === undefined) {
-      throw new ConfigurationError(
-        `no coin called "${typed}" was found on CoinGecko; try its full name, e.g. Solana`,
-      );
-    }
-    coinId = found.id;
-    face = await quote(coinId);
-    if (face === undefined) {
-      throw new TransientError(`CoinGecko lists ${found.name} but returned no price for it`);
-    }
   }
 
   // The chart is a decoration on a true price: a refused second request leaves a face
   // with a price and an empty chart, never a stale price.
-  face.chart = text(settings, "chart") === "candles" ? "candles" : "line";
+  const chosen = text(settings, "chart");
+  face.chart = chosen === "candles" || chosen === "none" ? chosen : "line";
+  if (face.chart === "none" || face.coinId === "") {
+    return face;
+  }
+  const coinId = face.coinId;
   const history = (path: string): Promise<string> =>
     get(
       endpoint(
@@ -391,6 +345,10 @@ const f2 = (value: number): string => fixed(value, 2);
 export function renderToken(face: TokenFace): string {
   const canvas = new Canvas(CANVAS_WIDTH, CANVAS_HEIGHT);
   canvas.rect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT, GROUND);
+  if (face.chart === "none") {
+    drawSimple(canvas, face);
+    return canvas.finish();
+  }
   drawHero(canvas, face);
   drawChart(canvas, face);
   return canvas.finish();
@@ -438,7 +396,18 @@ function drawHero(canvas: Canvas, face: TokenFace): void {
     });
   }
 
-  drawPrice(canvas, face, left, HERO_TOP + HERO_HEIGHT - HERO_PAD - 2, muted);
+  drawPrice(
+    canvas,
+    face,
+    {
+      anchor: left,
+      centred: false,
+      bottom: HERO_TOP + HERO_HEIGHT - HERO_PAD - 2,
+      room: INNER_WIDTH,
+    },
+    PRICE_STEPS,
+    muted,
+  );
 }
 
 /** The pill at the right of row one. Returns its width so the name can be fitted beside it. */
@@ -543,30 +512,95 @@ function composePrice(
   return { runs, width: cursor };
 }
 
-/** Draws the price with its baseline `bottom`, as large as the module's width allows. */
+/**
+ * Draws the price with its baseline `bottom`, at the largest of `steps` that fits
+ * `room`. `anchor` is the assembly's left ink edge, or its centre.
+ */
 function drawPrice(
   canvas: Canvas,
   face: TokenFace,
-  left: number,
-  bottom: number,
+  place: { anchor: number; centred: boolean; bottom: number; room: number },
+  steps: readonly number[],
   muted: string,
-): void {
+): number {
   // Fit the whole assembly, not just the integer: the mark and the fraction are what
   // push a five-figure price over the edge.
   const size =
-    PRICE_STEPS.find((step) => composePrice(face, step, muted).width <= INNER_WIDTH) ??
-    PRICE_STEPS.at(-1) ??
-    40;
-  for (const run of composePrice(face, size, muted).runs) {
+    steps.find((step) => composePrice(face, step, muted).width <= place.room) ?? steps.at(-1) ?? 40;
+  const { runs, width } = composePrice(face, size, muted);
+  const left = place.centred ? place.anchor - width / 2 : place.anchor;
+  for (const run of runs) {
     canvas.text({
       x: left + run.x,
-      baseline: bottom + run.dy,
+      baseline: place.bottom + run.dy,
       content: run.content,
       size: run.size,
       fill: run.fill,
       weight: WEIGHT_SEMIBOLD,
     });
   }
+  return size;
+}
+
+/** The simple face keeps the hero's price steps and adds the ones a whole canvas has room for. */
+const SIMPLE_STEPS = [120, 104, 92, ...PRICE_STEPS] as const;
+const SIMPLE_TICKER_SIZE = 40;
+
+/**
+ * The chart-free face: the ticker and the price, centred, and nothing else to read.
+ *
+ * One module fills the canvas, coloured by the day like the hero it replaces, and the
+ * small arrow beside the ticker says the same thing for anyone who cannot use the
+ * colour. The two lines are centred as ONE block, by their ink: the ticker's cap top
+ * to the price's baseline, so the pair sits in the optical middle rather than the
+ * price alone sitting there with a label floating above it.
+ */
+function drawSimple(canvas: Canvas, face: TokenFace): void {
+  const height = CANVAS_HEIGHT - 2 * MARGIN;
+  canvas.roundedRect(
+    MARGIN,
+    MARGIN,
+    CONTENT_WIDTH,
+    height,
+    RADIUS_MODULE,
+    rising(face) ? GROUND_RISING : GROUND_FALLING,
+  );
+  const center = CANVAS_WIDTH / 2;
+  const muted = rising(face) ? MUTED_RISING : MUTED_FALLING;
+
+  // Size first, so the block can be centred around what will actually be drawn.
+  const size =
+    SIMPLE_STEPS.find((step) => composePrice(face, step, muted).width <= INNER_WIDTH) ??
+    SIMPLE_STEPS.at(-1) ??
+    40;
+  const tickerCap = SIMPLE_TICKER_SIZE * CAP_HEIGHT;
+  const gap = 3.5 * GRID;
+  const block = tickerCap + gap + size * CAP_HEIGHT;
+  const top = MARGIN + (height - block) / 2;
+
+  const symbol = face.symbol.toUpperCase();
+  const arrow = 15;
+  const symbolInk = textInk(symbol, SIMPLE_TICKER_SIZE, WEIGHT_SEMIBOLD);
+  const symbolWidth = symbolInk.right - symbolInk.left;
+  const rowLeft = center - (arrow + 1.5 * GRID + symbolWidth) / 2;
+  canvas.path(triangle(rowLeft, top + tickerCap / 2, arrow, rising(face)), directionColor(face));
+  canvas.text({
+    x: rowLeft + arrow + 1.5 * GRID - symbolInk.left,
+    baseline: top + tickerCap,
+    content: symbol,
+    size: SIMPLE_TICKER_SIZE,
+    fill: muted,
+    weight: WEIGHT_SEMIBOLD,
+    tracking: 0,
+  });
+
+  drawPrice(
+    canvas,
+    face,
+    { anchor: center, centred: true, bottom: top + block, room: INNER_WIDTH },
+    [size],
+    muted,
+  );
 }
 
 function drawChart(canvas: Canvas, face: TokenFace): void {
@@ -748,9 +782,8 @@ export const token: FaceDefinition = {
   kind: "token",
   label: "Token price",
   fields: [
-    // The key is `coin_id` because that is what spec files already hold. What it accepts
-    // is whatever a person would type: a name, a ticker, or CoinGecko's own id.
-    { type: "text", key: "coin_id", label: "Coin", placeholder: "Solana" },
+    // The key is `coin_id` because that is what spec files already hold. It takes a ticker.
+    { type: "text", key: "coin_id", label: "Ticker", placeholder: "SOL" },
     { type: "text", key: "currency", label: "Currency", placeholder: "usd", default: "usd" },
     {
       type: "enum",
@@ -760,6 +793,7 @@ export const token: FaceDefinition = {
       options: [
         { value: "line", label: "Line" },
         { value: "candles", label: "Candles" },
+        { value: "none", label: "None" },
       ],
     },
   ],

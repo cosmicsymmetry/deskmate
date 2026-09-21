@@ -121,10 +121,10 @@ const CREATABLE_FACES: FaceDescriptor[] = [
     fields: [
       {
         key: "coin_id",
-        label: "Coin",
+        label: "Ticker",
         type: "text",
         value: "",
-        placeholder: "Solana",
+        placeholder: "SOL",
       },
       {
         key: "currency",
@@ -141,6 +141,7 @@ const CREATABLE_FACES: FaceDescriptor[] = [
         options: [
           { value: "line", label: "Line" },
           { value: "candles", label: "Candles" },
+          { value: "none", label: "None" },
         ],
       },
     ],

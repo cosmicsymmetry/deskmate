@@ -339,9 +339,9 @@ describe("mock backend contract", () => {
           {
             type: "text",
             key: "coin_id",
-            label: "Coin",
+            label: "Ticker",
             value: "",
-            placeholder: "Solana",
+            placeholder: "SOL",
           },
           {
             type: "text",
@@ -358,6 +358,7 @@ describe("mock backend contract", () => {
             options: [
               { value: "line", label: "Line" },
               { value: "candles", label: "Candles" },
+              { value: "none", label: "None" },
             ],
           },
         ],

@@ -3,7 +3,6 @@ import { ConfigurationError, TransientError } from "../src/face";
 import { fetchHackerNews, renderHackerNews, storyFromItem } from "../src/faces/hackernews";
 import { fetchRss, parseFeed, renderRss } from "../src/faces/rss";
 import {
-  coinFromSearch,
   fetchToken,
   parseCandles,
   parseMarkets,
@@ -37,6 +36,7 @@ const rendersToAFrame = (svg: string): boolean => pngFromSvg(svg).length > 1_000
 describe("token", () => {
   const MARKETS = JSON.stringify([
     {
+      id: "solana",
       symbol: "sol",
       name: "Solana",
       current_price: 142.37,
@@ -63,7 +63,7 @@ describe("token", () => {
 
   test("a quote and its chart are read into one face", async () => {
     const get = fake({ "/coins/markets": MARKETS, "/market_chart": CHART });
-    const face = await fetchToken({ coin_id: "solana", currency: "usd" }, get);
+    const face = await fetchToken({ coin_id: "SOL", currency: "usd" }, get);
     expect(face).toMatchObject({
       symbol: "sol",
       name: "Solana",
@@ -71,81 +71,82 @@ describe("token", () => {
       currencyMark: "$",
     });
     expect(face.series).toEqual([100, 101, 102, 103.5]);
-    expect(get.asked[0]).toContain("vs_currency=usd&ids=solana&price_change_percentage=24h");
+    expect(get.asked[0]).toContain("vs_currency=usd&symbols=sol&price_change_percentage=24h");
     expect(get.asked[1]).toContain("/coins/solana/market_chart?vs_currency=usd&days=1");
   });
 
   test("a chart failure still publishes the quote, with no sparkline", async () => {
     // A rate-limited decoration must not replace a correct price with a stale one.
     const get = fake({ "/coins/markets": MARKETS, "/market_chart": new TransientError("429") });
-    const face = await fetchToken({ coin_id: "solana" }, get);
+    const face = await fetchToken({ coin_id: "SOL" }, get);
     expect(face.price).toBe(142.37);
     expect(face.series).toEqual([]);
     expect(rendersToAFrame(renderToken(face))).toBe(true);
   });
 
-  const SEARCH = JSON.stringify({
-    coins: [
-      { id: "solv-protocol", symbol: "SOLV", name: "Solv Protocol", market_cap_rank: 807 },
-      { id: "wrapped-solana", symbol: "SOL", name: "Wrapped SOL", market_cap_rank: 412 },
-      { id: "solana", symbol: "SOL", name: "Solana", market_cap_rank: 7 },
-    ],
-  });
-
-  test("a ticker or a name is resolved to the coin the owner meant", async () => {
-    // What people type. CoinGecko answers `ids=sol` with [], and until this existed
-    // that was a log line on the VM and "Waiting for the first picture" on the panel.
-    for (const typed of ["SOL", "sol", "Solana", "  solana  "]) {
-      const get = fake({
-        "ids=solana&": MARKETS,
-        "/coins/markets": "[]",
-        "/search": SEARCH,
-        "/market_chart": CHART,
-      });
+  test("the ticker is looked up in the same request that returns the price", async () => {
+    // Case is the owner's business: sol and SOL are one ticker.
+    for (const typed of ["SOL", "sol", "  Sol  "]) {
+      const get = fake({ "/coins/markets": MARKETS, "/market_chart": CHART });
       const face = await fetchToken({ coin_id: typed }, get);
       expect(face.name).toBe("Solana");
+      expect(get.asked[0]).toContain("symbols=sol&");
+      expect(get.asked[0]).not.toContain("ids=");
       expect(get.asked.at(-1)).toContain("/coins/solana/market_chart");
+      expect(get.asked).toHaveLength(2);
     }
   });
 
-  test("the id the placeholder shows costs one quote request and no search", async () => {
-    const get = fake({ "/coins/markets": MARKETS, "/market_chart": CHART });
-    await fetchToken({ coin_id: "solana" }, get);
-    expect(get.asked.filter((url) => url.includes("/search"))).toEqual([]);
-    expect(get.asked).toHaveLength(2);
-  });
-
-  test("only an exact match is accepted, best-ranked first: SOL never becomes Solv Protocol", () => {
-    expect(coinFromSearch(SEARCH, "SOL")?.id).toBe("solana");
-    expect(coinFromSearch(SEARCH, "solv protocol")?.id).toBe("solv-protocol");
-    expect(coinFromSearch(SEARCH, "solv")?.id).toBe("solv-protocol");
-    expect(coinFromSearch(SEARCH, "sola")).toBeUndefined();
-    expect(
-      coinFromSearch('{"coins":[{"id":"../x","symbol":"SOL","name":"x"}]}', "sol"),
-    ).toBeUndefined();
-  });
-
-  test("a coin nobody lists is the owner's to fix, and says what to try", async () => {
-    const get = fake({ "/coins/markets": "[]", "/search": '{"coins":[]}' });
-    const failure = await fetchToken({ coin_id: "solanna" }, get).catch((error: unknown) => error);
+  test("a name is not a ticker, and the refusal says what to type instead", async () => {
+    // "solana" is a well-formed ticker that nothing trades under: the API answers [].
+    const get = fake({ "/coins/markets": "[]" });
+    const failure = await fetchToken({ coin_id: "solana" }, get).catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(ConfigurationError);
-    expect((failure as Error).message).toContain('no coin called "solanna"');
+    expect((failure as Error).message).toBe(
+      "no coin trades as SOLANA; enter the ticker, e.g. SOL for Solana",
+    );
   });
 
-  test("an empty coin and one that is not a name at all are refused before any request", async () => {
-    for (const coin_id of ["", "   ", "../etc/passwd", "<script>", "x".repeat(65)]) {
+  test("an answer for a different ticker than the one asked for is not accepted", async () => {
+    const get = fake({ "/coins/markets": MARKETS });
+    expect(fetchToken({ coin_id: "ETH" }, get)).rejects.toBeInstanceOf(ConfigurationError);
+  });
+
+  test("anything that is not a ticker's shape is refused before any request", async () => {
+    for (const coin_id of [
+      "",
+      "   ",
+      "Shiba Inu",
+      "wrapped-solana",
+      "../etc",
+      "<b>",
+      "x".repeat(13),
+    ]) {
       const get = fake({});
       await expect(fetchToken({ coin_id }, get)).rejects.toBeInstanceOf(ConfigurationError);
       expect(get.asked).toEqual([]);
     }
   });
 
+  test("the chart-free face asks for a price and nothing else, and draws no chart", async () => {
+    const get = fake({ "/coins/markets": MARKETS });
+    const face = await fetchToken({ coin_id: "SOL", chart: "none" }, get);
+    expect(get.asked).toHaveLength(1);
+    const svg = renderToken(face);
+    expect(svg).toContain(">SOL<");
+    expect(svg).not.toContain(">24H<");
+    expect(svg).not.toContain("%<");
+    // Colour is not the only carrier of the direction: the arrow is still there.
+    expect(svg).toContain(`fill="${GOOD}"`);
+    expect(rendersToAFrame(svg)).toBe(true);
+  });
+
   test("a hand-edited api key rides on both requests and an absent one adds nothing", async () => {
     const keyed = fake({ "/coins/markets": MARKETS, "/market_chart": CHART });
-    await fetchToken({ coin_id: "solana", api_key: "CG-secret" }, keyed);
+    await fetchToken({ coin_id: "SOL", api_key: "CG-secret" }, keyed);
     expect(keyed.asked.every((url) => url.includes("x_cg_demo_api_key=CG-secret"))).toBe(true);
     const bare = fake({ "/coins/markets": MARKETS, "/market_chart": CHART });
-    await fetchToken({ coin_id: "solana", api_key: null }, bare);
+    await fetchToken({ coin_id: "SOL", api_key: null }, bare);
     expect(bare.asked.some((url) => url.includes("x_cg_demo_api_key"))).toBe(false);
   });
 
@@ -172,7 +173,7 @@ describe("token", () => {
       [2, 108.01, 108.24, 107.93, 108.11],
     ]);
     const get = fake({ "/coins/markets": MARKETS, "/ohlc": OHLC });
-    const face = await fetchToken({ coin_id: "solana", chart: "candles" }, get);
+    const face = await fetchToken({ coin_id: "SOL", chart: "candles" }, get);
     expect(face.chart).toBe("candles");
     expect(face.candles).toEqual([
       { open: 108.06, high: 108.2, low: 107.95, close: 108.03 },
@@ -182,14 +183,14 @@ describe("token", () => {
     expect(get.asked.at(-1)).toContain("/coins/solana/ohlc?vs_currency=usd&days=1");
     // An unknown choice is the default, not an error: the field is an enum upstream.
     expect(
-      (await fetchToken({ coin_id: "solana", chart: "renko" }, fake({ "/coins/markets": MARKETS })))
+      (await fetchToken({ coin_id: "SOL", chart: "renko" }, fake({ "/coins/markets": MARKETS })))
         .chart,
     ).toBe("line");
   });
 
   test("a refused candle request leaves a true price over an empty chart", async () => {
     const get = fake({ "/coins/markets": MARKETS, "/ohlc": new TransientError("429") });
-    const face = await fetchToken({ coin_id: "solana", chart: "candles" }, get);
+    const face = await fetchToken({ coin_id: "SOL", chart: "candles" }, get);
     expect(face.price).toBe(142.37);
     expect(face.candles).toEqual([]);
     expect(rendersToAFrame(renderToken(face))).toBe(true);

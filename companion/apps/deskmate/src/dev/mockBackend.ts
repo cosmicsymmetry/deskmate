@@ -133,6 +133,16 @@ const CREATABLE_FACES: FaceDescriptor[] = [
         value: "usd",
         placeholder: "usd",
       },
+      {
+        key: "chart",
+        label: "Chart",
+        type: "enum",
+        value: "line",
+        options: [
+          { value: "line", label: "Line" },
+          { value: "candles", label: "Candles" },
+        ],
+      },
     ],
   },
 ];

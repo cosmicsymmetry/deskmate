@@ -1,13 +1,28 @@
 // The token face: one price, its direction, and where it has been.
 //
-// The price is set with its currency mark and its fractional part at about 42% of
-// the integer part's size, all on one baseline. That is the conventional ticker
-// treatment and it is not decoration: it lets the digits that actually change size
-// be as large as the canvas allows while keeping the cents legible.
+// # The anatomy is the weather face's
 //
-// The sparkline is drawn at full resolution, which is the clearest thing rastering
-// buys: a scene-native line is capped at 8 points, so a day of prices would arrive
-// as seven straight segments.
+// A rounded hero module over a SURFACE chart module, on black. The hero is coloured BY
+// the direction -- a deep green when the day is up, a deep red when it is down -- the way
+// the weather hero is coloured by its condition: the glance answer ("up or down?") is
+// the colour of the face, and the sign and the arrow say it again for anyone who cannot
+// use the colour. The first design set everything loose on black, and read as a list of
+// parts rather than as a face.
+//
+// # The price
+//
+// Currency mark and fraction at half the integer's size, all on one baseline: the
+// ticker treatment, which lets the digits that change be as large as the module allows.
+// The decimal point travels WITH the fraction. At half of an 84px numeral it is five
+// pixels of ink and perfectly visible; set at the integer's size, as it first was, it
+// was a bullet the size of a digit's counter floating between two numbers.
+//
+// # The chart is the owner's choice
+//
+// A smoothed line, or candles. Both are drawn at full resolution, which is the clearest
+// thing rastering buys: a scene-native line is capped at 8 points. Candles are also the
+// cheaper frame on the wire -- axis-aligned rectangles run-length encode almost for
+// free, where an anti-aliased curve is a run of one at every edge pixel.
 
 import {
   ConfigurationError,
@@ -43,10 +58,11 @@ import {
   INK_2,
   INK_3,
   MARGIN,
-  RADIUS_CHIP,
+  RADIUS_MODULE,
   SIZE_CAPTION,
   SIZE_EYEBROW,
   SIZE_SUBHEAD,
+  SURFACE,
   TRACKING_EYEBROW,
   WEIGHT_REGULAR,
   WEIGHT_SEMIBOLD,
@@ -71,8 +87,18 @@ export interface TokenFace {
   changePercent: number;
   low: number;
   high: number;
-  /** Oldest to newest. Fewer than two points draws no sparkline. */
+  /** Oldest to newest. Fewer than two points draws no line. */
   series: number[];
+  /** Oldest to newest. Drawn instead of the line when `chart` is "candles". */
+  candles: Candle[];
+  chart: "line" | "candles";
+}
+
+export interface Candle {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -86,6 +112,7 @@ const MARKETS_ENDPOINT = "https://api.coingecko.com/api/v3/coins/markets";
 const SEARCH_ENDPOINT = "https://api.coingecko.com/api/v3/search";
 const CHART_ENDPOINT_PREFIX = "https://api.coingecko.com/api/v3/coins/";
 const MAX_SERIES_SAMPLES = 96;
+const MAX_CANDLES = 48;
 const MAX_PRICE = 1e12;
 
 function currencyMark(code: string): string {
@@ -158,6 +185,8 @@ export function parseMarkets(body: string, currency: string): TokenFace | undefi
     high: Math.max(high, low),
     low: Math.min(high, low),
     series: [],
+    candles: [],
+    chart: "line",
   };
 }
 
@@ -174,6 +203,29 @@ export function parseChart(body: string): number[] {
     .map((point: unknown) => (Array.isArray(point) ? boundedPrice(point[1]) : undefined))
     .filter((price): price is number => price !== undefined);
   return downsample(prices, MAX_SERIES_SAMPLES);
+}
+
+/** CoinGecko's `ohlc` rows are `[time, open, high, low, close]`; one day is 48 half-hours. */
+export function parseCandles(body: string): Candle[] {
+  const rows: unknown = JSON.parse(body);
+  if (!Array.isArray(rows)) {
+    throw new TransientError("the token candles are not a list");
+  }
+  return rows
+    .map((row: unknown): Candle | undefined => {
+      const [, open, high, low, close] = (Array.isArray(row) ? row : []).map(boundedPrice);
+      return open === undefined || high === undefined || low === undefined || close === undefined
+        ? undefined
+        : // A feed that inverts a pair must not draw a wick inside out.
+          {
+            open,
+            close,
+            high: Math.max(open, high, low, close),
+            low: Math.min(open, high, low, close),
+          };
+    })
+    .filter((candle): candle is Candle => candle !== undefined)
+    .slice(-MAX_CANDLES);
 }
 
 function downsample(prices: number[], target: number): number[] {
@@ -286,10 +338,13 @@ export async function fetchToken(settings: Settings, get: FetchText): Promise<To
     }
   }
 
-  try {
-    const chart = await get(
+  // The chart is a decoration on a true price: a refused second request leaves a face
+  // with a price and an empty chart, never a stale price.
+  face.chart = text(settings, "chart") === "candles" ? "candles" : "line";
+  const history = (path: string): Promise<string> =>
+    get(
       endpoint(
-        `${CHART_ENDPOINT_PREFIX}${coinId}/market_chart`,
+        `${CHART_ENDPOINT_PREFIX}${coinId}/${path}`,
         [
           ["vs_currency", currency],
           ["days", "1"],
@@ -297,9 +352,15 @@ export async function fetchToken(settings: Settings, get: FetchText): Promise<To
         apiKey,
       ),
     );
-    face.series = parseChart(chart);
+  try {
+    if (face.chart === "candles") {
+      face.candles = parseCandles(await history("ohlc"));
+    } else {
+      face.series = parseChart(await history("market_chart"));
+    }
   } catch {
     face.series = [];
+    face.candles = [];
   }
   return face;
 }
@@ -308,15 +369,29 @@ export async function fetchToken(settings: Settings, get: FetchText): Promise<To
 // Drawing.
 // ---------------------------------------------------------------------------
 
-/** The fractional part and currency mark, relative to the integer part. */
-const FRACTION_RATIO = 0.42;
-const SPARKLINE_TOP = 190;
-const SPARKLINE_HEIGHT = 96;
-/** Headroom so a flat line is not drawn on the boundary and a peak is not clipped. */
-const SPARKLINE_PADDING = 8;
-const SPARKLINE_STROKE = 2.5;
-const AREA_OPACITY = 0.16;
-const CHIP_HEIGHT = 32;
+/** Deep, unsaturated grounds: a module of colour on an emissive panel, never a lamp. */
+const GROUND_RISING = "#0c2a1b";
+const GROUND_FALLING = "#2f1413";
+/** The label ink, warmed or cooled to sit on its ground instead of reading as grey fog. */
+const MUTED_RISING = "#8fb8a1";
+const MUTED_FALLING = "#c49a96";
+
+const HERO_TOP = MARGIN;
+const HERO_HEIGHT = 164;
+const HERO_PAD = 2.5 * GRID;
+const CHART_TOP = HERO_TOP + HERO_HEIGHT + 2 * GRID;
+const CHART_HEIGHT = CANVAS_HEIGHT - MARGIN - CHART_TOP;
+const CHART_PAD = 2 * GRID;
+const INNER_WIDTH = CONTENT_WIDTH - 2 * HERO_PAD;
+
+/** The fraction and the currency mark, relative to the integer part. */
+const FRACTION_RATIO = 0.5;
+const PRICE_STEPS = [84, 72, 64, 56, 48, 40] as const;
+const LINE_STROKE = 2.5;
+const AREA_OPACITY = 0.14;
+/** A day of 5-minute closes is noise at this size; the line is drawn through this many. */
+const LINE_POINTS = 40;
+const CHIP_HEIGHT = 30;
 
 const rising = (face: TokenFace): boolean => face.changePercent >= 0;
 const directionColor = (face: TokenFace): string => (rising(face) ? GOOD : BAD);
@@ -325,187 +400,82 @@ const f2 = (value: number): string => fixed(value, 2);
 export function renderToken(face: TokenFace): string {
   const canvas = new Canvas(CANVAS_WIDTH, CANVAS_HEIGHT);
   canvas.rect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT, GROUND);
-
-  drawIdentity(canvas, face);
-  const priceBottom = drawPrice(canvas, face);
-  drawChangeChip(canvas, face, priceBottom + 1.75 * GRID);
-  drawSparkline(canvas, face);
-  drawRange(canvas, face);
-
+  drawHero(canvas, face);
+  drawChart(canvas, face);
   return canvas.finish();
 }
 
-function drawIdentity(canvas: Canvas, face: TokenFace): void {
-  const baseline = baselineFromCapTop(MARGIN, SIZE_SUBHEAD);
+function drawHero(canvas: Canvas, face: TokenFace): void {
+  canvas.roundedRect(
+    MARGIN,
+    HERO_TOP,
+    CONTENT_WIDTH,
+    HERO_HEIGHT,
+    RADIUS_MODULE,
+    rising(face) ? GROUND_RISING : GROUND_FALLING,
+  );
+  const left = MARGIN + HERO_PAD;
+  const right = MARGIN + CONTENT_WIDTH - HERO_PAD;
+  const muted = rising(face) ? MUTED_RISING : MUTED_FALLING;
+
+  // Row one: what it is, and how the day went. The chip sits on the row's centre line.
+  const rowCenter = HERO_TOP + HERO_PAD + CHIP_HEIGHT / 2;
+  const chipWidth = drawChangeChip(canvas, face, right, rowCenter);
   const symbol = face.symbol.toUpperCase();
+  const baseline = baselineFromCenter(rowCenter, SIZE_SUBHEAD);
   canvas.text({
-    x: MARGIN,
+    x: left,
     baseline,
     content: symbol,
     size: SIZE_SUBHEAD,
     fill: INK,
     weight: WEIGHT_SEMIBOLD,
   });
-
-  const symbolWidth = textWidth(symbol, SIZE_SUBHEAD, WEIGHT_SEMIBOLD);
-  const nameX = MARGIN + symbolWidth + 1.5 * GRID;
-  const currency = face.currency.toUpperCase();
-  // Both of these runs are tracked, so both are measured with tracking.
-  const currencyWidth = trackedWidth(currency, SIZE_EYEBROW, WEIGHT_SEMIBOLD, TRACKING_EYEBROW);
-  const nameRoom = CANVAS_WIDTH - MARGIN - currencyWidth - 2 * GRID - nameX;
-
+  const nameX = left + textWidth(symbol, SIZE_SUBHEAD, WEIGHT_SEMIBOLD) + 1.25 * GRID;
+  const nameRoom = right - chipWidth - 1.5 * GRID - nameX;
   const name = normalizeWhitespace(face.name).toUpperCase();
-  if (name !== "" && nameRoom > 0) {
+  if (name !== "" && name !== symbol && nameRoom > 4 * GRID) {
     canvas.text({
       x: nameX,
-      // On the symbol's own baseline, not its box, so the two runs sit on one line
-      // despite the size difference.
+      // On the symbol's own baseline, so the two runs sit on one line despite the sizes.
       baseline,
       content: fitTracked(name, SIZE_EYEBROW, WEIGHT_SEMIBOLD, TRACKING_EYEBROW, nameRoom),
       size: SIZE_EYEBROW,
-      fill: INK_3,
+      fill: muted,
       weight: WEIGHT_SEMIBOLD,
       tracking: TRACKING_EYEBROW,
     });
   }
 
-  canvas.text({
-    x: CANVAS_WIDTH - MARGIN,
-    baseline,
-    content: currency,
-    size: SIZE_EYEBROW,
-    fill: INK_3,
-    weight: WEIGHT_SEMIBOLD,
-    tracking: TRACKING_EYEBROW,
-    anchor: "end",
-  });
+  drawPrice(canvas, face, left, HERO_TOP + HERO_HEIGHT - HERO_PAD - 2, muted);
 }
 
-/**
- * The integer run and the fraction digits as they will be drawn.
- *
- * The decimal separator is set at the INTEGER's size, not the fraction's. A period
- * is a few pixels of ink: at 42% beside a 112px numeral it disappears, and "$101"
- * followed by a small "96" reads as ten thousand one hundred and ninety-six.
- */
-function priceRuns(integer: string, fraction: string, uniform: boolean): [string, string] {
-  if (!uniform && fraction.startsWith(".")) {
-    return [`${integer}.`, fraction.slice(1)];
-  }
-  return [integer, fraction];
-}
-
-/** Draws the price and returns the y of its cap bottom. */
-function drawPrice(canvas: Canvas, face: TokenFace): number {
-  const [integer, fraction] = splitPrice(face.price);
-  const mark = face.currencyMark;
-  // Below a whole unit the integer part is the single character "0" and every digit
-  // that matters lives in the fraction. Shrinking the fraction there sets the one
-  // meaningless glyph large and the significant digits small, so a sub-unit price
-  // is set at one size.
-  const uniform = Math.abs(face.price) < 1 && fraction !== "";
-
-  // Fit the whole assembly, not just the integer part: the mark and the fraction
-  // are what push a four-digit price over the edge.
-  const size = fitPriceSize(mark, integer, fraction, uniform);
-  const fractionSize = uniform ? size : size * FRACTION_RATIO;
-  const markSize = size * FRACTION_RATIO;
-  const capTop = 62;
-  const baseline = baselineFromCapTop(capTop, size);
-  const [integerRun, fractionDigits] = priceRuns(integer, fraction, uniform);
-
-  let x = MARGIN;
-  if (mark !== "") {
-    // Cap-top aligned, not baseline aligned: a mark on the baseline of a 112px
-    // numeral hangs off the bottom-left corner looking detached.
-    canvas.text({
-      x,
-      baseline: baselineFromCapTop(capTop, markSize),
-      content: mark,
-      size: markSize,
-      fill: INK_2,
-      weight: WEIGHT_SEMIBOLD,
-    });
-    x += textWidth(mark, markSize, WEIGHT_SEMIBOLD) + 2;
-  }
-  canvas.text({
-    x,
-    baseline,
-    content: integerRun,
-    size,
-    fill: INK,
-    weight: WEIGHT_SEMIBOLD,
-  });
-  x += textWidth(integerRun, size, WEIGHT_SEMIBOLD);
-  if (fractionDigits !== "") {
-    // The fraction stays on the main baseline: raised cents read as a footnote mark.
-    canvas.text({
-      x,
-      baseline,
-      content: fractionDigits,
-      size: fractionSize,
-      fill: uniform ? INK : INK_2,
-      weight: WEIGHT_SEMIBOLD,
-    });
-  }
-
-  return capTop + size * CAP_HEIGHT;
-}
-
-/**
- * The largest step at which the whole assembly fits. It measures exactly what
- * `drawPrice` will draw -- otherwise the fit is computed for a different string
- * than the one that appears, which is how a price ends up one glyph past the margin.
- */
-function fitPriceSize(mark: string, integer: string, fraction: string, uniform: boolean): number {
-  const [integerRun, fractionDigits] = priceRuns(integer, fraction, uniform);
-  for (const candidate of HERO_STEPS) {
-    const fractionSize = uniform ? candidate : candidate * FRACTION_RATIO;
-    const markSize = candidate * FRACTION_RATIO;
-    const width =
-      textWidth(mark, markSize, WEIGHT_SEMIBOLD) +
-      textWidth(integerRun, candidate, WEIGHT_SEMIBOLD) +
-      textWidth(fractionDigits, fractionSize, WEIGHT_SEMIBOLD);
-    if (width <= CONTENT_WIDTH) {
-      return candidate;
-    }
-  }
-  return HERO_STEPS[HERO_STEPS.length - 1] ?? 60;
-}
-
-function drawChangeChip(canvas: Canvas, face: TokenFace, top: number): void {
+/** The pill at the right of row one. Returns its width so the name can be fitted beside it. */
+function drawChangeChip(canvas: Canvas, face: TokenFace, right: number, center: number): number {
   const color = directionColor(face);
   // The sign is printed as well as coloured: a red number with no minus is
   // indistinguishable from a green one in a greyscale screenshot.
-  const label = `${rising(face) ? "+" : "-"}${f2(Math.abs(face.changePercent))}%`;
-  const labelWidth = textWidth(label, SIZE_CAPTION, WEIGHT_SEMIBOLD);
+  const label = `${rising(face) ? "+" : "\u2212"}${f2(Math.abs(face.changePercent))}%`;
   const triangleWidth = 9;
-  const chipWidth = triangleWidth + 1 * GRID + labelWidth + 3 * GRID;
-  const center = top + CHIP_HEIGHT / 2;
-
-  canvas.rectOpacity(MARGIN, top, chipWidth, CHIP_HEIGHT, RADIUS_CHIP, color, AREA_OPACITY);
-
-  const triangleX = MARGIN + 1.5 * GRID;
-  canvas.path(triangle(triangleX, center, triangleWidth, rising(face)), color);
-
+  const width =
+    1.5 * GRID +
+    triangleWidth +
+    GRID +
+    textWidth(label, SIZE_CAPTION, WEIGHT_SEMIBOLD) +
+    1.5 * GRID;
+  const x = right - width;
+  canvas.rectOpacity(x, center - CHIP_HEIGHT / 2, width, CHIP_HEIGHT, CHIP_HEIGHT / 2, color, 0.2);
+  canvas.path(triangle(x + 1.5 * GRID, center, triangleWidth, rising(face)), color);
   canvas.text({
-    x: triangleX + triangleWidth + 1 * GRID,
+    x: right - 1.5 * GRID,
     baseline: baselineFromCenter(center, SIZE_CAPTION),
     content: label,
     size: SIZE_CAPTION,
     fill: color,
     weight: WEIGHT_SEMIBOLD,
+    anchor: "end",
   });
-
-  canvas.text({
-    x: MARGIN + chipWidth + 1.5 * GRID,
-    baseline: baselineFromCenter(center, SIZE_EYEBROW),
-    content: "24H",
-    size: SIZE_EYEBROW,
-    fill: INK_3,
-    weight: WEIGHT_SEMIBOLD,
-    tracking: TRACKING_EYEBROW,
-  });
+  return width;
 }
 
 /** An equilateral-ish triangle pointing up or down, centred vertically on `cy`. */
@@ -517,86 +487,206 @@ function triangle(x: number, cy: number, width: number, up: boolean): string {
   return `M${f2(x)} ${f2(base)}L${f2(x + half)} ${f2(apex)}L${f2(x + width)} ${f2(base)}Z`;
 }
 
-function drawSparkline(canvas: Canvas, face: TokenFace): void {
-  if (face.series.length < 2) {
-    // Not an error: a freshly configured card has no history yet. A hairline reads
-    // as "no series" without pretending to be a flat price.
-    canvas.rect(MARGIN, SPARKLINE_TOP + SPARKLINE_HEIGHT - 1, CONTENT_WIDTH, 1, HAIRLINE);
-    return;
-  }
-
-  let minimum = Number.MAX_VALUE;
-  let maximum = -Number.MAX_VALUE;
-  for (const value of face.series) {
-    minimum = Math.min(minimum, value);
-    maximum = Math.max(maximum, value);
-  }
-  const span = Math.max(maximum - minimum, Number.EPSILON);
-  const plotHeight = SPARKLINE_HEIGHT - 2 * SPARKLINE_PADDING;
-  const step = CONTENT_WIDTH / (face.series.length - 1);
-
-  const point = (index: number, value: number): [number, number] => {
-    // A perfectly flat series would otherwise sit on the top edge, because every
-    // value equals the maximum; centre it instead.
-    const normalized = maximum - minimum <= Number.EPSILON ? 0.5 : (value - minimum) / span;
-    return [
-      MARGIN + index * step,
-      SPARKLINE_TOP + SPARKLINE_PADDING + (1 - normalized) * plotHeight,
-    ];
-  };
-
-  let stroke = "";
-  face.series.forEach((value, index) => {
-    const [x, y] = point(index, value);
-    stroke += `${index === 0 ? "M" : "L"}${f2(x)} ${f2(y)}`;
-  });
-
-  const color = directionColor(face);
-  const bottom = SPARKLINE_TOP + SPARKLINE_HEIGHT;
-  const area = `${stroke}L${f2(MARGIN + CONTENT_WIDTH)} ${f2(bottom)}L${f2(MARGIN)} ${f2(bottom)}Z`;
-  canvas.filledPathOpacity(area, color, AREA_OPACITY);
-  canvas.strokedPath(stroke, color, SPARKLINE_STROKE);
-
-  // The newest point gets a marker, so the eye lands on "now" rather than on
-  // whichever peak happens to be tallest.
-  const lastIndex = face.series.length - 1;
-  const [x, y] = point(lastIndex, face.series[lastIndex] ?? 0);
-  canvas.circle(x, y, SPARKLINE_STROKE + 2, GROUND);
-  canvas.circle(x, y, SPARKLINE_STROKE + 0.5, color);
+/** The three runs of a price, and the size each is set at for a given integer size. */
+function priceRuns(
+  face: TokenFace,
+  size: number,
+): { content: string; size: number; fill: string }[] {
+  const [integer, fraction] = splitPrice(face.price);
+  // Below a whole unit the integer is the single character "0" and every digit that
+  // matters is in the fraction; shrinking it would set the one meaningless glyph large.
+  const uniform = Math.abs(face.price) < 1 && fraction !== "";
+  const small = size * FRACTION_RATIO;
+  return [
+    { content: face.currencyMark, size: small, fill: INK_2 },
+    { content: uniform ? `${integer}${fraction}` : integer, size, fill: INK },
+    { content: uniform ? "" : fraction, size: small, fill: INK_2 },
+  ].filter((run) => run.content !== "");
 }
 
-function drawRange(canvas: Canvas, face: TokenFace): void {
-  const labelTop = 300;
-  const mark = face.currencyMark;
-  const baseline = baselineFromCapTop(labelTop, SIZE_CAPTION);
+/** Draws the price with its baseline `bottom`, as large as the module's width allows. */
+function drawPrice(
+  canvas: Canvas,
+  face: TokenFace,
+  left: number,
+  bottom: number,
+  muted: string,
+): void {
+  // Fit the whole assembly, not just the integer: the mark and the fraction are what
+  // push a five-figure price over the edge.
+  const width = (size: number): number =>
+    priceRuns(face, size).reduce(
+      (total, run) => total + textWidth(run.content, run.size, WEIGHT_SEMIBOLD) + 2,
+      0,
+    );
+  const size = PRICE_STEPS.find((step) => width(step) <= INNER_WIDTH) ?? PRICE_STEPS.at(-1) ?? 40;
 
-  canvas.text({
-    x: MARGIN,
-    baseline,
-    content: `L ${mark}${compactPrice(face.low)}`,
-    size: SIZE_CAPTION,
-    fill: INK_3,
-    weight: WEIGHT_REGULAR,
-  });
-  canvas.text({
-    x: CANVAS_WIDTH - MARGIN,
-    baseline,
-    content: `H ${mark}${compactPrice(face.high)}`,
-    size: SIZE_CAPTION,
-    fill: INK_3,
-    weight: WEIGHT_REGULAR,
-    anchor: "end",
-  });
-
-  // Where the current price sits inside the window's range: the one fact the
-  // sparkline does not state plainly.
-  const trackY = labelTop + SIZE_CAPTION * CAP_HEIGHT + 1.5 * GRID;
-  canvas.roundedRect(MARGIN, trackY, CONTENT_WIDTH, 3, 1.5, HAIRLINE);
-  const span = face.high - face.low;
-  if (span > Number.EPSILON) {
-    const fraction = Math.min(1, Math.max(0, (face.price - face.low) / span));
-    canvas.circle(MARGIN + fraction * CONTENT_WIDTH, trackY + 1.5, 4.5, directionColor(face));
+  let x = left;
+  for (const run of priceRuns(face, size)) {
+    const isMark = run.content === face.currencyMark;
+    canvas.text({
+      x,
+      // The mark hangs from the cap line, the superior position every ticker uses; on
+      // the baseline of an 84px numeral it looks dropped.
+      baseline: isMark ? baselineFromCapTop(bottom - size * CAP_HEIGHT, run.size) : bottom,
+      content: run.content,
+      size: run.size,
+      fill: isMark ? muted : run.fill,
+      weight: WEIGHT_SEMIBOLD,
+    });
+    x += textWidth(run.content, run.size, WEIGHT_SEMIBOLD) + 2;
   }
+}
+
+function drawChart(canvas: Canvas, face: TokenFace): void {
+  canvas.roundedRect(MARGIN, CHART_TOP, CONTENT_WIDTH, CHART_HEIGHT, RADIUS_MODULE, SURFACE);
+  const left = MARGIN + CHART_PAD;
+  const right = MARGIN + CONTENT_WIDTH - CHART_PAD;
+
+  // The footer: the window, and the range the price moved in.
+  const footer = CHART_TOP + CHART_HEIGHT - CHART_PAD;
+  canvas.text({
+    x: left,
+    baseline: footer,
+    content: "24H",
+    size: SIZE_EYEBROW,
+    fill: INK_3,
+    weight: WEIGHT_SEMIBOLD,
+    tracking: TRACKING_EYEBROW,
+  });
+  const mark = face.currencyMark;
+  const range = [
+    { label: "H", value: `${mark}${compactPrice(face.high)}` },
+    { label: "L", value: `${mark}${compactPrice(face.low)}` },
+  ];
+  let x = right;
+  for (const { label, value } of range) {
+    canvas.text({
+      x,
+      baseline: footer,
+      content: value,
+      size: SIZE_CAPTION,
+      fill: INK_2,
+      anchor: "end",
+    });
+    x -= textWidth(value, SIZE_CAPTION, WEIGHT_REGULAR) + 0.75 * GRID;
+    canvas.text({
+      x,
+      baseline: footer,
+      content: label,
+      size: SIZE_EYEBROW,
+      fill: INK_3,
+      weight: WEIGHT_SEMIBOLD,
+      anchor: "end",
+    });
+    x -= textWidth(label, SIZE_EYEBROW, WEIGHT_SEMIBOLD) + 2 * GRID;
+  }
+
+  const plot = {
+    left,
+    right,
+    top: CHART_TOP + CHART_PAD,
+    bottom: footer - SIZE_CAPTION * CAP_HEIGHT - 1.75 * GRID,
+  };
+  if (face.chart === "candles" && face.candles.length >= 2) {
+    drawCandles(canvas, face.candles, plot);
+  } else if (face.chart === "line" && face.series.length >= 2) {
+    drawLine(canvas, face, plot);
+  } else {
+    // Not an error: a freshly configured card has no history yet, and a refused chart
+    // request leaves a true price. A hairline reads as "no series", not as a flat one.
+    canvas.rect(left, (plot.top + plot.bottom) / 2, right - left, 1, HAIRLINE);
+  }
+}
+
+interface Plot {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
+/** Maps a price onto the plot, centring a perfectly flat series instead of pinning it. */
+function scale(plot: Plot, minimum: number, maximum: number): (value: number) => number {
+  const span = maximum - minimum;
+  return (value) =>
+    span <= Number.EPSILON
+      ? (plot.top + plot.bottom) / 2
+      : plot.bottom - ((value - minimum) / span) * (plot.bottom - plot.top);
+}
+
+function drawLine(canvas: Canvas, face: TokenFace, plot: Plot): void {
+  // Averaged into buckets rather than sampled: a sampled line keeps every spike it
+  // happens to land on and drops the ones it does not, which is noise by another name.
+  const buckets = Math.min(LINE_POINTS, face.series.length);
+  const values = Array.from({ length: buckets }, (_, index) => {
+    const from = Math.floor((index * face.series.length) / buckets);
+    const to = Math.max(from + 1, Math.floor(((index + 1) * face.series.length) / buckets));
+    const slice = face.series.slice(from, to);
+    return slice.reduce((total, value) => total + value, 0) / slice.length;
+  });
+  // The newest point is the quoted price, not an average that lags it.
+  values[values.length - 1] = face.series.at(-1) ?? face.price;
+
+  const y = scale(plot, Math.min(...values), Math.max(...values));
+  const step = (plot.right - plot.left) / (values.length - 1);
+  const points = values.map((value, index): [number, number] => [
+    plot.left + index * step,
+    y(value),
+  ]);
+
+  // Catmull-Rom through the points, as cubic Beziers: the curve passes through every
+  // value, so nothing is invented, and the corners a polyline makes are gone. The
+  // control points are clamped to the plot so an overshoot cannot leave the module.
+  const clamp = (value: number): number => Math.min(plot.bottom, Math.max(plot.top, value));
+  let stroke = `M${f2(points[0]?.[0] ?? 0)} ${f2(points[0]?.[1] ?? 0)}`;
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const [p0, p1, p2, p3] = [index - 1, index, index + 1, index + 2].map(
+      (at) => points[Math.min(points.length - 1, Math.max(0, at))] ?? [0, 0],
+    ) as [[number, number], [number, number], [number, number], [number, number]];
+    stroke +=
+      `C${f2(p1[0] + (p2[0] - p0[0]) / 6)} ${f2(clamp(p1[1] + (p2[1] - p0[1]) / 6))} ` +
+      `${f2(p2[0] - (p3[0] - p1[0]) / 6)} ${f2(clamp(p2[1] - (p3[1] - p1[1]) / 6))} ` +
+      `${f2(p2[0])} ${f2(p2[1])}`;
+  }
+
+  const color = directionColor(face);
+  canvas.filledPathOpacity(
+    `${stroke}L${f2(plot.right)} ${f2(plot.bottom)}L${f2(plot.left)} ${f2(plot.bottom)}Z`,
+    color,
+    AREA_OPACITY,
+  );
+  canvas.strokedPath(stroke, color, LINE_STROKE);
+
+  // The newest point gets a marker, so the eye lands on "now" rather than on whichever
+  // peak happens to be tallest.
+  const [lastX, lastY] = points.at(-1) ?? [plot.right, plot.bottom];
+  canvas.circle(lastX, lastY, LINE_STROKE + 2.5, SURFACE);
+  canvas.circle(lastX, lastY, LINE_STROKE + 0.5, color);
+}
+
+function drawCandles(canvas: Canvas, candles: Candle[], plot: Plot): void {
+  const y = scale(
+    plot,
+    Math.min(...candles.map((candle) => candle.low)),
+    Math.max(...candles.map((candle) => candle.high)),
+  );
+  const step = (plot.right - plot.left) / candles.length;
+  // Whole pixels: a body on a half-pixel boundary is two grey columns instead of one
+  // crisp one, on the panel and on the wire.
+  const body = Math.max(2, Math.round(step * 0.62));
+  candles.forEach((candle, index) => {
+    // Each candle is coloured by ITS half hour, not by the day: that is what a candle is.
+    const up = candle.close >= candle.open;
+    const color = up ? GOOD : BAD;
+    const center = Math.round(plot.left + (index + 0.5) * step);
+    const wickTop = y(candle.high);
+    canvas.rect(center - 0.75, wickTop, 1.5, Math.max(1, y(candle.low) - wickTop), color);
+    const top = y(Math.max(candle.open, candle.close));
+    // A doji still gets a visible body: two pixels of "it went nowhere".
+    const height = Math.max(2, y(Math.min(candle.open, candle.close)) - top);
+    canvas.roundedRect(center - body / 2, top, body, height, 1, color);
+  });
 }
 
 /**
@@ -631,6 +721,16 @@ export const token: FaceDefinition = {
     // is whatever a person would type: a name, a ticker, or CoinGecko's own id.
     { type: "text", key: "coin_id", label: "Coin", placeholder: "Solana" },
     { type: "text", key: "currency", label: "Currency", placeholder: "usd", default: "usd" },
+    {
+      type: "enum",
+      key: "chart",
+      label: "Chart",
+      default: "line",
+      options: [
+        { value: "line", label: "Line" },
+        { value: "candles", label: "Candles" },
+      ],
+    },
   ],
   async render(settings) {
     return renderToken(await fetchToken(settings, fetchText));

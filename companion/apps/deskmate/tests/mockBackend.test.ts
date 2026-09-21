@@ -350,6 +350,16 @@ describe("mock backend contract", () => {
             value: "usd",
             placeholder: "usd",
           },
+          {
+            type: "enum",
+            key: "chart",
+            label: "Chart",
+            value: "line",
+            options: [
+              { value: "line", label: "Line" },
+              { value: "candles", label: "Candles" },
+            ],
+          },
         ],
       },
     ];

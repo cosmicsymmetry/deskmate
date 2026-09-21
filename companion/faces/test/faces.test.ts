@@ -5,6 +5,7 @@ import { fetchRss, parseFeed, renderRss } from "../src/faces/rss";
 import {
   coinFromSearch,
   fetchToken,
+  parseCandles,
   parseMarkets,
   renderToken,
   splitPrice,
@@ -159,10 +160,62 @@ describe("token", () => {
   test("a fall prints its sign as well as its colour", () => {
     const face = quoted(MARKETS, "usd");
     const falling = renderToken({ ...face, changePercent: -3.08 });
-    expect(falling).toContain("-3.08%");
+    expect(falling).toContain("\u22123.08%");
     expect(falling).toContain(BAD);
     expect(renderToken(face)).toContain("+2.41%");
     expect(renderToken(face)).toContain(GOOD);
+  });
+
+  test("candles ask the ohlc endpoint instead of the line's, never both", async () => {
+    const OHLC = JSON.stringify([
+      [1, 108.06, 108.2, 107.95, 108.03],
+      [2, 108.01, 108.24, 107.93, 108.11],
+    ]);
+    const get = fake({ "/coins/markets": MARKETS, "/ohlc": OHLC });
+    const face = await fetchToken({ coin_id: "solana", chart: "candles" }, get);
+    expect(face.chart).toBe("candles");
+    expect(face.candles).toEqual([
+      { open: 108.06, high: 108.2, low: 107.95, close: 108.03 },
+      { open: 108.01, high: 108.24, low: 107.93, close: 108.11 },
+    ]);
+    expect(get.asked.some((url) => url.includes("market_chart"))).toBe(false);
+    expect(get.asked.at(-1)).toContain("/coins/solana/ohlc?vs_currency=usd&days=1");
+    // An unknown choice is the default, not an error: the field is an enum upstream.
+    expect(
+      (await fetchToken({ coin_id: "solana", chart: "renko" }, fake({ "/coins/markets": MARKETS })))
+        .chart,
+    ).toBe("line");
+  });
+
+  test("a refused candle request leaves a true price over an empty chart", async () => {
+    const get = fake({ "/coins/markets": MARKETS, "/ohlc": new TransientError("429") });
+    const face = await fetchToken({ coin_id: "solana", chart: "candles" }, get);
+    expect(face.price).toBe(142.37);
+    expect(face.candles).toEqual([]);
+    expect(rendersToAFrame(renderToken(face))).toBe(true);
+  });
+
+  test("a malformed candle is dropped and an inverted one cannot draw a wick inside out", () => {
+    const candles = parseCandles(
+      JSON.stringify([[1, 10, 9, 12, 11], [2, 10, "x", 9, 11], [3, 10], "junk", [4, 5, 6, 4, 5]]),
+    );
+    expect(candles).toEqual([
+      { open: 10, high: 12, low: 9, close: 11 },
+      { open: 5, high: 6, low: 4, close: 5 },
+    ]);
+  });
+
+  test("each candle is coloured by its own half hour, whatever the day did", () => {
+    const svg = renderToken({
+      ...quoted(MARKETS, "usd"),
+      chart: "candles",
+      candles: [
+        { open: 10, high: 12, low: 9, close: 11 },
+        { open: 11, high: 11.5, low: 8, close: 9 },
+      ],
+    });
+    expect(svg).toContain(GOOD);
+    expect(svg).toContain(BAD);
   });
 
   test("decimals follow the magnitude, and only high precision is trimmed", () => {

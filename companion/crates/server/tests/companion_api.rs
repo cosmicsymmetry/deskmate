@@ -22,7 +22,7 @@ use support::{HttpTestServer as TestServer, json_body, replace_file_with_directo
 const ADMIN_TOKEN: &str = "in-memory-admin-token";
 
 async fn spawn_with(state: ServerState, web_root: Option<std::path::PathBuf>) -> TestServer {
-    support::spawn_http(app_with_web(state, web_root)).await
+    support::spawn_http(app_with_web(support::with_fake_faces(state), web_root)).await
 }
 
 async fn spawn() -> (TestServer, ServerState) {
@@ -1340,4 +1340,92 @@ async fn listed_source_ids(client: &Client, server: &TestServer) -> Vec<String> 
         .iter()
         .map(|row| row["id"].as_str().expect("source id").to_owned())
         .collect()
+}
+
+async fn preview_of(
+    client: &Client,
+    server: &TestServer,
+    device_id: &str,
+    card_id: &str,
+) -> serde_json::Value {
+    let response = client
+        .post(format!("{}/v1/app/{device_id}/preview", server.base_url))
+        .bearer_auth(ADMIN_TOKEN)
+        .header("content-type", "application/json")
+        .body(serde_json::json!({ "card_id": card_id }).to_string())
+        .send()
+        .await
+        .expect("preview");
+    assert_eq!(response.status(), StatusCode::OK);
+    json_body(response).await
+}
+
+#[tokio::test]
+async fn a_picture_cards_preview_is_the_frame_its_source_last_drew() {
+    use base64::Engine as _;
+    use std::time::Duration;
+
+    // Until 2026-09-20 every picture card previewed as a black rectangle with a
+    // sentence in it, so a weather or token card the owner had just created looked
+    // unfinished in the one place they could look at it.
+    let (server, _state) = spawn().await;
+    let client = Client::new();
+    let device = mint_device(&client, &server).await;
+    // `headlines` is complete at birth, so the fake package draws it straight away;
+    // a plain source has no producer in this test and never gets a frame.
+    let drawn = mint_face_source(&client, &server, "Headlines", "headlines").await;
+    let silent = mint_source(&client, &server, "Camera").await;
+
+    let mut config = snapshot(&client, &server, &device.device_id).await["config"].clone();
+    config["image_sources"] = serde_json::json!([
+        { "id": drawn, "name": "Headlines" },
+        { "id": silent, "name": "Camera" },
+    ]);
+    let picture = |id: &str, source: &str| {
+        serde_json::json!({
+            "kind": "picture", "id": id, "title": id, "source_id": source,
+            "tap_action": { "kind": "none" }, "refresh": { "kind": "manual" },
+            "alert": { "kind": "none" }, "dwell_seconds": null,
+        })
+    };
+    config["cards"] = serde_json::json!([picture("drawn", &drawn), picture("silent", &silent)]);
+    let saved = save_config(&client, &server, &device.device_id, &config).await;
+    assert_eq!(saved.status(), StatusCode::OK);
+
+    let waiting = preview_of(&client, &server, &device.device_id, "silent").await;
+    assert!(waiting["png_base64"].is_null());
+    assert!(
+        waiting["state"]
+            .as_str()
+            .is_some_and(|state| state.starts_with("No frame yet")),
+        "a source that has drawn nothing says so: {waiting}"
+    );
+
+    let mut frame = serde_json::Value::Null;
+    for _ in 0..100 {
+        frame = preview_of(&client, &server, &device.device_id, "drawn").await;
+        if frame["png_base64"].is_string() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(
+            frame["png_base64"]
+                .as_str()
+                .expect("the face was drawn within five seconds"),
+        )
+        .expect("base64");
+    assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+    let dimension = |offset: usize| u32::from_be_bytes(png[offset..offset + 4].try_into().unwrap());
+    assert_eq!(
+        (dimension(16), dimension(20)),
+        (448, 368),
+        "one whole canvas"
+    );
+    assert_eq!(
+        frame["sample"], false,
+        "these are real pixels, not defaults"
+    );
+    assert!(frame["state"].is_null());
 }

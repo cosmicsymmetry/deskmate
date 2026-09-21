@@ -637,6 +637,7 @@ export const apiContractFixtures = {
   "image_source_descriptors": [
     {
       "face": null,
+      "face_status": null,
       "id": "external-source",
       "name": "External picture"
     },
@@ -670,8 +671,51 @@ export const apiContractFixtures = {
         "kind": "weather",
         "label": "Weather"
       },
+      "face_status": {
+        "at_unix_seconds": null,
+        "message": null,
+        "state": "needs-settings"
+      },
       "id": "weather-source",
       "name": "Weather"
+    },
+    {
+      "face": {
+        "fields": [
+          {
+            "key": "location",
+            "label": "Location",
+            "placeholder": "Dubai",
+            "type": "text",
+            "value": ""
+          },
+          {
+            "key": "units",
+            "label": "Units",
+            "options": [
+              {
+                "label": "Metric",
+                "value": "metric"
+              },
+              {
+                "label": "Imperial",
+                "value": "imperial"
+              }
+            ],
+            "type": "enum",
+            "value": "metric"
+          }
+        ],
+        "kind": "weather",
+        "label": "Weather"
+      },
+      "face_status": {
+        "at_unix_seconds": 1790000000,
+        "message": "the token was not found; check the coin ID",
+        "state": "needs-attention"
+      },
+      "id": "token-source",
+      "name": "Token price"
     }
   ],
   "face_descriptors": [
@@ -741,6 +785,28 @@ export const apiContractFixtures = {
           "label": "Currency",
           "value": "usd",
           "placeholder": "usd"
+        }
+      ]
+    },
+    {
+      "kind": "headlines",
+      "label": "Headlines",
+      "fields": [
+        {
+          "type": "enum",
+          "key": "list",
+          "label": "Stories",
+          "value": "top",
+          "options": [
+            {
+              "value": "top",
+              "label": "Front page"
+            },
+            {
+              "value": "new",
+              "label": "Newest"
+            }
+          ]
         }
       ]
     }

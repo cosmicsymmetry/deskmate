@@ -294,6 +294,25 @@ describe("mock backend contract", () => {
         ],
       },
       {
+        kind: "hackernews",
+        label: "Hacker News",
+        fields: [
+          {
+            type: "enum",
+            key: "list",
+            label: "Stories",
+            value: "top",
+            options: [
+              { value: "top", label: "Front page" },
+              { value: "best", label: "Best" },
+              { value: "new", label: "Newest" },
+              { value: "ask", label: "Ask HN" },
+              { value: "show", label: "Show HN" },
+            ],
+          },
+        ],
+      },
+      {
         kind: "rss",
         label: "RSS feed",
         fields: [
@@ -320,9 +339,9 @@ describe("mock backend contract", () => {
           {
             type: "text",
             key: "coin_id",
-            label: "Coin ID",
+            label: "Ticker",
             value: "",
-            placeholder: "solana",
+            placeholder: "SOL",
           },
           {
             type: "text",
@@ -330,6 +349,17 @@ describe("mock backend contract", () => {
             label: "Currency",
             value: "usd",
             placeholder: "usd",
+          },
+          {
+            type: "enum",
+            key: "chart",
+            label: "Chart",
+            value: "line",
+            options: [
+              { value: "line", label: "Line" },
+              { value: "candles", label: "Candles" },
+              { value: "none", label: "None" },
+            ],
           },
         ],
       },

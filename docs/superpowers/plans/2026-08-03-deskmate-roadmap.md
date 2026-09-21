@@ -1,49 +1,88 @@
 # Deskmate v1 — Milestone Roadmap
 
-> **STATUS (updated 2026-09-18): HISTORICAL THROUGH V3.** The milestone rows preserve
-> what shipped and when; the “Current” paragraph below predates completion of the server
-> host and deletion of the Tauri companion. The current companion is the web app served
-> by the Rust server.
+> **STATUS (reviewed 2026-09-21).** The "Current" section below is current as of that
+> date. The milestone and stage tables are the record of what shipped and when, and their
+> rows keep the vocabulary of their time: "Tauri", "plugin manifest", `field.*`,
+> "capabilities 1003" and "provider" all name things that have since been deleted. Read a
+> row as history, and `CLAUDE.md`'s "Current state" as what is true now.
 
 Spec: `docs/superpowers/specs/2026-08-03-deskmate-design.md`
 
 **Current:** V1 and V2 are EXITED and TAGGED (`v1` at `7abd496`, `v2` at `fdf85ba`) by
-explicit owner direction on 2026-09-06. **V3 (server host)** is in progress on
-`feat/v3-server-host`.
+explicit owner direction on 2026-09-06. **V3 (server host) is the current milestone.**
+Its four sub-projects are delivered and merged to `main` (`fb15060`, 2026-09-13);
+`feat/v3-server-host` is fully merged and nothing lives only there any more. V3 is
+schema- and wire-neutral (config v10, protocol v2). What it still owes, in order:
 
-Running alongside V3 is the **legacy subtraction** (spec
-`docs/superpowers/specs/2026-09-11-deskmate-legacy-subtraction-design.md`), which removes
-the shapes seven schema versions and four rendering approaches left behind:
+1. **The reference Google Calendar producer** in `tools/picture-producers/` (today that
+   directory holds only `claude_limits_png.py`). It needs a real Google grant from the
+   owner.
+2. **The end-to-end gate**, which needs the panel. It used to wait on the protocol-v2
+   flash; `dev-0005` was flashed with `v2.1.0-proto2` and observed linking on 2026-09-12,
+   so it is runnable, not blocked.
+
+V3 then exits on owner direction, the V4 brainstorm happens at that exit, and a `v3` tag
+needs explicit owner authorization like every tag before it.
+
+The **legacy subtraction** (spec
+`docs/superpowers/specs/2026-09-11-deskmate-legacy-subtraction-design.md`) is **complete
+and merged, all three waves**:
 
 - Schema **v8** retired the device-rendered data cards and **v9** the manifest-based
   plugins, together about 36,500 lines.
-- **Wave A** (plan `2026-09-11-deskmate-legacy-subtraction-wave-a.md`) is complete: the
-  pre-v4 migration chain, the retired-template oracle and its parity gate, the M2 demo
-  tooling, and the module boundaries inside `runtime.rs` and `commands.rs`.
-- **Wave B** (schema v10) is complete: `playlists[]` and `active_playlist_id` are gone,
-  `cards` is ordered and IS the loop, dwell is a card field and `advance` is one
-  document-level setting.
-- **Wave C** (protocol v2, removing the pre-scene wire) remains, and is the only one
-  that spends a hardware session.
+- **Wave A** (plan `2026-09-11-deskmate-legacy-subtraction-wave-a.md`): the pre-v4
+  migration chain, the retired-template oracle and its parity gate, the M2 demo tooling,
+  and the module boundaries inside `runtime.rs` and `commands.rs`.
+- **Wave B** (schema v10): `playlists[]` and `active_playlist_id` are gone, `cards` is
+  ordered and IS the loop, dwell is a card field and `advance` is one document-level
+  setting. v10 has been the only readable config version since 2026-09-19.
+- **Wave C** (protocol v2, plan `2026-09-11-deskmate-legacy-subtraction-wave-c.md`):
+  merged on owner direction 2026-09-12 and flashed the same day. The wire no longer
+  describes templates; capabilities read **2016**.
 
-Scene stages 2a, 2b, 3a, 3b and 4 are delivered and confirmed on the board as of the
+Work delivered since V3's sub-projects that **belongs to no milestone row**, recorded
+here so the table does not read as the whole story:
+
+- **The companion became a web app** (spec
+  `2026-09-18-deskmate-web-companion-design.md`). The Tauri app of row M3 is deleted, not
+  wrapped; every surface is served by the server at `https://deskmate.rodi.one/`, and the
+  cable operations live in `deskmate-cli` only.
+- **Server-rendered faces** (spec `2026-09-12-deskmate-server-rendered-cards-design.md`):
+  weather, Hacker News, RSS and token, each an image source named by an ordinary picture
+  card -- not card kinds. They moved from Rust to TypeScript (`companion/faces/`, run as a
+  subprocess) on 2026-09-20, merged to `main` on 2026-09-21.
+- **The 2026-09-19 review sweep**: a refactor and 43 fixes, the tests-only consolidation
+  under `tools/testgate/`, and a CI that had been silently red for four weeks made loud.
+
+Scene stages 2a, 2b, 3a, 3b and 4 are delivered and were confirmed on the board in the
 2026-09-06 session (board-notes, "Stage 4 Task 7"). Stage 5 remains a risk review only;
 implementation awaits review completion and explicit owner approval.
 
-Hardware still owed: V2 Task 9's tap latency, the BUSY/OTA-owner refusal variant, stage
-3b's asset-GC teardown, and a framebuffer-matrix run — the last observed result is
-96/10/86 on 2026-09-06, which predates both v9 and Wave A; the current unobserved
-inventory is 44/6/38.
+Hardware still owed (the authoritative list is `CLAUDE.md`, "Hardware verification still
+owed"; all of it is runnable now that the board links):
 
-M0/M1 are tagged `m0`/`m1`; later milestones remain untagged without that
-authorization.
+- V2 Task 9's tap latency, the BUSY/OTA-owner refusal variant, and stage 3b's asset-GC
+  teardown.
+- The whole of protocol v2 except the link itself -- the **OTA download is mandatory**
+  (`.bss` moved), then capabilities 2016 by name, a face at both mountings, a pomodoro
+  counting down between pushes, and a tap reporting one card id.
+- A server-rendered face on the panel, one of each kind at both mountings. The owner
+  reported on 2026-09-21 that the token card did not work on the device; two fixes for
+  that symptom are unobserved on the panel.
+- A framebuffer-matrix run. The last observed result is 96/10/86 on 2026-09-06, which
+  predates v9, Wave A and Wave C alike; the current unobserved inventory is
+  **44 rows / 2 excluded / 42 comparable**.
+
+Tags `m0`, `m1`, `v1` and `v2` exist; later milestones remain untagged without explicit
+owner authorization.
 
 One plan per milestone; each milestone ends with working, demonstrable
 software. Ordering rationale: retire hardware risk first (from-scratch
 firmware is the biggest unknown), build the link with a headless CLI before
 any GUI, prove the widget architecture with three widgets that exercise
 every subsystem, then wrap the proven core in the Tauri app, then fill in
-breadth.
+breadth. (The Tauri app was deleted on 2026-09-18 in favour of the web companion; the
+ordering argument is kept because it explains rows M0-M3.)
 
 | # | Status | Milestone | Deliverable (demo) | Plan |
 |---|--------|-----------|--------------------|------|
@@ -54,7 +93,7 @@ breadth.
 | M4 | Superseded (Tasks 1-4 delivered) | v1 completion | Delivered: weather/JSON-feed/RSS providers, extended templates, the card model, timed rotation and alerts. Remainder redistributed by the 2026-08-11 reset spec §7 | `2026-08-05-deskmate-m4-v1-completion.md` |
 | V1 | **EXITED and tagged `v1` (2026-09-06, owner direction; tag at `7abd496`)** | Local Deskmate | Custom partition table (OTA slots + asset region), baked typeface, pixel-exact host-LVGL preview harness with golden frames, built-in widget redesign — all delivered and physically accepted 2026-08-14; playlist authoring model (schema v4, `presence` removed) delivered and merged 2026-08-15 (wire unchanged, no on-device delta). The CO5300 even-window check at the 64-line flush strip closed 2026-08-15 (human-observed clean at both orientations). Packaging/hardening delivered: private `cosmicsymmetry/deskmate` remote with the green `ci` workflow (macOS companion gate + DMG artifact; ESP-IDF build + host tests), advisories triaged in `docs/security/advisories.md`, security review in `docs/security/v1-review.md`, and the hands-on install matrix passed (recorded 2026-08-17 in the packaging plan; one defect found and fixed — settings window now auto-opens on first run only, `fc3750b`). V1 exited and tagged `v1` at `7abd496` on 2026-09-06 by owner direction | `2026-08-11-deskmate-v1-preview-typeface-redesign.md`, `2026-08-11-deskmate-v1-playlists.md`, `2026-08-15-deskmate-v1-packaging-hardening.md` |
 | V2 | **EXITED and tagged `v2` (2026-09-06, owner direction; tag at `fdf85ba`)** | Networked device | Device owned over the network instead of a cable: WiFi station, TLS, USB-based provisioning (no SoftAP), bearer-token device identity, tier pairing, WebSocket transport carrying today's frames unchanged, and OTA with rollback. Proven against a single-tenant no-accounts stub server. Headline demo: provision over USB, unplug, quit the Mac app, cards keep updating. Additive within protocol v1. **Delivered and verified on hardware**: the server owns the device, providers run server-side, real weather renders with the Mac quit, OTA installs and reboots, and rollback works unattended. Exited by owner direction 2026-09-06 with three hardware observations deferred, not observed, and not treated as blockers: Task 9 tap latency, the BUSY/OTA-owner refusal, and the §6 96 px glyph timing (Task 8's widening-backoff observation WAS discharged on the shipping build 2026-09-06) | `docs/superpowers/plans/2026-08-18-deskmate-v2-networked-device.md` |
-| V3 | **In progress; RE-SPECCED 2026-09-12** | Server host | Server-held OAuth credential custody, token vending to external producers, and a minimal management surface. **Sub-projects 1 (encrypted `IntegrationStore`) and 2 (OAuth `TokenManager`, consent/callback/revoke) are DELIVERED and reviewed** on `feat/v3-server-host`. **Sub-project 3 is re-scoped and DELIVERED 2026-09-13** (`986dbc6`..`af470a3`: `main` merged in, the server's egress cut to one permitted host with a mutation-probed boundary test, digest-only producer credentials, the vend route, and revocation coupling; full gate green). The original sub-project 3 (the `GoogleCalendarProvider` and a `CalendarSource::Google` schema bump) was **WITHDRAWN** — schema v8/v9 deleted the provider layer, the field bag and the `calendar` card it was built on. It is replaced by a token-vending route plus a reference producer living outside this repo, so V3 now changes **no schema and no wire byte** (it is schema-neutral at v10, protocol v2). **Sub-project 4 (the management surface) is DELIVERED 2026-09-13** (`5749461`..`64ed968`: one `AdminAuthenticated` instead of three, the device/integration/picture-source listings, and `/v1/manage` with its login and three actions -- the page `google_callback` had redirected to since sub-project 2). **Next: the reference Google Calendar producer** in `tools/picture-producers/`, which needs a real Google grant, and then V3's end-to-end gate, which needs the panel and therefore waits on the protocol-v2 flash | `docs/superpowers/specs/2026-09-12-deskmate-v3-server-host-revision.md` (supersedes the 2026-09-06 design; both currently on `feat/v3-server-host` only) |
+| V3 | **In progress; RE-SPECCED 2026-09-12; sub-projects 1-4 merged to `main` 2026-09-13 (`fb15060`)** | Server host | Server-held OAuth credential custody, token vending to external producers, and a minimal management surface. **Sub-projects 1 (encrypted `IntegrationStore`) and 2 (OAuth `TokenManager`, consent/callback/revoke) are DELIVERED and reviewed.** **Sub-project 3 is re-scoped and DELIVERED 2026-09-13** (`986dbc6`..`af470a3`: `main` merged in, the server's egress cut to one permitted host with a mutation-probed boundary test, digest-only producer credentials, the vend route, and revocation coupling; full gate green). The original sub-project 3 (the `GoogleCalendarProvider` and a `CalendarSource::Google` schema bump) was **WITHDRAWN** — schema v8/v9 deleted the provider layer, the field bag and the `calendar` card it was built on. It is replaced by a token-vending route plus a reference producer living outside this repo, so V3 now changes **no schema and no wire byte** (it is schema-neutral at v10, protocol v2). **Sub-project 4 (the management surface) is DELIVERED 2026-09-13** (`5749461`..`64ed968`: one `AdminAuthenticated` instead of three, the device/integration/picture-source listings, and `/v1/manage` with its login and three actions -- the page `google_callback` had redirected to since sub-project 2). **Next: the reference Google Calendar producer** in `tools/picture-producers/`, which needs a real Google grant, and then V3's end-to-end gate, which needs the panel. The protocol-v2 flash it waited on happened 2026-09-12, so the gate is runnable | `docs/superpowers/specs/2026-09-12-deskmate-v3-server-host-revision.md` (supersedes the 2026-09-06 design; both on `main`) |
 | V4 | Planned; **partly superseded** by the scene-rendering design | Plugin platform | Image cards, asset cache, billing (paid tier), and a plugin contract. **The "HTML plugin contract, headless-Chromium rendering" originally written here is retired**: `docs/superpowers/specs/2026-08-22-deskmate-plugin-scene-rendering-design.md` §5 rules a headless browser out permanently ("it would make the homelab an arbitrary-code-execution host. Deferred indefinitely, not scheduled") and names `resvg` as the only permitted rasterizer. The plugin contract is the declarative manifest frozen in `docs/plugins/manifest-v1.md`, delivered in stage 3b. Public uploads and the sandbox are that spec's stage 5, with their own risk review | own brainstorm at V3 exit; superseding decisions in the scene-rendering spec |
 
 The scene renderer's five stages each get their own plan, written at the previous stage's
@@ -66,7 +105,7 @@ exit (the spec is the architecture for all five, not one implementation plan):
 | 2b | `2026-08-26-deskmate-scene-templates.md` | Delivered; all six faces byte-identical |
 | 3a | `2026-08-27-deskmate-scene-native-rendering.md` | Delivered; the six C templates no longer ship. Gate B is closed: the templates-removed OTA download passed 2026-08-28 (`live1` -> `live2`), and the last owed piece — rollback survival across a second boot — closed 2026-09-06, when live2 had survived every subsequent reboot and its templates-removed successor `v2.0.0-raster1` installed first-try and survived the rollback window (board-notes, "Stage 4 Task 7 Phase B") |
 | 3b | `2026-08-28-deskmate-plugin-manifest.md` | **Task 9 PASSED on the board 2026-08-30** — both plugin faces at 270° and 90°, a runtime glyph at 72 px, the image node clean, and `field.*` drawing a real value for the first time. Step 6 (asset-GC teardown) was partially observed 2026-09-06 — the teardown/release/rebuild works live with no reboot, but the font-vanish moment is not panel-visible on dev-0005's card set — and only its BUSY/OTA-owner variant (needs a pending OTA in flight) is still owed |
-| 4 | `2026-08-29-deskmate-rasterization.md` | **Software-complete 2026-09-01** (Tasks 1-6: negotiation, manifest v2, resvg rasterizer, volatile PSRAM assets + bit 9 / capabilities 1003, RLE565 wire, the 30 s-floor executor, evidence rows). **Task 7's hardware session ran 2026-09-06 and PASSED** — the `v2.0.0-raster1` OTA installed first-try and survived the rollback window, capabilities read 1003, native and raster cards drew at 270° and 90°, the typed refuse rule and the 30 s floor held exactly, and 20-revision volatile churn kept the heap flat — and **Task 6 Step 5's on-target `framebuffer_diff` PASSED the same day: historical 96 total / 10 excluded / 86 identical / 0 differing; after manifest removal the unobserved software prediction is 78/8/70** (the original prediction was 96/8/88; corrected by three test-harness-only fixes, no firmware change). Only the BUSY/OTA-owner variant remains owed, and 3b's Phase A teardown was only partially observable (board-notes, "Stage 4 Task 7") |
+| 4 | `2026-08-29-deskmate-rasterization.md` | **Software-complete 2026-09-01** (Tasks 1-6: negotiation, manifest v2, resvg rasterizer, volatile PSRAM assets + bit 9 / capabilities 1003, RLE565 wire, the 30 s-floor executor, evidence rows). **Task 7's hardware session ran 2026-09-06 and PASSED** — the `v2.0.0-raster1` OTA installed first-try and survived the rollback window, capabilities read 1003, native and raster cards drew at 270° and 90°, the typed refuse rule and the 30 s floor held exactly, and 20-revision volatile churn kept the heap flat — and **Task 6 Step 5's on-target `framebuffer_diff` PASSED the same day: historical 96 total / 10 excluded / 86 identical / 0 differing; the current unobserved inventory, after v9, Wave A and Wave C, is 44/2/42** (the original prediction was 96/8/88; corrected by three test-harness-only fixes, no firmware change). Only the BUSY/OTA-owner variant remains owed, and 3b's Phase A teardown was only partially observable (board-notes, "Stage 4 Task 7") |
 | 5 | `2026-09-01-deskmate-plugin-upload-risk-review.md` | Risk-review plan written (Task 8 Step 3); implementation begins only after the review completes and the owner explicitly approves |
 
 First-widget order and why:

@@ -1,0 +1,22 @@
+{
+  "name": "deskmate-faces",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "bun test",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "lint": "biome lint .",
+    "dump": "bun run src/dump.ts"
+  },
+  "dependencies": {
+    "@resvg/resvg-js": "2.6.2",
+    "fast-xml-parser": "5"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.7",
+    "@types/bun": "latest",
+    "typescript": "7.0.2"
+  }
+}

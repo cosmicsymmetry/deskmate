@@ -15,6 +15,7 @@ import type {
   CardError,
   CardSettings,
   FaceDescriptor,
+  FaceStatus,
   ApiError,
   MintedImageSource,
   PomodoroSnapshot,
@@ -92,27 +93,90 @@ function descriptorValues(descriptor: FaceDescriptor): Record<string, string> {
   return Object.fromEntries(descriptor.fields.map((field) => [field.key, field.value]));
 }
 
+/** How often the face's status is re-read while its settings are on screen. */
+const FACE_STATUS_POLL_MS = 5_000;
+
+/** Ends a server message with a full stop, without touching how it starts. */
+const terminated = (text: string): string => (/[.!?]$/.test(text) ? text : `${text}.`);
+/** For a message that stands alone. Never for one that may open with a hostname. */
+const capitalized = (text: string): string => `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
+
+/** What the owner is told about a face, and whether it is a fault they must act on. */
+function describeFaceStatus(
+  status: FaceStatus | null,
+  descriptor: FaceDescriptor,
+): { text: string; alert: boolean } | null {
+  switch (status?.state) {
+    case "needs-settings": {
+      const missing = descriptor.fields
+        .filter((field) => field.type !== "enum" && !field.value.trim())
+        .map((field) => field.label);
+      return {
+        text: `Fill in ${missing.join(" and ") || "the settings"} to start this face.`,
+        alert: false,
+      };
+    }
+    case "drawing":
+      return { text: "Drawing the first frame…", alert: false };
+    case "drawn": {
+      const at = status.at_unix_seconds;
+      const time =
+        at === null
+          ? ""
+          : ` at ${new Date(at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+      return { text: `Drawn${time}. It redraws on its own.`, alert: false };
+    }
+    case "needs-attention":
+      return {
+        text: capitalized(terminated(status.message ?? "these settings were refused")),
+        alert: true,
+      };
+    case "retrying":
+      return {
+        text: `Couldn’t refresh: ${terminated(status.message ?? "the source did not answer")} The display keeps the last frame and this retries on its own.`,
+        alert: false,
+      };
+    case "unavailable":
+      return { text: "This server can’t draw this face right now.", alert: true };
+    default:
+      return null;
+  }
+}
+
+/**
+ * The settings of a server-drawn face. **They save themselves** -- on blur, on Enter,
+ * and at once for a choice -- and there is deliberately no button here.
+ *
+ * There used to be one, "Save source settings", beside the window's own "Save to
+ * server". Two saves for one card meant the prominent one silently discarded whatever
+ * was typed here: the face stayed blank, was never fetched, and the panel said "Waiting
+ * for the first picture" while the window said "Saved to the server". Clicking the
+ * window's save still works, because the click blurs the field first.
+ */
 function PictureFaceSettings({ sourceId }: { sourceId: string }) {
   const requestGeneration = useRef(0);
+  const saveInFlight = useRef(false);
   const [descriptor, setDescriptor] = useState<FaceDescriptor | null>(null);
+  const [status, setStatus] = useState<FaceStatus | null>(null);
   const [values, setValues] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
 
   useEffect(() => {
     const generation = requestGeneration.current + 1;
     requestGeneration.current = generation;
     setDescriptor(null);
+    setStatus(null);
     setValues({});
     setLoading(true);
     setSaving(false);
-    setSaved(false);
     setError(null);
+    saveInFlight.current = false;
+    const current = () => requestGeneration.current === generation;
     void listImageSources()
       .then((sources) => {
-        if (requestGeneration.current !== generation) {
+        if (!current()) {
           return;
         }
         const source = sources.find((candidate) => candidate.id === sourceId);
@@ -124,20 +188,34 @@ function PictureFaceSettings({ sourceId }: { sourceId: string }) {
           return;
         }
         setDescriptor(source.face);
+        setStatus(source.face_status);
         setValues(source.face ? descriptorValues(source.face) : {});
       })
       .catch((nextError) => {
-        if (requestGeneration.current === generation) {
+        if (current()) {
           setError(toApiError(nextError));
         }
       })
       .finally(() => {
-        if (requestGeneration.current === generation) {
+        if (current()) {
           setLoading(false);
         }
       });
+    // The status moves on its own -- the first frame lands seconds after the last field
+    // is filled in, and an API can start refusing at any refresh -- so it is re-read
+    // while the form is on screen. Only the status: never the fields, mid-typing.
+    const poll = window.setInterval(() => {
+      void listImageSources()
+        .then((sources) => {
+          if (current()) {
+            setStatus(sources.find((candidate) => candidate.id === sourceId)?.face_status ?? null);
+          }
+        })
+        .catch(() => {});
+    }, FACE_STATUS_POLL_MS);
     return () => {
       requestGeneration.current += 1;
+      window.clearInterval(poll);
     };
   }, [sourceId]);
 
@@ -161,46 +239,61 @@ function PictureFaceSettings({ sourceId }: { sourceId: string }) {
     return null;
   }
 
-  const dirty = descriptor.fields.some((field) => values[field.key] !== field.value);
-  const setValue = (key: string, value: string) => {
-    setValues((current) => ({ ...current, [key]: value }));
-    setSaved(false);
-    setError(null);
-  };
-  const save = () => {
+  const save = (next: Record<string, string>) => {
+    const changed = Object.fromEntries(
+      descriptor.fields
+        .filter((field) => next[field.key] !== field.value && (next[field.key] ?? "").trim())
+        .map((field) => [field.key, next[field.key] ?? ""]),
+    );
+    // A blank required field is an unfinished form, not something to send: the server
+    // would refuse it, and the status line already says what is missing.
+    if (Object.keys(changed).length === 0 || saveInFlight.current) {
+      return;
+    }
     const generation = requestGeneration.current;
+    const current = () => requestGeneration.current === generation;
+    saveInFlight.current = true;
     setSaving(true);
-    setSaved(false);
     setError(null);
-    void updateImageSourceFace(sourceId, values)
-      .then((updated) => {
-        if (requestGeneration.current !== generation) {
+    void updateImageSourceFace(sourceId, changed)
+      .then(async (updated) => {
+        if (!current()) {
           return;
         }
         setDescriptor(updated);
-        setValues(descriptorValues(updated));
-        setSaved(true);
+        // Fields typed while this save was in flight stay as typed.
+        setValues((typed) => ({ ...descriptorValues(updated), ...typed, ...changed }));
+        const sources = await listImageSources().catch(() => null);
+        if (current() && sources) {
+          setStatus(sources.find((candidate) => candidate.id === sourceId)?.face_status ?? null);
+        }
       })
       .catch((nextError) => {
-        if (requestGeneration.current === generation) {
+        if (current()) {
           setError(toApiError(nextError));
         }
       })
       .finally(() => {
-        if (requestGeneration.current === generation) {
+        if (current()) {
+          saveInFlight.current = false;
           setSaving(false);
         }
       });
   };
+  const setValue = (key: string, value: string): Record<string, string> => {
+    const next = { ...values, [key]: value };
+    setValues(next);
+    setError(null);
+    return next;
+  };
+  const shown = saving ? { text: "Saving…", alert: false } : describeFaceStatus(status, descriptor);
 
   return (
     <form
       className="source-settings"
       onSubmit={(event) => {
         event.preventDefault();
-        if (dirty && !saving) {
-          save();
-        }
+        save(values);
       }}
     >
       <fieldset className="source-settings__fields">
@@ -216,7 +309,7 @@ function PictureFaceSettings({ sourceId }: { sourceId: string }) {
                     className="source-settings__segment"
                     aria-pressed={values[field.key] === option.value}
                     key={option.value}
-                    onClick={() => setValue(field.key, option.value)}
+                    onClick={() => save(setValue(field.key, option.value))}
                   >
                     {option.label}
                   </button>
@@ -233,26 +326,25 @@ function PictureFaceSettings({ sourceId }: { sourceId: string }) {
                 value={values[field.key] ?? ""}
                 placeholder={field.placeholder}
                 onChange={(event) => setValue(field.key, event.currentTarget.value)}
+                onBlur={() => save(values)}
               />
             </label>
           ),
         )}
       </fieldset>
-      <div className="source-settings__actions">
-        <button className="button button--secondary" type="submit" disabled={!dirty || saving}>
-          {saving ? "Saving…" : "Save source settings"}
-        </button>
-        {saved && (
-          <small role="status">
-            Saved on the server. The refreshed face will use these settings.
-          </small>
-        )}
-      </div>
-      {error && (
+      {error ? (
         <p className="data-note" role="alert">
           <span>{error.message}</span>
         </p>
-      )}
+      ) : shown?.alert ? (
+        <p className="data-note" role="alert">
+          <span>{shown.text}</span>
+        </p>
+      ) : shown ? (
+        <p className="source-settings__status" role="status">
+          {shown.text}
+        </p>
+      ) : null}
     </form>
   );
 }

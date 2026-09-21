@@ -12,7 +12,16 @@ interface DevicePreviewProps {
   imageSources: ImageSource[];
 }
 
-const LIVE_TEMPLATES = new Set(["clock", "pomodoro"]);
+/** Re-render cadence per card kind, in milliseconds. */
+const REFRESH_MS: Record<string, number> = {
+  // Live templates re-render at 1 Hz so the clock ticks (spec §2.5).
+  clock: 1_000,
+  pomodoro: 1_000,
+  // A picture's preview is the frame its source last drew, and nothing tells the
+  // window when a source draws. Without this a face created a moment ago says "No
+  // frame yet" until the owner clicks away and back.
+  picture: 10_000,
+};
 
 export function DevicePreview({
   cards,
@@ -64,8 +73,8 @@ export function DevicePreview({
       }
     };
     void tick();
-    // Live templates re-render at 1 Hz so the clock ticks (spec §2.5).
-    const interval = LIVE_TEMPLATES.has(widget.kind) ? window.setInterval(tick, 1000) : undefined;
+    const cadence = REFRESH_MS[widget.kind];
+    const interval = cadence === undefined ? undefined : window.setInterval(tick, cadence);
     return () => {
       cancelled = true;
       if (interval) window.clearInterval(interval);

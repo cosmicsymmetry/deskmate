@@ -187,9 +187,8 @@ async fn post_form_refuses_the_cloud_metadata_address() {
 
 #[tokio::test]
 async fn the_calendar_api_host_is_not_reachable_from_the_credential_bearing_post_path() {
-    // Calendar is the producer's egress, so credential-bearing POSTs must
-    // not reach it. Provider GET content fetching uses the address guard
-    // without this identity-host allowlist.
+    // Calendar is the producer's egress, never the server's. If this ever
+    // stops failing, the server has become a content fetcher again.
     let error = super::fetch_post_form(
         "https://www.googleapis.com/calendar/v3/calendars/primary/events",
         &[],
@@ -345,11 +344,11 @@ impl HopResolver for FixedAddrResolver {
 }
 
 #[tokio::test]
-async fn fetch_inner_strips_path_and_query_secrets_from_request_errors() {
+async fn post_form_strips_path_and_query_secrets_from_request_errors() {
     let addr = SocketAddr::from(([127, 0, 0, 1], 0));
 
     let url = "http://failure.invalid:0/path-secret?query-secret-key=query-secret-value";
-    let error = fetch_inner(url, &FixedAddrResolver(addr))
+    let error = post_form_inner(url, &FixedAddrResolver(addr), &[])
         .await
         .expect_err("the closed listener must refuse the connection");
     let EgressError::Request(detail) = error else {
@@ -521,272 +520,33 @@ async fn reqwest_resolve_override_connects_to_the_pin_and_preserves_the_host_hea
     assert_eq!(observed_host, format!("example.invalid:{}", addr.port()));
 }
 
-/// A redirect must not walk an encrypted fetch down onto cleartext.
-/// `egress_guard` itself accepts `http`, so it cannot catch a downgrade
-/// without the previous hop's scheme.
-#[test]
-fn a_redirect_may_not_downgrade_https_to_http() {
-    let secure = Url::parse("https://feeds.example/data.json").expect("url");
-    let cleartext = Url::parse("http://feeds.example/data.json").expect("url");
-
-    let error =
-        deny_scheme_downgrade(&secure, &cleartext).expect_err("https -> http must be refused");
-    assert!(
-        matches!(&error, EgressError::BadRedirect(detail) if detail.contains("downgrade")),
-        "unexpected error: {error}"
-    );
-
-    // The three hops that are not downgrades all stay allowed.
-    deny_scheme_downgrade(&secure, &secure).expect("https -> https is fine");
-    deny_scheme_downgrade(&cleartext, &secure).expect("http -> https is an upgrade");
-    deny_scheme_downgrade(&cleartext, &cleartext).expect("http -> http is the caller's choice");
-}
-
-#[test]
-fn a_relative_redirect_target_resolves_against_its_base() {
-    let base = Url::parse("https://example.com/a/start").unwrap();
-    let next = base.join("../b/next").unwrap();
-    assert_eq!(next.as_str(), "https://example.com/b/next");
-    assert!(egress_guard(next.as_str()).is_ok());
-}
-
+/// The redirect guards went with the GET path -- the hop budget, the
+/// re-validation of every `Location`, the https-downgrade refusal -- and what
+/// makes that safe is that this client follows nothing. With reqwest's default
+/// policy a 303 from the token endpoint would be re-issued as a GET to wherever
+/// `Location` points, with no guard on that second request at all: a permitted
+/// host can redirect to `169.254.169.254`. Deleting
+/// `.redirect(Policy::none())` from `build_pinned_client` fails here, because
+/// the pin still maps the fake hostname onto the listener and `/landed` answers.
 #[tokio::test]
-async fn fetch_inner_denies_a_redirect_chain_that_exceeds_max_redirects() {
-    // A handler that redirects to itself forever exercises the cap directly:
-    // `fetch_inner` must give up after MAX_REDIRECTS hops, not loop
-    // indefinitely.
-    let router = axum::Router::new().route(
-        "/loop",
-        axum::routing::get(|| async { axum::response::Redirect::to("/loop") }),
-    );
-    let addr = spawn_server(router).await;
-    let url = format!("http://self-redirect.invalid:{}/loop", addr.port());
-
-    let outcome = fetch_inner(&url, &FixedAddrResolver(addr)).await;
-
-    assert!(
-        matches!(outcome, Err(EgressError::TooManyRedirects)),
-        "expected TooManyRedirects, got {outcome:?}"
-    );
-}
-
-#[tokio::test]
-async fn fetch_inner_denies_a_redirect_target_that_resolves_to_a_denied_address() {
-    // Distinct from the URL-space-only check above: this drives the
-    // REAL fetch_inner loop end to end -- resolver.resolve, the HTTP
-    // GET, RedirectBudget::consume, Location extraction, Url::join,
-    // and finally egress_guard running again on the joined URL -- via a
-    // server that actually issues the redirect, rather than
-    // hand-constructing the joined URL and calling egress_guard on it
-    // directly. A `fetch_inner` that dropped the re-validation call
-    // would return `Ok` here instead.
-    let router = axum::Router::new().route(
-        "/start",
-        axum::routing::get(|| async {
-            axum::response::Redirect::to("http://169.254.169.254/secret")
-        }),
-    );
-    let addr = spawn_server(router).await;
-    let url = format!("http://redirect-test.invalid:{}/start", addr.port());
-
-    let outcome = fetch_inner(&url, &FixedAddrResolver(addr)).await;
-
-    assert!(
-        matches!(
-            outcome,
-            Err(EgressError::Denied {
-                reason: DenyReason::CloudMetadata,
-                ..
-            })
-        ),
-        "expected the metadata redirect target to be denied, got {outcome:?}"
-    );
-}
-
-#[tokio::test]
-async fn fetch_inner_enforces_the_body_cap_against_a_server_that_never_declares_a_length() {
-    // A declared-length case alone does not exercise the streaming
-    // `limiter.push` check because the `content_length()` precheck rejects
-    // it before streaming starts. A hostile server can simply never send
-    // Content-Length at all (chunked transfer-encoding), which is
-    // exactly what `Body::from_stream` produces here, since axum only
-    // emits Content-Length when it knows the full size upfront. This
-    // is the case that can only be caught by the per-chunk
-    // `limiter.push` call as bytes actually arrive.
-    let router = axum::Router::new().route(
-        "/chunked-oversized",
-        axum::routing::get(|| async { chunked_oversized_body() }),
-    );
-    let addr = spawn_server(router).await;
-    let url = format!(
-        "http://chunked-oversized.invalid:{}/chunked-oversized",
-        addr.port()
-    );
-
-    let outcome = fetch_inner(&url, &FixedAddrResolver(addr)).await;
-
-    assert!(
-        matches!(
-            outcome,
-            Err(EgressError::ResponseTooLarge {
-                limit: MAX_RESPONSE_BODY_BYTES
-            })
-        ),
-        "expected ResponseTooLarge, got {outcome:?}"
-    );
-}
-
-#[tokio::test]
-async fn fetch_inner_enforces_the_response_body_cap_over_a_real_connection() {
-    // Exercises specifically the `content_length()` precheck in
-    // `read_capped_body`: axum sets a real, honest Content-Length for a
-    // fully-materialized `Vec<u8>` body, and that header alone is
-    // enough to reject this response before a single byte streams in.
-    let router = axum::Router::new().route(
-        "/oversized",
-        axum::routing::get(|| async { oversized_body() }),
-    );
-    let addr = spawn_server(router).await;
-    let url = format!("http://oversized.invalid:{}/oversized", addr.port());
-
-    let outcome = fetch_inner(&url, &FixedAddrResolver(addr)).await;
-
-    assert!(
-        matches!(
-            outcome,
-            Err(EgressError::ResponseTooLarge {
-                limit: MAX_RESPONSE_BODY_BYTES
-            })
-        ),
-        "expected ResponseTooLarge, got {outcome:?}"
-    );
-}
-
-#[tokio::test]
-async fn fetch_returns_the_response_status_for_a_non_2xx_response() {
-    // Drive the real guarded GET path against a server that answers 503 so
-    // provider error handling receives the upstream status unchanged.
-    let router = axum::Router::new().route(
-        "/unavailable",
-        axum::routing::get(|| async {
-            (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                "service unavailable",
-            )
-        }),
-    );
-    let addr = spawn_server(router).await;
-    let url = format!("http://unavailable.invalid:{}/unavailable", addr.port());
-
-    let outcome = fetch_with_resolver(&url, &FixedAddrResolver(addr)).await;
-
-    let response = outcome.expect("a non-2xx response must still be a successful fetch");
-    assert_eq!(response.status, 503);
-    assert_eq!(response.body, b"service unavailable".to_vec());
-}
-
-#[tokio::test]
-async fn fetch_succeeds_through_a_redirect_chain_that_stays_under_the_total_budget() {
-    // 3 hops * 5ms is trivially under the real TOTAL_FETCH_BUDGET
-    // (20s), so this drives the exact production composition
-    // (`fetch_with_resolver`, hence `fetch`'s real constant) rather
-    // than a shrunk test-only budget, with no risk of running slow.
-    let hop_delay = Duration::from_millis(5);
-    let addr = spawn_delayed_redirect_chain(hop_delay).await;
-    let url = format!("http://fast-chain.invalid:{}/hop1", addr.port());
-
-    let outcome = fetch_with_resolver(&url, &FixedAddrResolver(addr)).await;
-
-    let response = outcome.expect("fetch should succeed");
-    assert_eq!(response.status, 200);
-    assert_eq!(response.body, b"done".to_vec());
-}
-
-#[tokio::test]
-async fn fetch_times_out_when_cumulative_hop_delay_exceeds_the_total_budget() {
-    // Real (not paused/virtual) time throughout: mixing tokio's paused
-    // clock with genuine TCP I/O across two concurrently-running tasks
-    // (this test's client, the spawned axum server) turned out to be
-    // exactly as unreliable as its reputation -- an earlier version of
-    // this test used `#[tokio::test(start_paused = true)]` with 9-second
-    // hop delays and failed non-deterministically with the client's own
-    // per-hop request timeout firing before the paused clock had
-    // advanced the server's sleep, even though the sleep's deadline was
-    // provably sooner. Real, small (millisecond) delays sidestep the
-    // whole class of problem and are just as deterministic.
-    //
-    // `fetch_with_budget` (not `fetch_with_resolver`) lets this pass a
-    // millisecond-scale total budget rather than waiting out the real
-    // TOTAL_FETCH_BUDGET (20s); REQUEST_TIMEOUT stays the real 10s
-    // constant, unaffected, and is not at risk of firing here.
-    let hop_delay = Duration::from_millis(60);
-    let total_budget = Duration::from_millis(100);
-    assert!(hop_delay < REQUEST_TIMEOUT);
-    assert!(hop_delay * 3 > total_budget);
-    let addr = spawn_delayed_redirect_chain(hop_delay).await;
-    let url = format!("http://slow-chain.invalid:{}/hop1", addr.port());
-
-    let outcome = fetch_with_budget(&url, &FixedAddrResolver(addr), total_budget).await;
-
-    assert!(
-        matches!(outcome, Err(EgressError::Timeout)),
-        "expected Timeout, got {outcome:?}"
-    );
-}
-
-#[test]
-fn redirect_budget_allows_exactly_max_redirects_hops() {
-    let mut budget = RedirectBudget::new(MAX_REDIRECTS);
-    for hop in 0..MAX_REDIRECTS {
-        assert!(budget.consume().is_ok(), "hop {hop} should be permitted");
-    }
-}
-
-#[test]
-fn redirect_budget_rejects_one_hop_past_max_redirects() {
-    let mut budget = RedirectBudget::new(MAX_REDIRECTS);
-    for _ in 0..MAX_REDIRECTS {
-        budget.consume().expect("hops up to the cap are permitted");
-    }
-    assert!(matches!(
-        budget.consume(),
-        Err(EgressError::TooManyRedirects)
-    ));
-}
-
-/// Spawns a loopback server whose `/hop1` -> `/hop2` -> `/hop3` chain
-/// each sleeps `hop_delay` before redirecting to the next, and `/hop3`
-/// finally responds 200. Each hop's sleep is kept under
-/// [`REQUEST_TIMEOUT`] individually so no single hop times out; the
-/// point is their *sum*, which a caller picks to land on either side of
-/// [`TOTAL_FETCH_BUDGET`].
-async fn spawn_delayed_redirect_chain(hop_delay: Duration) -> SocketAddr {
+async fn post_form_returns_a_redirect_as_itself_and_never_follows_it() {
     let router = axum::Router::new()
         .route(
-            "/hop1",
-            axum::routing::get(move |headers: axum::http::HeaderMap| async move {
-                assert_eq!(headers[axum::http::header::USER_AGENT], USER_AGENT);
-                tokio::time::sleep(hop_delay).await;
-                axum::response::Redirect::to("/hop2")
-            }),
+            "/token",
+            axum::routing::post(|| async { axum::response::Redirect::to("/landed") }),
         )
-        .route(
-            "/hop2",
-            axum::routing::get(move |headers: axum::http::HeaderMap| async move {
-                assert_eq!(headers[axum::http::header::USER_AGENT], USER_AGENT);
-                tokio::time::sleep(hop_delay).await;
-                axum::response::Redirect::to("/hop3")
-            }),
-        )
-        .route(
-            "/hop3",
-            axum::routing::get(move |headers: axum::http::HeaderMap| async move {
-                assert_eq!(headers[axum::http::header::USER_AGENT], USER_AGENT);
-                tokio::time::sleep(hop_delay).await;
-                "done"
-            }),
-        );
-    spawn_server(router).await
+        .route("/landed", axum::routing::any(|| async { "followed" }));
+    let addr = spawn_server(router).await;
+    let url = format!("http://redirecting.invalid:{}/token", addr.port());
+
+    let outcome = post_form_with_resolver(&url, &FixedAddrResolver(addr), &[]).await;
+
+    let response = outcome.expect("a redirect is a response, not an error");
+    assert_eq!(
+        response.status, 303,
+        "the redirect must reach the caller as itself"
+    );
+    assert_ne!(response.body, b"followed".to_vec());
 }
 
 async fn spawn_server(router: axum::Router) -> SocketAddr {

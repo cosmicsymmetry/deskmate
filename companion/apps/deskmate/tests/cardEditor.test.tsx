@@ -11,6 +11,7 @@ import type {
   CardError,
   CardSettings,
   FaceDescriptor,
+  FaceStatus,
   MintedImageSource,
   ValidationIssue,
 } from "../src/lib/types";
@@ -162,92 +163,180 @@ test("a picture editor shows source access once, immediately after minting", () 
   expect(laterRender).not.toContain("This plaintext token is shown once.");
 });
 
-test("a picture editor renders and saves server-described fields without face-specific logic", async () => {
+const opaqueFace: FaceDescriptor = {
+  kind: "opaque-server-face",
+  label: "Source settings",
+  fields: [
+    { key: "place", label: "Place", type: "text", value: "Dubai", placeholder: "Dubai" },
+    {
+      key: "units",
+      label: "Units",
+      type: "enum",
+      value: "metric",
+      options: [
+        { value: "metric", label: "Metric" },
+        { value: "imperial", label: "Imperial" },
+      ],
+    },
+  ],
+};
+
+/** Mounts the editor on a picture card whose source answers with `face` and `status`. */
+async function mountFaceSettings(face: FaceDescriptor, status: FaceStatus | null) {
   const picture = pictureCard();
-  const descriptor: FaceDescriptor = {
-    kind: "opaque-server-face",
-    label: "Source settings",
-    fields: [
-      {
-        key: "place",
-        label: "Place",
-        type: "text",
-        value: "Dubai",
-        placeholder: "Dubai",
-      },
-      {
-        key: "units",
-        label: "Units",
-        type: "enum",
-        value: "metric",
-        options: [
-          { value: "metric", label: "Metric" },
-          { value: "imperial", label: "Imperial" },
-        ],
-      },
-    ],
-  };
+  let current = face;
+  let currentStatus = status;
+  const saves: Record<string, string>[] = [];
   backendMocks.imageSourcesImpl = async () => [
-    { id: picture.source_id, name: "Claude limits", face: descriptor },
+    { id: picture.source_id, name: "Claude limits", face: current, face_status: currentStatus },
   ];
-  let savedFields: Record<string, string> | null = null;
   backendMocks.updateImageSourceFaceImpl = async (_sourceId, fields) => {
-    savedFields = fields;
-    return {
-      ...descriptor,
-      fields: descriptor.fields.map((field) => ({
+    saves.push(fields);
+    current = {
+      ...current,
+      fields: current.fields.map((field) => ({
         ...field,
         value: fields[field.key] ?? field.value,
       })),
     };
+    return current;
   };
-  const { container, root, cleanup } = await mount();
+  const mounted = await mount();
+  await act(async () =>
+    mounted.root.render(
+      <CardEditor
+        card={picture}
+        config={cardListConfig([picture])}
+        issues={[]}
+        cardError={null}
+        pomodoro={null}
+        timerBusy={false}
+        onChange={() => {}}
+        onConfigChange={() => {}}
+        onRemove={() => {}}
+        onTimerAction={() => {}}
+      />,
+    ),
+  );
+  await waitFor(() => expect(mounted.container.textContent).toContain(face.label));
+  const type = async (placeholder: string, value: string) => {
+    const input = mounted.container.querySelector<HTMLInputElement>(
+      `input[placeholder="${placeholder}"]`,
+    );
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, value);
+      input?.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    return input;
+  };
+  return {
+    ...mounted,
+    saves,
+    type,
+    setStatus: (next: FaceStatus | null) => {
+      currentStatus = next;
+    },
+    cleanup: async () => {
+      await mounted.cleanup();
+      backendMocks.imageSourcesImpl = async () => [];
+      backendMocks.updateImageSourceFaceImpl = async () => {
+        throw new Error("updateImageSourceFace not configured for this test");
+      };
+    },
+  };
+}
+
+test("face settings save themselves: there is no second save button to forget", async () => {
+  // The defect this pins: a separate "Save source settings" button beside the window's
+  // "Save to server" meant the prominent one silently discarded a typed coin ID. The
+  // face stayed blank, the panel said "Waiting for the first picture", the window said
+  // "Saved to the server".
+  const editor = await mountFaceSettings(opaqueFace, null);
   try {
-    await act(async () =>
-      root.render(
-        <CardEditor
-          card={picture}
-          config={cardListConfig([picture])}
-          issues={[]}
-          cardError={null}
-          pomodoro={null}
-          timerBusy={false}
-          onChange={() => {}}
-          onConfigChange={() => {}}
-          onRemove={() => {}}
-          onTimerAction={() => {}}
-        />,
+    expect(buttonWithText(editor.container, "Save source settings")).toBeUndefined();
+
+    const place = await editor.type("Dubai", "Berlin");
+    expect(editor.saves).toEqual([]);
+    // Leaving the field is what clicking the window's own save does first.
+    await act(async () => place?.dispatchEvent(new FocusEvent("focusout", { bubbles: true })));
+    await waitFor(() => expect(editor.saves).toEqual([{ place: "Berlin" }]));
+
+    // A choice has no "leaving": it saves at once, and only what changed.
+    await act(async () => buttonWithText(editor.container, "Imperial")?.click());
+    await waitFor(() => expect(editor.saves).toEqual([{ place: "Berlin" }, { units: "imperial" }]));
+    expect(editor.container.textContent).not.toContain(opaqueFace.kind);
+  } finally {
+    await editor.cleanup();
+  }
+});
+
+test("an emptied required field is an unfinished form, not a request", async () => {
+  const editor = await mountFaceSettings(opaqueFace, null);
+  try {
+    const place = await editor.type("Dubai", "   ");
+    await act(async () => place?.dispatchEvent(new FocusEvent("focusout", { bubbles: true })));
+    await act(async () => {});
+    expect(editor.saves).toEqual([]);
+  } finally {
+    await editor.cleanup();
+  }
+});
+
+test("the window says why a face is not drawing, in the server's own words", async () => {
+  const blank: FaceDescriptor = {
+    kind: "token",
+    label: "Token price",
+    fields: [
+      { key: "coin_id", label: "Coin ID", type: "text", value: "", placeholder: "solana" },
+      { key: "currency", label: "Currency", type: "text", value: "usd", placeholder: "usd" },
+    ],
+  };
+  const editor = await mountFaceSettings(blank, {
+    state: "needs-settings",
+    message: null,
+    at_unix_seconds: null,
+  });
+  try {
+    expect(editor.container.textContent).toContain("Fill in Coin ID to start this face.");
+
+    // A ticker where an id belongs: the server reports it, and saving re-reads the status.
+    editor.setStatus({
+      state: "needs-attention",
+      message: "the token was not found; check the coin ID",
+      at_unix_seconds: 1_790_000_000,
+    });
+    const coin = await editor.type("solana", "SOL");
+    await act(async () => coin?.dispatchEvent(new FocusEvent("focusout", { bubbles: true })));
+    await waitFor(() =>
+      expect(editor.container.querySelector('[role="alert"]')?.textContent).toBe(
+        "The token was not found; check the coin ID.",
       ),
     );
-    await waitFor(() => expect(container.textContent).toContain("Source settings"));
-    const place = container.querySelector<HTMLInputElement>('input[placeholder="Dubai"]');
-    await act(async () => {
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(
-        place,
-        "Berlin",
-      );
-      place?.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    const imperial = buttonWithText(container, "Imperial");
-    await act(async () => imperial?.click());
-    await act(async () => buttonWithText(container, "Save source settings")?.click());
-
-    await waitFor(() => expect(savedFields).toEqual({ place: "Berlin", units: "imperial" }));
-    expect(container.textContent).toContain("Saved on the server");
-    expect(container.textContent).not.toContain(descriptor.kind);
   } finally {
-    await cleanup();
-    backendMocks.imageSourcesImpl = async () => [];
-    backendMocks.updateImageSourceFaceImpl = async () => {
-      throw new Error("updateImageSourceFace not configured for this test");
-    };
+    await editor.cleanup();
+  }
+});
+
+test("a drawn face and a retrying one are statuses, not alarms", async () => {
+  const editor = await mountFaceSettings(opaqueFace, {
+    state: "retrying",
+    message: "api.coingecko.com returned HTTP 429",
+    at_unix_seconds: 1_790_000_000,
+  });
+  try {
+    const status = editor.container.querySelector('.source-settings [role="status"]');
+    expect(status?.textContent).toContain("api.coingecko.com returned HTTP 429.");
+    expect(status?.textContent).toContain("keeps the last frame");
+    expect(editor.container.querySelector('.source-settings [role="alert"]')).toBeNull();
+  } finally {
+    await editor.cleanup();
   }
 });
 
 test("an external picture producer adds no settings form", async () => {
   const picture = pictureCard();
   backendMocks.imageSourcesImpl = async () => [
-    { id: picture.source_id, name: "Claude limits", face: null },
+    { id: picture.source_id, name: "Claude limits", face: null, face_status: null },
   ];
   const { container, root, cleanup } = await mount();
   try {

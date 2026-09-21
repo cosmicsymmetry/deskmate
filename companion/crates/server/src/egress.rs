@@ -1,16 +1,27 @@
-//! SSRF egress guard for every outbound HTTP request the server makes.
+//! SSRF egress guard for the server's one outbound call: a form POST to the
+//! OAuth token endpoint.
 //!
-//! Provider GETs accept owner-supplied URLs, so [`fetch`] applies address-level
-//! exclusions for RFC1918, loopback, link-local, `169.254.169.254`, and the other
-//! special-purpose ranges below, with resolve-then-pin protection against DNS
-//! rebinding. Credential-bearing OAuth POSTs use the same address checks and add
-//! a positive allowlist of exactly one host ([`IDENTITY_HOST`]).
+//! The server issues no GET of its own. It did twice -- plugin data feeds until
+//! schema v9, then the weather, RSS and token providers -- and both times the
+//! GET path was deleted with its consumer rather than left behind: a
+//! `fetch(url)` with no allowlist in front of it leaves the invariant open to
+//! the next caller. The faces that need the network now run in a separate
+//! subprocess (`companion/faces`), which does its own fetching behind its own,
+//! lighter guard (`companion/faces/src/kit/http.ts`). None of that traffic
+//! passes through this module, and this module does not vouch for it.
 //!
-//! The narrower OAuth allowlist prevents credentials from being posted to a
-//! provider URL, while the address checks stop any permitted hostname from
-//! resolving to a homelab neighbour or, on a cloud VM, the metadata endpoint.
-//! This module is the only place allowed to decide "yes, fetch that" and the
-//! only place that performs the fetch.
+//! What remains is the credential path, bounded twice over: a positive
+//! allowlist of exactly one host ([`IDENTITY_HOST`]), and, behind it,
+//! address-level exclusions for RFC1918, loopback, link-local,
+//! `169.254.169.254` and the other special-purpose ranges below, with
+//! resolve-then-pin protection against DNS rebinding.
+//!
+//! Both layers earn their place. The allowlist states the policy -- credentials
+//! are posted to the identity host and nowhere else -- while the address checks
+//! stop a DNS answer for that one permitted host from pointing the pinned
+//! connection at a homelab neighbour or, on a cloud VM, at the metadata
+//! endpoint. This module is the only place allowed to decide "yes, fetch that"
+//! and the only place that performs the fetch.
 //!
 //! # Why hostname validation alone is not enough
 //!
@@ -34,9 +45,9 @@
 //! server observed is the pinned name, not the literal address). This
 //! module does not independently verify reqwest's TCP connect behaviour
 //! beyond that, so a defect inside reqwest's connector itself is outside
-//! what this guard can catch. Every redirect hop is re-validated and
-//! re-pinned from scratch (a permitted host can redirect to
-//! `169.254.169.254`), but a single connection is not continuously
+//! what this guard can catch. No redirect is followed at all -- a permitted
+//! host can redirect to `169.254.169.254`, so a 3xx is handed back to the
+//! caller as itself -- but a single connection is not continuously
 //! re-checked against TOCTOU races faster than one DNS resolution.
 //!
 //! Every outbound client also disables reqwest's proxy support
@@ -89,29 +100,19 @@ use reqwest::Url;
 /// "this is the metadata endpoint," not merely "this is link-local".
 const CLOUD_METADATA_ADDR: Ipv4Addr = Ipv4Addr::new(169, 254, 169, 254);
 
-/// How this server identifies its provider GET requests.
-///
-/// One name for every provider GET, so an operator reading their access
-/// log sees one client rather than a blank line.
-const USER_AGENT: &str = concat!("deskmate-server/", env!("CARGO_PKG_VERSION"));
-
 /// Wall-clock budget for a single DNS resolution.
 const RESOLUTION_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Wall-clock budget for a single HTTP request/response (one redirect hop).
+/// Wall-clock budget for the single HTTP request/response.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Wall-clock budget for the *entire* fetch, including every redirect hop
-/// and DNS resolution. Bounds total time even though each hop also has its
-/// own [`REQUEST_TIMEOUT`], because a chain of hops that are each fast
-/// individually could otherwise still run unboundedly long.
+/// Wall-clock budget for the *entire* fetch: the DNS resolution and the
+/// request together. Each already has its own timeout
+/// ([`RESOLUTION_TIMEOUT`], [`REQUEST_TIMEOUT`]); this is the backstop over
+/// their sum, so the caller's wait is bounded by one number.
 const TOTAL_FETCH_BUDGET: Duration = Duration::from_secs(20);
 
-/// Maximum number of redirect hops followed before giving up. `0` means the
-/// first response must not be a redirect.
-const MAX_REDIRECTS: u8 = 5;
-
-/// Maximum response body size accepted by either outbound request path.
+/// Maximum response body size accepted from the token endpoint.
 pub(crate) const MAX_RESPONSE_BODY_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Why a fetch was refused. Every variant is meant to be safe to log and to
@@ -143,14 +144,8 @@ pub(crate) enum EgressError {
     /// protocol error, etc.).
     #[error("request failed: {0}")]
     Request(String),
-    /// Too many redirect hops.
-    #[error("too many redirects (limit {})", MAX_REDIRECTS)]
-    TooManyRedirects,
-    /// A redirect response had a missing or unusable `Location` header.
-    #[error("bad redirect: {0}")]
-    BadRedirect(String),
-    /// The credential-bearing POST host is not [`IDENTITY_HOST`]. Provider
-    /// GETs use the address guard without this host allowlist.
+    /// The host is not [`IDENTITY_HOST`], the one host this server posts
+    /// credentials to.
     #[error("host {host} is not the permitted identity host")]
     HostNotPermitted { host: String },
 }
@@ -478,10 +473,10 @@ fn deny_reason_v6(ip: Ipv6Addr) -> Option<DenyReason> {
 ///
 /// A literal-IP host needs no DNS resolution to validate, so this check is
 /// synchronous and cheap; it exists as a fast, obvious first gate that
-/// [`fetch`] also runs on every redirect target. It does **not** perform
-/// DNS resolution, so a DNS-name host that resolves to a denied address is
-/// only caught by [`fetch`]'s resolve-then-pin step, which runs the real
-/// resolution exactly once per hop.
+/// [`fetch_post_form`] runs before anything touches the network. It does
+/// **not** perform DNS resolution, so a DNS-name host that resolves to a
+/// denied address is only caught by the resolve-then-pin step
+/// ([`resolve_and_pin`]), which runs the real resolution exactly once.
 fn egress_guard(url: &str) -> Result<Url, EgressError> {
     let parsed = Url::parse(url).map_err(|error| EgressError::InvalidUrl(error.to_string()))?;
     match parsed.scheme() {
@@ -570,8 +565,8 @@ async fn resolve_once(host: &str, port: u16) -> Result<Vec<IpAddr>, EgressError>
 /// Resolves `url`'s host exactly once, validates every address that
 /// resolution returned, and returns the single validated
 /// `(host, SocketAddr)` pair the caller must pin the connection to. This is
-/// the resolve-then-pin step: [`fetch`] never asks anything (resolver or
-/// HTTP client) to resolve the same host a second time for the same hop.
+/// the resolve-then-pin step: [`fetch_post_form`] never asks anything
+/// (resolver or HTTP client) to resolve the same host a second time.
 async fn resolve_and_pin(url: &Url) -> Result<(String, SocketAddr), EgressError> {
     let host = url.host_str().ok_or(EgressError::MissingHost)?.to_string();
     let port = url
@@ -580,31 +575,6 @@ async fn resolve_and_pin(url: &Url) -> Result<(String, SocketAddr), EgressError>
     let candidates = resolve_once(&host, port).await?;
     let ip = select_pinned_address(&host, &candidates)?;
     Ok((host, SocketAddr::new(ip, port)))
-}
-
-/// Counts redirect hops and fails the moment more than `max` have been
-/// followed. Used by [`fetch_inner`] instead of an inline loop counter so
-/// the cap is directly unit-testable, the same way [`BodyLimiter`] makes
-/// the size cap directly testable.
-struct RedirectBudget {
-    max: u8,
-    followed: u8,
-}
-
-impl RedirectBudget {
-    fn new(max: u8) -> Self {
-        Self { max, followed: 0 }
-    }
-
-    /// Call once per redirect hop actually followed. Errs on the hop that
-    /// would take the count past `max`.
-    fn consume(&mut self) -> Result<(), EgressError> {
-        if self.followed >= self.max {
-            return Err(EgressError::TooManyRedirects);
-        }
-        self.followed += 1;
-        Ok(())
-    }
 }
 
 /// A byte counter that fails the moment it would exceed `limit`, used to
@@ -638,8 +608,8 @@ impl BodyLimiter {
 /// [`FixedAddrResolver`], which points the *connection* at a loopback
 /// wiremock while leaving `egress_guard` -- which still runs, unmodified, on
 /// the POST path -- to validate the URL exactly as
-/// production does. This is what makes the redirect chain, the body cap and
-/// the total time budget testable end-to-end against a real HTTP server:
+/// production does. This is what makes the pinned client and the body cap
+/// testable end-to-end against a real HTTP server:
 /// the seam is DNS resolution, never the deny-list, so a loopback address is
 /// still correctly refused everywhere the guard itself runs.
 trait HopResolver {
@@ -655,8 +625,9 @@ impl HopResolver for RealResolver {
 }
 
 /// The result of a request that ran to completion under the egress guard: the
-/// final HTTP status alongside its capped body. GET redirects are followed by
-/// `fetch` after re-validation; the POST path returns a redirect status as-is.
+/// HTTP status alongside its capped body. A redirect status arrives here as
+/// itself: the client disables redirect following, and the token endpoint has
+/// no reason to issue one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchResponse {
     pub status: u16,
@@ -679,9 +650,9 @@ fn describe_reqwest_error(error: reqwest::Error) -> String {
     message
 }
 
-/// Builds the reqwest client used for one pinned hop, shared by the GET
-/// ([`fetch`]) and POST ([`fetch_post_form`]) paths so both get identical
-/// resolve-then-pin, no-redirect, timeout and no-proxy behaviour.
+/// Builds the reqwest client for the one pinned request [`fetch_post_form`]
+/// makes: resolve-then-pin, no redirect following, a request timeout and no
+/// proxy.
 ///
 /// DO NOT REMOVE `.no_proxy()`: reqwest's `auto_sys_proxy` defaults to true and
 /// the underlying hyper-util connector reads `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`
@@ -702,131 +673,13 @@ fn build_pinned_client(
         .map_err(|error| EgressError::Request(describe_reqwest_error(error)))
 }
 
-/// Fetches `url` under the egress guard: scheme/deny-list checks, DNS
-/// resolve-then-pin, a capped redirect chain (every hop re-validated and
-/// re-pinned from scratch), a capped response body, and an overall wall-clock
-/// budget. This is the entry point for provider GETs.
-pub(crate) async fn fetch(url: &str) -> Result<FetchResponse, EgressError> {
-    fetch_with_resolver(url, &RealResolver).await
-}
-
-/// The whole of [`fetch`]'s behaviour -- including the total-budget
-/// wrapping -- parameterized over the DNS step *and* the budget itself, so
-/// tests exercise the exact same composition production uses rather than a
-/// parallel reimplementation of it. Production always calls this through
-/// [`fetch_with_resolver`], which fixes `total_budget` at
-/// [`TOTAL_FETCH_BUDGET`]; tests pass a millisecond-scale budget instead so
-/// the over-budget case is proven with a real (not virtual/paused) clock in
-/// milliseconds rather than tens of real seconds. [`REQUEST_TIMEOUT`] is
-/// unaffected either way -- it stays the real per-hop constant, comfortably
-/// larger than any test delay used against it.
-async fn fetch_with_budget(
-    url: &str,
-    resolver: &impl HopResolver,
-    total_budget: Duration,
-) -> Result<FetchResponse, EgressError> {
-    match tokio::time::timeout(total_budget, fetch_inner(url, resolver)).await {
-        Ok(result) => result,
-        Err(_elapsed) => Err(EgressError::Timeout),
-    }
-}
-
-async fn fetch_with_resolver(
-    url: &str,
-    resolver: &impl HopResolver,
-) -> Result<FetchResponse, EgressError> {
-    fetch_with_budget(url, resolver, TOTAL_FETCH_BUDGET).await
-}
-
-async fn fetch_inner(url: &str, resolver: &impl HopResolver) -> Result<FetchResponse, EgressError> {
-    let mut current = egress_guard(url)?;
-    let mut redirects = RedirectBudget::new(MAX_REDIRECTS);
-
-    loop {
-        let (host, pinned_addr) = resolver.resolve(&current).await?;
-
-        let client = reqwest::Client::builder()
-            .resolve(&host, pinned_addr)
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(REQUEST_TIMEOUT)
-            // reqwest sends no User-Agent at all unless one is set, and a
-            // Cloudflare-fronted API answers that with 403 before it ever
-            // looks at the path -- which is how the CoinGecko fetch failed
-            // with "provider returned HTTP 403" while curl to the same URL
-            // worked. `tools/picture-producers/claude_limits_png.py` carries
-            // the same note for urllib. This is identifying ourselves, not
-            // working around a control.
-            .user_agent(USER_AGENT)
-            // DO NOT REMOVE: reqwest's `auto_sys_proxy` defaults to true,
-            // and the underlying hyper-util connector reads
-            // HTTP_PROXY/HTTPS_PROXY/ALL_PROXY from the environment
-            // unconditionally. If any of those were set, the connection
-            // would go to the proxy instead of `pinned_addr`, silently
-            // defeating resolve-then-pin -- the DNS override above would
-            // simply never be consulted. `.no_proxy()` clears any
-            // configured proxy and disables that environment lookup.
-            .no_proxy()
-            .build()
-            .map_err(|error| EgressError::Request(describe_reqwest_error(error)))?;
-
-        let response = client
-            .get(current.clone())
-            .send()
-            .await
-            .map_err(|error| EgressError::Request(describe_reqwest_error(error)))?;
-
-        if response.status().is_redirection() {
-            redirects.consume()?;
-            let location = response
-                .headers()
-                .get(reqwest::header::LOCATION)
-                .ok_or_else(|| EgressError::BadRedirect("missing Location header".to_string()))?
-                .to_str()
-                .map_err(|_| {
-                    EgressError::BadRedirect("Location header is not valid UTF-8".to_string())
-                })?;
-            let next = current
-                .join(location)
-                .map_err(|error| EgressError::BadRedirect(error.to_string()))?;
-            deny_scheme_downgrade(&current, &next)?;
-            // Re-run the full guard (scheme + literal-IP deny check) on the
-            // redirect target: a permitted host can redirect to
-            // 169.254.169.254, and this is what catches that.
-            current = egress_guard(next.as_str())?;
-            continue;
-        }
-
-        let status = response.status().as_u16();
-        let body = read_capped_body(response).await?;
-        return Ok(FetchResponse { status, body });
-    }
-}
-
-/// Refuses a redirect that walks an `https` fetch down onto `http`.
-///
-/// `egress_guard` deliberately accepts both schemes because providers may be
-/// configured with an `http` URL. What it cannot express is that a fetch which
-/// *started* encrypted must stay encrypted: without this check a single
-/// `Location: http://...` silently downgrades every remaining hop and may expose
-/// credentials carried in a configured URL.
-///
-/// Upgrades (`http` -> `https`) and same-scheme hops are unaffected.
-fn deny_scheme_downgrade(current: &Url, next: &Url) -> Result<(), EgressError> {
-    if current.scheme() == "https" && next.scheme() != "https" {
-        return Err(EgressError::BadRedirect(format!(
-            "refusing to downgrade an https fetch to {}",
-            next.scheme()
-        )));
-    }
-    Ok(())
-}
-
-/// The credential-bearing POST path's only permitted outbound host.
+/// The server's only permitted outbound host.
 ///
 /// `accounts.google.com` is deliberately absent: consent is a `302` the
 /// *browser* follows, not a request the server issues. `www.googleapis.com` is
-/// absent because the Calendar API is the *producer's* egress. Provider GETs do
-/// not use this allowlist; they are constrained by the address guard instead.
+/// absent because the Calendar API is the *producer's* egress. Widening this
+/// constant means the server has started fetching something again, and each of
+/// those refusals has a test that says so.
 const IDENTITY_HOST: &str = "oauth2.googleapis.com";
 
 /// POSTs `form` as `application/x-www-form-urlencoded` to `url` under the full

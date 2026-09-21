@@ -55,18 +55,42 @@ default. This section states only what is true now.
   from one of two producers: an external one POSTing a PNG, or **the server itself**. The
   device-rendered data cards (calendar, weather, json-feed, rss) went in v8 and
   manifest-based plugins in v9, and neither is coming back as a card kind.
-- **The server renders weather, RSS and token faces, and therefore makes outbound HTTP
-  again** (`docs/images/server-rendered-cards.md`). It did not between `e137294` and
-  `feat/server-side-cards`. These are **not new card kinds**: each is an image source the
-  server pushes to itself, named by an ordinary picture card, configured in
-  `data-cards.json` under `DESKMATE_CONFIG_DIR` (or `DESKMATE_DATA_CARDS`). Schema stays
-  v10 and the wire is untouched. Every outbound request goes through
-  `crates/server/src/egress.rs` -- the same SSRF guard the plugin system used, restored
-  whole -- and `EgressHttpClient` is the only HTTP client the provider layer is given.
-  **A face is rastered, not composed as a scene**, because `SCENE_MAX_NODES` is 24, a
-  `SceneLine` holds 8 points, and only the Caption and Body baked tiers contain letters;
-  the frame then rides the picture card's existing asset path, so there is still exactly
-  one *scene* renderer.
+- **The server-rendered faces -- weather, Hacker News, RSS, token -- are TypeScript, in
+  `companion/faces/`, and the server runs them as a subprocess**
+  (`docs/images/server-rendered-cards.md`). They were Rust until 2026-09-20
+  (`crates/server/src/faces/`, `crates/providers`); the owner moved them for maintenance.
+  These are **not new card kinds**: each is an image source the server pushes to itself,
+  named by an ordinary picture card, configured in `data-cards.json` under
+  `DESKMATE_CONFIG_DIR` (or `DESKMATE_DATA_CARDS`). Schema stays v10 and the wire is
+  untouched. The split: `crates/server/src/data_cards.rs` owns the specs, the browser's
+  settings contract, validation and the refresh schedule, and **names no face kind**; the
+  package owns what a face fetches and how it is drawn. The seam is two verbs
+  (`data_cards/faces_package.rs` <-> `faces/src/main.ts`): `describe` prints the catalog
+  the add menu is built from, `render` turns `{kind, settings}` on stdin into a PNG on
+  stdout that goes through `canonical_frame_from_png` like any producer's POST. Exit 2
+  means "the owner must change a setting", anything else non-zero is transient, and
+  either keeps the stored frame. The child's environment is cleared -- the server's holds
+  the admin token. **Adding a face is a file in `faces/src/faces/` plus
+  `deploy.sh --faces-only`: no Rust, no restart**, because `DESKMATE_FACES_DIR` is read
+  per refresh and the catalog re-read every minute, exactly as `DESKMATE_WEB_DIR` is.
+  - **The server makes no outbound GET again.** The faces fetch from their own process,
+    behind their own guard (`faces/src/kit/http.ts`: private/loopback/metadata refused on
+    every redirect hop, body cap, deadline, and the resolved address PINNED -- the
+    request dials the validated IP with the name in `Host` and as the TLS server name,
+    because Bun's `node:https` `lookup` override breaks certificate checking and its
+    `fetch` would resolve the name a second time). `egress.rs` is back
+    to one host, `oauth2.googleapis.com`, POST only.
+  - **A face is rastered, not composed as a scene**, because `SCENE_MAX_NODES` is 24, a
+    `SceneLine` holds 8 points, and only the Caption and Body baked tiers contain
+    letters; the frame then rides the picture card's existing asset path, so there is
+    still exactly one *scene* renderer. `@resvg/resvg-js` is the same `resvg` engine the
+    Rust faces used, which is what let the port be accepted on **byte-identical SVG**:
+    `faces/test/golden/` holds the Rust renderer's own output for the 19 cases that
+    existed, and the owner-approved weather design moved without a pixel changing.
+  - **The window's preview of a picture card is the stored frame**, decoded back to a PNG
+    (`image_ingest::png_from_canonical_frame`). Nothing is rendered for it, so this is
+    not a second renderer. Until 2026-09-20 every picture card previewed as a sentence on
+    black, which made a freshly created face look unfinished.
 - **Every card face is a host-pushed scene**, and there is exactly **one renderer**. The
   hand-written C templates stopped shipping at stage 3a and their reference oracle was
   deleted on 2026-09-11. The companion's card preview builds the same scene
@@ -99,6 +123,10 @@ default. This section states only what is true now.
   compiles the panel's own LVGL for the card preview; `firmware/managed_components/` is
   gitignored and is the one part copied from the working tree, pinned by the tracked
   `firmware/dependencies.lock`. Device URL `wss://deskmate.rodi.one/v1/device/link`.
+  **The faces ship separately, as a directory**: `deploy.sh` rsyncs `companion/faces/`,
+  runs `bun install` and the faces suite **on the VM** (its resvg build is not the
+  Mac's), and only then installs into `/var/lib/deskmate/faces`. The VM needs
+  `/usr/local/bin/bun`; the script says how if it is missing.
   - **No edge auth, on the owner's decision (2026-09-18).** The app is its own gate:
     `/v1/app/*` and `/v1/manage/*` need the operator session cookie traded for
     `DESKMATE_ADMIN_TOKEN`, `/v1/device/*` and `/v1/images/*` need their own bearers, and
@@ -229,14 +257,45 @@ Each of these cost this project real time at least once.
   the image valid, or `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` rolls it back.
 - **The board is normally powered off.** A disconnected `dev-0005` or an idle-timeout
   close is the resting state, not a fault.
-- **`face_render::text_width` does NOT account for `letter-spacing`.** Every eyebrow on a
-  server-rendered face is tracked out 1.4px, so a 27-character run draws ~38px wider than
-  it measures and silently overhangs the canvas -- a fixed panel has no scrollbar and no
-  clipping artifact to show you. Use `svg::tracked_width`/`svg::fit_tracked` for any
-  tracked run. Every fixture place name was short, so only a live response caught it.
-- **`reqwest` sends no `User-Agent` unless one is set**, and a Cloudflare-fronted API
-  answers that with 403 before it reads the path -- which is why a CoinGecko fetch failed
-  while `curl` to the same URL worked. `egress::USER_AGENT` covers the server;
+- **`textWidth` (`companion/faces/src/kit/`) does NOT account for `letter-spacing`.**
+  Every eyebrow on a server-rendered face is tracked out 1.4px, so a 27-character run
+  draws ~38px wider than it measures and silently overhangs the canvas -- a fixed panel
+  has no scrollbar and no clipping artifact to show you. Use `trackedWidth`/`fitTracked`
+  for any tracked run. Every fixture place name was short, so only a live response
+  caught it -- and the same is true of the Hacker News planner, whose lone-lead fallback
+  outbid its own index until a real front page with a short top story arrived. **Build a
+  face's cases from captured responses, not from invented ones.**
+- **A golden SVG in `companion/faces/test/golden/` is byte-exact, and `fixed()` is why it
+  can be.** Rust's `{:.2}` rounds an exact tie to even and JS `toFixed` rounds it away
+  from zero; 8px-grid arithmetic produces exact ties (n/8 is representable), so a port
+  using `toFixed` differs in the last digit of a few coordinates. Go through
+  `kit/svg.ts`'s `fixed`, never `toFixed`, for anything that reaches the document. A
+  deliberate design change is `bun run dump --update`, reviewed as a diff.
+- **A second save control beside "Save to server" silently discards what it guards.** The
+  server faces' fields once had their own small "Save source settings" button. Type a coin,
+  press the prominent save, and the coin was gone: the face stayed blank, was never
+  fetched, the panel said "Waiting for the first picture" and the window said "Saved to
+  the server". Face fields now save themselves (blur, Enter, at once for a choice). **Do
+  not add a control whose unsaved state the window's one save ignores.**
+- **A face that cannot draw must say so in the window, because the panel cannot.** The
+  device has three states for a picture card -- waiting, stale, drawn -- and none of them
+  is "your coin was not found" or "the API said 429". `face_status` on `GET /v1/images`
+  carries the faces package's own sentence to the editor. A new failure mode in a face is
+  a `ConfigurationError` (the owner must act) or a `TransientError` (retried in a minute),
+  never a log line only.
+- **The server's frame store is not the panel.** On 2026-09-20 the token card was driven
+  end to end "against a real server", pronounced working, and did not work on the device.
+  A frame in the store proves the fetch and the drawing. It says nothing about what the
+  owner typed into the live window, what the live VM's IP is allowed to fetch, or what the
+  tunnel carries. Say which of those was checked, in those words.
+- **Waiting for a child's pipe to close is not waiting for the child.** EOF needs every
+  holder of the write end gone, and an unrelated process can inherit one: on macOS a pipe
+  gains `CLOEXEC` non-atomically, so a concurrent fork elsewhere in the process races it.
+  `faces_package::run` therefore waits on the exit status, gives EOF 250 ms, and takes
+  what was collected. It surfaced as a flaky test, and would have been a wedged refresh.
+- **An HTTP client's default `User-Agent` gets a 403 from a Cloudflare-fronted API**
+  before it reads the path -- which is why a CoinGecko fetch failed while `curl` to the
+  same URL worked. `companion/faces/src/kit/http.ts`'s `USER_AGENT` covers the faces;
   `tools/picture-producers/claude_limits_png.py` carries the same note for urllib.
 
 ### Product rules the owner has set
@@ -342,9 +401,15 @@ These are decisions, not defaults. Changing one needs the owner, not a judgement
   so these are runnable rather than blocked.
 - A **server-rendered face on the panel**. These frames reach the device over the picture
   card's asset path, which is proven for a producer's PNG but has never carried a frame
-  the server drew. Owed: one weather, one RSS and one token face on `dev-0005` at both
-  mountings, plus the measured RLE565 transfer size per frame -- the flat-fill argument in
-  `docs/images/server-rendered-cards.md` is reasoned, not measured.
+  the server drew. Owed: one weather, one Hacker News, one RSS and one token face on
+  `dev-0005` at both mountings. The RLE565 sizes are now measured off-panel (token 28 KB /
+  15 chunks, weather 32 KB / 17, Hacker News 61 KB / 33 -- the "~10 KB" once quoted was low
+  by 3x), but whether the tunnel carries the Hacker News face's 33 chunks is not known.
+  **On 2026-09-21 the owner reported that the token card did not work on the device**,
+  after it had been verified only as far as the server's frame store. The cause was not
+  observed. Two defects that produce exactly that symptom were found and fixed in the
+  window and the face (a second save button that discarded the coin; a ticker refused
+  silently), and neither fix has been seen on the panel.
 - The framebuffer matrix has not been run since Wave A moved it to 44 rows and Wave C
   closed the four `field.*` exclusions, leaving **44 rows / 2 excluded / 42 comparable**
   (the one exclusion is the `progress-ring--running-mid-countdown` push-to-capture timing
@@ -418,7 +483,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
 cargo test --workspace --doc
 cd apps/deskmate && bun test && bun run check && bun run format:check && bun run build
+cd ../../faces && bun test && bun run check && bun run lint && bun run format:check
 ```
+
+The faces gates need nothing from the Rust workspace and take about a second. For a
+change to a face, the suite is not the real check either: `bun run dump out/` and look
+at the PNGs, the `.desk.png` ones especially -- 0.4x is roughly the panel's physical
+size, and type that reads fine at 448px wide can be illegible from a chair.
 
 `bun run check` type-checks the tests as well as the app (`tsconfig.tests.json`), so a
 test still passing a prop the component dropped is a type error, not a silent pass.
@@ -442,6 +513,8 @@ suite is about 28 seconds**, nearly all of it `cargo test --all-targets` (23 s, 
 it test execution). The
 35-minute figure this section used to quote is a *cold* run, and it is compilation,
 not tests -- quoting it as the everyday cost sent one session at the wrong target.
+(Counts on 2026-09-21: 721 Rust, 188 window and 192 faces tests -- the Rust faces and
+`crates/providers` left for `companion/faces/`. The timing was NOT re-measured then.)
 
 **This is the local gate suite and has nothing to do with the deploy**, which is 3.8 s
 for a no-op and 23 s for a real change (`companion/crates/server/deploy/deploy.sh`).

@@ -503,10 +503,13 @@ fn no_device_scene_failure_enters_reconnect_without_becoming_a_card_fault() {
     wait_for(Duration::from_secs(1), || control.connection_count() >= 2);
     let snapshot = wait_until_online(&runtime);
     assert!(snapshot.card_errors.is_empty());
-    assert!(
-        control.count_operations(|operation| { matches!(operation, Operation::PushScene(_)) }) >= 2,
-        "the reconnect did not retry the scene event"
-    );
+    // Online is visible in the snapshot BEFORE the scene push that follows the
+    // reconnect, so the retry is waited for, not sampled: asserting the count at
+    // once lost that race on a CI runner (2026-09-21). `wait_for` panics at its
+    // deadline, so a reconnect that never retries the scene still fails here.
+    wait_for(Duration::from_secs(1), || {
+        control.count_operations(|operation| matches!(operation, Operation::PushScene(_))) >= 2
+    });
     runtime.shutdown().unwrap();
 }
 

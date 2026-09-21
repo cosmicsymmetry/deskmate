@@ -121,9 +121,27 @@ account running the agent/daemon.
 
 ### Server-rendered data cards (optional)
 
-Create weather, RSS and token faces in the browser companion: select the server
-face from the add menu, fill in its descriptor fields, and save the card/configuration.
-The server persists the spec and starts fetching once its settings are complete.
+Weather, Hacker News, RSS and token faces are drawn by `companion/faces/`, a TypeScript
+package the server runs as a subprocess once per refresh. Two variables turn it on, and
+both must be absolute because the subprocess gets a cleared environment:
+
+- `DESKMATE_FACES_DIR` -- a copy of `companion/faces/` with its `node_modules` installed
+  **on this machine** (`@resvg/resvg-js` ships one native binary per platform, so a
+  `node_modules` rsync'd from a Mac does not run on Linux). Unset means this server draws
+  no faces; external picture producers are unaffected. The server refuses to start when
+  it is set and has no `src/main.ts`.
+- `DESKMATE_BUN` -- the runtime, default `/usr/local/bin/bun`. Under `ProtectHome=yes`
+  it cannot live in `~/.bun`; install it once with
+  `curl -fsSL https://bun.sh/install | bash && sudo install -m 0755 ~/.bun/bin/bun /usr/local/bin/bun`.
+
+`deploy.sh` does all of this: it ships the directory, installs on the VM, runs the faces
+suite there, and adds `DESKMATE_FACES_DIR` to `server.env` if it is missing. Like the web
+directory, the package is read at use -- `deploy.sh --faces-only` needs no Rust build and
+no restart, and a new face appears in the add menu within a minute.
+
+Create a face in the browser companion: select it from the add menu, fill in its fields,
+and save the card/configuration. The server persists the spec and starts fetching once
+its settings are complete.
 See [Setting one up](../../../../docs/images/server-rendered-cards.md#setting-one-up).
 
 For settings absent from the browser, such as `api_key` and `refresh_seconds`, follow
@@ -135,15 +153,19 @@ with `DESKMATE_DATA_CARDS` as the override.
 
 Two consequences worth stating before you enable this:
 
-- **The server makes outbound HTTP again.** Only to Open-Meteo, CoinGecko and whatever
-  feed URLs the specs name, and every request goes through the SSRF guard in
-  `crates/server/src/egress.rs` -- scheme checks, the RFC1918/loopback/link-local/
-  metadata deny list, resolve-then-pin against DNS rebinding, per-hop re-validation
-  across redirects, a body cap and a wall-clock budget. But the surface is non-zero
-  again, where between `e137294` and `feat/server-side-cards` it was zero.
+- **A subprocess on this host makes outbound HTTP.** To Open-Meteo, CoinGecko, the Hacker
+  News API and whatever feed URLs the specs name. Not the server: its own egress is one
+  host, `oauth2.googleapis.com`, POST only (`crates/server/src/egress.rs`). The faces'
+  guard is `companion/faces/src/kit/http.ts` -- http(s) only, private, loopback,
+  link-local, CGNAT and metadata addresses refused on every redirect hop, a body cap and
+  a deadline -- and it pins the resolved address against DNS rebinding, dialling the
+  validated IP with the name in `Host` and as the TLS server name. It is smaller than
+  `egress.rs` (a hand-written deny list, not the full special-use registry).
 - **A malformed spec file fails the start.** Deliberately: a server that came up with
   cards silently missing presents as "the panel stopped updating" with nothing in the
-  log. Unknown fields are refused too, so a typo does not quietly take a default.
+  log. An unknown *outer* field is refused too. Inside `face` the settings are the
+  package's to check, so a typo there runs the face on its default, and a kind the
+  package does not draw is kept but not refreshed, with a warning.
 
 ## 3a. Run under systemd (Linux)
 
@@ -332,6 +354,10 @@ The service runs under `DynamicUser`, so the real state path is
 path. The server reads these files per request, so a UI-only deployment needs no
 Rust build or restart; it refuses to start when the configured directory lacks
 `index.html`.
+
+The faces package is the same idea one directory over: real path
+`/var/lib/private/deskmate/faces`, service-visible `DESKMATE_FACES_DIR=/var/lib/deskmate/faces`,
+read per refresh, shipped by `deploy.sh` (or `--faces-only`) with no Rust build or restart.
 
 **Redeploy whenever the config schema moves.** The server compiles its own
 `CURRENT_SCHEMA_VERSION` in, so a schema bump on the app side does nothing to a live

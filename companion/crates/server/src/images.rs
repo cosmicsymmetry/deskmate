@@ -117,6 +117,9 @@ struct ImageSourceDescriptor {
     id: String,
     name: String,
     face: Option<crate::data_cards::FaceDescriptor>,
+    /// Null exactly when `face` is: an external producer's source has no server
+    /// face to report on.
+    face_status: Option<crate::data_cards::FaceStatus>,
 }
 
 #[cfg(test)]
@@ -132,7 +135,7 @@ pub(super) fn contract_mint_source_responses() -> Vec<serde_json::Value> {
 
 #[cfg(test)]
 pub(super) fn contract_image_source_descriptors() -> Vec<serde_json::Value> {
-    let face = crate::data_cards::creatable_faces()
+    let face = crate::data_cards::creatable_faces(&ServerState::in_memory())
         .into_iter()
         .next()
         .expect("the server exposes at least one creatable face");
@@ -141,11 +144,27 @@ pub(super) fn contract_image_source_descriptors() -> Vec<serde_json::Value> {
             id: "external-source".into(),
             name: "External picture".into(),
             face: None,
+            face_status: None,
         },
         ImageSourceDescriptor {
             id: "weather-source".into(),
             name: "Weather".into(),
+            face: Some(face.clone()),
+            face_status: Some(crate::data_cards::FaceStatus {
+                state: crate::data_cards::FaceState::NeedsSettings,
+                message: None,
+                at_unix_seconds: None,
+            }),
+        },
+        ImageSourceDescriptor {
+            id: "token-source".into(),
+            name: "Token price".into(),
             face: Some(face),
+            face_status: Some(crate::data_cards::FaceStatus {
+                state: crate::data_cards::FaceState::NeedsAttention,
+                message: Some("the token was not found; check the coin ID".into()),
+                at_unix_seconds: Some(1_790_000_000),
+            }),
         },
     ]
     .into_iter()
@@ -169,6 +188,7 @@ async fn list_sources(
         .into_iter()
         .map(|source| ImageSourceDescriptor {
             face: crate::data_cards::descriptor_for_source(&state, &source.id),
+            face_status: crate::data_cards::status_for_source(&state, &source.id),
             id: source.id,
             name: source.name,
         })
@@ -210,10 +230,10 @@ async fn update_face(
 /// The app renders this list verbatim -- it is what lets "Weather" appear in the
 /// window without the app knowing what weather is.
 async fn list_creatable_faces(
-    _state: State<ServerState>,
+    State(state): State<ServerState>,
     _operator: OperatorAuthenticated,
 ) -> Json<Vec<crate::data_cards::FaceDescriptor>> {
-    Json(crate::data_cards::creatable_faces())
+    Json(crate::data_cards::creatable_faces(&state))
 }
 
 async fn mint_source(

@@ -15,9 +15,11 @@
 # mtime -- so only the crates actually edited recompile.
 #
 # Usage:
-#   deploy.sh              binary + UI
+#   deploy.sh              binary + UI + faces
 #   deploy.sh --ui-only    just the browser companion (no Rust build, no restart)
+#   deploy.sh --faces-only just the server-rendered faces (no Rust build, no restart)
 #   deploy.sh --dry-run    export and sync, build, but do not install or restart
+#   deploy.sh --status     print which commit each part was last shipped from
 set -euo pipefail
 
 VM=rodion@100.93.166.123
@@ -27,13 +29,28 @@ VM=rodion@100.93.166.123
 REMOTE=deskmate-build
 IMAGE=rust:1.98-bookworm
 WEB_DIR=/var/lib/private/deskmate/web
+# The faces package (companion/faces): TypeScript the server runs as a subprocess.
+# Like the web dist it is read at use, so shipping a face is an rsync. The unit sees
+# this directory as /var/lib/deskmate/faces -- DynamicUser maps the private path.
+FACES_DIR=/var/lib/private/deskmate/faces
+FACES_DIR_IN_UNIT=/var/lib/deskmate/faces
+BUN=/usr/local/bin/bun
+
+# Where each part's last shipped commit is written down, on the VM. Three files, not
+# one, because the three parts ship independently: after a --ui-only deploy the binary
+# is still whatever commit it was, and a single "deployed revision" would lie about it.
+DEPLOYED=$REMOTE/deployed
 
 ui_only=false
+faces_only=false
 dry_run=false
+status=false
 for arg in "$@"; do
 	case "$arg" in
 	--ui-only) ui_only=true ;;
+	--faces-only) faces_only=true ;;
 	--dry-run) dry_run=true ;;
+	--status) status=true ;;
 	*)
 		echo "unknown option: $arg" >&2
 		exit 2
@@ -43,6 +60,14 @@ done
 
 repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
+
+if [ "$status" = true ]; then
+	# shellcheck disable=SC2029  # $DEPLOYED is meant to expand here.
+	ssh "$VM" "for part in faces web binary; do
+		printf '%-7s %s\n' \$part \"\$(cat $DEPLOYED/\$part 2>/dev/null || echo 'never recorded')\"
+	done"
+	exit 0
+fi
 
 if [ -n "$(git status --porcelain)" ]; then
 	# The export comes from HEAD, so a dirty tree would deploy code that is not
@@ -54,6 +79,67 @@ fi
 
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 
+# The tree is clean and every part is built from HEAD, so HEAD is what shipped.
+revision=$(git rev-parse HEAD)
+record() {
+	# shellcheck disable=SC2029  # the variables are meant to expand here.
+	ssh "$VM" "mkdir -p $DEPLOYED && echo '$revision $(date -u +%Y-%m-%dT%H:%M:%SZ)' >$DEPLOYED/$1"
+}
+
+# --- the faces --------------------------------------------------------------
+ship_faces() {
+	say "shipping the faces"
+	# The gates run here, on the machine that has the sources: a face that does not
+	# type-check or whose golden moved must not reach the panel.
+	(cd companion/faces && bun install --frozen-lockfile >/dev/null 2>&1 && bun run check >/dev/null 2>&1 && bun test >/dev/null 2>&1) ||
+		{
+			echo "refusing to ship: companion/faces does not pass its own gates" >&2
+			exit 1
+		}
+	# shellcheck disable=SC2029  # $BUN is meant to expand here.
+	ssh "$VM" "test -x $BUN" || {
+		cat >&2 <<-MISSING
+			refusing to ship: $BUN is not on the VM. Once, on the VM:
+			  curl -fsSL https://bun.sh/install | bash && sudo install -m 0755 ~/.bun/bin/bun $BUN
+		MISSING
+		exit 1
+	}
+	# node_modules is NOT synced: @resvg/resvg-js ships one native binary per
+	# platform, and the Mac's is darwin-arm64. It is installed on the VM instead, and
+	# `--exclude` keeps rsync's --delete from taking it between deploys.
+	rsync -a --delete --exclude node_modules/ --exclude out/ \
+		companion/faces/ "$VM:/tmp/deskmate-faces/"
+	# shellcheck disable=SC2029  # $BUN is meant to expand here.
+	ssh "$VM" "set -e
+		cd /tmp/deskmate-faces
+		$BUN install --frozen-lockfile --production >/dev/null
+		# The suite again, HERE: the goldens are byte-exact and this is the platform
+		# that draws for the panel, with its own native resvg build. Then the cold
+		# start the server performs. A package that fails either must not replace
+		# one that works.
+		$BUN test >/dev/null 2>&1 || { echo 'the faces suite fails on the VM' >&2; exit 1; }
+		$BUN run src/main.ts describe >/dev/null"
+
+	if [ "$dry_run" = false ]; then
+		# shellcheck disable=SC2029  # the variables are meant to expand here.
+		ssh "$VM" "set -e
+			sudo -n rsync -a --delete --chown=deskmate-server:deskmate-server /tmp/deskmate-faces/ $FACES_DIR/
+			if ! sudo -n grep -q '^DESKMATE_FACES_DIR=' /etc/deskmate/server.env; then
+				echo 'DESKMATE_FACES_DIR=$FACES_DIR_IN_UNIT' | sudo -n tee -a /etc/deskmate/server.env >/dev/null
+				echo '  added DESKMATE_FACES_DIR to /etc/deskmate/server.env -- it takes effect at the next restart'
+			fi"
+		record faces
+		say "faces shipped (run per refresh, catalog re-read every minute -- no restart needed)"
+	fi
+}
+
+if [ "$ui_only" = false ]; then
+	ship_faces
+fi
+if [ "$faces_only" = true ]; then
+	exit 0
+fi
+
 # --- the browser companion -------------------------------------------------
 say "building the companion"
 (cd companion/apps/deskmate && bun run build >/dev/null)
@@ -62,6 +148,7 @@ rsync -a --delete companion/apps/deskmate/dist/ "$VM:/tmp/deskmate-web/"
 if [ "$dry_run" = false ]; then
 	# shellcheck disable=SC2029  # $WEB_DIR is meant to expand here.
 	ssh "$VM" "sudo -n rsync -a --delete --chown=deskmate-server:deskmate-server /tmp/deskmate-web/ $WEB_DIR/"
+	record web
 	say "companion shipped (served per request -- no restart needed)"
 fi
 
@@ -127,6 +214,9 @@ ssh "$VM" "set -e
 	sudo -n systemctl restart deskmate-server
 	sleep 2
 	sudo -n systemctl is-active deskmate-server"
+# Recorded when the binary was unchanged too: the installed one is then byte-identical
+# to this commit's build, which is the fact the record exists to state.
+record binary
 
 say "checking"
 curl -sf -o /dev/null -w '  GET /            %{http_code}\n' https://deskmate.rodi.one/

@@ -1,220 +1,184 @@
 use std::time::Duration;
 
 use chrono::Utc;
-use providers::http::HttpClient;
-use providers::rss::{RssOptions, RssProvider};
-use providers::token::{TokenOptions, TokenProvider};
-use providers::weather::{WeatherOptions, WeatherProvider, WeatherUnits};
 use tokio::task::JoinHandle;
 
-use super::{DataCardSpec, FaceSpec, Units, render_snapshot};
-use crate::egress_client::EgressHttpClient;
-use crate::face_render::frame_from_svg;
-use crate::faces::{adapt, rss, token, weather};
+use super::faces_package::{self, FaceCommand, FaceRenderError};
+use super::{DataCardSpec, RefreshOutcome, record_outcome};
+use crate::image_ingest::{CanonicalFrame, canonical_frame_from_png};
 use crate::image_sources::AcceptOutcome;
 use crate::{ImageNotificationOrigin, ServerState};
 
-/// A refresh no faster than this, whatever a spec asks for, for every provider.
+/// A refresh no faster than this, whatever a spec asks for, for every face.
 const MIN_REFRESH: Duration = Duration::from_secs(60);
 /// An unreachable source is retried on its own interval, but never slower than
 /// this, so a card that failed once during a network blip does not sit stale
 /// for a day.
 const MAX_REFRESH: Duration = Duration::from_hours(6);
 
-impl From<Units> for WeatherUnits {
-    fn from(units: Units) -> Self {
-        match units {
-            Units::Metric => Self::Metric,
-            Units::Imperial => Self::Imperial,
-        }
-    }
-}
-
 pub(super) fn spawn_refresher(
     runtime: &tokio::runtime::Handle,
     state: ServerState,
+    faces: FaceCommand,
     spec: DataCardSpec,
 ) -> JoinHandle<()> {
     let refresh = clamped_refresh(spec.refresh_seconds);
-    runtime.spawn(async move { refresh_loop(state, spec, refresh).await })
+    runtime.spawn(async move { refresh_loop(state, faces, spec, refresh).await })
 }
 
 fn clamped_refresh(refresh_seconds: u64) -> Duration {
     Duration::from_secs(refresh_seconds).clamp(MIN_REFRESH, MAX_REFRESH)
 }
 
-/// Renders one spec's face, fetching whatever it needs.
+/// Why one refresh published nothing. Every variant keeps the stored frame
+/// without renewing its freshness; they differ in who has to act.
+#[derive(Debug, PartialEq, Eq)]
+enum RefreshFailure {
+    /// The owner must change a setting.
+    Configuration(String),
+    /// Try again next tick.
+    Transient(String),
+    /// The package answered, but not with a frame the asset path accepts. That is
+    /// a bug in `companion/faces`, not in any feed.
+    NotAFrame(String),
+}
+
+/// Runs the faces package once and turns its PNG into the canonical frame.
 ///
-/// Synchronous and network-touching, so it must be called from
-/// `spawn_blocking` -- [`EgressHttpClient`] blocks on the runtime. The
-/// provider is passed in and handed back so the same instance can move into
-/// the next blocking task. Failed refreshes do not publish: the durable image
-/// source retains the previous frame without renewing its freshness.
-fn render_face<C: HttpClient>(provider: &mut FaceProvider<C>) -> Result<String, String> {
-    let now = Utc::now();
-    match provider {
-        FaceProvider::Weather { provider } => render_snapshot(provider.refresh(), |value| {
-            weather::render(&adapt::weather_face(value))
-        }),
-        FaceProvider::Rss { provider, title } => render_snapshot(provider.refresh(), |value| {
-            rss::render(&adapt::rss_face(value, title, now))
-        }),
-        FaceProvider::Token { provider } => render_snapshot(provider.refresh(), |value| {
-            token::render(&adapt::token_face(value))
-        }),
-    }
+/// Blocking -- it waits on a subprocess -- so it must be called from
+/// `spawn_blocking`. The PNG goes through the same ingest function an external
+/// producer's POST does, which is what makes "the server is just another
+/// producer" true rather than merely intended.
+fn render_frame(
+    faces: &FaceCommand,
+    spec: &DataCardSpec,
+) -> Result<CanonicalFrame, RefreshFailure> {
+    let png =
+        faces_package::render(faces, &spec.face.kind, &spec.face.settings).map_err(|error| {
+            match error {
+                FaceRenderError::Configuration(message) => RefreshFailure::Configuration(message),
+                FaceRenderError::Transient(message) => RefreshFailure::Transient(message),
+            }
+        })?;
+    canonical_frame_from_png(&png).map_err(|error| RefreshFailure::NotAFrame(error.to_string()))
 }
 
-/// One live provider, with the extra the adapter needs beside it.
-enum FaceProvider<C> {
-    Weather {
-        provider: Box<WeatherProvider<C>>,
-    },
-    Rss {
-        provider: Box<RssProvider<C>>,
-        title: String,
-    },
-    Token {
-        provider: Box<TokenProvider<C>>,
-    },
-}
-
-impl FaceProvider<EgressHttpClient> {
-    /// Builds the provider for a spec.
-    ///
-    /// Constructed inside the runtime because [`EgressHttpClient::new`]
-    /// captures the current handle.
-    fn build(spec: &DataCardSpec) -> Self {
-        match &spec.face {
-            FaceSpec::Weather { location, units } => Self::Weather {
-                provider: Box::new(WeatherProvider::new(
-                    EgressHttpClient::new(),
-                    WeatherOptions {
-                        location: location.clone(),
-                        units: (*units).into(),
-                    },
-                )),
-            },
-            FaceSpec::Rss { url, title } => Self::Rss {
-                provider: Box::new(RssProvider::new(
-                    EgressHttpClient::new(),
-                    RssOptions {
-                        url: url.clone(),
-                        // Four is what the face can show: one lead plus three
-                        // followers. Asking for more would parse items nothing
-                        // draws.
-                        maximum_items: 4,
-                    },
-                )),
-                title: title.clone(),
-            },
-            FaceSpec::Token {
-                coin_id,
-                currency,
-                api_key,
-            } => Self::Token {
-                provider: Box::new(TokenProvider::new(
-                    EgressHttpClient::new(),
-                    TokenOptions {
-                        coin_id: coin_id.clone(),
-                        currency: currency.clone(),
-                        api_key: api_key.clone(),
-                    },
-                )),
-            },
-        }
-    }
-
-    const fn label(&self) -> &'static str {
-        match self {
-            Self::Weather { .. } => "weather",
-            Self::Rss { .. } => "rss",
-            Self::Token { .. } => "token",
+/// How long to wait before the next attempt.
+///
+/// A drawn face waits its whole interval, and so does one whose settings were
+/// refused -- nothing changes until the owner edits them, and an edit restarts this
+/// task. A TRANSIENT failure is retried soon, backing off to the interval: a keyless
+/// API answers a burst with 429 for about a minute, and waiting fifteen for that left
+/// a freshly created card on "Waiting for the first picture" for a quarter of an hour
+/// with nothing wrong that a minute would not fix.
+fn next_attempt(
+    refresh: Duration,
+    outcome: &RefreshOutcome,
+    consecutive_failures: u32,
+) -> Duration {
+    match outcome {
+        RefreshOutcome::Drawn | RefreshOutcome::NeedsAttention(_) => refresh,
+        RefreshOutcome::Retrying(_) => {
+            let doublings = consecutive_failures.saturating_sub(1).min(16);
+            MIN_REFRESH.saturating_mul(1 << doublings).min(refresh)
         }
     }
 }
 
-async fn refresh_loop(state: ServerState, spec: DataCardSpec, refresh: Duration) {
-    let mut provider = FaceProvider::build(&spec);
-    let source_id = spec.source_id.clone();
-    let kind = provider.label();
+/// One refresh: render, accept, notify. `None` means a blocking task panicked, which
+/// is a bug rather than an outcome, and ends the refresher.
+async fn refresh_once(
+    state: &ServerState,
+    faces: &FaceCommand,
+    spec: &DataCardSpec,
+) -> Option<RefreshOutcome> {
+    let (source_id, kind) = (&spec.source_id, &spec.face.kind);
+    let render_faces = faces.clone();
+    let render_spec = spec.clone();
+    let rendered =
+        tokio::task::spawn_blocking(move || render_frame(&render_faces, &render_spec)).await;
+    let frame = match rendered {
+        Ok(Ok(frame)) => frame,
+        Ok(Err(RefreshFailure::Configuration(error))) => {
+            tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error,
+                "the face's settings need the owner's attention; keeping the stored frame unchanged");
+            return Some(RefreshOutcome::NeedsAttention(error));
+        }
+        Ok(Err(RefreshFailure::Transient(error))) => {
+            tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error,
+                "the data fetch failed; keeping the stored frame unchanged");
+            return Some(RefreshOutcome::Retrying(error));
+        }
+        Ok(Err(RefreshFailure::NotAFrame(error))) => {
+            tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error,
+                "the faces package did not produce an acceptable frame");
+            return Some(RefreshOutcome::Retrying(format!(
+                "the face could not be drawn: {error}"
+            )));
+        }
+        Err(error) => {
+            tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error, "the render task panicked");
+            return None;
+        }
+    };
+
+    let accept_state = state.clone();
+    let accept_source = source_id.clone();
+    let accepted = tokio::task::spawn_blocking(move || {
+        accept_state
+            .image_sources()
+            .accept(&accept_source, frame, Utc::now())
+    })
+    .await;
+    match accepted {
+        Ok(Ok(outcome)) => {
+            if !notify_image_source_outcome(state, source_id, &outcome) {
+                tracing::debug!(target: "server::data_cards", source_id = %source_id, kind, "the face is unchanged");
+            }
+            Some(RefreshOutcome::Drawn)
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error, "the frame was not stored");
+            Some(RefreshOutcome::Retrying(format!(
+                "the frame was not stored: {error}"
+            )))
+        }
+        Err(error) => {
+            tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error, "the store task panicked");
+            None
+        }
+    }
+}
+
+async fn refresh_loop(
+    state: ServerState,
+    faces: FaceCommand,
+    spec: DataCardSpec,
+    refresh: Duration,
+) {
     tracing::info!(target: "server::data_cards",
-        source_id = %source_id,
-        kind,
+        source_id = %spec.source_id,
+        kind = %spec.face.kind,
         refresh_seconds = refresh.as_secs(),
         "server-rendered card refreshing"
     );
-
-    let mut ticker = tokio::time::interval(refresh);
-    // The first tick fires immediately, which is what fills a freshly started
-    // server's panels instead of leaving them blank for fifteen minutes.
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
+    // `record_outcome` checks this id against the retained handle, so a refresher that
+    // was replaced mid-render cannot overwrite its successor's status.
+    let task = tokio::task::id();
+    let mut consecutive_failures = 0_u32;
+    // The first attempt is immediate, which is what fills a freshly started server's
+    // panels instead of leaving them blank for fifteen minutes.
     loop {
-        ticker.tick().await;
-
-        // The whole fetch-and-render is blocking: the egress client blocks on
-        // the runtime, and rasterizing is CPU work that has no business on an
-        // async worker.
-        let outcome = tokio::task::spawn_blocking(move || {
-            let rendered = render_face(&mut provider).map(|svg| frame_from_svg(&svg));
-            (rendered, provider)
-        })
-        .await;
-        let (rendered, returned) = match outcome {
-            Ok(pair) => pair,
-            Err(error) => {
-                tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error, "the render task panicked");
-                return;
-            }
+        let Some(outcome) = refresh_once(&state, &faces, &spec).await else {
+            return;
         };
-        provider = returned;
-
-        let rasterized = match rendered {
-            Ok(frame) => frame,
-            Err(error) => {
-                tracing::warn!(target: "server::data_cards",
-                    source_id = %source_id,
-                    kind,
-                    %error,
-                    "the data fetch failed; keeping the stored frame unchanged"
-                );
-                continue;
-            }
+        consecutive_failures = match outcome {
+            RefreshOutcome::Retrying(_) => consecutive_failures.saturating_add(1),
+            RefreshOutcome::Drawn | RefreshOutcome::NeedsAttention(_) => 0,
         };
-
-        let frame = match rasterized {
-            Ok(frame) => frame,
-            Err(error) => {
-                // This is our SVG, so this is our bug, not the feed's.
-                tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error, "the authored face did not rasterize");
-                continue;
-            }
-        };
-
-        let accept_state = state.clone();
-        let accept_source = source_id.clone();
-        let accepted = tokio::task::spawn_blocking(move || {
-            accept_state
-                .image_sources()
-                .accept(&accept_source, frame, Utc::now())
-        })
-        .await;
-
-        match accepted {
-            Ok(Ok(outcome)) => {
-                if !notify_image_source_outcome(&state, &source_id, &outcome) {
-                    tracing::debug!(target: "server::data_cards", source_id = %source_id, kind, "the face is unchanged");
-                }
-            }
-            Ok(Err(error)) => {
-                tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error, "the frame was not stored");
-            }
-            Err(error) => {
-                tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error, "the store task panicked");
-                return;
-            }
-        }
+        let wait = next_attempt(refresh, &outcome, consecutive_failures);
+        record_outcome(&state, &spec.source_id, task, outcome);
+        tokio::time::sleep(wait).await;
     }
 }
 
@@ -238,97 +202,107 @@ fn notify_image_source_outcome(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-
-    use providers::ProviderError;
+    use std::collections::BTreeMap;
 
     use super::*;
+    use crate::data_cards::FaceSpec;
 
-    struct FakeClient {
-        responses: VecDeque<Result<String, ProviderError>>,
-    }
-
-    impl HttpClient for FakeClient {
-        fn get_text(&mut self, _url: &str) -> Result<String, ProviderError> {
-            self.responses.pop_front().expect("a response is queued")
+    fn spec(steer: &str) -> DataCardSpec {
+        DataCardSpec {
+            source_id: "source".into(),
+            refresh_seconds: 900,
+            face: FaceSpec {
+                kind: "weather".into(),
+                settings: BTreeMap::from([("location".into(), steer.into())]),
+            },
         }
     }
 
     #[test]
-    fn a_token_chart_failure_still_publishes_the_successful_quote() {
-        let mut provider = FaceProvider::Token {
-            provider: Box::new(TokenProvider::new(
-                FakeClient {
-                    responses: VecDeque::from([
-                        Ok(r#"[{"symbol":"sol","name":"Solana","current_price":142.37}]"#.into()),
-                        Err(ProviderError::Timeout),
-                    ]),
-                },
-                TokenOptions {
-                    coin_id: "solana".into(),
-                    currency: "usd".into(),
-                    api_key: None,
-                },
-            )),
+    fn a_rendered_png_becomes_the_frame_a_producers_post_would() {
+        let frame = render_frame(&faces_package::fake(), &spec("Dubai")).expect("a frame");
+        let posted = canonical_frame_from_png(
+            &std::fs::read(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/support/fake-face.png"
+            ))
+            .expect("the fixture is readable"),
+        )
+        .expect("the fixture is a valid frame");
+        assert_eq!(frame.digest, posted.digest);
+    }
+
+    #[test]
+    fn output_the_asset_path_would_refuse_is_our_bug_not_the_feeds() {
+        for steer in ["answer-with-garbage", "answer-with-wrong-size"] {
+            assert!(matches!(
+                render_frame(&faces_package::fake(), &spec(steer)),
+                Err(RefreshFailure::NotAFrame(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn the_two_refusals_keep_their_meaning_through_the_worker() {
+        assert!(matches!(
+            render_frame(&faces_package::fake(), &spec("refuse-as-configuration")),
+            Err(RefreshFailure::Configuration(_))
+        ));
+        assert!(matches!(
+            render_frame(&faces_package::fake(), &spec("refuse-as-transient")),
+            Err(RefreshFailure::Transient(_))
+        ));
+    }
+
+    #[test]
+    fn a_failed_refresh_keeps_the_stored_frame_and_does_not_renew_its_freshness() {
+        use crate::image_sources::ImageSourceStore;
+        use chrono::TimeZone as _;
+
+        let directory = tempfile::tempdir().expect("temp directory");
+        let store = ImageSourceStore::new(directory.path().to_path_buf()).expect("store");
+        let source = store.mint("News").expect("source");
+        let at = |seconds: i64| Utc.timestamp_opt(1_700_000_000 + seconds, 0).unwrap();
+        // What the refresh loop does with one tick: render, and accept only a frame.
+        let publish = |steer: &str, now| {
+            render_frame(&faces_package::fake(), &spec(steer))
+                .map(|frame| store.accept(&source.id, frame, now).expect("accept"))
         };
-        let svg = render_face(&mut provider).expect("a quote needs no chart");
-        assert!(svg.contains("142.37"));
-        frame_from_svg(&svg).expect("the successful quote remains publishable");
-    }
 
-    #[test]
-    fn the_refresh_interval_is_clamped_at_both_ends() {
-        for (seconds, expected) in [
-            (0, 60),
-            (1, 60),
-            (60, 60),
-            (900, 900),
-            (21_600, 21_600),
-            (999_999, 21_600),
-            (u64::MAX, 21_600),
-        ] {
-            assert_eq!(clamped_refresh(seconds), Duration::from_secs(expected));
+        for seconds in [0, 60, 120, 180] {
+            publish("Dubai", at(seconds)).expect("a successful refresh");
         }
-    }
+        let before = store.frame(&source.id, at(180)).unwrap();
+        let disk_before = std::fs::read(directory.path().join("image-sources.json")).unwrap();
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn first_refresh_failures_return_the_existing_error_without_a_face() {
-        for (face, expected) in [
-            (
-                FaceSpec::Weather {
-                    location: String::new(),
-                    units: Units::Metric,
-                },
-                "invalid provider configuration: weather location is empty",
-            ),
-            (
-                FaceSpec::Token {
-                    coin_id: "Solana".into(),
-                    currency: "usd".into(),
-                    api_key: None,
-                },
-                "invalid provider configuration: the token's coin id may use only lowercase letters, digits and h",
-            ),
-            (
-                FaceSpec::Rss {
-                    url: "http://192.168.1.1/feed.xml".into(),
-                    title: "News".into(),
-                },
-                "invalid provider configuration: RFC1918 private",
-            ),
-        ] {
-            let result = tokio::task::spawn_blocking(move || {
-                let spec = DataCardSpec {
-                    source_id: "test".into(),
-                    refresh_seconds: 900,
-                    face,
-                };
-                render_face(&mut FaceProvider::build(&spec))
-            })
-            .await
-            .expect("the blocking refresh runs");
-            assert_eq!(result, Err(expected.to_owned()));
+        for seconds in [240, 600, 1_200] {
+            assert!(publish("refuse-as-transient", at(seconds)).is_err());
+            assert!(publish("refuse-as-configuration", at(seconds)).is_err());
         }
+        let after = store.frame(&source.id, at(1_200)).unwrap();
+        assert_eq!(
+            after.digest, before.digest,
+            "the pixels are the last good ones"
+        );
+        assert_eq!(store.summaries(at(1_200))[0].last_push, Some(at(180)));
+        assert_eq!(
+            std::fs::read(directory.path().join("image-sources.json")).unwrap(),
+            disk_before,
+            "a failure writes nothing"
+        );
+        assert!(
+            after.stale,
+            "and the face is allowed to go stale, which is the truth"
+        );
+
+        // An identical face is a no-op for bytes and still counts as liveness.
+        assert_eq!(publish("Dubai", at(1_300)), Ok(AcceptOutcome::Unchanged));
+        assert_eq!(store.summaries(at(1_300))[0].last_push, Some(at(1_300)));
+        assert!(!store.frame(&source.id, at(1_300)).unwrap().stale);
+        assert!(matches!(
+            publish("alternate-frame", at(1_400)),
+            Ok(AcceptOutcome::Changed { .. })
+        ));
     }
 
     #[tokio::test]
@@ -356,5 +330,33 @@ mod tests {
             &AcceptOutcome::Unchanged,
         ));
         assert_eq!(state.image_notifications_for_test().len(), 1);
+    }
+
+    #[test]
+    fn a_transient_failure_is_retried_soon_and_backs_off_to_the_interval() {
+        let refresh = Duration::from_mins(15);
+        let retrying = RefreshOutcome::Retrying("HTTP 429".into());
+        let waits: Vec<u64> = (1..=6)
+            .map(|failures| next_attempt(refresh, &retrying, failures).as_secs())
+            .collect();
+        assert_eq!(waits, [60, 120, 240, 480, 900, 900]);
+        assert_eq!(
+            next_attempt(refresh, &retrying, u32::MAX),
+            refresh,
+            "no overflow"
+        );
+        // A refresh faster than the retry floor is never made slower by a failure.
+        assert_eq!(next_attempt(MIN_REFRESH, &retrying, 3), MIN_REFRESH);
+        // Refused settings wait for the owner, not for the clock.
+        let refused = RefreshOutcome::NeedsAttention("no such coin".into());
+        assert_eq!(next_attempt(refresh, &refused, 0), refresh);
+        assert_eq!(next_attempt(refresh, &RefreshOutcome::Drawn, 0), refresh);
+    }
+
+    #[test]
+    fn refresh_is_clamped_at_both_ends() {
+        assert_eq!(clamped_refresh(1), MIN_REFRESH);
+        assert_eq!(clamped_refresh(900), Duration::from_mins(15));
+        assert_eq!(clamped_refresh(u64::MAX), MAX_REFRESH);
     }
 }

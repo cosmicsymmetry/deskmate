@@ -129,16 +129,41 @@ pub(crate) fn canonical_frame_from_png(bytes: &[u8]) -> Result<CanonicalFrame, I
     })
 }
 
-/// Shared with [`crate::face_render`], which rasterizes a server-authored face.
-/// Both paths use the same canonical header and RGB565 quantization.
-pub(crate) fn encode_rgb565(width: u32, height: u32, pixmap: &tiny_skia::Pixmap) -> Vec<u8> {
-    let mut bytes = rgb565_buffer(width, height);
-    for pixel in pixmap.pixels() {
-        bytes.extend_from_slice(
-            &pack_rgb565(pixel.red(), pixel.green(), pixel.blue()).to_le_bytes(),
-        );
+/// The inverse of [`canonical_frame_from_png`], for the one place a person looks at
+/// a stored frame: the companion's preview of a picture card.
+///
+/// Each channel is expanded by bit replication, the standard inverse of a 5/6-bit
+/// quantization, so black stays black and full scale stays full scale. `None` for
+/// anything that is not exactly one canvas of RGB565 behind the LVGL header -- the
+/// store only ever holds such frames, so that would be corruption, and the preview
+/// then says "no frame" rather than drawing garbage.
+pub(crate) fn png_from_canonical_frame(frame: &[u8]) -> Option<Vec<u8>> {
+    let width = u32::try_from(SCENE_CANVAS_WIDTH).expect("fixed canvas");
+    let height = u32::try_from(SCENE_CANVAS_HEIGHT).expect("fixed canvas");
+    let pixel_count = usize::try_from(width * height).expect("fixed canvas fits usize");
+    let pixels = frame.get(LVGL_IMAGE_HEADER_BYTES..)?;
+    if pixels.len() != pixel_count * 2 {
+        return None;
     }
-    bytes
+
+    let mut rgb = Vec::with_capacity(pixel_count * 3);
+    for pair in pixels.as_chunks::<2>().0 {
+        let packed = u16::from_le_bytes(*pair);
+        let (red, green, blue) = (packed >> 11, (packed >> 5) & 0x3f, packed & 0x1f);
+        let expand = |value: u16, bits: u32| -> u8 {
+            u8::try_from((value << (8 - bits)) | (value >> (2 * bits - 8))).expect("eight bits")
+        };
+        rgb.extend_from_slice(&[expand(red, 5), expand(green, 6), expand(blue, 5)]);
+    }
+
+    let mut png = Vec::new();
+    let mut encoder = png::Encoder::new(&mut png, width, height);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().ok()?;
+    writer.write_image_data(&rgb).ok()?;
+    writer.finish().ok()?;
+    Some(png)
 }
 
 fn rgb565_buffer(width: u32, height: u32) -> Vec<u8> {
@@ -165,6 +190,33 @@ fn pack_rgb565(red: u8, green: u8, blue: u8) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stored_frame_shown_as_a_png_is_the_same_frame_when_pushed_back() {
+        // Every one of the 65,536 RGB565 values, tiled across one canvas: expanding
+        // to eight bits and re-quantizing must land on the value it started from,
+        // or the preview would show colours the panel never displays.
+        let width = u32::try_from(SCENE_CANVAS_WIDTH).expect("fixed canvas");
+        let height = u32::try_from(SCENE_CANVAS_HEIGHT).expect("fixed canvas");
+        let mut frame = rgb565_buffer(width, height);
+        for index in 0..(width * height) {
+            let value = u16::try_from(index % 65_536).expect("sixteen bits");
+            frame.extend_from_slice(&value.to_le_bytes());
+        }
+        let png = png_from_canonical_frame(&frame).expect("a whole frame decodes");
+        let again = canonical_frame_from_png(&png).expect("and is an acceptable push");
+        assert_eq!(again.bytes, frame);
+    }
+
+    #[test]
+    fn anything_but_one_whole_canvas_is_no_preview_rather_than_garbage() {
+        assert_eq!(png_from_canonical_frame(&[]), None);
+        assert_eq!(png_from_canonical_frame(&[0; 11]), None);
+        assert_eq!(
+            png_from_canonical_frame(&vec![0; 12 + 448 * 368 * 2 - 2]),
+            None
+        );
+    }
 
     /// Builds a real PNG of the given size and colour type.
     fn png_of(width: u32, height: u32, color: png::ColorType, depth: png::BitDepth) -> Vec<u8> {

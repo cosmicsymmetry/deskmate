@@ -19,6 +19,7 @@
 #   deploy.sh --ui-only    just the browser companion (no Rust build, no restart)
 #   deploy.sh --faces-only just the server-rendered faces (no Rust build, no restart)
 #   deploy.sh --dry-run    export and sync, build, but do not install or restart
+#   deploy.sh --status     print which commit each part was last shipped from
 set -euo pipefail
 
 VM=rodion@100.93.166.123
@@ -35,14 +36,21 @@ FACES_DIR=/var/lib/private/deskmate/faces
 FACES_DIR_IN_UNIT=/var/lib/deskmate/faces
 BUN=/usr/local/bin/bun
 
+# Where each part's last shipped commit is written down, on the VM. Three files, not
+# one, because the three parts ship independently: after a --ui-only deploy the binary
+# is still whatever commit it was, and a single "deployed revision" would lie about it.
+DEPLOYED=$REMOTE/deployed
+
 ui_only=false
 faces_only=false
 dry_run=false
+status=false
 for arg in "$@"; do
 	case "$arg" in
 	--ui-only) ui_only=true ;;
 	--faces-only) faces_only=true ;;
 	--dry-run) dry_run=true ;;
+	--status) status=true ;;
 	*)
 		echo "unknown option: $arg" >&2
 		exit 2
@@ -53,6 +61,14 @@ done
 repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
 
+if [ "$status" = true ]; then
+	# shellcheck disable=SC2029  # $DEPLOYED is meant to expand here.
+	ssh "$VM" "for part in faces web binary; do
+		printf '%-7s %s\n' \$part \"\$(cat $DEPLOYED/\$part 2>/dev/null || echo 'never recorded')\"
+	done"
+	exit 0
+fi
+
 if [ -n "$(git status --porcelain)" ]; then
 	# The export comes from HEAD, so a dirty tree would deploy code that is not
 	# the code you are looking at. Refuse rather than silently ship the commit.
@@ -62,6 +78,13 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+
+# The tree is clean and every part is built from HEAD, so HEAD is what shipped.
+revision=$(git rev-parse HEAD)
+record() {
+	# shellcheck disable=SC2029  # the variables are meant to expand here.
+	ssh "$VM" "mkdir -p $DEPLOYED && echo '$revision $(date -u +%Y-%m-%dT%H:%M:%SZ)' >$DEPLOYED/$1"
+}
 
 # --- the faces --------------------------------------------------------------
 ship_faces() {
@@ -105,6 +128,7 @@ ship_faces() {
 				echo 'DESKMATE_FACES_DIR=$FACES_DIR_IN_UNIT' | sudo -n tee -a /etc/deskmate/server.env >/dev/null
 				echo '  added DESKMATE_FACES_DIR to /etc/deskmate/server.env -- it takes effect at the next restart'
 			fi"
+		record faces
 		say "faces shipped (run per refresh, catalog re-read every minute -- no restart needed)"
 	fi
 }
@@ -124,6 +148,7 @@ rsync -a --delete companion/apps/deskmate/dist/ "$VM:/tmp/deskmate-web/"
 if [ "$dry_run" = false ]; then
 	# shellcheck disable=SC2029  # $WEB_DIR is meant to expand here.
 	ssh "$VM" "sudo -n rsync -a --delete --chown=deskmate-server:deskmate-server /tmp/deskmate-web/ $WEB_DIR/"
+	record web
 	say "companion shipped (served per request -- no restart needed)"
 fi
 
@@ -189,6 +214,9 @@ ssh "$VM" "set -e
 	sudo -n systemctl restart deskmate-server
 	sleep 2
 	sudo -n systemctl is-active deskmate-server"
+# Recorded when the binary was unchanged too: the installed one is then byte-identical
+# to this commit's build, which is the fact the record exists to state.
+record binary
 
 say "checking"
 curl -sf -o /dev/null -w '  GET /            %{http_code}\n' https://deskmate.rodi.one/

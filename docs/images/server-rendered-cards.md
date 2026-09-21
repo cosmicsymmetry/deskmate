@@ -160,7 +160,7 @@ outside.
 | `title` | rss | The eyebrow. Feeds name themselves inconsistently and often at length, so this is the owner's words. |
 | `coin_id` | token | The **ticker**, and only the ticker: `SOL`, not `Solana` and not CoinGecko's id (owner's direction, 2026-09-21; the key keeps its name because spec files already hold it). Case-insensitive, letters and digits, at most 12. It is looked up with `symbols=` on the markets endpoint, which answers with the best-ranked coin carrying that ticker in the same request that returns the price. A name is refused with *no coin trades as SOLANA; enter the ticker, e.g. SOL for Solana*. |
 | `currency` | token | Quote currency, default `usd`. |
-| `chart` | token | `line` (default): a day of closes, averaged into 40 points and drawn as a smooth curve. `candles`: 48 half-hour candles from CoinGecko's `ohlc`, each coloured by its own half hour. `none`: the simple face -- one module, the ticker and the price centred in it, no chart, no change, no range, and one request per refresh instead of two. A refused chart request leaves a true price over an empty chart. |
+| `chart` | token | `line` (default): a day of closes, averaged into 40 points and drawn as a smooth curve. `candles`: 48 half-hour candles from CoinGecko's `ohlc`, each coloured by its own half hour. `none`: the simple face -- a black panel, the price in its exact centre (by ink, both axes) coloured green or red by the day, the ticker slightly above it; no chart, no change, no range, and one request per refresh instead of two. A refused chart request leaves a true price over an empty chart. |
 | `api_key` | token | Optional CoinGecko demo key. |
 
 ## Where the data comes from

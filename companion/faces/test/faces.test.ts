@@ -136,8 +136,14 @@ describe("token", () => {
     expect(svg).toContain(">SOL<");
     expect(svg).not.toContain(">24H<");
     expect(svg).not.toContain("%<");
-    // Colour is not the only carrier of the direction: the arrow is still there.
-    expect(svg).toContain(`fill="${GOOD}"`);
+    // The ground is black and the figure carries the day's colour; the arrow beside the
+    // ticker is there so that colour is not the only carrier of the direction.
+    expect(svg).not.toMatch(/<rect[^>]*rx=/);
+    expect(svg).toMatch(new RegExp(`<text[^>]*fill="${GOOD}"[^>]*>142<`));
+    expect(svg).toMatch(new RegExp(`<path[^>]*fill="${GOOD}"`));
+    expect(renderToken({ ...face, changePercent: -1 })).toMatch(
+      new RegExp(`<text[^>]*fill="${BAD}"[^>]*>142<`),
+    );
     expect(rendersToAFrame(svg)).toBe(true);
   });
 

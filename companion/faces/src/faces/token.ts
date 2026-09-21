@@ -406,7 +406,7 @@ function drawHero(canvas: Canvas, face: TokenFace): void {
       room: INNER_WIDTH,
     },
     PRICE_STEPS,
-    muted,
+    { mark: muted, numerals: INK, fraction: INK_2 },
   );
 }
 
@@ -447,6 +447,13 @@ function triangle(x: number, cy: number, width: number, up: boolean): string {
   return `M${f2(x)} ${f2(base)}L${f2(x + half)} ${f2(apex)}L${f2(x + width)} ${f2(base)}Z`;
 }
 
+/** The three inks of a price: its currency mark, its numerals, and its fraction. */
+interface PriceTones {
+  mark: string;
+  numerals: string;
+  fraction: string;
+}
+
 interface PlacedRun {
   content: string;
   size: number;
@@ -475,7 +482,7 @@ interface PlacedRun {
 function composePrice(
   face: TokenFace,
   size: number,
-  muted: string,
+  tones: PriceTones,
 ): { runs: PlacedRun[]; width: number } {
   const [integer, fraction] = splitPrice(face.price);
   // Below a whole unit the integer is the single character "0" and every digit that
@@ -495,18 +502,24 @@ function composePrice(
     runs.push({
       content: mark,
       size: small,
-      fill: muted,
+      fill: tones.mark,
       x: -markInk.left,
       dy: textInk("0", size, WEIGHT_SEMIBOLD).top - body.top,
     });
     cursor = markInk.right - markInk.left + size * 0.055;
   }
-  runs.push({ content: numerals, size, fill: INK, x: cursor - numeralInk.left, dy: 0 });
+  runs.push({ content: numerals, size, fill: tones.numerals, x: cursor - numeralInk.left, dy: 0 });
   cursor += numeralInk.right - numeralInk.left;
   if (!uniform && fraction !== "") {
     const fractionInk = textInk(fraction, small, WEIGHT_SEMIBOLD);
     cursor += size * 0.035;
-    runs.push({ content: fraction, size: small, fill: INK_2, x: cursor - fractionInk.left, dy: 0 });
+    runs.push({
+      content: fraction,
+      size: small,
+      fill: tones.fraction,
+      x: cursor - fractionInk.left,
+      dy: 0,
+    });
     cursor += fractionInk.right - fractionInk.left;
   }
   return { runs, width: cursor };
@@ -521,13 +534,13 @@ function drawPrice(
   face: TokenFace,
   place: { anchor: number; centred: boolean; bottom: number; room: number },
   steps: readonly number[],
-  muted: string,
+  tones: PriceTones,
 ): number {
   // Fit the whole assembly, not just the integer: the mark and the fraction are what
   // push a five-figure price over the edge.
   const size =
-    steps.find((step) => composePrice(face, step, muted).width <= place.room) ?? steps.at(-1) ?? 40;
-  const { runs, width } = composePrice(face, size, muted);
+    steps.find((step) => composePrice(face, step, tones).width <= place.room) ?? steps.at(-1) ?? 40;
+  const { runs, width } = composePrice(face, size, tones);
   const left = place.centred ? place.anchor - width / 2 : place.anchor;
   for (const run of runs) {
     canvas.text({
@@ -544,63 +557,66 @@ function drawPrice(
 
 /** The simple face keeps the hero's price steps and adds the ones a whole canvas has room for. */
 const SIMPLE_STEPS = [120, 104, 92, ...PRICE_STEPS] as const;
-const SIMPLE_TICKER_SIZE = 40;
+const SIMPLE_TICKER_SIZE = 34;
+
+/** The direction colours taken down for the small runs, flat: a dimmer ink, not an opacity. */
+const GOOD_DIM = "#1f8f3e";
+const BAD_DIM = "#b3342c";
 
 /**
- * The chart-free face: the ticker and the price, centred, and nothing else to read.
+ * The chart-free face: the price in the dead centre of a black panel, the ticker
+ * slightly above it, and nothing else to read.
  *
- * One module fills the canvas, coloured by the day like the hero it replaces, and the
- * small arrow beside the ticker says the same thing for anyone who cannot use the
- * colour. The two lines are centred as ONE block, by their ink: the ticker's cap top
- * to the price's baseline, so the pair sits in the optical middle rather than the
- * price alone sitting there with a label floating above it.
+ * The owner's direction, 2026-09-21: a dark ground, the NUMBER green or red by the
+ * day, centred. So the colour moved from the ground to the figure -- on an emissive
+ * panel a dark ground is unlit pixels, and the price is then the only lit thing on
+ * the desk. It is the price's own ink that is centred on the canvas, in both axes: a
+ * pair centred as a block put the figure visibly below the middle. The ticker hangs
+ * above it and is deliberately outside that balance. The small arrow stays beside
+ * the ticker because colour may not be the only carrier of the direction.
  */
 function drawSimple(canvas: Canvas, face: TokenFace): void {
-  const height = CANVAS_HEIGHT - 2 * MARGIN;
-  canvas.roundedRect(
-    MARGIN,
-    MARGIN,
-    CONTENT_WIDTH,
-    height,
-    RADIUS_MODULE,
-    rising(face) ? GROUND_RISING : GROUND_FALLING,
-  );
-  const center = CANVAS_WIDTH / 2;
-  const muted = rising(face) ? MUTED_RISING : MUTED_FALLING;
+  const centerX = CANVAS_WIDTH / 2;
+  const centerY = CANVAS_HEIGHT / 2;
+  const tones: PriceTones = rising(face)
+    ? { mark: GOOD_DIM, numerals: GOOD, fraction: GOOD_DIM }
+    : { mark: BAD_DIM, numerals: BAD, fraction: BAD_DIM };
 
-  // Size first, so the block can be centred around what will actually be drawn.
   const size =
-    SIMPLE_STEPS.find((step) => composePrice(face, step, muted).width <= INNER_WIDTH) ??
+    SIMPLE_STEPS.find((step) => composePrice(face, step, tones).width <= CONTENT_WIDTH) ??
     SIMPLE_STEPS.at(-1) ??
     40;
-  const tickerCap = SIMPLE_TICKER_SIZE * CAP_HEIGHT;
-  const gap = 3.5 * GRID;
-  const block = tickerCap + gap + size * CAP_HEIGHT;
-  const top = MARGIN + (height - block) / 2;
-
-  const symbol = face.symbol.toUpperCase();
-  const arrow = 15;
-  const symbolInk = textInk(symbol, SIMPLE_TICKER_SIZE, WEIGHT_SEMIBOLD);
-  const symbolWidth = symbolInk.right - symbolInk.left;
-  const rowLeft = center - (arrow + 1.5 * GRID + symbolWidth) / 2;
-  canvas.path(triangle(rowLeft, top + tickerCap / 2, arrow, rising(face)), directionColor(face));
-  canvas.text({
-    x: rowLeft + arrow + 1.5 * GRID - symbolInk.left,
-    baseline: top + tickerCap,
-    content: symbol,
-    size: SIMPLE_TICKER_SIZE,
-    fill: muted,
-    weight: WEIGHT_SEMIBOLD,
-    tracking: 0,
-  });
-
+  // Centre the digits' INK, not their em box: the box carries descender room the
+  // numerals never use, which is exactly the few pixels of "slightly off".
+  const digits = textInk("0", size, WEIGHT_SEMIBOLD);
+  const baseline = centerY - (digits.top + digits.bottom) / 2;
   drawPrice(
     canvas,
     face,
-    { anchor: center, centred: true, bottom: top + block, room: INNER_WIDTH },
+    { anchor: centerX, centred: true, bottom: baseline, room: CONTENT_WIDTH },
     [size],
-    muted,
+    tones,
   );
+
+  const symbol = face.symbol.toUpperCase();
+  const arrow = 13;
+  const symbolInk = textInk(symbol, SIMPLE_TICKER_SIZE, WEIGHT_SEMIBOLD);
+  const symbolWidth = symbolInk.right - symbolInk.left;
+  const rowLeft = centerX - (arrow + 1.25 * GRID + symbolWidth) / 2;
+  const tickerBaseline = baseline + digits.top - 3 * GRID;
+  const tickerCap = SIMPLE_TICKER_SIZE * CAP_HEIGHT;
+  canvas.path(
+    triangle(rowLeft, tickerBaseline - tickerCap / 2, arrow, rising(face)),
+    directionColor(face),
+  );
+  canvas.text({
+    x: rowLeft + arrow + 1.25 * GRID - symbolInk.left,
+    baseline: tickerBaseline,
+    content: symbol,
+    size: SIMPLE_TICKER_SIZE,
+    fill: INK_2,
+    weight: WEIGHT_SEMIBOLD,
+  });
 }
 
 function drawChart(canvas: Canvas, face: TokenFace): void {

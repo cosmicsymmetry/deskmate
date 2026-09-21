@@ -50,8 +50,7 @@ here so the table does not read as the whole story:
 - **Server-rendered faces** (spec `2026-09-12-deskmate-server-rendered-cards-design.md`):
   weather, Hacker News, RSS and token, each an image source named by an ordinary picture
   card -- not card kinds. They moved from Rust to TypeScript (`companion/faces/`, run as a
-  subprocess) on 2026-09-20; as of this review that port is on `feat/typescript-faces`,
-  not yet on `main`.
+  subprocess) on 2026-09-20, merged to `main` on 2026-09-21.
 - **The 2026-09-19 review sweep**: a refactor and 43 fixes, the tests-only consolidation
   under `tools/testgate/`, and a CI that had been silently red for four weeks made loud.
 

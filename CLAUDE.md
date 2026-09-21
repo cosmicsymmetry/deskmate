@@ -513,6 +513,8 @@ suite is about 28 seconds**, nearly all of it `cargo test --all-targets` (23 s, 
 it test execution). The
 35-minute figure this section used to quote is a *cold* run, and it is compilation,
 not tests -- quoting it as the everyday cost sent one session at the wrong target.
+(Counts on 2026-09-21: 721 Rust, 188 window and 192 faces tests -- the Rust faces and
+`crates/providers` left for `companion/faces/`. The timing was NOT re-measured then.)
 
 **This is the local gate suite and has nothing to do with the deploy**, which is 3.8 s
 for a no-op and 23 s for a real change (`companion/crates/server/deploy/deploy.sh`).

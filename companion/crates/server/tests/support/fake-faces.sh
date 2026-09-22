@@ -29,6 +29,10 @@ render)
 	case "$request" in
 	*refuse-as-configuration*) echo "the coin was not found; check the coin ID" >&2; exit 2 ;;
 	*refuse-as-transient*) echo "api.example returned HTTP 503" >&2; exit 1 ;;
+	*answer-with-an-envelope*) printf '{"png":"%s","state":{"page":3}}' "$(base64 < "$here/fake-face.png" | tr -d '\n')" ;;
+	*answer-with-a-null-state*) printf '{"png":"%s","state":null}' "$(base64 < "$here/fake-face.png" | tr -d '\n')" ;;
+	*echo-the-request*) echo "$request" >&2; exit 1 ;;
+	*answer-with-bad-base64*) printf '{"png":"not base64 at all!!","state":null}' ;;
 	*answer-with-garbage*) echo "this is not a PNG" ;;
 	*answer-with-wrong-size*) cat "$here/fake-face-wrong-size.png" ;;
 	*answer-with-a-flood*) head -c 3000000 /dev/zero ;;

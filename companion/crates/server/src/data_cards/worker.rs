@@ -3,7 +3,7 @@ use std::time::Duration;
 use chrono::Utc;
 use tokio::task::JoinHandle;
 
-use super::faces_package::{self, FaceCommand, FaceRenderError};
+use super::faces_package::{self, FaceCommand, FaceRenderError, RenderRequest};
 use super::{DataCardSpec, RefreshOutcome, record_outcome};
 use crate::image_ingest::{CanonicalFrame, canonical_frame_from_png};
 use crate::image_sources::AcceptOutcome;
@@ -53,13 +53,21 @@ fn render_frame(
     faces: &FaceCommand,
     spec: &DataCardSpec,
 ) -> Result<CanonicalFrame, RefreshFailure> {
-    let png =
-        faces_package::render(faces, &spec.face.kind, &spec.face.settings).map_err(|error| {
-            match error {
-                FaceRenderError::Configuration(message) => RefreshFailure::Configuration(message),
-                FaceRenderError::Transient(message) => RefreshFailure::Transient(message),
-            }
-        })?;
+    let rendered = faces_package::render(
+        faces,
+        RenderRequest {
+            kind: &spec.face.kind,
+            settings: &spec.face.settings,
+            state: None,
+            taps: 0,
+        },
+    )
+    .map_err(|error| match error {
+        FaceRenderError::Configuration(message) => RefreshFailure::Configuration(message),
+        FaceRenderError::Malformed(message) => RefreshFailure::NotAFrame(message),
+        FaceRenderError::Transient(message) => RefreshFailure::Transient(message),
+    })?;
+    let faces_package::Rendered { png, state: _ } = rendered;
     canonical_frame_from_png(&png).map_err(|error| RefreshFailure::NotAFrame(error.to_string()))
 }
 

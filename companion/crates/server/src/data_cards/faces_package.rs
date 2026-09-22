@@ -5,9 +5,11 @@
 //!
 //! - `describe` prints the catalog the browser's add menu and settings form are
 //!   built from;
-//! - `render` reads `{"kind", "settings"}` on stdin and writes one PNG to stdout,
-//!   which goes through [`crate::image_ingest::canonical_frame_from_png`] exactly
-//!   as an external producer's POST would. The server is just another producer.
+//! - `render` reads a kind, settings, optional state, and optional tap event on
+//!   stdin, then writes a base64 PNG and optional state in a JSON envelope. A
+//!   legacy package may still write a bare PNG. Either frame goes through
+//!   [`crate::image_ingest::canonical_frame_from_png`] exactly as an external
+//!   producer's POST would. The server is just another producer.
 //!
 //! # Exit codes are the error taxonomy
 //!
@@ -33,6 +35,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use serde::Deserialize;
 
 use super::FaceFieldOption;
@@ -42,7 +45,10 @@ use super::FaceFieldOption;
 const RENDER_TIMEOUT: Duration = Duration::from_secs(45);
 const DESCRIBE_TIMEOUT: Duration = Duration::from_secs(15);
 /// The ingest route's own body limit: a face may not be larger than a producer's.
-const MAX_PNG_BYTES: usize = 1024 * 1024;
+/// The cap on `render`'s stdout. It bounds the ENVELOPE, not the frame inside it:
+/// base64 inflates a PNG by a third, so the largest frame this admits is about
+/// 1.5 MB. The biggest face measured off-panel is 61 KB, so the headroom is real.
+const MAX_PNG_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CATALOG_BYTES: usize = 256 * 1024;
 const MAX_STDERR_BYTES: usize = 8 * 1024;
 const MAX_MESSAGE_CHARS: usize = 200;
@@ -130,12 +136,44 @@ impl CatalogField {
 /// Why a face produced no frame.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum FaceRenderError {
+    /// The package answered with something that is neither a PNG nor an envelope.
+    /// That is a bug in `companion/faces`, not a feed having a bad day, so the
+    /// caller reports it as such rather than retrying it as transient.
+    #[error("{0}")]
+    Malformed(String),
     /// The owner must change a setting; retrying cannot help.
     #[error("{0}")]
     Configuration(String),
     /// The world did not cooperate this time.
     #[error("{0}")]
     Transient(String),
+}
+
+/// Everything the faces package needs to render one frame.
+#[derive(Clone, Copy)]
+pub(crate) struct RenderRequest<'a> {
+    pub(crate) kind: &'a str,
+    pub(crate) settings: &'a std::collections::BTreeMap<String, serde_json::Value>,
+    pub(crate) state: Option<&'a serde_json::Value>,
+    /// Zero means this is a scheduled refresh rather than a response to taps.
+    pub(crate) taps: u32,
+}
+
+/// A rendered frame and the package's instruction for stored state.
+#[allow(clippy::option_option)] // Absent keeps state, null clears it, and a value replaces it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Rendered {
+    pub(crate) png: Vec<u8>,
+    /// `None` keeps state, `Some(None)` clears it, and `Some(Some(value))` replaces it.
+    pub(crate) state: Option<Option<serde_json::Value>>,
+}
+
+#[allow(clippy::option_option)] // Preserve the envelope's absent/null/value distinction.
+#[derive(Deserialize)]
+struct RenderEnvelope {
+    png: String,
+    #[serde(default, deserialize_with = "deserialize_explicit_null")]
+    state: Option<Option<serde_json::Value>>,
 }
 
 struct Finished {
@@ -296,17 +334,30 @@ pub(crate) fn describe(command: &FaceCommand) -> Result<Vec<CatalogFace>, String
     Ok(catalog)
 }
 
-/// Fetches and draws one face, returning the PNG the package produced.
+/// Fetches and draws one face, returning its PNG and state instruction.
 pub(crate) fn render(
     command: &FaceCommand,
-    kind: &str,
-    settings: &std::collections::BTreeMap<String, serde_json::Value>,
-) -> Result<Vec<u8>, FaceRenderError> {
-    let request = serde_json::json!({ "kind": kind, "settings": settings }).to_string();
+    request: RenderRequest<'_>,
+) -> Result<Rendered, FaceRenderError> {
+    let mut body = serde_json::json!({
+        "kind": request.kind,
+        "settings": request.settings,
+    });
+    if let Some(state) = request.state {
+        body["state"] = state.clone();
+    }
+    if request.taps > 0 {
+        // `point` is null until the wire carries one. Sending the key now means C2
+        // changes the firmware and the server, and no face and no contract.
+        body["event"] = serde_json::json!({
+            "taps": request.taps,
+            "point": serde_json::Value::Null,
+        });
+    }
     let finished = run(
         command,
         "render",
-        request.as_bytes(),
+        body.to_string().as_bytes(),
         MAX_PNG_BYTES,
         RENDER_TIMEOUT,
     )
@@ -315,10 +366,52 @@ pub(crate) fn render(
         Some(0) if finished.stdout.is_empty() => Err(FaceRenderError::Transient(
             "the faces package exited cleanly without a frame".into(),
         )),
-        Some(0) => Ok(finished.stdout),
+        Some(0) => decode(finished.stdout),
         Some(EXIT_CONFIGURATION) => Err(FaceRenderError::Configuration(message_of(&finished))),
         _ => Err(FaceRenderError::Transient(message_of(&finished))),
     }
+}
+
+/// Decodes the two successful `render` response forms.
+///
+/// The server and faces package deploy independently, so an older package answering
+/// with a bare PNG must keep working. The PNG signature cannot open a JSON document,
+/// which makes the two forms unambiguous.
+fn decode(stdout: Vec<u8>) -> Result<Rendered, FaceRenderError> {
+    if stdout.starts_with(b"\x89PNG") {
+        return Ok(Rendered {
+            png: stdout,
+            state: None,
+        });
+    }
+
+    let envelope: RenderEnvelope = serde_json::from_slice(&stdout).map_err(|error| {
+        FaceRenderError::Malformed(format!(
+            "the faces package answered with neither a PNG nor an envelope: {error}"
+        ))
+    })?;
+    let png = BASE64_STANDARD.decode(&envelope.png).map_err(|error| {
+        FaceRenderError::Malformed(format!("the envelope's frame is not base64: {error}"))
+    })?;
+    Ok(Rendered {
+        png,
+        state: envelope.state,
+    })
+}
+
+/// Keeps a present JSON null distinct from an absent field.
+#[allow(clippy::option_option)] // This is the deserializer for the three-state field above.
+fn deserialize_explicit_null<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<serde_json::Value>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(Some(match value {
+        serde_json::Value::Null => None,
+        value => Some(value),
+    }))
 }
 
 #[cfg(test)]
@@ -339,6 +432,20 @@ mod tests {
         )])
     }
 
+    fn request<'a>(
+        kind: &'a str,
+        settings: &'a BTreeMap<String, serde_json::Value>,
+        state: Option<&'a serde_json::Value>,
+        taps: u32,
+    ) -> RenderRequest<'a> {
+        RenderRequest {
+            kind,
+            settings,
+            state,
+            taps,
+        }
+    }
+
     #[test]
     fn the_catalog_is_read_with_its_defaults() {
         let catalog = describe(&fake()).expect("the fake package describes itself");
@@ -355,21 +462,107 @@ mod tests {
 
     #[test]
     fn a_frame_comes_back_as_the_bytes_the_package_wrote() {
-        let png = render(&fake(), "weather", &steer("Dubai")).expect("a frame");
-        assert!(png.starts_with(b"\x89PNG"));
-        assert!(crate::image_ingest::canonical_frame_from_png(&png).is_ok());
+        let rendered =
+            render(&fake(), request("weather", &steer("Dubai"), None, 0)).expect("a frame");
+        assert!(rendered.png.starts_with(b"\x89PNG"));
+        assert!(crate::image_ingest::canonical_frame_from_png(&rendered.png).is_ok());
+    }
+
+    #[test]
+    fn a_legacy_bare_png_is_still_a_frame_and_leaves_state_alone() {
+        let rendered = render(&fake(), request("weather", &steer(""), None, 0)).expect("a frame");
+        assert_eq!(&rendered.png[..4], b"\x89PNG");
+        assert!(rendered.state.is_none());
+    }
+
+    #[test]
+    fn an_envelope_carries_the_frame_and_the_new_state() {
+        let rendered = render(
+            &fake(),
+            request("weather", &steer("answer-with-an-envelope"), None, 0),
+        )
+        .expect("a frame");
+        assert_eq!(&rendered.png[..4], b"\x89PNG");
+        assert_eq!(rendered.state, Some(Some(serde_json::json!({ "page": 3 }))));
+    }
+
+    #[test]
+    fn an_envelope_may_clear_the_state() {
+        let rendered = render(
+            &fake(),
+            request("weather", &steer("answer-with-a-null-state"), None, 0),
+        )
+        .expect("a frame");
+        assert_eq!(rendered.state, Some(None));
+    }
+
+    #[test]
+    fn the_request_carries_state_and_the_tap_count_to_the_package() {
+        // fake-faces.sh echoes its request to stderr for this setting and exits 1.
+        let state = serde_json::json!({"page": 2});
+        let error = render(
+            &fake(),
+            request("weather", &steer("echo-the-request"), Some(&state), 3),
+        )
+        .expect_err("the fake refuses on purpose");
+        let FaceRenderError::Transient(message) = error else {
+            panic!("expected transient")
+        };
+        assert!(message.contains("\"taps\":3"), "{message}");
+        assert!(message.contains("\"page\":2"), "{message}");
+    }
+
+    #[test]
+    fn a_scheduled_refresh_sends_no_event_at_all() {
+        let error = render(
+            &fake(),
+            request("weather", &steer("echo-the-request"), None, 0),
+        )
+        .expect_err("the fake refuses on purpose");
+        let FaceRenderError::Transient(message) = error else {
+            panic!("expected transient")
+        };
+        assert!(!message.contains("event"), "{message}");
+    }
+
+    #[test]
+    fn output_that_is_neither_a_png_nor_an_envelope_is_the_packages_bug_not_a_feeds() {
+        let error = render(
+            &fake(),
+            request("weather", &steer("answer-with-garbage"), None, 0),
+        )
+        .expect_err("not a frame");
+        // Not Transient: retrying cannot fix a package that cannot answer, and the
+        // worker turns this into NotAFrame so the log names the right culprit.
+        assert!(matches!(error, FaceRenderError::Malformed(_)), "{error:?}");
+    }
+
+    #[test]
+    fn an_envelope_whose_frame_is_not_base64_is_malformed_too() {
+        let error = render(
+            &fake(),
+            request("weather", &steer("answer-with-bad-base64"), None, 0),
+        )
+        .expect_err("not a frame");
+        assert!(matches!(error, FaceRenderError::Malformed(_)), "{error:?}");
     }
 
     #[test]
     fn exit_two_is_the_owners_to_fix_and_anything_else_is_transient() {
         assert_eq!(
-            render(&fake(), "token", &steer("refuse-as-configuration")),
+            render(
+                &fake(),
+                request("token", &steer("refuse-as-configuration"), None, 0),
+            ),
             Err(FaceRenderError::Configuration(
                 "the coin was not found; check the coin ID".into()
             ))
         );
         assert_eq!(
-            render(&fake(), "token", &steer("refuse-as-transient")),
+            render(
+                &fake(),
+                request("token", &steer("refuse-as-transient"), None, 0),
+            ),
             Err(FaceRenderError::Transient(
                 "api.example returned HTTP 503".into()
             ))
@@ -380,7 +573,10 @@ mod tests {
     fn a_missing_program_is_transient_rather_than_a_panic() {
         let nowhere = FaceCommand::bun("/nonexistent/bun".into(), Path::new("/nonexistent"));
         assert!(matches!(
-            render(&nowhere, "weather", &BTreeMap::new()),
+            render(
+                &nowhere,
+                request("weather", &BTreeMap::new(), None, 0),
+            ),
             Err(FaceRenderError::Transient(message)) if message.contains("could not start")
         ));
         assert!(describe(&nowhere).is_err());
@@ -389,7 +585,10 @@ mod tests {
     #[test]
     fn a_flood_on_stdout_is_refused_at_the_cap_not_buffered() {
         assert!(matches!(
-            render(&fake(), "weather", &steer("answer-with-a-flood")),
+            render(
+                &fake(),
+                request("weather", &steer("answer-with-a-flood"), None, 0),
+            ),
             Err(FaceRenderError::Transient(message)) if message.contains("more than")
         ));
     }

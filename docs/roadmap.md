@@ -35,6 +35,7 @@ can write a plugin and either self-host it or submit it to run on ours.
 | **D. Landing page** | Research first (vibebuddy.sh is the reference the owner likes), then the site | Research now | A, for sign-up and checkout |
 | **E. Socials and marketing** | Channels, content, launch. Free where possible | Now | D, for somewhere to send people |
 | **F. Store and fulfilment** | Checkout, flashing, shipping | Later | A, and a device worth selling |
+| **G. Desk agent** | A headless daemon on the owner's machine that runs local actions a server cannot: open a URL, focus an app, run a macro | Later | C1 phase 2, and A for an identity |
 
 ## How the tracks run in parallel
 
@@ -54,14 +55,16 @@ can write a plugin and either self-host it or submit it to run on ours.
 
 ## Board
 
-**Schema/wire lock:** free.
+**Schema/wire lock:** free. C1 does not need it: tap-to-face crosses no schema, wire or
+firmware boundary (`docs/superpowers/specs/2026-09-23-deskmate-tap-to-face-design.md`).
 
 | Track | Status | Branch | Waiting on |
 |---|---|---|---|
 | A | Not started | -- | -- |
 | B | Not started | -- | -- |
-| C1 | Not started | -- | -- |
+| C1 | Spec approved; writing the plan | `track-c1-tap-to-face` | -- |
 | C2 | Not started | -- | C1 |
 | D | Not started | -- | -- |
 | E | Not started | -- | -- |
 | F | Not started | -- | A |
+| G | Not started | -- | C1 phase 2, A |

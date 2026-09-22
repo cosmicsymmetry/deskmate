@@ -10,9 +10,8 @@ The companion is a browser application served by `companion/crates/server`; its 
 lives in `companion/apps/deskmate`. The current application config is frozen at
 [schema v10](docs/config/v10.md), and the wire contract is frozen at
 [protocol v2](docs/protocol/v2.md). Clock and pomodoro render as host-built scenes;
-picture frames use durable device assets. Historical milestones are recorded in the
-[roadmap](docs/superpowers/plans/2026-08-03-deskmate-roadmap.md) and
-[project history](docs/history.md). Hardware observations and unresolved board gates are
+picture frames use durable device assets. What comes next is the
+[roadmap](docs/roadmap.md); what came before is the [project history](docs/history.md). Hardware observations and unresolved board gates are
 recorded in [board notes](docs/hardware/board-notes.md).
 
 ## Web companion

@@ -1,8 +1,10 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
 use tokio::task::JoinHandle;
 
+use super::face_state::FaceStateStore;
 use super::faces_package::{self, FaceCommand, FaceRenderError, RenderRequest};
 use super::{DataCardSpec, RefreshOutcome, record_outcome};
 use crate::image_ingest::{CanonicalFrame, canonical_frame_from_png};
@@ -20,10 +22,11 @@ pub(super) fn spawn_refresher(
     runtime: &tokio::runtime::Handle,
     state: ServerState,
     faces: FaceCommand,
+    face_state: Arc<FaceStateStore>,
     spec: DataCardSpec,
 ) -> JoinHandle<()> {
     let refresh = clamped_refresh(spec.refresh_seconds);
-    runtime.spawn(async move { refresh_loop(state, faces, spec, refresh).await })
+    runtime.spawn(async move { refresh_loop(state, faces, face_state, spec, refresh).await })
 }
 
 fn clamped_refresh(refresh_seconds: u64) -> Duration {
@@ -43,6 +46,12 @@ enum RefreshFailure {
     NotAFrame(String),
 }
 
+#[allow(clippy::option_option)] // Absent keeps state; present null clears it.
+struct RenderedFrame {
+    frame: CanonicalFrame,
+    state: Option<Option<serde_json::Value>>,
+}
+
 /// Runs the faces package once and turns its PNG into the canonical frame.
 ///
 /// Blocking -- it waits on a subprocess -- so it must be called from
@@ -52,13 +61,14 @@ enum RefreshFailure {
 fn render_frame(
     faces: &FaceCommand,
     spec: &DataCardSpec,
-) -> Result<CanonicalFrame, RefreshFailure> {
+    state: Option<&serde_json::Value>,
+) -> Result<RenderedFrame, RefreshFailure> {
     let rendered = faces_package::render(
         faces,
         RenderRequest {
             kind: &spec.face.kind,
             settings: &spec.face.settings,
-            state: None,
+            state,
             taps: 0,
         },
     )
@@ -67,8 +77,10 @@ fn render_frame(
         FaceRenderError::Malformed(message) => RefreshFailure::NotAFrame(message),
         FaceRenderError::Transient(message) => RefreshFailure::Transient(message),
     })?;
-    let faces_package::Rendered { png, state: _ } = rendered;
-    canonical_frame_from_png(&png).map_err(|error| RefreshFailure::NotAFrame(error.to_string()))
+    let faces_package::Rendered { png, state } = rendered;
+    let frame = canonical_frame_from_png(&png)
+        .map_err(|error| RefreshFailure::NotAFrame(error.to_string()))?;
+    Ok(RenderedFrame { frame, state })
 }
 
 /// How long to wait before the next attempt.
@@ -98,15 +110,19 @@ fn next_attempt(
 async fn refresh_once(
     state: &ServerState,
     faces: &FaceCommand,
+    face_state: &Arc<FaceStateStore>,
     spec: &DataCardSpec,
 ) -> Option<RefreshOutcome> {
     let (source_id, kind) = (&spec.source_id, &spec.face.kind);
+    let previous_state = face_state.get(source_id);
     let render_faces = faces.clone();
     let render_spec = spec.clone();
-    let rendered =
-        tokio::task::spawn_blocking(move || render_frame(&render_faces, &render_spec)).await;
-    let frame = match rendered {
-        Ok(Ok(frame)) => frame,
+    let rendered = tokio::task::spawn_blocking(move || {
+        render_frame(&render_faces, &render_spec, previous_state.as_ref())
+    })
+    .await;
+    let rendered = match rendered {
+        Ok(Ok(rendered)) => rendered,
         Ok(Err(RefreshFailure::Configuration(error))) => {
             tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error,
                 "the face's settings need the owner's attention; keeping the stored frame unchanged");
@@ -132,10 +148,19 @@ async fn refresh_once(
 
     let accept_state = state.clone();
     let accept_source = source_id.clone();
+    let next_face_state = rendered.state;
+    let face_state = Arc::clone(face_state);
     let accepted = tokio::task::spawn_blocking(move || {
-        accept_state
-            .image_sources()
-            .accept(&accept_source, frame, Utc::now())
+        let outcome =
+            accept_state
+                .image_sources()
+                .accept(&accept_source, rendered.frame, Utc::now());
+        if outcome.is_ok()
+            && let Some(next_face_state) = next_face_state
+        {
+            face_state.put(&accept_source, next_face_state);
+        }
+        outcome
     })
     .await;
     match accepted {
@@ -161,6 +186,7 @@ async fn refresh_once(
 async fn refresh_loop(
     state: ServerState,
     faces: FaceCommand,
+    face_state: Arc<FaceStateStore>,
     spec: DataCardSpec,
     refresh: Duration,
 ) {
@@ -177,7 +203,7 @@ async fn refresh_loop(
     // The first attempt is immediate, which is what fills a freshly started server's
     // panels instead of leaving them blank for fifteen minutes.
     loop {
-        let Some(outcome) = refresh_once(&state, &faces, &spec).await else {
+        let Some(outcome) = refresh_once(&state, &faces, &face_state, &spec).await else {
             return;
         };
         consecutive_failures = match outcome {
@@ -228,7 +254,7 @@ mod tests {
 
     #[test]
     fn a_rendered_png_becomes_the_frame_a_producers_post_would() {
-        let frame = render_frame(&faces_package::fake(), &spec("Dubai")).expect("a frame");
+        let rendered = render_frame(&faces_package::fake(), &spec("Dubai"), None).expect("a frame");
         let posted = canonical_frame_from_png(
             &std::fs::read(concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -237,14 +263,14 @@ mod tests {
             .expect("the fixture is readable"),
         )
         .expect("the fixture is a valid frame");
-        assert_eq!(frame.digest, posted.digest);
+        assert_eq!(rendered.frame.digest, posted.digest);
     }
 
     #[test]
     fn output_the_asset_path_would_refuse_is_our_bug_not_the_feeds() {
         for steer in ["answer-with-garbage", "answer-with-wrong-size"] {
             assert!(matches!(
-                render_frame(&faces_package::fake(), &spec(steer)),
+                render_frame(&faces_package::fake(), &spec(steer), None),
                 Err(RefreshFailure::NotAFrame(_))
             ));
         }
@@ -253,13 +279,100 @@ mod tests {
     #[test]
     fn the_two_refusals_keep_their_meaning_through_the_worker() {
         assert!(matches!(
-            render_frame(&faces_package::fake(), &spec("refuse-as-configuration")),
+            render_frame(
+                &faces_package::fake(),
+                &spec("refuse-as-configuration"),
+                None,
+            ),
             Err(RefreshFailure::Configuration(_))
         ));
         assert!(matches!(
-            render_frame(&faces_package::fake(), &spec("refuse-as-transient")),
+            render_frame(&faces_package::fake(), &spec("refuse-as-transient"), None,),
             Err(RefreshFailure::Transient(_))
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refresh_passes_stored_state_to_the_faces_package() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let face_state = Arc::new(FaceStateStore::load(
+            directory.path().join("face-state.json"),
+        ));
+        face_state.put("source", Some(serde_json::json!({ "page": 2 })));
+        let state = ServerState::in_memory();
+
+        let outcome = refresh_once(
+            &state,
+            &faces_package::fake(),
+            &face_state,
+            &spec("echo-the-request"),
+        )
+        .await
+        .expect("the refresh task did not panic");
+        let RefreshOutcome::Retrying(message) = outcome else {
+            panic!("the fake package refuses this request on purpose");
+        };
+        assert!(message.contains(r#""state":{"page":2}"#), "{message}");
+        assert_eq!(
+            face_state.get("source"),
+            Some(serde_json::json!({ "page": 2 })),
+            "a failed render keeps the prior state"
+        );
+        state.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn only_an_accepted_frame_applies_the_returned_state() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let face_state = Arc::new(FaceStateStore::load(
+            directory.path().join("face-state.json"),
+        ));
+        let state = ServerState::in_memory();
+        let source = state.image_sources().mint("Weather").expect("a source");
+
+        let mut accepted_spec = spec("answer-with-an-envelope");
+        accepted_spec.source_id.clone_from(&source.id);
+        assert_eq!(
+            refresh_once(&state, &faces_package::fake(), &face_state, &accepted_spec,).await,
+            Some(RefreshOutcome::Drawn)
+        );
+        assert_eq!(
+            face_state.get(&source.id),
+            Some(serde_json::json!({ "page": 3 }))
+        );
+
+        let mut refused_spec = spec("answer-with-an-envelope");
+        refused_spec.source_id = "missing-source".into();
+        face_state.put(
+            &refused_spec.source_id,
+            Some(serde_json::json!({ "page": 2 })),
+        );
+        assert!(matches!(
+            refresh_once(&state, &faces_package::fake(), &face_state, &refused_spec,).await,
+            Some(RefreshOutcome::Retrying(_))
+        ));
+        assert_eq!(
+            face_state.get(&refused_spec.source_id),
+            Some(serde_json::json!({ "page": 2 })),
+            "an unaccepted frame must not advance state"
+        );
+
+        let clear_source = state
+            .image_sources()
+            .mint("Forecast")
+            .expect("another source");
+        face_state.put(
+            &clear_source.id,
+            Some(serde_json::json!({ "view": "days" })),
+        );
+        let mut clear_spec = spec("answer-with-a-null-state");
+        clear_spec.source_id.clone_from(&clear_source.id);
+        assert_eq!(
+            refresh_once(&state, &faces_package::fake(), &face_state, &clear_spec,).await,
+            Some(RefreshOutcome::Drawn)
+        );
+        assert_eq!(face_state.get(&clear_source.id), None);
+        state.shutdown();
     }
 
     #[test]
@@ -273,8 +386,11 @@ mod tests {
         let at = |seconds: i64| Utc.timestamp_opt(1_700_000_000 + seconds, 0).unwrap();
         // What the refresh loop does with one tick: render, and accept only a frame.
         let publish = |steer: &str, now| {
-            render_frame(&faces_package::fake(), &spec(steer))
-                .map(|frame| store.accept(&source.id, frame, now).expect("accept"))
+            render_frame(&faces_package::fake(), &spec(steer), None).map(|rendered| {
+                store
+                    .accept(&source.id, rendered.frame, now)
+                    .expect("accept")
+            })
         };
 
         for seconds in [0, 60, 120, 180] {

@@ -29,9 +29,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::ServerState;
 
+mod face_state;
 mod faces_package;
 mod worker;
 
+use face_state::FaceStateStore;
 pub use faces_package::FaceCommand;
 use faces_package::{CatalogFace, CatalogField};
 
@@ -267,6 +269,7 @@ fn face_is_complete(descriptor: &FaceDescriptor) -> bool {
 /// one refresher that consumes it.
 pub(crate) struct DataCardState {
     spec_path: PathBuf,
+    face_state: Arc<FaceStateStore>,
     specs: Vec<DataCardSpec>,
     tasks: HashMap<String, tokio::task::JoinHandle<()>>,
     /// How to run the faces package. `None` means this deployment has none, and
@@ -284,8 +287,12 @@ pub(crate) struct DataCardState {
 
 impl DataCardState {
     pub(crate) fn new(spec_path: PathBuf, faces: Option<FaceCommand>) -> Self {
+        let face_state = Arc::new(FaceStateStore::load(
+            spec_path.with_file_name("face-state.json"),
+        ));
         Self {
             spec_path,
+            face_state,
             specs: Vec::new(),
             tasks: HashMap::new(),
             faces,
@@ -325,7 +332,13 @@ impl DataCardState {
             Some(descriptor) if face_is_complete(&descriptor) => {
                 self.tasks.insert(
                     spec.source_id.clone(),
-                    worker::spawn_refresher(runtime, state.clone(), faces, spec.clone()),
+                    worker::spawn_refresher(
+                        runtime,
+                        state.clone(),
+                        faces,
+                        Arc::clone(&self.face_state),
+                        spec.clone(),
+                    ),
                 );
             }
             // A card added from the menu is stored blank and stays unfetched until
@@ -508,6 +521,9 @@ fn spawn_refreshers(state: &ServerState, spec_path: PathBuf, specs: Vec<DataCard
         task.abort();
     }
     data_cards.outcomes.clear();
+    data_cards.face_state = Arc::new(FaceStateStore::load(
+        spec_path.with_file_name("face-state.json"),
+    ));
     data_cards.spec_path = spec_path;
     data_cards.specs = specs;
     // Read fresh at every start, here, so no request handler pays for it later.
@@ -802,6 +818,7 @@ pub(crate) fn remove_face(state: &ServerState, source_id: &str) -> Result<(), Fa
         .iter()
         .any(|spec| spec.source_id == source_id)
     {
+        data_cards.face_state.remove(source_id);
         return Ok(());
     }
 
@@ -815,6 +832,7 @@ pub(crate) fn remove_face(state: &ServerState, source_id: &str) -> Result<(), Fa
     // Only replace the in-memory specs after persistence succeeds, retaining
     // the original spec for a retry if the write fails.
     data_cards.specs = updated_specs;
+    data_cards.face_state.remove(source_id);
     Ok(())
 }
 
@@ -1674,6 +1692,29 @@ mod tests {
         }
         tokio::task::yield_now().await;
         assert!(abort.is_finished());
+        state.shutdown();
+    }
+
+    #[tokio::test]
+    async fn face_state_lives_beside_the_specs_and_is_removed_with_its_face() {
+        let state = ServerState::in_memory();
+        create_face(&state, "target", "weather").expect("create face");
+        let (path, face_state) = {
+            let cards = state.inner.data_cards.lock().expect("data cards");
+            (
+                cards.spec_path.with_file_name("face-state.json"),
+                Arc::clone(&cards.face_state),
+            )
+        };
+        face_state.put("target", Some(serde_json::json!({ "page": 3 })));
+        assert_eq!(
+            FaceStateStore::load(path.clone()).get("target"),
+            Some(serde_json::json!({ "page": 3 }))
+        );
+
+        remove_face(&state, "target").expect("remove face");
+        assert_eq!(face_state.get("target"), None);
+        assert_eq!(FaceStateStore::load(path).get("target"), None);
         state.shutdown();
     }
 

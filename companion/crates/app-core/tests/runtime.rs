@@ -3,7 +3,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use app_core::runtime::ImageSourceFrame;
+use app_core::runtime::{CardTapSink, ImageSourceFrame};
 use app_core::{
     AlertHold, AppConfig, CardAlert, CardErrorKind, CardField, CardFieldValue, CardSettings,
     CarouselAdvance, ConnectionState, DesiredAsset, DeviceCapability, DeviceConnection,
@@ -217,13 +217,7 @@ impl MockDeviceControl {
     }
 
     fn tap_pomodoro(&self, sequence: u64) {
-        self.push_event(DeviceEvent {
-            sequence,
-            kind: EventKind::Tap,
-            card_id: "pomodoro".into(),
-            action: EventAction::StartPause,
-            interrupt_token: None,
-        });
+        self.push_event(tap_event(sequence, "pomodoro"));
     }
 
     fn navigate_next(&self, sequence: u64, card_id: &str) {
@@ -308,6 +302,34 @@ impl MockDeviceControl {
             .iter()
             .filter(|operation| **operation == Operation::TimeSync)
             .count()
+    }
+}
+
+fn tap_event(sequence: u64, card_id: &str) -> DeviceEvent {
+    DeviceEvent {
+        sequence,
+        kind: EventKind::Tap,
+        card_id: card_id.into(),
+        action: EventAction::StartPause,
+        interrupt_token: None,
+    }
+}
+
+#[derive(Default)]
+struct RecordingTapSink(Mutex<Vec<(String, String)>>);
+
+impl RecordingTapSink {
+    fn taken(&self) -> Vec<(String, String)> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+}
+
+impl CardTapSink for RecordingTapSink {
+    fn tapped(&self, card_id: &str, source_id: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .push((card_id.to_owned(), source_id.to_owned()));
     }
 }
 
@@ -814,6 +836,32 @@ fn picture_config(picture_is_active: bool) -> AppConfig {
     config
 }
 
+fn config_with_picture(card_id: &str, source_id: &str) -> AppConfig {
+    AppConfig {
+        cards: vec![CardSettings::Picture {
+            id: card_id.into(),
+            title: card_id.into(),
+            source_id: source_id.into(),
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Manual,
+            alert: CardAlert::None,
+            dwell_seconds: None,
+        }],
+        image_sources: vec![app_core::config::ImageSource {
+            id: source_id.into(),
+            name: source_id.into(),
+        }],
+        ..AppConfig::default()
+    }
+}
+
+fn config_with_pomodoro(card_id: &str) -> AppConfig {
+    AppConfig {
+        cards: vec![pomodoro_card(card_id, CardAlert::None)],
+        ..AppConfig::default()
+    }
+}
+
 fn start_picture_runtime(
     config: AppConfig,
     control: &MockDeviceControl,
@@ -824,6 +872,21 @@ fn start_picture_runtime(
         Box::new(MockDevice::new(control.clone())),
         options(),
         host,
+    )
+    .unwrap()
+}
+
+fn start_runtime_with_tap_sink(
+    config: AppConfig,
+    control: &MockDeviceControl,
+    tap_sink: Arc<dyn CardTapSink>,
+) -> RuntimeHandle {
+    RuntimeHandle::start_with_ports(
+        config,
+        Box::new(MockDevice::new(control.clone())),
+        options(),
+        None,
+        Some(tap_sink),
     )
     .unwrap()
 }

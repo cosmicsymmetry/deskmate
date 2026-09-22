@@ -1,6 +1,82 @@
 use super::*;
 
 #[test]
+fn a_tap_on_a_picture_card_reaches_the_sink_with_its_source() {
+    let control = MockDeviceControl::default();
+    let sink = Arc::new(RecordingTapSink::default());
+    let runtime = start_runtime_with_tap_sink(
+        config_with_picture("usage", "claude-limits"),
+        &control,
+        sink.clone(),
+    );
+    wait_until_online(&runtime);
+
+    control.push_event(tap_event(1, "usage"));
+    wait_for(Duration::from_secs(1), || {
+        !sink.0.lock().unwrap().is_empty()
+    });
+
+    assert_eq!(
+        sink.taken(),
+        vec![("usage".to_owned(), "claude-limits".to_owned())]
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn a_tap_on_a_pomodoro_still_toggles_its_timer_and_never_reaches_the_sink() {
+    let control = MockDeviceControl::default();
+    let sink = Arc::new(RecordingTapSink::default());
+    let runtime =
+        start_runtime_with_tap_sink(config_with_pomodoro("focus"), &control, sink.clone());
+    wait_until_online(&runtime);
+
+    control.push_event(tap_event(1, "focus"));
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot
+            .pomodoros
+            .iter()
+            .any(|timer| timer.card_id == "focus" && timer.state == PomodoroState::Running)
+    });
+
+    assert!(sink.taken().is_empty());
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn a_tap_naming_a_card_that_does_not_exist_is_counted_and_dropped() {
+    let control = MockDeviceControl::default();
+    let sink = Arc::new(RecordingTapSink::default());
+    let runtime = start_runtime_with_tap_sink(
+        config_with_picture("usage", "claude-limits"),
+        &control,
+        sink.clone(),
+    );
+    wait_until_online(&runtime);
+
+    control.push_event(tap_event(1, "ghost"));
+    wait_for(Duration::from_secs(1), || runtime.taps_dropped() == 1);
+
+    assert!(sink.taken().is_empty());
+    assert_eq!(runtime.taps_dropped(), 1);
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn a_runtime_with_no_sink_drops_a_picture_tap_without_panicking() {
+    let control = MockDeviceControl::default();
+    let runtime = start_runtime(config_with_picture("usage", "claude-limits"), &control);
+    wait_until_online(&runtime);
+
+    control.push_event(tap_event(1, "usage"));
+    wait_for(Duration::from_secs(1), || runtime.taps_dropped() == 1);
+
+    assert!(runtime.snapshot().is_ok());
+    assert_eq!(runtime.taps_dropped(), 1);
+    runtime.shutdown().unwrap();
+}
+
+#[test]
 fn rotation_follows_card_order_and_each_cards_own_dwell() {
     let control = MockDeviceControl::default();
     // "b" first with an explicit 5s dwell, then "a" taking the 10s default:

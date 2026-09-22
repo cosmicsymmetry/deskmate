@@ -49,6 +49,12 @@ use timers::{
 const DEFAULT_RUNTIME_COMMAND_CAPACITY: usize = 16;
 const DEFAULT_MAX_SUBSCRIBERS: usize = 8;
 
+/// Receives taps on cards whose host-provided picture may need to change.
+pub trait CardTapSink: Send + Sync {
+    /// Called on the runtime worker thread. MUST NOT block.
+    fn tapped(&self, card_id: &str, source_id: &str);
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct RuntimeOptions {
     pub command_capacity: usize,
@@ -95,7 +101,7 @@ impl RuntimeHandle {
         device: Box<dyn RuntimeDevice>,
         options: RuntimeOptions,
     ) -> Result<Self, RuntimeError> {
-        Self::start_with_image_source_host(config, device, options, None)
+        Self::start_with_ports(config, device, options, None, None)
     }
 
     pub fn start_with_image_source_host(
@@ -103,6 +109,16 @@ impl RuntimeHandle {
         device: Box<dyn RuntimeDevice>,
         options: RuntimeOptions,
         image_source_host: Option<Box<dyn ImageSourceHost>>,
+    ) -> Result<Self, RuntimeError> {
+        Self::start_with_ports(config, device, options, image_source_host, None)
+    }
+
+    pub fn start_with_ports(
+        config: AppConfig,
+        device: Box<dyn RuntimeDevice>,
+        options: RuntimeOptions,
+        image_source_host: Option<Box<dyn ImageSourceHost>>,
+        tap_sink: Option<Arc<dyn CardTapSink>>,
     ) -> Result<Self, RuntimeError> {
         config
             .compile(1)
@@ -125,6 +141,7 @@ impl RuntimeHandle {
             config,
             device,
             image_source_host,
+            tap_sink,
         };
         let worker = thread::Builder::new()
             .name("deskmate-runtime".into())
@@ -162,6 +179,12 @@ impl RuntimeHandle {
 
     pub fn subscribe(&self) -> Result<RuntimeSubscription, RuntimeError> {
         self.publisher.subscribe()
+    }
+
+    /// Number of device taps dropped because their card was unknown or their
+    /// picture card had no host sink.
+    pub fn taps_dropped(&self) -> u64 {
+        self.diagnostics.taps_dropped.load(Ordering::Relaxed)
     }
 
     pub fn apply_config(&self, config: AppConfig) -> Result<(), RuntimeError> {
@@ -354,6 +377,7 @@ struct WorkerState {
     /// digest/staleness changes without retrying an unchanged terminal refusal.
     last_evaluated_picture_face: BTreeMap<String, ([u8; protocol::ASSET_DIGEST_LEN], bool)>,
     image_source_host: Option<Box<dyn ImageSourceHost>>,
+    tap_sink: Option<Arc<dyn CardTapSink>>,
     dirty_cards: BTreeSet<String>,
     /// Card ID -> the most recent typed refusal for that card. There is deliberately
     /// one editor-visible slot per card: if data and scene refusals happen before
@@ -392,11 +416,22 @@ impl WorkerState {
         Self::new_with_image_source_host(config, now, scheduler, None)
     }
 
+    #[cfg(test)]
     fn new_with_image_source_host(
         config: AppConfig,
         now: Instant,
         scheduler: &mut Scheduler,
         image_source_host: Option<Box<dyn ImageSourceHost>>,
+    ) -> Self {
+        Self::new_with_ports(config, now, scheduler, image_source_host, None)
+    }
+
+    fn new_with_ports(
+        config: AppConfig,
+        now: Instant,
+        scheduler: &mut Scheduler,
+        image_source_host: Option<Box<dyn ImageSourceHost>>,
+        tap_sink: Option<Arc<dyn CardTapSink>>,
     ) -> Self {
         let mut state = Self {
             config: config.clone(),
@@ -405,6 +440,7 @@ impl WorkerState {
             latest_fields: BTreeMap::new(),
             last_evaluated_picture_face: BTreeMap::new(),
             image_source_host,
+            tap_sink,
             dirty_cards: BTreeSet::new(),
             push_rejections: BTreeMap::new(),
             pomodoros: BTreeMap::new(),
@@ -617,6 +653,13 @@ fn card_index(config: &AppConfig, card_id: &str) -> Option<usize> {
     config.cards.iter().position(|card| card.id() == card_id)
 }
 
+fn picture_source<'a>(config: &'a AppConfig, card_id: &str) -> Option<&'a str> {
+    config.cards.iter().find_map(|card| match card {
+        CardSettings::Picture { id, source_id, .. } if id == card_id => Some(source_id.as_str()),
+        _ => None,
+    })
+}
+
 /// The dwell for the card at `index`, resolved against the document's default.
 /// Returns `None` under `CarouselAdvance::Manual` or when fewer than two cards
 /// exist, keeping no-op rotation deadlines disarmed.
@@ -658,6 +701,7 @@ struct RuntimeWorkerInputs {
     config: AppConfig,
     device: Box<dyn RuntimeDevice>,
     image_source_host: Option<Box<dyn ImageSourceHost>>,
+    tap_sink: Option<Arc<dyn CardTapSink>>,
 }
 
 fn run_runtime(
@@ -671,6 +715,7 @@ fn run_runtime(
         config,
         mut device,
         image_source_host,
+        tap_sink,
     } = inputs;
     let now = Instant::now();
     let mut scheduler = Scheduler::new(
@@ -680,7 +725,7 @@ fn run_runtime(
         options.time_sync_interval,
     );
     let mut state =
-        WorkerState::new_with_image_source_host(config, now, &mut scheduler, image_source_host);
+        WorkerState::new_with_ports(config, now, &mut scheduler, image_source_host, tap_sink);
     state.publish_if_changed(publisher, diagnostics);
 
     let mut shutting_down = false;
@@ -1050,25 +1095,37 @@ fn drain_device_events(
                     scheduler.set_rotation(current_dwell(&state.config, index), now);
                 }
             }
-            (EventKind::Tap, EventAction::StartPause) => {
-                let _ = control_pomodoro(
-                    state,
-                    scheduler,
-                    device,
-                    &received.event.card_id,
-                    PomodoroAction::Toggle,
-                    now,
-                );
-            }
-            (EventKind::Tap, EventAction::Reset) => {
-                let _ = control_pomodoro(
-                    state,
-                    scheduler,
-                    device,
-                    &received.event.card_id,
-                    PomodoroAction::Reset,
-                    now,
-                );
+            (EventKind::Tap, action @ (EventAction::StartPause | EventAction::Reset)) => {
+                // Every picture card is lowered to StartPause so the device reports taps at
+                // all (see config.rs's wire_config). What the tap MEANS is the host's
+                // business: a pomodoro's tap drives its timer, a picture's tap goes to
+                // whatever draws it. This file must not learn what that is.
+                if let Some(source_id) =
+                    picture_source(&state.config, &received.event.card_id).map(str::to_owned)
+                {
+                    match &state.tap_sink {
+                        Some(sink) => sink.tapped(&received.event.card_id, &source_id),
+                        None => {
+                            diagnostics.taps_dropped.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                } else if card_index(&state.config, &received.event.card_id).is_none() {
+                    diagnostics.taps_dropped.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    let pomodoro_action = match action {
+                        EventAction::StartPause => PomodoroAction::Toggle,
+                        EventAction::Reset => PomodoroAction::Reset,
+                        _ => unreachable!("the match arm only accepts pomodoro tap actions"),
+                    };
+                    let _ = control_pomodoro(
+                        state,
+                        scheduler,
+                        device,
+                        &received.event.card_id,
+                        pomodoro_action,
+                        now,
+                    );
+                }
             }
             (EventKind::InterruptDismissed, EventAction::DismissInterrupt) => {
                 let applied = received

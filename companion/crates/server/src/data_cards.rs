@@ -86,6 +86,9 @@ struct FaceSpec {
 pub(crate) struct FaceDescriptor {
     pub(crate) kind: String,
     pub(crate) label: String,
+    /// What the window tells the owner a tap does. Absent means taps are ignored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tap: Option<String>,
     pub(crate) fields: Vec<FaceFieldDescriptor>,
 }
 
@@ -182,6 +185,7 @@ fn describe_face(
     FaceDescriptor {
         kind: face.kind.clone(),
         label: face.label.clone(),
+        tap: face.tap.clone(),
         fields: face
             .fields
             .iter()
@@ -593,6 +597,13 @@ pub(crate) fn descriptor_for_source(
         .face
         .clone();
     data_cards.descriptor(&face)
+}
+
+/// Whether `source_id` belongs to a server-rendered face that declares a tap.
+#[must_use]
+#[allow(dead_code)] // Task 6 consumes this when it installs the server's CardTapSink.
+pub(crate) fn face_takes_taps(state: &ServerState, source_id: &str) -> bool {
+    descriptor_for_source(state, source_id).is_some_and(|face| face.tap.is_some())
 }
 
 /// What to tell the owner about `source_id`'s face, or `None` for a source that has
@@ -1134,6 +1145,43 @@ mod tests {
             create_face(&state, "source", "weather"),
             Err(FaceUpdateError::UnknownField(kind)) if kind == "weather"
         ));
+        state.shutdown();
+    }
+
+    #[test]
+    fn a_faces_tap_sentence_reaches_the_descriptor_and_absence_means_no_taps() {
+        let state = ServerState::in_memory();
+        set_faces(&state, faces_package::fake());
+
+        let descriptors = creatable_faces(&state);
+        let headlines = descriptors
+            .iter()
+            .find(|face| face.kind == "headlines")
+            .expect("headlines");
+        assert_eq!(
+            headlines.tap.as_deref(),
+            Some("Tap the panel for the next stories.")
+        );
+        assert_eq!(
+            serde_json::to_value(headlines).unwrap()["tap"],
+            "Tap the panel for the next stories."
+        );
+        let weather = descriptors
+            .iter()
+            .find(|face| face.kind == "weather")
+            .expect("weather");
+        assert_eq!(weather.tap, None);
+        assert_eq!(
+            serde_json::to_value(weather).unwrap().get("tap"),
+            None,
+            "a face without a tap sentence adds no contract key"
+        );
+
+        create_face(&state, "tappable", "headlines").expect("attach tappable face");
+        create_face(&state, "untappable", "weather").expect("attach untappable face");
+        assert!(face_takes_taps(&state, "tappable"));
+        assert!(!face_takes_taps(&state, "untappable"));
+        assert!(!face_takes_taps(&state, "external-or-unknown"));
         state.shutdown();
     }
 

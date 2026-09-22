@@ -791,6 +791,7 @@ export const apiContractFixtures = {
     {
       "kind": "headlines",
       "label": "Headlines",
+      "tap": "Tap the panel for the next stories.",
       "fields": [
         {
           "type": "enum",

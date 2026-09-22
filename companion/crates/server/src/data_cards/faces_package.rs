@@ -89,6 +89,9 @@ impl FaceCommand {
 pub(crate) struct CatalogFace {
     pub(crate) kind: String,
     pub(crate) label: String,
+    /// What the window tells the owner a tap does. Absent means taps are ignored.
+    #[serde(default)]
+    pub(crate) tap: Option<String>,
     pub(crate) fields: Vec<CatalogField>,
 }
 

@@ -105,6 +105,11 @@ export interface FaceDescriptor {
   /** Opaque server metadata. The app renders `fields` and never branches on this value. */
   kind: string;
   label: string;
+  /**
+   * What the face says a tap on the panel does, in its own words. Absent means this
+   * face ignores taps -- the server drops them rather than re-rendering.
+   */
+  tap?: string;
   fields: FaceFieldDescriptor[];
 }
 

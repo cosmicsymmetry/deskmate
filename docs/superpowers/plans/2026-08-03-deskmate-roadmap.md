@@ -9,21 +9,18 @@
 Spec: `docs/superpowers/specs/2026-08-03-deskmate-design.md`
 
 **Current:** V1 and V2 are EXITED and TAGGED (`v1` at `7abd496`, `v2` at `fdf85ba`) by
-explicit owner direction on 2026-09-06. **V3 (server host) is the current milestone.**
-Its four sub-projects are delivered and merged to `main` (`fb15060`, 2026-09-13). The
+explicit owner direction on 2026-09-06. **V3 (server host) EXITED and was tagged `v3` on
+explicit owner direction 2026-09-22.** Its four sub-projects are delivered and merged to
+`main` (`fb15060`, 2026-09-13), schema- and wire-neutral (config v10, protocol v2). The
 branch they were built on, `feat/v3-server-host`, was deleted on 2026-09-22 with every
-other merged branch: `main` is the only branch on the remote. V3 is
-schema- and wire-neutral (config v10, protocol v2). What it still owes, in order:
+other merged branch: `main` is the only branch on the remote.
 
-1. **The reference Google Calendar producer** in `tools/picture-producers/` (today that
-   directory holds only `claude_limits_png.py`). It needs a real Google grant from the
-   owner.
-2. **The end-to-end gate**, which needs the panel. It used to wait on the protocol-v2
-   flash; `dev-0005` was flashed with `v2.1.0-proto2` and observed linking on 2026-09-12,
-   so it is runnable, not blocked.
+V3's last two items were **dropped by the owner, not delivered**: the reference Google
+Calendar producer (`tools/picture-producers/` holds only `claude_limits_png.py`) and the
+end-to-end gate on the panel. Nothing about V3 was observed on hardware as an exit gate.
 
-V3 then exits on owner direction, the V4 brainstorm happens at that exit, and a `v3` tag
-needs explicit owner authorization like every tag before it.
+**No milestone is current.** V4's brainstorm was to happen at V3's exit and has not
+started.
 
 The **legacy subtraction** (spec
 `docs/superpowers/specs/2026-09-11-deskmate-legacy-subtraction-design.md`) is **complete
@@ -59,8 +56,9 @@ Scene stages 2a, 2b, 3a, 3b and 4 are delivered and were confirmed on the board 
 2026-09-06 session (board-notes, "Stage 4 Task 7"). Stage 5 remains a risk review only;
 implementation awaits review completion and explicit owner approval.
 
-Hardware still owed (the authoritative list is `CLAUDE.md`, "Hardware verification still
-owed"; all of it is runnable now that the board links):
+Hardware still owed -- **not scheduled; dropped by the owner 2026-09-22, and every item
+still UNOBSERVED** (the authoritative list is `CLAUDE.md`, "Hardware verification still
+owed"):
 
 - V2 Task 9's tap latency, the BUSY/OTA-owner refusal variant, and stage 3b's asset-GC
   teardown.
@@ -94,7 +92,7 @@ ordering argument is kept because it explains rows M0-M3.)
 | M4 | Superseded (Tasks 1-4 delivered) | v1 completion | Delivered: weather/JSON-feed/RSS providers, extended templates, the card model, timed rotation and alerts. Remainder redistributed by the 2026-08-11 reset spec §7 | `2026-08-05-deskmate-m4-v1-completion.md` |
 | V1 | **EXITED and tagged `v1` (2026-09-06, owner direction; tag at `7abd496`)** | Local Deskmate | Custom partition table (OTA slots + asset region), baked typeface, pixel-exact host-LVGL preview harness with golden frames, built-in widget redesign — all delivered and physically accepted 2026-08-14; playlist authoring model (schema v4, `presence` removed) delivered and merged 2026-08-15 (wire unchanged, no on-device delta). The CO5300 even-window check at the 64-line flush strip closed 2026-08-15 (human-observed clean at both orientations). Packaging/hardening delivered: private `cosmicsymmetry/deskmate` remote with the green `ci` workflow (macOS companion gate + DMG artifact; ESP-IDF build + host tests), advisories triaged in `docs/security/advisories.md`, security review in `docs/security/v1-review.md`, and the hands-on install matrix passed (recorded 2026-08-17 in the packaging plan; one defect found and fixed — settings window now auto-opens on first run only, `fc3750b`). V1 exited and tagged `v1` at `7abd496` on 2026-09-06 by owner direction | `2026-08-11-deskmate-v1-preview-typeface-redesign.md`, `2026-08-11-deskmate-v1-playlists.md`, `2026-08-15-deskmate-v1-packaging-hardening.md` |
 | V2 | **EXITED and tagged `v2` (2026-09-06, owner direction; tag at `fdf85ba`)** | Networked device | Device owned over the network instead of a cable: WiFi station, TLS, USB-based provisioning (no SoftAP), bearer-token device identity, tier pairing, WebSocket transport carrying today's frames unchanged, and OTA with rollback. Proven against a single-tenant no-accounts stub server. Headline demo: provision over USB, unplug, quit the Mac app, cards keep updating. Additive within protocol v1. **Delivered and verified on hardware**: the server owns the device, providers run server-side, real weather renders with the Mac quit, OTA installs and reboots, and rollback works unattended. Exited by owner direction 2026-09-06 with three hardware observations deferred, not observed, and not treated as blockers: Task 9 tap latency, the BUSY/OTA-owner refusal, and the §6 96 px glyph timing (Task 8's widening-backoff observation WAS discharged on the shipping build 2026-09-06) | `docs/superpowers/plans/2026-08-18-deskmate-v2-networked-device.md` |
-| V3 | **In progress; RE-SPECCED 2026-09-12; sub-projects 1-4 merged to `main` 2026-09-13 (`fb15060`)** | Server host | Server-held OAuth credential custody, token vending to external producers, and a minimal management surface. **Sub-projects 1 (encrypted `IntegrationStore`) and 2 (OAuth `TokenManager`, consent/callback/revoke) are DELIVERED and reviewed.** **Sub-project 3 is re-scoped and DELIVERED 2026-09-13** (`986dbc6`..`af470a3`: `main` merged in, the server's egress cut to one permitted host with a mutation-probed boundary test, digest-only producer credentials, the vend route, and revocation coupling; full gate green). The original sub-project 3 (the `GoogleCalendarProvider` and a `CalendarSource::Google` schema bump) was **WITHDRAWN** — schema v8/v9 deleted the provider layer, the field bag and the `calendar` card it was built on. It is replaced by a token-vending route plus a reference producer living outside this repo, so V3 now changes **no schema and no wire byte** (it is schema-neutral at v10, protocol v2). **Sub-project 4 (the management surface) is DELIVERED 2026-09-13** (`5749461`..`64ed968`: one `AdminAuthenticated` instead of three, the device/integration/picture-source listings, and `/v1/manage` with its login and three actions -- the page `google_callback` had redirected to since sub-project 2). **Next: the reference Google Calendar producer** in `tools/picture-producers/`, which needs a real Google grant, and then V3's end-to-end gate, which needs the panel. The protocol-v2 flash it waited on happened 2026-09-12, so the gate is runnable | `docs/superpowers/specs/2026-09-12-deskmate-v3-server-host-revision.md` (supersedes the 2026-09-06 design; both on `main`) |
+| V3 | **EXITED and tagged `v3` (2026-09-22, owner direction)**; re-specced 2026-09-12; sub-projects 1-4 merged to `main` 2026-09-13 (`fb15060`); the Calendar producer and the end-to-end gate were dropped, not delivered | Server host | Server-held OAuth credential custody, token vending to external producers, and a minimal management surface. **Sub-projects 1 (encrypted `IntegrationStore`) and 2 (OAuth `TokenManager`, consent/callback/revoke) are DELIVERED and reviewed.** **Sub-project 3 is re-scoped and DELIVERED 2026-09-13** (`986dbc6`..`af470a3`: `main` merged in, the server's egress cut to one permitted host with a mutation-probed boundary test, digest-only producer credentials, the vend route, and revocation coupling; full gate green). The original sub-project 3 (the `GoogleCalendarProvider` and a `CalendarSource::Google` schema bump) was **WITHDRAWN** — schema v8/v9 deleted the provider layer, the field bag and the `calendar` card it was built on. It is replaced by a token-vending route plus a reference producer living outside this repo, so V3 now changes **no schema and no wire byte** (it is schema-neutral at v10, protocol v2). **Sub-project 4 (the management surface) is DELIVERED 2026-09-13** (`5749461`..`64ed968`: one `AdminAuthenticated` instead of three, the device/integration/picture-source listings, and `/v1/manage` with its login and three actions -- the page `google_callback` had redirected to since sub-project 2). **Next: the reference Google Calendar producer** in `tools/picture-producers/`, which needs a real Google grant, and then V3's end-to-end gate, which needs the panel. The protocol-v2 flash it waited on happened 2026-09-12, so the gate is runnable | `docs/superpowers/specs/2026-09-12-deskmate-v3-server-host-revision.md` (supersedes the 2026-09-06 design; both on `main`) |
 | V4 | Planned; **partly superseded** by the scene-rendering design | Plugin platform | Image cards, asset cache, billing (paid tier), and a plugin contract. **The "HTML plugin contract, headless-Chromium rendering" originally written here is retired**: `docs/superpowers/specs/2026-08-22-deskmate-plugin-scene-rendering-design.md` §5 rules a headless browser out permanently ("it would make the homelab an arbitrary-code-execution host. Deferred indefinitely, not scheduled") and names `resvg` as the only permitted rasterizer. The plugin contract is the declarative manifest frozen in `docs/plugins/manifest-v1.md`, delivered in stage 3b. Public uploads and the sandbox are that spec's stage 5, with their own risk review | own brainstorm at V3 exit; superseding decisions in the scene-rendering spec |
 
 The scene renderer's five stages each get their own plan, written at the previous stage's

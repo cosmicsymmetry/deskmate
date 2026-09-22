@@ -1,5 +1,10 @@
 # Deskmate V3 Server Host — Design Revision (Producer-Side Integrations)
 
+> **STATUS (2026-09-22): V3 EXITED on owner direction, tagged `v3`.** Sub-projects 1-4
+> are delivered. The reference Google Calendar producer and the end-to-end gate this
+> document calls for were **dropped by the owner, not delivered** -- the token-vending
+> route has no in-tree consumer, and no V3 exit gate was observed on the panel.
+
 > **HISTORICAL BASELINE NOTE (2026-09-18).** References to the Mac app describe the
 > system this server design was replacing. The current companion is the web app served
 > by that server.

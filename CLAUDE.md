@@ -141,13 +141,14 @@ default. This section states only what is true now.
     so a host-wide gate breaks the device link outright. That is why the removed block
     gated only `/`, `/assets/*`, `/v1/app/*` and `/v1/manage/*`. Cookie and Basic do not
     contend, so the two gates can coexist -- they just are not both wanted.
-- **Milestones**: V1 and V2 are exited and tagged (`v1` at `7abd496`, `v2` at `fdf85ba`).
-  V3 (server host) is in progress; **sub-projects 1-4 are merged to `main`** (`fb15060`,
-  2026-09-13) and V3 is **schema- and wire-neutral** -- it adds no config field, no wire
-  message and no firmware change, so merging it does not move the flash. What V3 still
-  owes is the reference Google Calendar producer in `tools/picture-producers/` and the
-  end-to-end gate, which needs the panel. Tags require explicit owner
-  authorization; `m0`/`m1`/`v1`/`v2` exist and later milestones do not.
+- **Milestones**: V1, V2 and V3 are exited and tagged (`v1` at `7abd496`, `v2` at
+  `fdf85ba`, `v3` at the commit that records its exit). **V3 (server host) exited on the
+  owner's direction 2026-09-22**: sub-projects 1-4 merged to `main` (`fb15060`,
+  2026-09-13), schema- and wire-neutral. Its last two items -- the reference Google
+  Calendar producer and the end-to-end gate on the panel -- were **dropped, not done**:
+  there is no Calendar producer in `tools/picture-producers/`, and no V3 exit gate was
+  observed on hardware. No milestone is current; V4's brainstorm has not started. Tags
+  require explicit owner authorization.
 - **The legacy subtraction** (spec
   `docs/superpowers/specs/2026-09-11-deskmate-legacy-subtraction-design.md`): all three
   waves are complete and merged, Wave C on explicit owner direction 2026-09-12.
@@ -390,6 +391,10 @@ These are decisions, not defaults. Changing one needs the owner, not a judgement
   schema bump, a wire change, a firmware change, and an on-board OTA re-verification.
 
 ### Hardware verification still owed
+
+**Not scheduled -- the owner dropped it on 2026-09-22, with V3's end-to-end gate.** The list
+stays because every item on it is still UNOBSERVED: do not read its absence from a plan as
+verification, and do not claim any of it without seeing it on the board.
 
 - V2 Task 9's tap latency.
 - The BUSY/OTA-owner refusal variant (needs a pending OTA in flight).

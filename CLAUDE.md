@@ -386,9 +386,9 @@ These are decisions, not defaults. Changing one needs the owner, not a judgement
 - **`preferences.timezone` is seeded from the host's IANA zone on FIRST RUN ONLY.** An
   existing saved configuration is never rewritten, because a timezone change moves the
   clock on a physical panel and that is the owner's decision.
-- **`feat/display-brightness` is a dead branch kept for reference; do not rebase it.**
-  Its "schema v6" collides with the real v6. Reviving brightness is new work: a fresh
-  schema bump, a wire change, a firmware change, and an on-board OTA re-verification.
+- **Brightness is not a feature, and its old branch is deleted (2026-09-22).** Its
+  "schema v6" collided with the real v6. Reviving brightness is new work: a fresh schema
+  bump, a wire change, a firmware change, and an on-board OTA re-verification.
 
 ### Hardware verification still owed
 

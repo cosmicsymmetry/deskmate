@@ -23,6 +23,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -45,6 +46,77 @@ const MAX_FACE_FIELD_VALUE_BYTES: usize = 2_048;
 /// How often the catalog is re-read. The faces directory is rsync'd like the web
 /// `dist/`, so a new face appears in the add menu without a restart.
 const CATALOG_RELOAD: Duration = Duration::from_secs(60);
+
+/// More taps than this between renders still produce one render, but the face is
+/// never asked to process an unbounded amount of work from one request.
+const MAX_COALESCED_TAPS: u32 = 32;
+
+/// Taps waiting for one card's existing refresher, as a count rather than a queue.
+///
+/// A render can take seconds. Taps received while it runs accumulate here so the
+/// same task performs one further render with the whole count; no second task can
+/// race the first one for that face's stored state.
+#[derive(Default)]
+struct TapSignal {
+    pending: AtomicU32,
+    notify: tokio::sync::Notify,
+}
+
+impl TapSignal {
+    fn tap(&self) {
+        let first_pending = matches!(
+            self.pending
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                    Some(pending.saturating_add(1).min(MAX_COALESCED_TAPS))
+                }),
+            Ok(0)
+        );
+        // One permit means "the count is nonzero", not one queued render per
+        // tap. Notifying again before `take` can leave a stale permit behind and
+        // manufacture a one-tap render after the whole count was consumed.
+        if first_pending {
+            self.notify.notify_one();
+        }
+    }
+
+    fn take(&self) -> u32 {
+        self.pending.swap(0, Ordering::AcqRel)
+    }
+}
+
+struct Refresher {
+    task: tokio::task::JoinHandle<()>,
+    taps: Arc<TapSignal>,
+}
+
+impl Refresher {
+    fn new(task: tokio::task::JoinHandle<()>, taps: Arc<TapSignal>) -> Self {
+        Self { task, taps }
+    }
+
+    #[cfg(test)]
+    fn for_test(task: tokio::task::JoinHandle<()>) -> Self {
+        Self::new(task, Arc::new(TapSignal::default()))
+    }
+
+    fn id(&self) -> tokio::task::Id {
+        self.task.id()
+    }
+
+    fn abort(&self) {
+        self.task.abort();
+    }
+
+    #[cfg(test)]
+    fn abort_handle(&self) -> tokio::task::AbortHandle {
+        self.task.abort_handle()
+    }
+
+    #[cfg(test)]
+    fn is_finished(&self) -> bool {
+        self.task.is_finished()
+    }
+}
 
 /// One server-rendered card.
 ///
@@ -271,7 +343,9 @@ pub(crate) struct DataCardState {
     spec_path: PathBuf,
     face_state: Arc<FaceStateStore>,
     specs: Vec<DataCardSpec>,
-    tasks: HashMap<String, tokio::task::JoinHandle<()>>,
+    tasks: HashMap<String, Refresher>,
+    /// Taps the server could not route to a live, tappable face refresher.
+    taps_dropped: u64,
     /// How to run the faces package. `None` means this deployment has none, and
     /// then there is no catalog, no add-menu entry and no refresher.
     faces: Option<FaceCommand>,
@@ -295,6 +369,7 @@ impl DataCardState {
             face_state,
             specs: Vec::new(),
             tasks: HashMap::new(),
+            taps_dropped: 0,
             faces,
             catalog: None,
             catalog_reloader: None,
@@ -330,16 +405,17 @@ impl DataCardState {
         };
         match self.descriptor(&spec.face) {
             Some(descriptor) if face_is_complete(&descriptor) => {
-                self.tasks.insert(
-                    spec.source_id.clone(),
-                    worker::spawn_refresher(
-                        runtime,
-                        state.clone(),
-                        faces,
-                        Arc::clone(&self.face_state),
-                        spec.clone(),
-                    ),
+                let taps = Arc::new(TapSignal::default());
+                let task = worker::spawn_refresher(
+                    runtime,
+                    state.clone(),
+                    faces,
+                    Arc::clone(&self.face_state),
+                    Arc::clone(&taps),
+                    spec.clone(),
                 );
+                self.tasks
+                    .insert(spec.source_id.clone(), Refresher::new(task, taps));
             }
             // A card added from the menu is stored blank and stays unfetched until
             // its settings are filled in, so restarting must not start it either.
@@ -361,7 +437,7 @@ impl DataCardState {
         source_id: String,
         task: tokio::task::JoinHandle<()>,
     ) {
-        self.tasks.insert(source_id, task);
+        self.tasks.insert(source_id, Refresher::for_test(task));
     }
 
     #[cfg(test)]
@@ -372,6 +448,11 @@ impl DataCardState {
     #[cfg(test)]
     pub(crate) fn has_task_for_test(&self, source_id: &str) -> bool {
         self.tasks.contains_key(source_id)
+    }
+
+    #[cfg(test)]
+    fn taps_dropped_for_test(&self) -> u64 {
+        self.taps_dropped
     }
 }
 
@@ -617,9 +698,48 @@ pub(crate) fn descriptor_for_source(
 
 /// Whether `source_id` belongs to a server-rendered face that declares a tap.
 #[must_use]
-#[allow(dead_code)] // Task 6 consumes this when it installs the server's CardTapSink.
 pub(crate) fn face_takes_taps(state: &ServerState, source_id: &str) -> bool {
     descriptor_for_source(state, source_id).is_some_and(|face| face.tap.is_some())
+}
+
+fn count_dropped_tap(state: &ServerState, source_id: &str, reason: &'static str) {
+    let mut data_cards = state
+        .inner
+        .data_cards
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    data_cards.taps_dropped = data_cards.taps_dropped.saturating_add(1);
+    tracing::debug!(target: "server::data_cards", source_id, reason, "dropping card tap");
+}
+
+/// Routes one device tap to the source's retained refresher without starting a
+/// render task of its own. A miss is diagnostic data, not a reason to invent a
+/// face for an external producer's picture card.
+pub(crate) fn tapped(state: &ServerState, source_id: &str) {
+    if !face_takes_taps(state, source_id) {
+        count_dropped_tap(
+            state,
+            source_id,
+            "the source has no face that declares a tap",
+        );
+        return;
+    }
+
+    let signal = {
+        state
+            .inner
+            .data_cards
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .tasks
+            .get(source_id)
+            .map(|refresher| Arc::clone(&refresher.taps))
+    };
+    let Some(signal) = signal else {
+        count_dropped_tap(state, source_id, "the face has no running refresher");
+        return;
+    };
+    signal.tap();
 }
 
 /// What to tell the owner about `source_id`'s face, or `None` for a source that has
@@ -684,12 +804,7 @@ pub(super) fn record_outcome(
         .data_cards
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if data_cards
-        .tasks
-        .get(source_id)
-        .map(tokio::task::JoinHandle::id)
-        == Some(task)
-    {
+    if data_cards.tasks.get(source_id).map(Refresher::id) == Some(task) {
         data_cards
             .outcomes
             .insert(source_id.to_owned(), (outcome, chrono::Utc::now()));
@@ -950,6 +1065,200 @@ mod tests {
         directory
     }
 
+    fn shell_word(value: &Path) -> String {
+        format!("'{}'", value.display().to_string().replace('\'', "'\\''"))
+    }
+
+    /// One real refresher speaking to the fake package through its subprocess
+    /// boundary. The wrapper supplies a private request-log directory after
+    /// `FaceCommand` clears the server process's environment.
+    struct FaceTestServer {
+        state: ServerState,
+        source_id: String,
+        directory: tempfile::TempDir,
+        scheduled_renders_fail: bool,
+    }
+
+    impl FaceTestServer {
+        async fn new(kind: &str, block_tapped_renders: bool, scheduled_renders_fail: bool) -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let directory = tempfile::tempdir().expect("request log directory");
+            let wrapper = directory.path().join("fake-faces");
+            let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake-faces.sh");
+            let block = if block_tapped_renders { "1" } else { "0" };
+            let fail_scheduled = if scheduled_renders_fail { "1" } else { "0" };
+            std::fs::write(
+                &wrapper,
+                format!(
+                    "#!/bin/sh\nexport DESKMATE_FAKE_FACES_REQUEST_DIR={}\nexport DESKMATE_FAKE_FACES_BLOCK_TAPS={}\nexport DESKMATE_FAKE_FACES_FAIL_SCHEDULED={}\nexec {} \"$@\"\n",
+                    shell_word(directory.path()),
+                    block,
+                    fail_scheduled,
+                    shell_word(&fake),
+                ),
+            )
+            .expect("write fake-faces wrapper");
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))
+                .expect("make fake-faces wrapper executable");
+
+            let state = ServerState::in_memory();
+            set_faces(&state, FaceCommand::program(wrapper));
+            let source = state.image_sources().mint(kind).expect("mint source");
+            create_face(&state, &source.id, kind).expect("create face");
+            if kind == "weather" {
+                update_face_fields(
+                    &state,
+                    &tokio::runtime::Handle::current(),
+                    &source.id,
+                    &BTreeMap::from([("location".into(), "Dubai".into())]),
+                )
+                .expect("complete weather face");
+            }
+
+            let server = Self {
+                state,
+                source_id: source.id,
+                directory,
+                scheduled_renders_fail,
+            };
+            server.wait_for_requests(1).await;
+            status_when(&server.state, &server.source_id, |status| {
+                status.state
+                    == if scheduled_renders_fail {
+                        FaceState::Retrying
+                    } else {
+                        FaceState::Drawn
+                    }
+            })
+            .await;
+            server
+        }
+
+        fn requests(&self) -> Vec<serde_json::Value> {
+            let Ok(contents) =
+                std::fs::read_to_string(self.directory.path().join("requests.jsonl"))
+            else {
+                return Vec::new();
+            };
+            contents
+                .lines()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect()
+        }
+
+        async fn wait_for_requests(&self, count: usize) -> Vec<serde_json::Value> {
+            for _ in 0..200 {
+                let requests = self.requests();
+                if requests.len() >= count {
+                    return requests;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!(
+                "only {} render requests arrived; wanted {count}",
+                self.requests().len()
+            );
+        }
+
+        async fn wait_for_file(&self, name: &str) {
+            for _ in 0..200 {
+                if self.directory.path().join(name).exists() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("the fake package never created {name}");
+        }
+
+        async fn wait_for_face_state(&self, expected: serde_json::Value) {
+            for _ in 0..200 {
+                let actual = self
+                    .state
+                    .inner
+                    .data_cards
+                    .lock()
+                    .expect("data cards")
+                    .face_state
+                    .get(&self.source_id);
+                if actual.as_ref() == Some(&expected) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let actual = self
+                .state
+                .inner
+                .data_cards
+                .lock()
+                .expect("data cards")
+                .face_state
+                .get(&self.source_id);
+            panic!(
+                "the face state never became {expected}; actual={actual:?}, status={:?}, requests={:?}",
+                status_for_source(&self.state, &self.source_id),
+                self.requests()
+            );
+        }
+
+        async fn restart_with_refresh(&self, refresh: Duration) -> usize {
+            let (faces, face_state, spec) = {
+                let mut cards = self.state.inner.data_cards.lock().expect("data cards");
+                cards
+                    .tasks
+                    .remove(&self.source_id)
+                    .expect("existing refresher")
+                    .abort();
+                cards.outcomes.remove(&self.source_id);
+                (
+                    cards.faces.clone().expect("fake faces"),
+                    Arc::clone(&cards.face_state),
+                    cards
+                        .specs
+                        .iter()
+                        .find(|spec| spec.source_id == self.source_id)
+                        .expect("face spec")
+                        .clone(),
+                )
+            };
+            let baseline = self.requests().len();
+            let taps = Arc::new(TapSignal::default());
+            let task = worker::spawn_refresher_for_test(
+                &tokio::runtime::Handle::current(),
+                self.state.clone(),
+                faces,
+                face_state,
+                Arc::clone(&taps),
+                spec,
+                refresh,
+            );
+            self.state
+                .inner
+                .data_cards
+                .lock()
+                .expect("data cards")
+                .tasks
+                .insert(self.source_id.clone(), Refresher::new(task, taps));
+            self.wait_for_requests(baseline + 1).await;
+            status_when(&self.state, &self.source_id, |status| {
+                status.state
+                    == if self.scheduled_renders_fail {
+                        FaceState::Retrying
+                    } else {
+                        FaceState::Drawn
+                    }
+            })
+            .await;
+            baseline + 1
+        }
+    }
+
+    impl Drop for FaceTestServer {
+        fn drop(&mut self) {
+            self.state.shutdown();
+        }
+    }
+
     #[test]
     fn a_missing_spec_file_is_no_cards_rather_than_an_error() {
         // The ordinary deployment. An error here would make every server
@@ -973,7 +1282,9 @@ mod tests {
                 refresh_seconds: 900,
                 face: blank("weather"),
             });
-            retained.tasks.insert("old".into(), task);
+            retained
+                .tasks
+                .insert("old".into(), Refresher::for_test(task));
         }
 
         start_data_cards(&state, path.clone()).expect("missing specs are valid");
@@ -1007,7 +1318,9 @@ mod tests {
         let original_path = {
             let mut retained = state.inner.data_cards.lock().expect("data cards");
             retained.specs = original.clone();
-            retained.tasks.insert("old".into(), task);
+            retained
+                .tasks
+                .insert("old".into(), Refresher::for_test(task));
             retained.spec_path.clone()
         };
 
@@ -1119,6 +1432,23 @@ mod tests {
             status_for_source(&state, &source.id).map(|status| status.state),
             Some(FaceState::Unavailable)
         );
+        let dropped_before = state
+            .inner
+            .data_cards
+            .lock()
+            .expect("data cards")
+            .taps_dropped_for_test();
+        tapped(&state, &source.id);
+        assert_eq!(
+            state
+                .inner
+                .data_cards
+                .lock()
+                .expect("data cards")
+                .taps_dropped_for_test(),
+            dropped_before + 1,
+            "a retained spec whose face is unavailable still drops its tap"
+        );
         assert!(matches!(
             update_face_fields(
                 &state,
@@ -1201,6 +1531,163 @@ mod tests {
         assert!(!face_takes_taps(&state, "untappable"));
         assert!(!face_takes_taps(&state, "external-or-unknown"));
         state.shutdown();
+    }
+
+    #[test]
+    fn pending_taps_are_counted_and_capped() {
+        let signal = TapSignal::default();
+        for _ in 0..(MAX_COALESCED_TAPS + 8) {
+            signal.tap();
+        }
+        assert_eq!(signal.take(), MAX_COALESCED_TAPS);
+        assert_eq!(signal.take(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_tap_coalesced_after_wakeup_leaves_no_extra_render_permit() {
+        let signal = TapSignal::default();
+        let first_wakeup = signal.notify.notified();
+        tokio::pin!(first_wakeup);
+        first_wakeup.as_mut().enable();
+
+        signal.tap();
+        first_wakeup.await;
+        signal.tap();
+        assert_eq!(signal.take(), 2);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), signal.notify.notified())
+                .await
+                .is_err(),
+            "coalescing the second tap must not queue a phantom render"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tap_on_a_tappable_face_renders_at_once_with_a_tap_count() {
+        let server = FaceTestServer::new("headlines", false, false).await;
+        assert_eq!(server.requests()[0].get("event"), None);
+
+        tapped(&server.state, &server.source_id);
+        let requests = server.wait_for_requests(2).await;
+        assert_eq!(requests[1]["event"]["taps"], serde_json::json!(1));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn taps_arriving_during_a_render_coalesce_into_one_further_render() {
+        let server = FaceTestServer::new("headlines", true, false).await;
+
+        tapped(&server.state, &server.source_id);
+        server.wait_for_requests(2).await;
+        server.wait_for_file("render-blocked").await;
+        tapped(&server.state, &server.source_id);
+        tapped(&server.state, &server.source_id);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let requests_while_blocked = server.requests();
+        std::fs::write(server.directory.path().join("release"), b"")
+            .expect("release blocked render");
+        assert_eq!(
+            requests_while_blocked.len(),
+            2,
+            "the existing refresher must finish before another render starts"
+        );
+
+        let requests = server.wait_for_requests(3).await;
+        let counts: Vec<u64> = requests[1..]
+            .iter()
+            .map(|request| request["event"]["taps"].as_u64().expect("tap count"))
+            .collect();
+        assert_eq!(
+            counts.iter().sum::<u64>(),
+            3,
+            "every tap is answered in at most two renders: {counts:?}"
+        );
+        assert_eq!(counts, [1, 2]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tap_on_a_face_that_declares_no_tap_is_dropped_and_counted() {
+        let server = FaceTestServer::new("weather", false, false).await;
+        let renders_before = server.requests().len();
+        let dropped_before = server
+            .state
+            .inner
+            .data_cards
+            .lock()
+            .expect("data cards")
+            .taps_dropped_for_test();
+
+        tapped(&server.state, &server.source_id);
+
+        {
+            let cards = server.state.inner.data_cards.lock().expect("data cards");
+            assert_eq!(cards.taps_dropped_for_test(), dropped_before + 1);
+            assert_eq!(
+                cards.tasks[&server.source_id]
+                    .taps
+                    .pending
+                    .load(Ordering::Acquire),
+                0,
+                "an untappable face must not be signalled"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(server.requests().len(), renders_before);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tap_on_a_source_with_no_spec_is_dropped_without_starting_a_task() {
+        let server = FaceTestServer::new("headlines", false, false).await;
+        let dropped_before = server
+            .state
+            .inner
+            .data_cards
+            .lock()
+            .expect("data cards")
+            .taps_dropped_for_test();
+
+        tapped(&server.state, "external-producer");
+
+        let cards = server.state.inner.data_cards.lock().expect("data cards");
+        assert!(!cards.has_task_for_test("external-producer"));
+        assert_eq!(cards.taps_dropped_for_test(), dropped_before + 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tapped_render_carries_stored_state_and_stores_what_comes_back() {
+        let server = FaceTestServer::new("headlines", false, true).await;
+
+        tapped(&server.state, &server.source_id);
+        server.wait_for_requests(2).await;
+        server
+            .wait_for_face_state(serde_json::json!({ "page": 3 }))
+            .await;
+        tapped(&server.state, &server.source_id);
+        let requests = server.wait_for_requests(3).await;
+
+        assert_eq!(requests[2]["state"], serde_json::json!({ "page": 3 }));
+        assert_eq!(requests[2]["event"]["taps"], serde_json::json!(1));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tap_reschedules_the_interval_rather_than_adding_a_refresh() {
+        let server = FaceTestServer::new("headlines", false, true).await;
+        let baseline = server
+            .restart_with_refresh(Duration::from_millis(500))
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        tapped(&server.state, &server.source_id);
+        server.wait_for_requests(baseline + 1).await;
+        server
+            .wait_for_face_state(serde_json::json!({ "page": 3 }))
+            .await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        assert_eq!(
+            server.requests().len(),
+            baseline + 1,
+            "the startup render and tap render reset the interval"
+        );
     }
 
     /// Polls until the face's status satisfies `done`, the way the window does.
@@ -1296,7 +1783,7 @@ mod tests {
             .lock()
             .expect("data cards")
             .tasks
-            .insert("target".into(), current);
+            .insert("target".into(), Refresher::for_test(current));
 
         record_outcome(&state, "target", replaced_id, RefreshOutcome::Drawn);
         assert!(
@@ -1559,7 +2046,9 @@ mod tests {
             let mut retained = state.inner.data_cards.lock().unwrap();
             retained.spec_path = path.clone();
             retained.specs = original.clone();
-            retained.tasks.insert("target".into(), task);
+            retained
+                .tasks
+                .insert("target".into(), Refresher::for_test(task));
         }
         for (key, value) in [("location", " "), ("units", "kelvin"), ("unknown", "value")] {
             assert!(
@@ -1608,7 +2097,9 @@ mod tests {
             let mut cards = state.inner.data_cards.lock().unwrap();
             cards.spec_path = path.clone();
             cards.specs = original.clone();
-            cards.tasks.insert(removed.id.clone(), task);
+            cards
+                .tasks
+                .insert(removed.id.clone(), Refresher::for_test(task));
         }
         tokio::task::yield_now().await;
         state.image_sources().revoke(&removed.id).unwrap();
@@ -1658,7 +2149,7 @@ mod tests {
             .lock()
             .unwrap()
             .tasks
-            .insert("absent".into(), task);
+            .insert("absent".into(), Refresher::for_test(task));
         remove_face(&state, "absent").unwrap();
         assert!(state.inner.data_cards.lock().unwrap().tasks.is_empty());
         tokio::task::yield_now().await;
@@ -1678,8 +2169,12 @@ mod tests {
         let retained_id = retained.id();
         {
             let mut cards = state.inner.data_cards.lock().unwrap();
-            cards.tasks.insert("removed".into(), removed);
-            cards.tasks.insert("retained".into(), retained);
+            cards
+                .tasks
+                .insert("removed".into(), Refresher::for_test(removed));
+            cards
+                .tasks
+                .insert("retained".into(), Refresher::for_test(retained));
         }
         remove_face(&state, "removed").unwrap();
         {
@@ -1777,7 +2272,9 @@ mod tests {
             let mut retained = state.inner.data_cards.lock().expect("data cards");
             retained.spec_path = path.clone();
             retained.specs = original.clone();
-            retained.tasks.insert("target".into(), task);
+            retained
+                .tasks
+                .insert("target".into(), Refresher::for_test(task));
         }
         let runtime = tokio::runtime::Handle::current();
         let result = match operation {

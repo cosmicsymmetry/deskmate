@@ -213,11 +213,41 @@ impl ImageSourceStore {
             .map(|source| source.id.clone())
     }
 
+    /// Accepts an external producer's frame, no faster than `MIN_PUSH_INTERVAL`.
     pub(crate) fn accept(
         &self,
         id: &str,
         frame: CanonicalFrame,
         now: DateTime<Utc>,
+    ) -> Result<AcceptOutcome, ImageSourceError> {
+        self.accept_paced(id, frame, now, true)
+    }
+
+    /// Accepts a frame the SERVER drew, without the producer rate limit.
+    ///
+    /// `MIN_PUSH_INTERVAL` bounds what an external producer can do to this server
+    /// over HTTP. The faces path is not that: one refresher per card renders
+    /// strictly in sequence, and a tap can only ask for the next render once the
+    /// previous one has finished. Applying the producer limit here would make a
+    /// second tap within five seconds draw nothing -- the render happens, the frame
+    /// is refused as `TooSoon`, and the panel silently keeps the old picture while the
+    /// face's new state is discarded with it. Tapping twice in a row is the normal
+    /// way to use a tappable face, so the limit would break the feature it guards.
+    pub(crate) fn accept_server_rendered(
+        &self,
+        id: &str,
+        frame: CanonicalFrame,
+        now: DateTime<Utc>,
+    ) -> Result<AcceptOutcome, ImageSourceError> {
+        self.accept_paced(id, frame, now, false)
+    }
+
+    fn accept_paced(
+        &self,
+        id: &str,
+        frame: CanonicalFrame,
+        now: DateTime<Utc>,
+        rate_limited: bool,
     ) -> Result<AcceptOutcome, ImageSourceError> {
         let mut state = self.lock();
         let index = state
@@ -227,7 +257,7 @@ impl ImageSourceStore {
             .ok_or(ImageSourceError::UnknownToken)?;
         let source = &state.sources[index];
 
-        if let Some(last) = source.recent_push_times.last() {
+        if rate_limited && let Some(last) = source.recent_push_times.last() {
             let minimum = chrono::Duration::from_std(MIN_PUSH_INTERVAL)
                 .expect("the fixed minimum push interval fits chrono");
             if now - *last < minimum {
@@ -550,6 +580,31 @@ fn valid_source_id(id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_server_rendered_frame_is_not_held_to_the_producer_rate_limit() {
+        // Two taps two seconds apart are ordinary use. Refusing the second as
+        // TooSoon would leave the panel showing the old page with no error anywhere
+        // the owner can see, and would throw away the face's advanced state too.
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("store");
+        let source = store.mint("Status panel").expect("mint source");
+        assert!(
+            store
+                .accept_server_rendered(&source.id, canonical_frame(1), at(0))
+                .is_ok()
+        );
+        assert!(
+            store
+                .accept_server_rendered(&source.id, canonical_frame(2), at(2))
+                .is_ok()
+        );
+        // An external producer POSTing at the same cadence is still refused.
+        assert_eq!(
+            store.accept(&source.id, canonical_frame(3), at(3)),
+            Err(ImageSourceError::TooSoon)
+        );
+    }
 
     #[test]
     fn summaries_report_liveness_without_carrying_frame_bytes() {

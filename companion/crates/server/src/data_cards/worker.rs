@@ -6,7 +6,7 @@ use tokio::task::JoinHandle;
 
 use super::face_state::FaceStateStore;
 use super::faces_package::{self, FaceCommand, FaceRenderError, RenderRequest};
-use super::{DataCardSpec, RefreshOutcome, record_outcome};
+use super::{DataCardSpec, RefreshOutcome, TapSignal, record_outcome};
 use crate::image_ingest::{CanonicalFrame, canonical_frame_from_png};
 use crate::image_sources::AcceptOutcome;
 use crate::{ImageNotificationOrigin, ServerState};
@@ -23,10 +23,36 @@ pub(super) fn spawn_refresher(
     state: ServerState,
     faces: FaceCommand,
     face_state: Arc<FaceStateStore>,
+    taps: Arc<TapSignal>,
     spec: DataCardSpec,
 ) -> JoinHandle<()> {
     let refresh = clamped_refresh(spec.refresh_seconds);
-    runtime.spawn(async move { refresh_loop(state, faces, face_state, spec, refresh).await })
+    spawn_refresher_with_refresh(runtime, state, faces, face_state, taps, spec, refresh)
+}
+
+fn spawn_refresher_with_refresh(
+    runtime: &tokio::runtime::Handle,
+    state: ServerState,
+    faces: FaceCommand,
+    face_state: Arc<FaceStateStore>,
+    taps: Arc<TapSignal>,
+    spec: DataCardSpec,
+    refresh: Duration,
+) -> JoinHandle<()> {
+    runtime.spawn(async move { refresh_loop(state, faces, face_state, taps, spec, refresh).await })
+}
+
+#[cfg(test)]
+pub(super) fn spawn_refresher_for_test(
+    runtime: &tokio::runtime::Handle,
+    state: ServerState,
+    faces: FaceCommand,
+    face_state: Arc<FaceStateStore>,
+    taps: Arc<TapSignal>,
+    spec: DataCardSpec,
+    refresh: Duration,
+) -> JoinHandle<()> {
+    spawn_refresher_with_refresh(runtime, state, faces, face_state, taps, spec, refresh)
 }
 
 fn clamped_refresh(refresh_seconds: u64) -> Duration {
@@ -62,6 +88,7 @@ fn render_frame(
     faces: &FaceCommand,
     spec: &DataCardSpec,
     state: Option<&serde_json::Value>,
+    taps: u32,
 ) -> Result<RenderedFrame, RefreshFailure> {
     let rendered = faces_package::render(
         faces,
@@ -69,7 +96,7 @@ fn render_frame(
             kind: &spec.face.kind,
             settings: &spec.face.settings,
             state,
-            taps: 0,
+            taps,
         },
     )
     .map_err(|error| match error {
@@ -112,13 +139,14 @@ async fn refresh_once(
     faces: &FaceCommand,
     face_state: &Arc<FaceStateStore>,
     spec: &DataCardSpec,
+    taps: u32,
 ) -> Option<RefreshOutcome> {
     let (source_id, kind) = (&spec.source_id, &spec.face.kind);
     let previous_state = face_state.get(source_id);
     let render_faces = faces.clone();
     let render_spec = spec.clone();
     let rendered = tokio::task::spawn_blocking(move || {
-        render_frame(&render_faces, &render_spec, previous_state.as_ref())
+        render_frame(&render_faces, &render_spec, previous_state.as_ref(), taps)
     })
     .await;
     let rendered = match rendered {
@@ -151,10 +179,11 @@ async fn refresh_once(
     let next_face_state = rendered.state;
     let face_state = Arc::clone(face_state);
     let accepted = tokio::task::spawn_blocking(move || {
-        let outcome =
-            accept_state
-                .image_sources()
-                .accept(&accept_source, rendered.frame, Utc::now());
+        let outcome = accept_state.image_sources().accept_server_rendered(
+            &accept_source,
+            rendered.frame,
+            Utc::now(),
+        );
         if outcome.is_ok()
             && let Some(next_face_state) = next_face_state
         {
@@ -187,6 +216,7 @@ async fn refresh_loop(
     state: ServerState,
     faces: FaceCommand,
     face_state: Arc<FaceStateStore>,
+    taps: Arc<TapSignal>,
     spec: DataCardSpec,
     refresh: Duration,
 ) {
@@ -200,10 +230,12 @@ async fn refresh_loop(
     // was replaced mid-render cannot overwrite its successor's status.
     let task = tokio::task::id();
     let mut consecutive_failures = 0_u32;
+    let mut tap_count = 0;
     // The first attempt is immediate, which is what fills a freshly started server's
     // panels instead of leaving them blank for fifteen minutes.
     loop {
-        let Some(outcome) = refresh_once(&state, &faces, &face_state, &spec).await else {
+        let Some(outcome) = refresh_once(&state, &faces, &face_state, &spec, tap_count).await
+        else {
             return;
         };
         consecutive_failures = match outcome {
@@ -212,7 +244,10 @@ async fn refresh_loop(
         };
         let wait = next_attempt(refresh, &outcome, consecutive_failures);
         record_outcome(&state, &spec.source_id, task, outcome);
-        tokio::time::sleep(wait).await;
+        tap_count = tokio::select! {
+            () = tokio::time::sleep(wait) => 0,
+            () = taps.notify.notified() => taps.take().max(1),
+        };
     }
 }
 
@@ -254,7 +289,8 @@ mod tests {
 
     #[test]
     fn a_rendered_png_becomes_the_frame_a_producers_post_would() {
-        let rendered = render_frame(&faces_package::fake(), &spec("Dubai"), None).expect("a frame");
+        let rendered =
+            render_frame(&faces_package::fake(), &spec("Dubai"), None, 0).expect("a frame");
         let posted = canonical_frame_from_png(
             &std::fs::read(concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -270,7 +306,7 @@ mod tests {
     fn output_the_asset_path_would_refuse_is_our_bug_not_the_feeds() {
         for steer in ["answer-with-garbage", "answer-with-wrong-size"] {
             assert!(matches!(
-                render_frame(&faces_package::fake(), &spec(steer), None),
+                render_frame(&faces_package::fake(), &spec(steer), None, 0),
                 Err(RefreshFailure::NotAFrame(_))
             ));
         }
@@ -283,11 +319,17 @@ mod tests {
                 &faces_package::fake(),
                 &spec("refuse-as-configuration"),
                 None,
+                0,
             ),
             Err(RefreshFailure::Configuration(_))
         ));
         assert!(matches!(
-            render_frame(&faces_package::fake(), &spec("refuse-as-transient"), None,),
+            render_frame(
+                &faces_package::fake(),
+                &spec("refuse-as-transient"),
+                None,
+                0,
+            ),
             Err(RefreshFailure::Transient(_))
         ));
     }
@@ -306,6 +348,7 @@ mod tests {
             &faces_package::fake(),
             &face_state,
             &spec("echo-the-request"),
+            0,
         )
         .await
         .expect("the refresh task did not panic");
@@ -333,7 +376,14 @@ mod tests {
         let mut accepted_spec = spec("answer-with-an-envelope");
         accepted_spec.source_id.clone_from(&source.id);
         assert_eq!(
-            refresh_once(&state, &faces_package::fake(), &face_state, &accepted_spec,).await,
+            refresh_once(
+                &state,
+                &faces_package::fake(),
+                &face_state,
+                &accepted_spec,
+                0,
+            )
+            .await,
             Some(RefreshOutcome::Drawn)
         );
         assert_eq!(
@@ -348,7 +398,14 @@ mod tests {
             Some(serde_json::json!({ "page": 2 })),
         );
         assert!(matches!(
-            refresh_once(&state, &faces_package::fake(), &face_state, &refused_spec,).await,
+            refresh_once(
+                &state,
+                &faces_package::fake(),
+                &face_state,
+                &refused_spec,
+                0,
+            )
+            .await,
             Some(RefreshOutcome::Retrying(_))
         ));
         assert_eq!(
@@ -368,7 +425,7 @@ mod tests {
         let mut clear_spec = spec("answer-with-a-null-state");
         clear_spec.source_id.clone_from(&clear_source.id);
         assert_eq!(
-            refresh_once(&state, &faces_package::fake(), &face_state, &clear_spec,).await,
+            refresh_once(&state, &faces_package::fake(), &face_state, &clear_spec, 0,).await,
             Some(RefreshOutcome::Drawn)
         );
         assert_eq!(face_state.get(&clear_source.id), None);
@@ -386,7 +443,7 @@ mod tests {
         let at = |seconds: i64| Utc.timestamp_opt(1_700_000_000 + seconds, 0).unwrap();
         // What the refresh loop does with one tick: render, and accept only a frame.
         let publish = |steer: &str, now| {
-            render_frame(&faces_package::fake(), &spec(steer), None).map(|rendered| {
+            render_frame(&faces_package::fake(), &spec(steer), None, 0).map(|rendered| {
                 store
                     .accept(&source.id, rendered.frame, now)
                     .expect("accept")

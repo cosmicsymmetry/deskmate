@@ -7,6 +7,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use tokio::sync::OwnedSemaphorePermit;
 
+use app_core::runtime::CardTapSink;
 use app_core::{ConfigOrigin, LoadOutcome, RuntimeHandle};
 
 use crate::auth::AuthenticatedDevice;
@@ -32,6 +33,24 @@ pub(crate) const MAX_CONCURRENT_LINKS: usize = 32;
 /// message may concatenate smaller complete frames, but their combined size
 /// remains bounded by this protocol-native ceiling.
 const MAX_WS_MESSAGE_SIZE: usize = protocol::MAX_WIRE_FRAME;
+
+/// Leaves the app-core runtime worker immediately and performs server routing on
+/// Tokio. The runtime worker also owns the device link, so it must never wait on
+/// the data-card mutex or catalog lookup.
+struct ServerTapSink {
+    state: ServerState,
+    runtime: tokio::runtime::Handle,
+}
+
+impl CardTapSink for ServerTapSink {
+    fn tapped(&self, _card_id: &str, source_id: &str) {
+        let state = self.state.clone();
+        let source_id = source_id.to_owned();
+        std::mem::drop(self.runtime.spawn(async move {
+            crate::data_cards::tapped(&state, &source_id);
+        }));
+    }
+}
 
 pub(crate) async fn handler(
     State(state): State<ServerState>,
@@ -77,12 +96,17 @@ async fn run(
         let peer = connector.attach();
         let image_sources = std::sync::Arc::clone(state.image_sources());
         let options = state.runtime_options();
+        let tap_sink: std::sync::Arc<dyn CardTapSink> = std::sync::Arc::new(ServerTapSink {
+            state: state.clone(),
+            runtime: tokio::runtime::Handle::current(),
+        });
         let runtime = tokio::task::spawn_blocking(move || {
-            RuntimeHandle::start_with_image_source_host(
+            RuntimeHandle::start_with_ports(
                 config,
                 Box::new(device),
                 options,
                 Some(Box::new(ServerImageSourceHost::new(image_sources))),
+                Some(tap_sink),
             )
         })
         .await;
@@ -180,5 +204,35 @@ async fn load_config(
             tracing::error!(device_id = %device_id, "device config loader panicked");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_runtime_tap_callback_does_not_wait_for_server_routing() {
+        let state = ServerState::in_memory();
+        let sink = std::sync::Arc::new(ServerTapSink {
+            state: state.clone(),
+            runtime: tokio::runtime::Handle::current(),
+        });
+        let data_cards = state.inner.data_cards.lock().expect("data cards");
+        let (returned, observed) = std::sync::mpsc::channel();
+        let caller = std::thread::spawn(move || {
+            sink.tapped("picture", "external-producer");
+            returned.send(()).expect("observe callback return");
+        });
+
+        let callback_returned = observed.recv_timeout(std::time::Duration::from_millis(200));
+        drop(data_cards);
+        caller.join().expect("callback thread");
+        state.shutdown();
+
+        assert!(
+            callback_returned.is_ok(),
+            "the app-core worker callback waited on the server's data-card mutex"
+        );
     }
 }

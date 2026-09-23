@@ -5324,3 +5324,41 @@ Observed over SSH at 14:44 UTC, with the pre-retirement binary still running:
 To restore one: move its file back. The current binary will refuse it as
 `UnsupportedVersion` (visibly, and without overwriting it); only a pre-2026-09-19 binary can
 migrate it.
+
+## 2026-09-23 -- tap to face (track C1, phase 1) deployed; the tap itself is NOT yet observed
+
+The server, the browser companion and the faces were deployed from
+`track-c1-tap-to-face` at 10:11 UTC. What follows is **server-side evidence only**, in the
+sense `CLAUDE.md` means it: a frame in the store is not the panel, and no finger has
+touched the glass yet.
+
+Observed:
+
+- **The new lowering did not disturb the board.** Every picture card's wire `CardConfig`
+  changed with this build (all of them now lower to `StartPause`, which is the only way
+  protocol v2 reports a tap at all). The link closed with the old binary at 10:11:12 and was
+  established again at 10:11:15 -- three seconds -- and no `StaleRevision`, no
+  `VersionMismatch` and no refusal of any kind appears in the unit's log since.
+- **The envelope reaches the real faces package.** The weather face refreshed at 10:11:13
+  through the new `{png, state}` path and its frame came back **digest-unchanged**
+  (`the face is unchanged`), which is the strongest available proof that base64 round-trips
+  byte-for-byte: the same face drawn by the old bare-PNG path produced the same digest.
+- **`dev-0005` is linked**, Wi-Fi connected at -70 dBm, IP 192.168.8.168, update idle,
+  mounting "landscape flipped" (270 degrees), reported by the live companion.
+- **The live window states the tap.** The weather card's editor reads "Tap the panel for the
+  coming days." where it previously read "Tapping this card does nothing." That sentence is
+  the face's own, carried from `describe` through `FaceDescriptor`.
+
+**Still owed on the board, and not claimable without it:**
+
+- A **tap on the panel** doing anything at all. This is the whole point of the track and it
+  needs a person at the desk. The weather card on `dev-0005` is a weather face, so it is the
+  card to tap: one tap should redraw it as tomorrow plus the four days after, and a second
+  tap should return it to the current conditions.
+- The same at **both mountings** (the board is currently at 270).
+- The **tap-to-redraw latency**, wall clock. Nobody has measured it. A weather frame is about
+  32 KB / 17 chunks; Hacker News is 61 KB / 33 and would be the slower case.
+- **Hacker News paging on the panel.** The card named "Hacker News" in the live loop is an
+  *RSS* face pointed at the Hacker News feed, not the `hackernews` face, so it does not take
+  taps. Exercising the paging on hardware needs a `hackernews` picture card added to the
+  loop, which is the owner's to add.

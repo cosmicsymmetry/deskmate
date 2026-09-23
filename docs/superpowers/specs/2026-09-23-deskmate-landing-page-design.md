@@ -16,8 +16,9 @@ That constraint produced the first decision: **the page asks for an email addres
 nothing else.** No price, no ship date, no deposit, no checkout. When A lands, the page
 grows a real sign-up; when F lands, it grows a store. Neither is in this spec.
 
-The site is a separate repository and deploys on its own. It touches no code in the
-Deskmate tree — see "Frame production" for why that turned out to be possible.
+The site is a separate repository and deploys on its own. It touches the Deskmate tree
+in exactly one place — a dev-only frame-export example — and no production code. See
+"Frame production".
 
 ## Decisions taken with the owner
 
@@ -118,21 +119,42 @@ A `<button>`, not a `<div>`, wrapping a frame stack at the device's real logical
 
 ### Frame production
 
-`POST /v1/app/{id}/preview` (`companion/crates/server/src/app_api/mod.rs:747`) renders a
-named card through `lvgl_sim`, which links the firmware's own `scene_view.c`. Its
-`preview_timer` helper (`:839`) reads `duration_seconds`, `remaining_seconds` and
-`running` straight off the request, so the endpoint will render **any** timer state on
-demand: 25:00 paused, 24:37 running, the ring at any angle.
+**Corrected 2026-09-23, before any plan was written.** An earlier draft of this spec
+claimed `POST /v1/app/{id}/preview` would render any timer state on request. It will
+not. `PreviewRequest` (`companion/crates/server/src/app_api/mod.rs:726`) carries only
+`card_id`; the `duration_seconds` / `remaining_seconds` / `running` fields that
+`preview_timer` (`:839`) reads come from `snapshot.card_data`, which the runtime
+assembles from its own `latest_fields` (`crates/app-core/src/runtime/mod.rs:583`) —
+device events and the pomodoro engine. The HTTP surface renders whatever state the
+runtime is actually in. It cannot be asked for "24:37, running".
 
-So the frame pack is a scripted loop of authenticated POSTs against the server the owner
-already runs. **No new Rust, no worktree in the Deskmate repo, no gates** — which keeps
-Track D what the roadmap says it is: a session with no code worktree. The site
-repository holds the exported frames and the script that regenerates them.
+The knob exists one layer down, and it is explicit:
+`lvgl_sim::scene::SceneRenderRequest` (`crates/lvgl-sim/src/scene.rs:153`) takes
+`timer: Option<SceneTimer>`, and `SceneTimer` is exactly `{ total_ms, remaining_ms,
+running }`. `Simulator::render_scene_png` (`:246`) returns the encoded PNG. The scene
+itself comes from `app_core::preview_card_scene(&config, &card_id, &fields)`
+(`crates/app-core/src/runtime/scene.rs:86`) — the same builder the server's preview
+calls, so the frames stay the ones the panel would be sent.
+
+So the exporter is **a dev-only example in `app-core`**:
+`companion/crates/app-core/examples/frame_export.rs`. That crate already depends on
+`lvgl-sim` for exactly this kind of tool, and its `Cargo.toml:21-24` documents the edge
+as dev-only. `examples/scene_panel_check.rs` is the established pattern, down to the
+`cargo run -p app-core --example ...` invocation in its module doc.
+
+**This costs Track D one worktree and one pull request in the Deskmate repo**, against
+the roadmap's expectation of a track with no code worktree. It is one file, dev-only, no
+production code, no schema and no wire — but it is not zero, and the plan schedules it
+as its own task with the workspace gates run.
 
 Planned pack: 25:00 → 24:00 at one frame per second — the cadence the device itself
 ticks at — plus the paused state, so roughly 61 frames for the timer. Single frames for
 the other faces. The weather, Hacker News, RSS and token faces come from `bun run dump`
-in `companion/faces/` and need no server at all.
+in `companion/faces/` and need no server and no exporter at all.
+
+`Simulator` allows exactly one instance per process (`crates/lvgl-sim/src/lib.rs`,
+`SimError::AlreadyClaimed`), so the exporter renders its frames sequentially in a single
+run rather than in parallel.
 
 **Unmeasured, and the plan measures it before committing to this approach:** the encoded
 size of a 448×368 mostly-black emissive frame as WebP, and therefore the pack's total
@@ -204,7 +226,7 @@ product fact the page is deliberately mirroring.
 |---|---|---|
 | Photographs of the real panel, not generated | The owner | Section 06 |
 | A domain | The owner, later | Track E's launch, not this build |
-| Operator access to run the frame export | The owner's existing token | The hero |
+| A worktree and a PR for the frame-export example | This track | The hero |
 | Whether the repository goes public | The owner, undecided | The open-source block, which is out of scope here |
 
 The only existing photograph in the tree is

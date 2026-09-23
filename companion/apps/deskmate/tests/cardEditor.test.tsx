@@ -500,6 +500,10 @@ test("a tappable face tells the owner what a tap does, and others say nothing", 
     await waitFor(() =>
       expect(tappable.container.textContent).toContain("Tap the panel for the next stories."),
     );
+    // And it must REPLACE the gesture note's claim, not sit beside it: a picture
+    // card's document action is always `none`, so the editor used to say a tap did
+    // nothing while the panel paged the front page.
+    expect(tappable.container.textContent).not.toContain("Tapping this card does nothing.");
   } finally {
     await tappable.cleanup();
   }
@@ -507,6 +511,9 @@ test("a tappable face tells the owner what a tap does, and others say nothing", 
   const quiet = await mountFaceSettings(opaqueFace, null);
   try {
     expect(quiet.container.textContent).not.toContain("Tap the panel");
+    await waitFor(() =>
+      expect(quiet.container.textContent).toContain("Tapping this card does nothing."),
+    );
   } finally {
     await quiet.cleanup();
   }

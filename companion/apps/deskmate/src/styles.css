@@ -1190,12 +1190,6 @@ fieldset legend {
   padding: 0;
 }
 
-.source-settings__tap {
-  margin: 0;
-  color: var(--ink-3);
-  font-size: 0.7rem;
-}
-
 .source-settings__enum {
   gap: 6px;
 }

@@ -22,6 +22,7 @@ tokio-util = { version = "0.7", features = ["io"] }
 tower = { version = "0.5", features = ["limit", "load-shed", "timeout", "util"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 rand = "0.9"
+rusqlite = { version = "0.39", features = ["bundled"] }
 sha2 = "0.10"
 # HMAC-SHA256 for signing the short-lived operator session cookie, keyed by
 # DESKMATE_ADMIN_TOKEN. Pairs with the existing sha2 0.10; pinned exactly.

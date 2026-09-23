@@ -31,6 +31,10 @@ mod egress;
 // rasterizer that turns one into the frame a picture producer would have
 // pushed (`face_render`).
 pub mod firmware;
+// This module is the foundation for the account routes added by the following
+// plan tasks. Keep its crate-private surface intact while those callers land.
+#[allow(dead_code)]
+mod identity;
 mod image_ingest;
 mod image_sources;
 mod image_staleness;

@@ -1,0 +1,200 @@
+[
+  {
+    "id": 49805509,
+    "title": "GPT-6 Sol and Luna",
+    "score": 1401,
+    "descendants": 680,
+    "url": "https://openai.com/index/introducing-gpt-6-sol-and-luna/",
+    "time": 1790100034,
+    "type": "story"
+  },
+  {
+    "id": 49803892,
+    "title": "Claude Opus 5.5",
+    "score": 1418,
+    "descendants": 896,
+    "url": "https://www.anthropic.com/claude-opus-5-5",
+    "time": 1790094545,
+    "type": "story"
+  },
+  {
+    "id": 49811065,
+    "title": "Transit rewards (Waymo pays you to take the train)",
+    "score": 99,
+    "descendants": 77,
+    "url": "https://waymo.com/blog/2026/09/transit-rewards/",
+    "time": 1790131949,
+    "type": "story"
+  },
+  {
+    "id": 49801324,
+    "title": "OpenAI GPT\u20136 Astra breaks Enigma message that has resisted solution since 2005",
+    "score": 633,
+    "descendants": 381,
+    "url": "https://www.cryptocellar.org/bgac/the-mvueh-break.html",
+    "time": 1790085135,
+    "type": "story"
+  },
+  {
+    "id": 49808023,
+    "title": "Microsoft killed FoxPro in 2007. Anyway, here's FoxPro revived",
+    "score": 272,
+    "descendants": 161,
+    "url": "https://foxscript.org/",
+    "time": 1790110830,
+    "type": "story"
+  },
+  {
+    "id": 49811429,
+    "title": "Data-only attacks are easier than you think (2024)",
+    "score": 21,
+    "descendants": 9,
+    "url": "https://www.usenix.org/publications/loginonline/data-only-attacks-are-easier-you-think",
+    "time": 1790135368,
+    "type": "story"
+  },
+  {
+    "id": 49805278,
+    "title": "'We hacked the FBI:' Hackers say they have data on all FBI employees",
+    "score": 543,
+    "descendants": 378,
+    "url": "https://www.404media.co/we-hacked-the-fbi-hackers-say-they-have-data-on-all-fbi-employees/",
+    "time": 1790099162,
+    "type": "story"
+  },
+  {
+    "id": 49781862,
+    "title": "ReBarUEFI: Resizable BAR for almost any UEFI system",
+    "score": 121,
+    "descendants": 39,
+    "url": "https://github.com/xCuri0/ReBarUEFI",
+    "time": 1789952866,
+    "type": "story"
+  },
+  {
+    "id": 49796379,
+    "title": "What California is learning from solar panels built over irrigation canals",
+    "score": 188,
+    "descendants": 292,
+    "url": "https://www.kqed.org/science/2002033/heres-what-california-is-learning-from-solar-panels-built-over-irrigation-canals",
+    "time": 1790046605,
+    "type": "story"
+  },
+  {
+    "id": 49806335,
+    "title": "SAML: A fractal of bad design",
+    "score": 209,
+    "descendants": 125,
+    "url": "https://blog.trailofbits.com/2026/09/21/saml-a-fractal-of-bad-design/",
+    "time": 1790103437,
+    "type": "story"
+  },
+  {
+    "id": 49795337,
+    "title": "No Easy Fix for Bogus Respondents in Online Opt-In Polls",
+    "score": 15,
+    "descendants": 3,
+    "url": "https://www.pewresearch.org/methods/2026/08/27/no-easy-fix-for-bogus-respondents-in-online-opt-in-polls/",
+    "time": 1790037164,
+    "type": "story"
+  },
+  {
+    "id": 49758709,
+    "title": "How did AMD Ryzen get 50% faster in two years?",
+    "score": 281,
+    "descendants": 110,
+    "url": "https://lemire.me/blog/2026/09/18/how-did-amd-ryzen-get-50-faster-in-two-years/",
+    "time": 1789758063,
+    "type": "story"
+  },
+  {
+    "id": 49803959,
+    "title": "WordPress: Unauthenticated path traversal leading to conditional RCE",
+    "score": 179,
+    "descendants": 92,
+    "url": "https://github.com/WordPress/wordpress-develop/security/advisories/GHSA-7hp8-65ch-5whp",
+    "time": 1790094825,
+    "type": "story"
+  },
+  {
+    "id": 49804316,
+    "title": "Claude Opus 5.5 Intelligence, Performance and Price Analysis (Max)",
+    "score": 269,
+    "descendants": 80,
+    "url": "https://artificialanalysis.ai/models/claude-opus-5-5",
+    "time": 1790095891,
+    "type": "story"
+  },
+  {
+    "id": 49806430,
+    "title": "Pentagon says overreliance on AI contributed to missile strike on Iran school",
+    "score": 573,
+    "descendants": 278,
+    "url": "https://www.bloomberg.com/graphics/2026-iran-school-attack/",
+    "time": 1790103818,
+    "type": "story"
+  },
+  {
+    "id": 49805748,
+    "title": "Unreal Agent",
+    "score": 161,
+    "descendants": 94,
+    "url": "https://unreallabs.ai/blog/unreal-agent/",
+    "time": 1790100953,
+    "type": "story"
+  },
+  {
+    "id": 49808816,
+    "title": "The current balance of power in open models",
+    "score": 73,
+    "descendants": 22,
+    "url": "https://www.interconnects.ai/p/the-current-balance-of-power-in-open",
+    "time": 1790114626,
+    "type": "story"
+  },
+  {
+    "id": 49795686,
+    "title": "People hooked on vapes try a new way to quit: cigarettes",
+    "score": 153,
+    "descendants": 158,
+    "url": "https://www.bloomberg.com/news/articles/2026-09-18/to-quit-vaping-some-are-starting-to-smoke",
+    "time": 1790040080,
+    "type": "story"
+  },
+  {
+    "id": 49802161,
+    "title": "OpenAI is well positioned to fast-follow Jev",
+    "score": 282,
+    "descendants": 203,
+    "url": "https://arcturus-labs.com/blog/2026/09/21/will-openai-eat-jevs-lunch/",
+    "time": 1790088179,
+    "type": "story"
+  },
+  {
+    "id": 49795053,
+    "title": "The softness of metal",
+    "score": 20,
+    "descendants": 3,
+    "url": "https://psyche.co/turning-points/his-frailty-made-ozzys-final-gig-true-heavy-metal",
+    "time": 1790035150,
+    "type": "story"
+  },
+  {
+    "id": 49800574,
+    "title": "Show HN: JevBench, a reproducible benchmark for typed decision models",
+    "score": 92,
+    "descendants": 22,
+    "url": "https://benchmarkheaven.com/jev-models",
+    "time": 1790082063,
+    "type": "story"
+  },
+  {
+    "id": 49811484,
+    "title": "Grammarly will send unhinged messages to all your users if you try to cancel",
+    "score": 45,
+    "descendants": 9,
+    "url": "https://www.reddit.com/r/sysadmin/comments/1wjdpgx/psa_grammarly_will_send_unhinged_messages_to_all/",
+    "time": 1790136043,
+    "type": "story"
+  }
+]

@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { ConfigurationError, TransientError } from "../src/face";
-import { fetchHackerNews, renderHackerNews, storyFromItem } from "../src/faces/hackernews";
+import {
+  fetchHackerNews,
+  hackernews,
+  renderHackerNews,
+  renderHackerNewsRequest,
+  type Story,
+  storyFromItem,
+} from "../src/faces/hackernews";
 import { fetchRss, parseFeed, renderRss } from "../src/faces/rss";
 import {
   fetchToken,
@@ -15,6 +22,20 @@ import { pngFromSvg, textInk } from "../src/kit/raster";
 import { BAD, GOOD } from "../src/kit/theme";
 
 const NOW = new Date("2026-09-12T14:00:00Z");
+
+interface CapturedHackerNewsItem {
+  id: number;
+  title: string;
+  score: number;
+  descendants: number;
+  url: string;
+  time: number;
+  type: string;
+}
+
+const CAPTURED_HACKER_NEWS = (await Bun.file(
+  new URL("./hn-front-page.captured.json", import.meta.url),
+).json()) as CapturedHackerNewsItem[];
 
 /** A fetcher that answers from a table and records what it was asked for. */
 function fake(routes: Record<string, string | Error>): FetchText & { asked: string[] } {
@@ -32,6 +53,16 @@ function fake(routes: Record<string, string | Error>): FetchText & { asked: stri
 }
 
 const rendersToAFrame = (svg: string): boolean => pngFromSvg(svg).length > 1_000;
+
+const visibleSvgText = (svg: string): string =>
+  [...svg.matchAll(/<text\b[^>]*>([^<]*)<\/text>/g)]
+    .map((match) => match[1] ?? "")
+    .join(" ")
+    .replaceAll("&apos;", "'")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&gt;", ">")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&amp;", "&");
 
 describe("token", () => {
   const MARKETS = JSON.stringify([
@@ -372,6 +403,34 @@ describe("weather", () => {
 });
 
 describe("hacker news", () => {
+  const CAPTURED_AT = new Date("2026-09-23T05:00:00Z");
+  const FIXTURE_FRONT_PAGE = CAPTURED_HACKER_NEWS;
+
+  const capturedStories = (count = 20): Story[] =>
+    FIXTURE_FRONT_PAGE.slice(0, count).flatMap((item, index) => {
+      const story = storyFromItem(item, index + 1, CAPTURED_AT);
+      return story === undefined ? [] : [story];
+    });
+
+  const capturedFrontPage = (): FetchText & { asked: string[] } =>
+    fake({
+      "topstories.json": JSON.stringify(FIXTURE_FRONT_PAGE.map(({ id }) => id)),
+      ...Object.fromEntries(
+        FIXTURE_FRONT_PAGE.map((item) => [`item/${item.id}.json`, JSON.stringify(item)]),
+      ),
+    });
+
+  const capturedTitle = (index: number): string => {
+    const item = FIXTURE_FRONT_PAGE[index];
+    if (item === undefined) {
+      throw new Error(`captured Hacker News fixture has no story at index ${index}`);
+    }
+    return item.title;
+  };
+
+  const minutesBefore = (date: Date, minutes: number): string =>
+    new Date(date.getTime() - minutes * 60_000).toISOString();
+
   const item = (id: number, extra: object = {}): string =>
     JSON.stringify({
       id,
@@ -395,7 +454,7 @@ describe("hacker news", () => {
       "item/6.json": item(6),
     });
     const face = await fetchHackerNews({}, NOW, get);
-    expect(face.stories.map((story) => story.rank)).toEqual([1, 2, 3, 4]);
+    expect(face.stories.map((story) => story.rank)).toEqual([1, 2, 3, 4, 5, 6]);
     expect(face.stories[0]).toEqual({
       rank: 1,
       title: "Story 1",
@@ -404,7 +463,7 @@ describe("hacker news", () => {
       domain: "example1.com",
       age: "3h",
     });
-    expect(get.asked.some((url) => url.includes("item/7.json"))).toBe(false);
+    expect(get.asked.some((url) => url.includes("item/8.json"))).toBe(true);
   });
 
   test("a dead, deleted or unreadable story is skipped and the ranks stay contiguous", async () => {
@@ -478,5 +537,108 @@ describe("hacker news", () => {
     for (const match of svg.matchAll(/<text x="[\d.-]+" y="([\d.-]+)"/g)) {
       expect(Number(match[1])).toBeLessThanOrEqual(368 - 24);
     }
+  });
+
+  test("a tap moves to the next page without fetching", async () => {
+    const get = fake({});
+    const result = await renderHackerNewsRequest(
+      {},
+      CAPTURED_AT,
+      {
+        state: { stories: capturedStories(), page: 0, tappedAt: null },
+        event: { taps: 1, point: null },
+      },
+      get,
+    );
+    expect(get.asked).toEqual([]);
+    expect(hackernews.tap).toBe("Tap the panel for the next stories.");
+    expect(result.state.page).toBe(1);
+    expect(visibleSvgText(result.svg)).toContain(capturedTitle(4));
+    expect(result.svg).toContain(">2 / 5<");
+  });
+
+  test("three coalesced taps move three pages", async () => {
+    const result = await renderHackerNewsRequest(
+      {},
+      CAPTURED_AT,
+      {
+        state: { stories: capturedStories(), page: 0, tappedAt: null },
+        event: { taps: 3, point: null },
+      },
+      fake({}),
+    );
+    expect(result.state.page).toBe(3);
+    expect(visibleSvgText(result.svg)).toContain(capturedTitle(12));
+  });
+
+  test("paging wraps at the end", async () => {
+    const result = await renderHackerNewsRequest(
+      {},
+      CAPTURED_AT,
+      {
+        state: { stories: capturedStories(), page: 4, tappedAt: null },
+        event: { taps: 1, point: null },
+      },
+      fake({}),
+    );
+    expect(result.state.page).toBe(0);
+    expect(visibleSvgText(result.svg)).toContain(capturedTitle(0));
+    expect(visibleSvgText(result.svg)).toContain(capturedTitle(1));
+    expect(visibleSvgText(result.svg)).toContain(capturedTitle(2));
+  });
+
+  test("a scheduled refresh within ten minutes of a tap keeps the page", async () => {
+    const get = capturedFrontPage();
+    const result = await renderHackerNewsRequest(
+      {},
+      CAPTURED_AT,
+      { state: { stories: capturedStories(), page: 2, tappedAt: minutesBefore(CAPTURED_AT, 9) } },
+      get,
+    );
+    expect(result.state.page).toBe(2);
+    expect(result.state.stories).toHaveLength(20);
+    expect(Buffer.byteLength(JSON.stringify(result.state))).toBeLessThanOrEqual(16 * 1024);
+    expect(get.asked).toHaveLength(23);
+    expect(visibleSvgText(result.svg)).toContain(capturedTitle(8));
+  });
+
+  test("a scheduled refresh more than ten minutes after a tap returns to the front", async () => {
+    const result = await renderHackerNewsRequest(
+      {},
+      CAPTURED_AT,
+      { state: { stories: capturedStories(), page: 2, tappedAt: minutesBefore(CAPTURED_AT, 11) } },
+      capturedFrontPage(),
+    );
+    expect(result.state.page).toBe(0);
+    expect(result.state.tappedAt).toBeNull();
+    expect(visibleSvgText(result.svg)).toContain(capturedTitle(0));
+  });
+
+  test("a tap on a face with no state fetches, as a first render does", async () => {
+    const get = capturedFrontPage();
+    const result = await renderHackerNewsRequest(
+      {},
+      CAPTURED_AT,
+      { state: undefined, event: { taps: 1, point: null } },
+      get,
+    );
+    expect(get.asked).toHaveLength(23);
+    expect(result.state.page).toBe(0);
+    expect(visibleSvgText(result.svg)).toContain(capturedTitle(0));
+  });
+
+  test("a page with fewer than four stories still draws", async () => {
+    const result = await renderHackerNewsRequest(
+      {},
+      CAPTURED_AT,
+      {
+        state: { stories: capturedStories(17), page: 3, tappedAt: null },
+        event: { taps: 1, point: null },
+      },
+      fake({}),
+    );
+    expect(result.state.page).toBe(4);
+    expect(visibleSvgText(result.svg)).toContain(capturedTitle(16));
+    expect(result.svg).toContain(">5 / 5<");
   });
 });

@@ -8,7 +8,12 @@
 // output from before the move to TypeScript: the port was accepted on being
 // byte-identical to them.
 
-import { type HackerNewsFace, renderHackerNews } from "./faces/hackernews";
+import {
+  type HackerNewsFace,
+  renderHackerNews,
+  type Story,
+  storyFromItem,
+} from "./faces/hackernews";
 import { type FeedEntry, renderRss } from "./faces/rss";
 import { type Candle, renderToken, type TokenFace } from "./faces/token";
 import { type Condition, type HourlyStep, renderWeather } from "./faces/weather";
@@ -23,6 +28,15 @@ const hour = (label: string, temperature: number, condition: Condition): HourlyS
   label,
   temperature,
   condition,
+});
+
+const HN_CAPTURED_AT = new Date("2026-09-23T05:00:00Z");
+const HN_CAPTURED_ITEMS = (await Bun.file(
+  new URL("../test/hn-front-page.captured.json", import.meta.url),
+).json()) as unknown[];
+const HN_CAPTURED_STORIES: Story[] = HN_CAPTURED_ITEMS.flatMap((item, index) => {
+  const story = storyFromItem(item, index + 1, HN_CAPTURED_AT);
+  return story === undefined ? [] : [story];
 });
 
 /**
@@ -466,6 +480,27 @@ const hn = (stories: HackerNewsFace["stories"]): string => renderHackerNews({ st
 
 function hackerNewsCases(): Case[] {
   return [
+    {
+      name: "hackernews--paged-front-page",
+      svg: renderHackerNews({
+        stories: HN_CAPTURED_STORIES.slice(0, 4),
+        page: { index: 0, count: 5 },
+      }),
+    },
+    {
+      name: "hackernews--paged-third-page",
+      svg: renderHackerNews({
+        stories: HN_CAPTURED_STORIES.slice(8, 12),
+        page: { index: 2, count: 5 },
+      }),
+    },
+    {
+      name: "hackernews--paged-short-tail",
+      svg: renderHackerNews({
+        stories: HN_CAPTURED_STORIES.slice(16, 17),
+        page: { index: 4, count: 5 },
+      }),
+    },
     {
       name: "hackernews--front-page",
       svg: hn([

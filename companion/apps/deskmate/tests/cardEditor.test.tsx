@@ -488,3 +488,26 @@ test("the dwell field is shown when the loop is timed or the value must be repai
   const timed = renderDwell(cardListConfig([card]));
   expect(timed).toContain("Stays on the panel for");
 });
+
+test("a tappable face tells the owner what a tap does, and others say nothing", async () => {
+  // The panel has three states for a picture -- waiting, stale, drawn -- and none of
+  // them can say "this one answers a tap". The window is where that is learnable.
+  const tappable = await mountFaceSettings(
+    { ...opaqueFace, tap: "Tap the panel for the next stories." },
+    null,
+  );
+  try {
+    await waitFor(() =>
+      expect(tappable.container.textContent).toContain("Tap the panel for the next stories."),
+    );
+  } finally {
+    await tappable.cleanup();
+  }
+
+  const quiet = await mountFaceSettings(opaqueFace, null);
+  try {
+    expect(quiet.container.textContent).not.toContain("Tap the panel");
+  } finally {
+    await quiet.cleanup();
+  }
+});

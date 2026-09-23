@@ -331,6 +331,7 @@ function PictureFaceSettings({ sourceId }: { sourceId: string }) {
             </label>
           ),
         )}
+        {descriptor.tap ? <p className="source-settings__tap">{descriptor.tap}</p> : null}
       </fieldset>
       {error ? (
         <p className="data-note" role="alert">

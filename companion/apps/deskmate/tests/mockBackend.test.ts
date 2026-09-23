@@ -296,6 +296,7 @@ describe("mock backend contract", () => {
       {
         kind: "hackernews",
         label: "Hacker News",
+        tap: "Tap the panel for the next stories.",
         fields: [
           {
             type: "enum",

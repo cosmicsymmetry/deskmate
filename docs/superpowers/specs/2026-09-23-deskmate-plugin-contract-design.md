@@ -17,8 +17,14 @@ the contract — what a plugin *is*, what runs it, what it may reach, how it fai
 is tested.
 
 It defines no submission flow, no review queue, no directory UI, no per-author identity
-and no tap handling. Those wait: the first three on there being an outside author at all,
-identity and plan limits on Track A, tap on Track C1.
+and no per-author identity. Those wait: the first three on there being an outside author
+at all, identity and plan limits on Track A.
+
+**Tap and state are in, and are Track C1's shapes, not new ones.** PR #4 gives every face
+a `state` that round-trips through the server and an `event: {taps, point}` for a tap, and
+changes the render seam to a `{png, state}` envelope. A plugin uses exactly those. This
+spec is written against the post-C1 seam and its plan is sequenced behind that merge; §
+"Tap and state" says what a plugin sees.
 
 ## What does not change
 
@@ -157,8 +163,13 @@ interface RenderContext {
   answers: Answer[];            // in the order the requests were declared
   now: { utc: string; local: LocalTime; timezone: string };
   format: Format;               // numbers, dates, durations, relative ages
+  state?: unknown;              // what this plugin returned last time (C1)
+  event?: { taps: number; point: { x: number; y: number } | null };  // C1
 }
 ```
+
+`plan` is handed the same context minus `answers`, so a plugin can decide what to fetch
+from where it left off — a paging plugin answering a tap fetches nothing at all.
 
 `now.local` and `format` exist because **the sandbox has no `Intl` and its clock is
 UTC** — verified, see Evidence. Without them every plugin invents its own broken
@@ -200,6 +211,7 @@ nothing carries between renders or between users.
 | Measurements | 64 per render | enough to fit a headline and a list |
 | Boxes in a card | 2,000 | verified in the converter |
 | Output | SVG 512 KB · PNG 1 MB | the PNG cap is the existing ingest cap |
+| State returned | 16 KB encoded | C1's `face-state.json` cap, unchanged |
 
 Exceeding a limit ends the render and keeps the stored frame. A deterministic overrun
 (too many boxes, an undeclared site) is a configuration error, because retrying cannot
@@ -212,8 +224,9 @@ help; a timeout is transient.
    loopback, link-local, CGNAT and metadata addresses refused on every redirect hop; the
    resolved address pinned with the name in `Host` and as the TLS server name; body cap;
    deadline.
-3. Substitutes secrets, then runs `render`, converts the card, rasters it, and hands the
-   PNG to `ImageSourceStore::accept` exactly as a producer's POST arrives.
+3. Substitutes secrets, then runs `render`, converts the card, rasters it, and returns
+   C1's `{png, state}` envelope, whose PNG reaches `ImageSourceStore::accept` exactly as
+   a producer's POST does.
 
 **Secrets are never given to the plugin.** A plugin writes `{{secret:github_token}}` in a
 header or query value; the host substitutes the stored credential **only** when that
@@ -328,6 +341,28 @@ A face that cannot draw must say so in the window, because the panel cannot
 
 `render` may also return log lines beside its card. They go to our log for the author and
 the reviewer, capped and sanitized, and never to the panel.
+
+## Tap and state
+
+Both are Track C1's, unchanged, and a plugin is simply another face to them.
+
+- **A plugin may return `state` beside its card**, capped at **16 KB encoded** per source
+  and stored in `face-state.json` under `DESKMATE_CONFIG_DIR`. Omitted leaves the stored
+  state alone; `null` clears it. A failed render keeps both the frame and the state, so a
+  429 on a tap does not lose the reader's place.
+- **A plugin that answers taps declares `tap` in its manifest**: the sentence the window
+  shows the owner about what a tap does. A plugin without it ignores taps, which is every
+  plugin's default.
+- **Taps coalesce**: three quick taps can arrive as one render with `taps: 3`. `point` is
+  `null` until C2 carries one; a plugin that hit-tests gets it in the same 448x368 space
+  it drew in.
+
+This is why a plugin can page through a list, flip between two views, or show "the next
+one" on a tap without any state of its own — and why the earlier claim in this session
+that a plugin cannot remember anything between renders is wrong, and was wrong the moment
+C1 landed its seam.
+
+**A stateful plugin is never shared** between users, for the obvious reason.
 
 ## Sharing identical renders
 
@@ -447,3 +482,6 @@ output path must accept `data:` references only.
 - The remote adapter, which is prose from the superseded spec and has never run.
 - Anything on hardware. No plugin-drawn frame has reached `dev-0005`, and
   `CLAUDE.md` already owes a server-rendered face on the panel at both mountings.
+- The interaction with C1's seam, which was open as PR #4 when this was written. The plan
+  is sequenced behind that merge; if C1's shapes change, this spec follows them rather
+  than the reverse.

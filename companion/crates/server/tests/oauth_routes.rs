@@ -12,21 +12,37 @@ use server::{ServerState, app};
 use tower::ServiceExt;
 
 mod oauth_support;
+mod support;
 
 use oauth_support::{FakeTransport, integration_state};
+
+fn account_request(
+    _state: &ServerState,
+    account: &support::TestAccount,
+    method: &str,
+    uri: impl AsRef<str>,
+) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri.as_ref())
+        .header(header::COOKIE, &account.cookie)
+        .header(header::ORIGIN, "https://deskmate.test")
+        .body(Body::empty())
+        .unwrap()
+}
 
 #[tokio::test]
 async fn callback_with_unknown_state_is_rejected_before_any_exchange() {
     let fixture = integration_state(Arc::new(EgressTransport), None);
+    let owner = support::owner_account(&fixture.state);
     let app = app(fixture.state.clone());
     let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/v1/integrations/google/callback?code=abc&state=never-issued")
-                .header(header::AUTHORIZATION, "Bearer in-memory-admin-token")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(account_request(
+            &fixture.state,
+            &owner,
+            "GET",
+            "/v1/integrations/google/callback?code=abc&state=never-issued",
+        ))
         .await
         .unwrap();
     // No stash for that state -> 400, and crucially no token exchange was attempted.
@@ -90,36 +106,15 @@ async fn callback_and_revoke_also_reject_unauthenticated_callers_with_bare_401s(
 async fn callback_rejects_a_state_from_another_session_before_exchange() {
     let fixture = integration_state(Arc::new(EgressTransport), None);
     let state = &fixture.state;
-    let login = app(state.clone())
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/session/login")
-                .header(header::AUTHORIZATION, "Bearer in-memory-admin-token")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(login.status(), StatusCode::NO_CONTENT);
-    let cookie = login
-        .headers()
-        .get(header::SET_COOKIE)
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap();
+    let first = support::owner_account(state);
+    let second = support::new_session(state, &first);
     let consent = app(state.clone())
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/integrations/google")
-                .header(header::COOKIE, cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(account_request(
+            state,
+            &first,
+            "POST",
+            "/v1/integrations/google",
+        ))
         .await
         .unwrap();
     assert_eq!(consent.status(), StatusCode::SEE_OTHER);
@@ -136,15 +131,12 @@ async fn callback_rejects_a_state_from_another_session_before_exchange() {
         .expect("state query parameter");
 
     let response = app(state.clone())
-        .oneshot(
-            Request::builder()
-                .uri(format!(
-                    "/v1/integrations/google/callback?code=abc&state={state_value}"
-                ))
-                .header(header::AUTHORIZATION, "Bearer in-memory-admin-token")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(account_request(
+            state,
+            &second,
+            "GET",
+            format!("/v1/integrations/google/callback?code=abc&state={state_value}"),
+        ))
         .await
         .unwrap();
 
@@ -156,15 +148,12 @@ async fn callback_rejects_a_state_from_another_session_before_exchange() {
             .is_empty()
     );
     let retry = app(state.clone())
-        .oneshot(
-            Request::builder()
-                .uri(format!(
-                    "/v1/integrations/google/callback?code=abc&state={state_value}"
-                ))
-                .header(header::COOKIE, cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(account_request(
+            state,
+            &first,
+            "GET",
+            format!("/v1/integrations/google/callback?code=abc&state={state_value}"),
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -179,18 +168,17 @@ async fn callback_rejects_a_state_from_another_session_before_exchange() {
 }
 
 #[tokio::test]
-async fn start_consent_redirects_to_google_for_an_admin_caller() {
+async fn start_consent_redirects_to_google_for_the_instance_owner() {
     let fixture = integration_state(Arc::new(EgressTransport), None);
+    let owner = support::owner_account(&fixture.state);
     let app = app(fixture.state.clone());
     let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/integrations/google")
-                .header(header::AUTHORIZATION, "Bearer in-memory-admin-token")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(account_request(
+            &fixture.state,
+            &owner,
+            "POST",
+            "/v1/integrations/google",
+        ))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
@@ -219,15 +207,14 @@ fn stored_grant() -> IntegrationSecret {
 }
 
 async fn mint_producer_credential(state: &ServerState, integration_id: &str) -> String {
+    let owner = support::owner_account(state);
     let response = app(state.clone())
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/v1/integrations/{integration_id}/producer"))
-                .header(header::AUTHORIZATION, "Bearer in-memory-admin-token")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(account_request(
+            state,
+            &owner,
+            "POST",
+            format!("/v1/integrations/{integration_id}/producer"),
+        ))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED, "mint must succeed");
@@ -364,16 +351,15 @@ async fn revoking_a_producer_credential_stops_it_vending() {
     )]);
     let fixture = integration_state(transport, Some(stored_grant()));
     let credential = mint_producer_credential(&fixture.state, "google").await;
+    let owner = support::owner_account(&fixture.state);
 
     let revoked = app(fixture.state.clone())
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/v1/integrations/google/producer")
-                .header(header::AUTHORIZATION, "Bearer in-memory-admin-token")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(account_request(
+            &fixture.state,
+            &owner,
+            "DELETE",
+            "/v1/integrations/google/producer",
+        ))
         .await
         .unwrap();
     assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
@@ -433,16 +419,15 @@ async fn revoking_an_integration_also_revokes_its_producer_credential() {
     let transport = FakeTransport::with(vec![(200, r"{}")]);
     let fixture = integration_state(transport, Some(stored_grant()));
     let credential = mint_producer_credential(&fixture.state, "google").await;
+    let owner = support::owner_account(&fixture.state);
 
     let revoked = app(fixture.state.clone())
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/integrations/google/revoke")
-                .header(header::AUTHORIZATION, "Bearer in-memory-admin-token")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(account_request(
+            &fixture.state,
+            &owner,
+            "POST",
+            "/v1/integrations/google/revoke",
+        ))
         .await
         .unwrap();
     assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
@@ -463,16 +448,15 @@ async fn revoking_an_integration_drops_the_credential_even_when_the_remote_revok
     let transport = FakeTransport::with(vec![]); // every post_form errors
     let fixture = integration_state(transport, Some(stored_grant()));
     let credential = mint_producer_credential(&fixture.state, "google").await;
+    let owner = support::owner_account(&fixture.state);
 
     let revoked = app(fixture.state.clone())
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/integrations/google/revoke")
-                .header(header::AUTHORIZATION, "Bearer in-memory-admin-token")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(account_request(
+            &fixture.state,
+            &owner,
+            "POST",
+            "/v1/integrations/google/revoke",
+        ))
         .await
         .unwrap();
     assert_eq!(revoked.status(), StatusCode::NO_CONTENT);

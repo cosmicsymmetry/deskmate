@@ -22,8 +22,22 @@ use support::{HttpTestServer as TestServer, json_body, replace_file_with_directo
 const ADMIN_TOKEN: &str = "in-memory-admin-token";
 
 async fn spawn_with(state: ServerState, web_root: Option<std::path::PathBuf>) -> TestServer {
-    support::owner_account(&state);
-    support::spawn_http(app_with_web(support::with_fake_faces(state), web_root)).await
+    let account = support::owner_account(&state);
+    support::spawn_http(app_with_web(support::with_fake_faces(state), web_root))
+        .await
+        .with_account(account)
+}
+
+fn account_request(
+    client: &Client,
+    server: &TestServer,
+    method: Method,
+    path: &str,
+) -> reqwest::RequestBuilder {
+    client
+        .request(method, format!("{}{path}", server.base_url))
+        .header("cookie", &server.account().cookie)
+        .header("origin", "https://deskmate.test")
 }
 
 fn mint_test_device(state: &ServerState) -> server::registry::DeviceIdentity {
@@ -78,22 +92,27 @@ async fn mint_device(client: &Client, server: &TestServer) -> MintedDevice {
 /// workspace: the production client's feature set is deliberately minimal
 /// because it is the one the SSRF egress guard hands to the provider layer.
 async fn snapshot(client: &Client, server: &TestServer, device_id: &str) -> serde_json::Value {
-    let response = client
-        .get(format!("{}/v1/app/{device_id}/snapshot", server.base_url))
-        .bearer_auth(ADMIN_TOKEN)
-        .send()
-        .await
-        .expect("snapshot");
+    let response = account_request(
+        client,
+        server,
+        Method::GET,
+        &format!("/v1/app/{device_id}/snapshot"),
+    )
+    .send()
+    .await
+    .expect("snapshot");
     assert_eq!(response.status(), StatusCode::OK);
     json_body(response).await
 }
 
 async fn direct_snapshot(state: &ServerState, device_id: &str) -> serde_json::Value {
+    let account = support::owner_account(state);
     let response = app(state.clone())
         .oneshot(
             Request::builder()
                 .uri(format!("/v1/app/{device_id}/snapshot"))
-                .header("authorization", format!("Bearer {ADMIN_TOKEN}"))
+                .header("cookie", account.cookie)
+                .header("origin", "https://deskmate.test")
                 .body(Body::empty())
                 .expect("snapshot request"),
         )
@@ -107,11 +126,13 @@ async fn direct_snapshot(state: &ServerState, device_id: &str) -> serde_json::Va
 }
 
 async fn direct_device_list(state: &ServerState) -> serde_json::Value {
+    let account = support::owner_account(state);
     let response = app(state.clone())
         .oneshot(
             Request::builder()
                 .uri("/v1/app/devices")
-                .header("authorization", format!("Bearer {ADMIN_TOKEN}"))
+                .header("cookie", account.cookie)
+                .header("origin", "https://deskmate.test")
                 .body(Body::empty())
                 .expect("device-list request"),
         )
@@ -133,7 +154,7 @@ async fn event_stream_ends_when_shutdown_begins_without_a_socket() {
     let state = ServerState::in_memory();
     let device = mint_test_device(&state);
     let response = app(state.clone())
-        .oneshot(event_request(&device.device_id))
+        .oneshot(event_request(&state, &device.device_id))
         .await
         .expect("event response");
     assert_eq!(response.status(), StatusCode::OK);
@@ -168,8 +189,8 @@ async fn event_stream_opened_after_shutdown_ends_immediately() {
     let state = ServerState::in_memory();
     let device = mint_test_device(&state);
     state.begin_shutdown();
-    let response = app(state)
-        .oneshot(event_request(&device.device_id))
+    let response = app(state.clone())
+        .oneshot(event_request(&state, &device.device_id))
         .await
         .expect("late event response");
     assert_eq!(response.status(), StatusCode::OK);
@@ -182,10 +203,12 @@ async fn event_stream_opened_after_shutdown_ends_immediately() {
     );
 }
 
-fn event_request(device_id: &str) -> Request<Body> {
+fn event_request(state: &ServerState, device_id: &str) -> Request<Body> {
+    let account = support::owner_account(state);
     Request::builder()
         .uri(format!("/v1/app/{device_id}/events"))
-        .header("authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header("cookie", account.cookie)
+        .header("origin", "https://deskmate.test")
         .body(Body::empty())
         .expect("event request")
 }
@@ -215,27 +238,29 @@ async fn open_event_stream_allows_graceful_server_shutdown() {
     use tokio::time::timeout;
 
     let state = ServerState::in_memory();
-    support::owner_account(&state);
+    let account = support::owner_account(&state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind shutdown test server");
-    let server = TestServer {
-        base_url: format!("http://{}", listener.local_addr().unwrap()),
-    };
+    let server =
+        TestServer::at(format!("http://{}", listener.local_addr().unwrap())).with_account(account);
     let (stop, stopped) = tokio::sync::oneshot::channel();
     let shutdown_state = state.clone();
     let serving = tokio::spawn(async move {
-        axum::serve(listener, app(state))
-            .with_graceful_shutdown(async move {
-                stopped.await.expect("shutdown requested");
-                shutdown_state.begin_shutdown();
-            })
-            .await
-            .expect("serve until drained");
+        axum::serve(
+            listener,
+            app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            stopped.await.expect("shutdown requested");
+            shutdown_state.begin_shutdown();
+        })
+        .await
+        .expect("serve until drained");
     });
     let client = Client::new();
     let device = mint_device(&client, &server).await;
-    let cookie = session_cookie(&client, &server).await;
+    let cookie = server.account().cookie.clone();
     let expected = snapshot(&client, &server, &device.device_id).await;
     let mut response = timeout(
         Duration::from_secs(3),
@@ -245,6 +270,7 @@ async fn open_event_stream_allows_graceful_server_shutdown() {
                 server.base_url, device.device_id
             ))
             .header("cookie", cookie)
+            .header("origin", "https://deskmate.test")
             .send(),
     )
     .await
@@ -340,49 +366,6 @@ async fn every_companion_route_refuses_an_anonymous_caller() {
             "{method} {path} returned content to an anonymous caller"
         );
     }
-}
-
-#[tokio::test]
-async fn the_admin_token_buys_a_session_cookie_and_a_wrong_one_buys_nothing() {
-    let (server, _state) = spawn().await;
-    let client = Client::new();
-
-    let refused = client
-        .post(format!("{}/v1/app/session", server.base_url))
-        .header("content-type", "application/json")
-        .body(serde_json::json!({ "token": "not-the-admin-token" }).to_string())
-        .send()
-        .await
-        .expect("login attempt");
-    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
-    assert!(
-        refused.headers().get("set-cookie").is_none(),
-        "a refused login must not mint a session"
-    );
-
-    let accepted = client
-        .post(format!("{}/v1/app/session", server.base_url))
-        .header("content-type", "application/json")
-        .body(serde_json::json!({ "token": ADMIN_TOKEN }).to_string())
-        .send()
-        .await
-        .expect("login");
-    assert_eq!(accepted.status(), StatusCode::NO_CONTENT);
-    let cookie = accepted
-        .headers()
-        .get("set-cookie")
-        .expect("session cookie")
-        .to_str()
-        .expect("cookie is text");
-    // `__Host-` and its attributes are load-bearing, not decoration: without
-    // them a sibling host under the registrable domain could set a same-named
-    // cookie that the header scan would happily pick up first.
-    assert!(cookie.starts_with("__Host-deskmate_session="));
-    assert!(cookie.contains("HttpOnly"));
-    assert!(cookie.contains("Secure"));
-    assert!(cookie.contains("Path=/"));
-    assert!(cookie.ends_with("; Max-Age=2592000"));
-    assert!(!cookie.to_ascii_lowercase().contains("domain="));
 }
 
 #[tokio::test]
@@ -577,12 +560,15 @@ async fn an_unknown_device_is_a_typed_not_found_rather_than_an_empty_snapshot() 
     let (server, _state) = spawn().await;
     let client = Client::new();
 
-    let response = client
-        .get(format!("{}/v1/app/never-minted/snapshot", server.base_url))
-        .bearer_auth(ADMIN_TOKEN)
-        .send()
-        .await
-        .expect("snapshot");
+    let response = account_request(
+        &client,
+        &server,
+        Method::GET,
+        "/v1/app/never-minted/snapshot",
+    )
+    .send()
+    .await
+    .expect("snapshot");
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let body = json_body(response).await;
     // The category is what the frontend switches on; a bare status would leave
@@ -635,17 +621,17 @@ async fn semantic_validation_reports_issues_and_preserves_the_last_good_document
     config["cards"][0]["dwell_seconds"] = serde_json::json!(app_core::MIN_DWELL_SECONDS - 1);
     let envelope = serde_json::json!({ "json": config.to_string() }).to_string();
 
-    let preflight = client
-        .post(format!(
-            "{}/v1/app/{}/config/validate",
-            server.base_url, device.device_id
-        ))
-        .bearer_auth(ADMIN_TOKEN)
-        .header("content-type", "application/json")
-        .body(envelope.clone())
-        .send()
-        .await
-        .expect("validate config");
+    let preflight = account_request(
+        &client,
+        &server,
+        Method::POST,
+        &format!("/v1/app/{}/config/validate", device.device_id),
+    )
+    .header("content-type", "application/json")
+    .body(envelope.clone())
+    .send()
+    .await
+    .expect("validate config");
     assert_eq!(preflight.status(), StatusCode::OK);
     let preflight = json_body(preflight).await;
     assert_eq!(preflight["valid"], false);
@@ -714,17 +700,17 @@ async fn a_draft_over_the_size_limit_is_refused_before_it_is_parsed() {
     // Deliberately not valid JSON: if the size check did not come first, this
     // would be reported as a parse failure and the test would catch it.
     let oversized = "x".repeat(64 * 1024 + 1);
-    let response = client
-        .post(format!(
-            "{}/v1/app/{}/config/validate",
-            server.base_url, device.device_id
-        ))
-        .bearer_auth(ADMIN_TOKEN)
-        .header("content-type", "application/json")
-        .body(serde_json::json!({ "json": oversized }).to_string())
-        .send()
-        .await
-        .expect("validate draft");
+    let response = account_request(
+        &client,
+        &server,
+        Method::POST,
+        &format!("/v1/app/{}/config/validate", device.device_id),
+    )
+    .header("content-type", "application/json")
+    .body(serde_json::json!({ "json": oversized }).to_string())
+    .send()
+    .await
+    .expect("validate draft");
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     let body = json_body(response).await;
     assert_eq!(body["category"], "payload-too-large");
@@ -737,17 +723,17 @@ async fn a_pomodoro_command_with_no_board_says_so_instead_of_silently_succeeding
     let client = Client::new();
     let device = mint_device(&client, &server).await;
 
-    let response = client
-        .post(format!(
-            "{}/v1/app/{}/pomodoro",
-            server.base_url, device.device_id
-        ))
-        .bearer_auth(ADMIN_TOKEN)
-        .header("content-type", "application/json")
-        .body(serde_json::json!({ "card_id": "pomodoro", "action": "start" }).to_string())
-        .send()
-        .await
-        .expect("pomodoro");
+    let response = account_request(
+        &client,
+        &server,
+        Method::POST,
+        &format!("/v1/app/{}/pomodoro", device.device_id),
+    )
+    .header("content-type", "application/json")
+    .body(serde_json::json!({ "card_id": "pomodoro", "action": "start" }).to_string())
+    .send()
+    .await
+    .expect("pomodoro");
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = json_body(response).await;
     assert_eq!(body["category"], "runtime-unavailable");
@@ -821,9 +807,7 @@ async fn the_spa_fallback_serves_client_routes_but_never_shadows_the_api() {
     assert!(!unknown_api.text().await.expect("body").contains("shell"));
 
     // And a real API route still answers as itself rather than as the shell.
-    let devices = client
-        .get(format!("{}/v1/app/devices", server.base_url))
-        .bearer_auth(ADMIN_TOKEN)
+    let devices = account_request(&client, &server, Method::GET, "/v1/app/devices")
         .send()
         .await
         .expect("devices");
@@ -964,13 +948,14 @@ async fn spawn_with_plain() -> TestServer {
         .expect("bind test server");
     let address = listener.local_addr().expect("test server address");
     tokio::spawn(async move {
-        axum::serve(listener, app(state))
-            .await
-            .expect("serve plain routes");
+        axum::serve(
+            listener,
+            app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve plain routes");
     });
-    TestServer {
-        base_url: format!("http://127.0.0.1:{}", address.port()),
-    }
+    TestServer::at(format!("http://127.0.0.1:{}", address.port()))
 }
 
 #[tokio::test]
@@ -986,12 +971,13 @@ async fn the_image_and_face_routes_answer_a_browser_session_not_only_a_bearer() 
     // which would need a feature this crate deliberately does not enable -- and
     // which would refuse a `Secure` cookie over the loopback http the harness
     // uses anyway. In deployment the origin is HTTPS, so `Secure` costs nothing.
-    let cookie = session_cookie(&client, &server).await;
+    let cookie = &server.account().cookie;
 
     for path in ["/v1/images", "/v1/faces"] {
         let response = client
             .get(format!("{}{path}", server.base_url))
-            .header("cookie", &cookie)
+            .header("cookie", cookie)
+            .header("origin", "https://deskmate.test")
             .send()
             .await
             .expect("session request");
@@ -1004,36 +990,14 @@ async fn the_image_and_face_routes_answer_a_browser_session_not_only_a_bearer() 
 
     let minted = client
         .post(format!("{}/v1/images", server.base_url))
-        .header("cookie", &cookie)
+        .header("cookie", cookie)
+        .header("origin", "https://deskmate.test")
         .header("content-type", "application/json")
         .body(serde_json::json!({ "name": "Weather", "face_kind": null }).to_string())
         .send()
         .await
         .expect("mint from the browser session");
     assert_eq!(minted.status(), StatusCode::OK);
-}
-
-/// Signs in and returns the `Cookie` header a browser would then send.
-async fn session_cookie(client: &Client, server: &TestServer) -> String {
-    let login = client
-        .post(format!("{}/v1/app/session", server.base_url))
-        .header("content-type", "application/json")
-        .body(serde_json::json!({ "token": ADMIN_TOKEN }).to_string())
-        .send()
-        .await
-        .expect("login");
-    assert_eq!(login.status(), StatusCode::NO_CONTENT);
-    let set_cookie = login
-        .headers()
-        .get("set-cookie")
-        .expect("session cookie")
-        .to_str()
-        .expect("cookie is text");
-    set_cookie
-        .split(';')
-        .next()
-        .expect("cookie name=value")
-        .to_owned()
 }
 
 #[tokio::test]
@@ -1053,9 +1017,7 @@ async fn the_device_list_says_which_identities_have_ever_been_configured() {
     let saved = save_config(&client, &server, &second.device_id, &configured["config"]).await;
     assert_eq!(saved.status(), StatusCode::OK);
 
-    let listed = client
-        .get(format!("{}/v1/app/devices", server.base_url))
-        .bearer_auth(ADMIN_TOKEN)
+    let listed = account_request(&client, &server, Method::GET, "/v1/app/devices")
         .send()
         .await
         .expect("devices");
@@ -1101,17 +1063,17 @@ async fn preview_stays_upright_for_both_physical_mountings() {
         let stored = snapshot(&client, &server, &device.device_id).await;
         assert_eq!(stored["config"]["preferences"]["orientation"], orientation);
 
-        let response = client
-            .post(format!(
-                "{}/v1/app/{}/preview",
-                server.base_url, device.device_id
-            ))
-            .bearer_auth(ADMIN_TOKEN)
-            .header("content-type", "application/json")
-            .body(serde_json::json!({ "card_id": "pomodoro" }).to_string())
-            .send()
-            .await
-            .expect("preview");
+        let response = account_request(
+            &client,
+            &server,
+            Method::POST,
+            &format!("/v1/app/{}/preview", device.device_id),
+        )
+        .header("content-type", "application/json")
+        .body(serde_json::json!({ "card_id": "pomodoro" }).to_string())
+        .send()
+        .await
+        .expect("preview");
         assert_eq!(response.status(), StatusCode::OK);
         let frame = json_body(response).await;
         assert!(
@@ -1308,9 +1270,7 @@ async fn mint_source_with_face(
     if let Some(face_kind) = face_kind {
         body["face_kind"] = face_kind.into();
     }
-    let response = client
-        .post(format!("{}/v1/images", server.base_url))
-        .bearer_auth(ADMIN_TOKEN)
+    let response = account_request(client, server, Method::POST, "/v1/images")
         .header("content-type", "application/json")
         .body(body.to_string())
         .send()
@@ -1347,20 +1307,21 @@ async fn put_config_body(
     device_id: &str,
     body: String,
 ) -> reqwest::Response {
-    client
-        .put(format!("{}/v1/app/{device_id}/config", server.base_url))
-        .bearer_auth(ADMIN_TOKEN)
-        .header("content-type", "application/json")
-        .body(body)
-        .send()
-        .await
-        .expect("save config")
+    account_request(
+        client,
+        server,
+        Method::PUT,
+        &format!("/v1/app/{device_id}/config"),
+    )
+    .header("content-type", "application/json")
+    .body(body)
+    .send()
+    .await
+    .expect("save config")
 }
 
 async fn listed_source_ids(client: &Client, server: &TestServer) -> Vec<String> {
-    let response = client
-        .get(format!("{}/v1/images", server.base_url))
-        .bearer_auth(ADMIN_TOKEN)
+    let response = account_request(client, server, Method::GET, "/v1/images")
         .send()
         .await
         .expect("list image sources");
@@ -1379,14 +1340,17 @@ async fn preview_of(
     device_id: &str,
     card_id: &str,
 ) -> serde_json::Value {
-    let response = client
-        .post(format!("{}/v1/app/{device_id}/preview", server.base_url))
-        .bearer_auth(ADMIN_TOKEN)
-        .header("content-type", "application/json")
-        .body(serde_json::json!({ "card_id": card_id }).to_string())
-        .send()
-        .await
-        .expect("preview");
+    let response = account_request(
+        client,
+        server,
+        Method::POST,
+        &format!("/v1/app/{device_id}/preview"),
+    )
+    .header("content-type", "application/json")
+    .body(serde_json::json!({ "card_id": card_id }).to_string())
+    .send()
+    .await
+    .expect("preview");
     assert_eq!(response.status(), StatusCode::OK);
     json_body(response).await
 }

@@ -7,24 +7,21 @@
 
 pub(crate) mod view;
 
-use axum::Form;
 use axum::Router;
 use axum::extract::{Path, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use chrono::Utc;
-use serde::Deserialize;
 
 use crate::ServerState;
-use crate::oauth::routes::{SESSION_TTL, mint_producer_action, revoke_integration_action};
-use crate::oauth::session::{OperatorAuthenticated, SessionSigner, set_cookie_header};
+use crate::oauth::routes::{mint_producer_action, revoke_integration_action};
+use crate::web_auth::{InstanceOwner, session_digest_key};
 use view::{DashboardModel, DeviceRow, IntegrationRow, SourceRow};
 
 pub(crate) fn routes() -> Router<ServerState> {
     Router::new()
         .route("/v1/manage", get(dashboard))
-        .route("/v1/manage/login", get(login_form).post(login_submit))
         .route(
             "/v1/manage/integrations/{id}/connect",
             post(connect_integration),
@@ -43,11 +40,12 @@ pub(crate) fn routes() -> Router<ServerState> {
 /// values never leave their owning stores.
 async fn dashboard(
     State(state): State<ServerState>,
-    _operator: OperatorAuthenticated,
+    owner: InstanceOwner,
 ) -> Result<Html<String>, crate::app_api::AppApiError> {
     let lookup = state.clone();
+    let account_id = owner.0.account.id;
     let (space, device_ids) = tokio::task::spawn_blocking(move || {
-        let space = lookup.operator_space()?;
+        let space = lookup.account_space(&account_id);
         let devices = lookup
             .identity()
             .devices_for(&space.account_id)
@@ -108,57 +106,15 @@ async fn dashboard(
     })))
 }
 
-/// Always reachable: a 401 with no way to authenticate would make the page
-/// useless in a browser, and this form carries nothing worth protecting.
-async fn login_form() -> Html<String> {
-    Html(view::render_login(None))
-}
-
-#[derive(Deserialize)]
-struct LoginForm {
-    token: String,
-}
-
-/// Mints the same cookie, through the same signer and TTL, as the JSON login
-/// route -- one cookie format, not two.
-async fn login_submit(State(state): State<ServerState>, Form(form): Form<LoginForm>) -> Response {
-    if !state.verify_admin_token(&form.token) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Html(view::render_login(Some("That token was not accepted."))),
-        )
-            .into_response();
-    }
-    if state.integrations().is_none() {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Html(view::render_login(Some(
-                "OAuth integrations are not configured on this server.",
-            ))),
-        )
-            .into_response();
-    }
-    let sid = SessionSigner::new_sid();
-    let cookie = state.sessions().mint(&sid, Utc::now(), SESSION_TTL);
-    let Ok(header_value) = HeaderValue::from_str(&set_cookie_header(&cookie, SESSION_TTL)) else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
-    let mut response = Redirect::to("/v1/manage").into_response();
-    response
-        .headers_mut()
-        .insert(header::SET_COOKIE, header_value);
-    response
-}
-
 async fn connect_integration(
     State(state): State<ServerState>,
-    operator: OperatorAuthenticated,
+    owner: InstanceOwner,
     Path(id): Path<String>,
 ) -> Response {
     let Some(runtime) = state.integrations() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    match runtime.start_consent(&operator.sid, &id) {
+    match runtime.start_consent(&session_digest_key(&owner.0.session_plaintext), &id) {
         Some(url) => Redirect::to(&url).into_response(),
         None => (
             StatusCode::BAD_REQUEST,
@@ -172,7 +128,7 @@ async fn connect_integration(
 
 async fn revoke_from_dashboard(
     State(state): State<ServerState>,
-    _operator: OperatorAuthenticated,
+    _owner: InstanceOwner,
     Path(id): Path<String>,
 ) -> Response {
     match revoke_integration_action(&state, &id).await {
@@ -188,7 +144,7 @@ async fn revoke_from_dashboard(
 /// the operator. It is shown once because only its digest is kept.
 async fn mint_from_dashboard(
     State(state): State<ServerState>,
-    _operator: OperatorAuthenticated,
+    _owner: InstanceOwner,
     Path(id): Path<String>,
 ) -> Response {
     match mint_producer_action(&state, &id).await {

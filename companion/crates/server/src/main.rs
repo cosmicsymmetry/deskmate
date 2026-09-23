@@ -351,10 +351,13 @@ async fn main() {
         tracing::info!("no web companion configured (DESKMATE_WEB_DIR unset)");
     }
 
-    axum::serve(listener, app_with_web(state, web_dir))
-        .with_graceful_shutdown(shutdown_signal(shutdown_state.clone()))
-        .await
-        .expect("server exited with an error");
+    axum::serve(
+        listener,
+        app_with_web(state, web_dir).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(shutdown_state.clone()))
+    .await
+    .expect("server exited with an error");
     tokio::task::spawn_blocking(move || shutdown_state.shutdown())
         .await
         .expect("device runtime shutdown worker panicked");

@@ -4,7 +4,6 @@
 
 mod pkce;
 pub(crate) mod routes;
-pub mod session;
 mod token;
 pub mod transport;
 

@@ -8,9 +8,9 @@
 //! `ApiError` union, plus the corresponding status. The web client switches on
 //! the same category that non-browser callers can infer from the status.
 //!
-//! Protected data routes use [`OperatorAuthenticated`]. `POST /v1/app/session`
-//! trades the admin token for that session cookie, while `DELETE /v1/app/session`
-//! merely expires the caller's cookie. No edge gate currently exists.
+//! Protected data routes use the account carried by [`AccountSession`].
+//! `DELETE /v1/app/session` revokes that stored session and clears its cookie.
+//! The admin bearer is deliberately not accepted on this browser surface.
 //! Device routes authenticate their own bearer tokens independently; firmware
 //! downloads under `/v1/firmware/*` are deliberately unauthenticated.
 
@@ -25,25 +25,17 @@ use app_core::{
 use axum::Json;
 use axum::Router;
 use axum::extract::{Path, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use base64::prelude::{BASE64_STANDARD, Engine as _};
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::Utc;
 use futures_util::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
 
-use crate::oauth::session::{OperatorAuthenticated, SessionSigner, set_cookie_header};
+use crate::web_auth::{AccountSession, clear_session_cookie};
 use crate::{AccountSpace, ServerState};
-
-/// How long a companion session lasts. Longer than the OAuth-console session
-/// (`oauth::routes::SESSION_TTL`, 12 h) on purpose: that one fronts a consent
-/// flow an operator visits occasionally, this one fronts the page the owner
-/// keeps open, and a daily re-login to read a clock face is friction with no
-/// security to show for it. The admin token is exchanged, not stored by the
-/// browser.
-const SESSION_TTL_DAYS: i64 = 30;
 
 /// Largest configuration document accepted from the browser. Matches the app's
 /// own `MAX_DRAFT_BYTES` so a draft that the UI refuses to send is also a draft
@@ -68,7 +60,7 @@ const EVENT_HEARTBEAT: Duration = Duration::from_secs(30);
 
 pub(crate) fn routes() -> Router<ServerState> {
     Router::new()
-        .route("/v1/app/session", post(login).delete(logout))
+        .route("/v1/app/session", axum::routing::delete(logout))
         .route("/v1/app/devices", get(list_devices))
         .route("/v1/app/{id}/snapshot", get(snapshot))
         .route("/v1/app/{id}/events", get(events))
@@ -166,39 +158,20 @@ fn worker_failed() -> AppApiError {
 // Session
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
-struct LoginRequest {
-    token: String,
-}
-
-/// Trades the admin token for a session cookie.
-///
-/// The browser cannot put a bearer on a navigation, and keeping the admin token
-/// in web storage would make every XSS a permanent credential leak. The cookie is
-/// `HttpOnly` and `__Host-`-prefixed, so script cannot read it and no sibling host
-/// can shadow it.
-async fn login(State(state): State<ServerState>, payload: Json<LoginRequest>) -> Response {
-    if !state.verify_admin_token(&payload.token) {
-        // Bare 401, matching `auth.rs`: no body, no echo of what was presented.
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let ttl = ChronoDuration::days(SESSION_TTL_DAYS);
-    let value = state
-        .sessions()
-        .mint(&SessionSigner::new_sid(), Utc::now(), ttl);
-    let Ok(cookie) = HeaderValue::from_str(&set_cookie_header(&value, ttl)) else {
-        return AppApiError::internal("cannot build the session cookie").into_response();
-    };
-    ([(header::SET_COOKIE, cookie)], StatusCode::NO_CONTENT).into_response()
-}
-
-/// Ends the session by expiring the cookie. Nothing server-side to revoke: the
-/// cookie is a signed assertion, not a stored record.
-async fn logout() -> Response {
-    let Ok(cookie) = HeaderValue::from_str(&set_cookie_header("", ChronoDuration::zero())) else {
-        return AppApiError::internal("cannot clear the session cookie").into_response();
-    };
-    ([(header::SET_COOKIE, cookie)], StatusCode::NO_CONTENT).into_response()
+async fn logout(
+    State(state): State<ServerState>,
+    session: AccountSession,
+) -> Result<Response, AppApiError> {
+    let plaintext = session.session_plaintext;
+    tokio::task::spawn_blocking(move || state.identity().delete_session(&plaintext))
+        .await
+        .map_err(|_| worker_failed())?
+        .map_err(|error| AppApiError::internal(error.to_string()))?;
+    Ok((
+        [(header::SET_COOKIE, clear_session_cookie())],
+        StatusCode::NO_CONTENT,
+    )
+        .into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -230,45 +203,51 @@ struct DeviceRow {
 
 async fn list_devices(
     State(state): State<ServerState>,
-    _operator: OperatorAuthenticated,
+    session: AccountSession,
 ) -> Result<Json<Vec<DeviceRow>>, AppApiError> {
-    let space = operator_space(&state).await?;
+    let space = account_space(&state, &session).await?;
     let identity_state = state.clone();
     let account_id = space.account_id.clone();
-    let ids = tokio::task::spawn_blocking(move || {
-        identity_state
+    let config_space = Arc::clone(&space);
+    let stored = tokio::task::spawn_blocking(move || {
+        let owners = identity_state
             .identity()
             .devices_for(&account_id)
-            .map(|owners| {
-                owners
-                    .into_iter()
-                    .map(|owner| owner.device_id)
-                    .collect::<Vec<_>>()
-            })
+            .map_err(|error| AppApiError::internal(error.to_string()))?;
+        Ok::<_, AppApiError>(
+            owners
+                .into_iter()
+                .map(|owner| {
+                    let id = owner.device_id;
+                    let path = config_space
+                        .configs
+                        .for_device(&id)
+                        .store
+                        .path()
+                        .to_path_buf();
+                    let configured_at = std::fs::metadata(&path)
+                        .and_then(|metadata| metadata.modified())
+                        .ok()
+                        .and_then(|modified| {
+                            modified
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .ok()
+                                .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
+                        });
+                    (id, path.exists(), configured_at)
+                })
+                .collect::<Vec<_>>(),
+        )
     })
     .await
-    .map_err(|_| worker_failed())?
-    .map_err(|error| AppApiError::internal(error.to_string()))?;
-    let rows = ids
+    .map_err(|_| worker_failed())??;
+    let rows = stored
         .into_iter()
-        .map(|id| {
-            let connected = state.device_is_linked(&id);
-            let path = space.configs.for_device(&id).store.path().to_path_buf();
-            let configured_at = std::fs::metadata(&path)
-                .and_then(|metadata| metadata.modified())
-                .ok()
-                .and_then(|modified| {
-                    modified
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .ok()
-                        .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
-                });
-            DeviceRow {
-                id,
-                connected,
-                has_saved_config: path.exists(),
-                configured_at,
-            }
+        .map(|(id, has_saved_config, configured_at)| DeviceRow {
+            connected: state.device_is_linked(&id),
+            id,
+            has_saved_config,
+            configured_at,
         })
         .collect();
     Ok(Json(rows))
@@ -296,11 +275,10 @@ pub(crate) struct CompanionSnapshot {
 
 async fn snapshot(
     State(state): State<ServerState>,
-    _operator: OperatorAuthenticated,
+    session: AccountSession,
     Path(device_id): Path<String>,
 ) -> Result<Json<CompanionSnapshot>, AppApiError> {
-    let space = operator_space(&state).await?;
-    known_device(&state, &space, &device_id).await?;
+    let space = owned_device(&state, &session, &device_id).await?;
     let snapshot = read_snapshot(&state, space, device_id).await?;
     Ok(Json(snapshot))
 }
@@ -377,38 +355,39 @@ fn live_runtime(state: &ServerState, device_id: &str) -> Option<Arc<RuntimeHandl
     state.device_link(device_id).and_then(|link| link.runtime())
 }
 
-async fn operator_space(state: &ServerState) -> Result<Arc<AccountSpace>, AppApiError> {
+async fn account_space(
+    state: &ServerState,
+    session: &AccountSession,
+) -> Result<Arc<AccountSpace>, AppApiError> {
     let lookup = state.clone();
-    tokio::task::spawn_blocking(move || lookup.operator_space())
+    let account_id = session.account.id.clone();
+    tokio::task::spawn_blocking(move || lookup.account_space(&account_id))
         .await
-        .map_err(|_| worker_failed())?
+        .map_err(|_| worker_failed())
 }
 
-async fn known_device(
+async fn owned_device(
     state: &ServerState,
-    space: &AccountSpace,
+    session: &AccountSession,
     device_id: &str,
-) -> Result<(), AppApiError> {
+) -> Result<Arc<AccountSpace>, AppApiError> {
     let lookup = state.clone();
-    let account_id = space.account_id.clone();
+    let account_id = session.account.id.clone();
     let device_id = device_id.to_owned();
     let lookup_device_id = device_id.clone();
-    let owned = tokio::task::spawn_blocking(move || {
-        lookup
+    let space = tokio::task::spawn_blocking(move || {
+        let owned = lookup
             .identity()
             .device_owner(&lookup_device_id)
-            .map(|owner| owner.is_some_and(|owner| owner.account_id == account_id))
+            .map_err(|error| AppApiError::internal(error.to_string()))?
+            .is_some_and(|owner| owner.account_id == account_id);
+        Ok::<_, AppApiError>(owned.then(|| lookup.account_space(&account_id)))
     })
     .await
-    .map_err(|_| worker_failed())?
-    .map_err(|error| AppApiError::internal(error.to_string()))?;
-    if owned {
-        Ok(())
-    } else {
-        Err(AppApiError::NotFound {
-            message: format!("no device with id {device_id:?}"),
-        })
-    }
+    .map_err(|_| worker_failed())??;
+    space.ok_or_else(|| AppApiError::NotFound {
+        message: format!("no device with id {device_id:?}"),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -421,11 +400,10 @@ async fn known_device(
 /// between those, an idle panel produces only SSE keep-alive comments.
 async fn events(
     State(state): State<ServerState>,
-    _operator: OperatorAuthenticated,
+    session: AccountSession,
     Path(device_id): Path<String>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, AppApiError> {
-    let space = operator_space(&state).await?;
-    known_device(&state, &space, &device_id).await?;
+    let space = owned_device(&state, &session, &device_id).await?;
     let shutdown = state.subscribe_shutdown();
     let start = (
         state,
@@ -551,12 +529,11 @@ fn parse_draft(draft: &DraftPayload) -> Result<AppConfig, AppApiError> {
 /// that is never applied.
 async fn validate_config(
     State(state): State<ServerState>,
-    _operator: OperatorAuthenticated,
+    session: AccountSession,
     Path(device_id): Path<String>,
     payload: Json<DraftPayload>,
 ) -> Result<Json<DraftValidation>, AppApiError> {
-    let space = operator_space(&state).await?;
-    known_device(&state, &space, &device_id).await?;
+    let space = owned_device(&state, &session, &device_id).await?;
     let config = parse_draft(&payload)?;
     let device = read_snapshot(&state, space, device_id).await?.app.device;
     let issues = match config.compile(1) {
@@ -627,12 +604,11 @@ fn describe_capabilities(bits: u64) -> String {
 /// persisted-but-unapplied until the next reconnect.
 async fn save_config(
     State(state): State<ServerState>,
-    _operator: OperatorAuthenticated,
+    session: AccountSession,
     Path(device_id): Path<String>,
     payload: Json<DraftPayload>,
 ) -> Result<Json<ConfigApplyResult>, AppApiError> {
-    let space = operator_space(&state).await?;
-    known_device(&state, &space, &device_id).await?;
+    let space = owned_device(&state, &session, &device_id).await?;
     let config = parse_draft(&payload)?;
     let maximum = state
         .entitlements()
@@ -764,12 +740,11 @@ struct PomodoroRequest {
 /// better than silently accepting a tap that changes nothing.
 async fn pomodoro(
     State(state): State<ServerState>,
-    _operator: OperatorAuthenticated,
+    session: AccountSession,
     Path(device_id): Path<String>,
     payload: Json<PomodoroRequest>,
 ) -> Result<StatusCode, AppApiError> {
-    let space = operator_space(&state).await?;
-    known_device(&state, &space, &device_id).await?;
+    let _space = owned_device(&state, &session, &device_id).await?;
     validate_card_id(&payload.card_id)?;
     let Some(runtime) = live_runtime(&state, &device_id) else {
         return Err(AppApiError::RuntimeUnavailable {
@@ -820,12 +795,11 @@ const PICTURE_HAS_NO_FRAME_YET: &str =
 /// face sent to the panel.
 async fn preview(
     State(state): State<ServerState>,
-    _operator: OperatorAuthenticated,
+    session: AccountSession,
     Path(device_id): Path<String>,
     payload: Json<PreviewRequest>,
 ) -> Result<Json<PreviewFrame>, AppApiError> {
-    let space = operator_space(&state).await?;
-    known_device(&state, &space, &device_id).await?;
+    let space = owned_device(&state, &session, &device_id).await?;
     validate_card_id(&payload.card_id)?;
     let card_id = payload.0.card_id;
     let snapshot = read_snapshot(&state, Arc::clone(&space), device_id)
@@ -1031,7 +1005,7 @@ mod tests {
     }
 
     fn mint_face(state: &ServerState) -> crate::image_sources::MintedSource {
-        let space = state.operator_space().expect("operator space");
+        let space = state.account_space(&state.instance_owner().expect("instance owner").id);
         let source = space.image_sources.mint("Weather").expect("mint source");
         crate::data_cards::create_face(state, &space, &source.id, "weather").expect("create face");
         source
@@ -1046,7 +1020,7 @@ mod tests {
     #[tokio::test]
     async fn reconciliation_tolerates_source_failure_and_skips_its_face() {
         let (_root, state) = state();
-        let space = state.operator_space().unwrap();
+        let space = state.account_space(&state.instance_owner().unwrap().id);
         let source = mint_face(&state);
         replace_file_with_directory(
             &space
@@ -1068,7 +1042,7 @@ mod tests {
     #[tokio::test]
     async fn reconciliation_tolerates_face_failure_after_revoking_the_source() {
         let (_root, state) = state();
-        let space = state.operator_space().unwrap();
+        let space = state.account_space(&state.instance_owner().unwrap().id);
         let source = mint_face(&state);
         replace_file_with_directory(&space.root.join("data-cards.json"));
 

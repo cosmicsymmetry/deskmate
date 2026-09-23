@@ -9,6 +9,7 @@ pub type DeviceSocket =
 
 pub const IN_MEMORY_ADMIN_TOKEN: &str = "in-memory-admin-token";
 
+#[derive(Clone)]
 pub struct TestAccount {
     pub id: server::identity::AccountId,
     pub cookie: String,
@@ -49,6 +50,37 @@ fn test_account(state: &server::ServerState, account: server::identity::Account)
     }
 }
 
+pub fn new_session(state: &server::ServerState, account: &TestAccount) -> TestAccount {
+    let sid = state
+        .identity()
+        .create_session(&account.id, chrono::Utc::now())
+        .expect("create another account session");
+    TestAccount {
+        id: account.id.clone(),
+        cookie: format!("__Host-deskmate_session={sid}"),
+    }
+}
+
+pub async fn cookie_request(
+    server: &HttpTestServer,
+    account: &TestAccount,
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> reqwest::Response {
+    let method = reqwest::Method::from_bytes(method.as_bytes()).expect("HTTP method");
+    let mut request = reqwest::Client::new()
+        .request(method, format!("{}{path}", server.base_url))
+        .header("cookie", &account.cookie)
+        .header("origin", "https://deskmate.test");
+    if let Some(body) = body {
+        request = request
+            .header("content-type", "application/json")
+            .body(body.to_string());
+    }
+    request.send().await.expect("account request")
+}
+
 pub fn mint_owned_device(
     state: &server::ServerState,
     account: &TestAccount,
@@ -68,6 +100,25 @@ pub fn mint_owned_device(
 
 pub struct HttpTestServer {
     pub base_url: String,
+    account: Option<TestAccount>,
+}
+
+impl HttpTestServer {
+    pub fn at(base_url: String) -> Self {
+        Self {
+            base_url,
+            account: None,
+        }
+    }
+
+    pub fn with_account(mut self, account: TestAccount) -> Self {
+        self.account = Some(account);
+        self
+    }
+
+    pub fn account(&self) -> &TestAccount {
+        self.account.as_ref().expect("test server account")
+    }
 }
 
 pub async fn spawn_http(router: axum::Router) -> HttpTestServer {
@@ -76,13 +127,14 @@ pub async fn spawn_http(router: axum::Router) -> HttpTestServer {
         .expect("bind test server");
     let address = listener.local_addr().expect("test server address");
     tokio::spawn(async move {
-        axum::serve(listener, router)
-            .await
-            .expect("serve test routes");
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve test routes");
     });
-    HttpTestServer {
-        base_url: format!("http://127.0.0.1:{}", address.port()),
-    }
+    HttpTestServer::at(format!("http://127.0.0.1:{}", address.port()))
 }
 
 /// Installs the fake faces package (`fake-faces.sh` beside this file), so a test of

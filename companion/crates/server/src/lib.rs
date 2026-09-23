@@ -52,6 +52,7 @@ pub mod secrets;
 mod store;
 // Serves the companion's built assets from DESKMATE_WEB_DIR.
 mod web;
+mod web_auth;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -138,11 +139,6 @@ struct StateInner {
     /// `reconnect_interval` plus a two-second `status_interval` -- and four
     /// reconnects made one test 14 seconds, a third of the whole suite.
     runtime_options: app_core::RuntimeOptions,
-    /// Signs and verifies the operator session cookie, keyed by the admin token.
-    /// Held here so deployments without OAuth integrations still have browser
-    /// sessions: the companion authenticates once with the admin token and then
-    /// carries a cookie, independently of any configured OAuth provider.
-    sessions: oauth::session::SessionSigner,
     firmware: FirmwareCatalog,
     options: ServerOptions,
     /// The OAuth integration runtime, attached at startup by `set_integrations`
@@ -267,7 +263,6 @@ impl ServerState {
                 accounts: Mutex::new(HashMap::new()),
                 face_catalog: Mutex::new(data_cards::FaceCatalogState::new(default_faces())),
                 producer_credentials: Arc::new(producer_credentials),
-                sessions: oauth::session::SessionSigner::from_admin_token(&admin_token),
                 admin_token,
                 runtime_options,
                 firmware,
@@ -379,21 +374,6 @@ impl ServerState {
         Some(self.account_space(&owner.account_id))
     }
 
-    pub(crate) fn operator_space(&self) -> Result<Arc<AccountSpace>, app_api::AppApiError> {
-        let owner = self
-            .identity()
-            .accounts()
-            .map_err(|error| app_api::AppApiError::Internal {
-                message: error.to_string(),
-            })?
-            .into_iter()
-            .find(|account| account.is_instance_owner)
-            .ok_or_else(|| app_api::AppApiError::NotFound {
-                message: "set up this server first".into(),
-            })?;
-        Ok(self.account_space(&owner.id))
-    }
-
     pub(crate) fn instance_owner(&self) -> Result<identity::Account, identity::IdentityError> {
         self.identity()
             .accounts()?
@@ -402,8 +382,6 @@ impl ServerState {
             .ok_or(identity::IdentityError::NotFound)
     }
 
-    // Task 5 uses these in the instance and email-link routes.
-    #[allow(dead_code)]
     pub(crate) fn public_url(&self) -> &url::Url {
         &self.inner.options.public_url
     }
@@ -418,15 +396,23 @@ impl ServerState {
         self.inner.options.edition
     }
 
-    /// The operator session signer. Always present -- see the field's own note.
-    pub(crate) fn sessions(&self) -> &oauth::session::SessionSigner {
-        &self.inner.sessions
-    }
-
     pub(crate) fn producer_credentials(
         &self,
     ) -> &Arc<producer_credentials::ProducerCredentialStore> {
         &self.inner.producer_credentials
+    }
+
+    pub(crate) fn authenticate_image_producer(
+        &self,
+        token: &str,
+    ) -> Option<(Arc<AccountSpace>, String)> {
+        for account in self.identity().accounts().ok()? {
+            let space = self.account_space(&account.id);
+            if let Some(source_id) = space.image_sources.authenticate(token) {
+                return Some((space, source_id));
+            }
+        }
+        None
     }
 
     /// Whether a device currently holds a live link. A board at rest is the

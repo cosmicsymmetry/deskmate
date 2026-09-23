@@ -15,8 +15,8 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::{AccountSpace, ImageNotificationOrigin, ServerState};
-// These operator routes accept either the browser's session cookie or the raw
-// admin bearer used by scripts. Both carriers represent the same privilege.
+// These account routes accept the browser's session cookie. The admin bearer
+// is deliberately not a browser session.
 //
 // The producer push route below is deliberately NOT covered by this: it
 // authenticates a per-source producer credential, which is a different and much
@@ -24,7 +24,7 @@ use crate::{AccountSpace, ImageNotificationOrigin, ServerState};
 use crate::auth::bearer_token;
 use crate::image_ingest::{ImageIngestError, canonical_frame_from_png};
 use crate::image_sources::{AcceptOutcome, ImageSourceError};
-use crate::oauth::session::OperatorAuthenticated;
+use crate::web_auth::AccountSession;
 
 const MAX_IMAGE_BODY_BYTES: usize = 1024 * 1024;
 const MAX_FACE_SETTINGS_BODY_BYTES: usize = 16 * 1024;
@@ -181,9 +181,9 @@ struct UpdateFaceRequest {
 
 async fn list_sources(
     State(state): State<ServerState>,
-    _operator: OperatorAuthenticated,
+    session: AccountSession,
 ) -> Result<Json<Vec<ImageSourceDescriptor>>, ImageRouteError> {
-    let space = operator_space(&state).await?;
+    let space = account_space(&state, &session).await?;
     let sources = space
         .image_sources
         .summaries(chrono::Utc::now())
@@ -200,11 +200,11 @@ async fn list_sources(
 
 async fn update_face(
     State(state): State<ServerState>,
-    _operator: OperatorAuthenticated,
+    session: AccountSession,
     Path(source_id): Path<String>,
     payload: Result<Json<UpdateFaceRequest>, JsonRejection>,
 ) -> Result<Json<crate::data_cards::FaceDescriptor>, ImageRouteError> {
-    let space = operator_space(&state).await?;
+    let space = account_space(&state, &session).await?;
     let source_exists = space
         .image_sources
         .summaries(chrono::Utc::now())
@@ -241,14 +241,14 @@ async fn update_face(
 /// window without the app knowing what weather is.
 async fn list_creatable_faces(
     State(state): State<ServerState>,
-    _operator: OperatorAuthenticated,
+    _session: AccountSession,
 ) -> Json<Vec<crate::data_cards::FaceDescriptor>> {
     Json(crate::data_cards::creatable_faces(&state))
 }
 
 async fn mint_source(
     State(state): State<ServerState>,
-    _operator: OperatorAuthenticated,
+    session: AccountSession,
     payload: Result<Json<MintSourceRequest>, JsonRejection>,
 ) -> Result<Json<MintSourceResponse>, ImageRouteError> {
     let Json(request) = payload.map_err(|rejection| ImageRouteError::InvalidJson {
@@ -256,7 +256,7 @@ async fn mint_source(
         message: rejection.body_text(),
     })?;
     let face_kind = request.face_kind.clone();
-    let space = operator_space(&state).await?;
+    let space = account_space(&state, &session).await?;
     let maximum = state
         .entitlements()
         .max_image_sources(&space.account_id)
@@ -311,10 +311,10 @@ async fn mint_source(
 
 async fn revoke_source(
     State(state): State<ServerState>,
-    _operator: OperatorAuthenticated,
+    session: AccountSession,
     Path(source_id): Path<String>,
 ) -> Result<StatusCode, ImageRouteError> {
-    let space = operator_space(&state).await?;
+    let space = account_space(&state, &session).await?;
     revoke_image_source(state, space, source_id)
         .await
         .map_err(|error| match error {
@@ -416,32 +416,21 @@ async fn authenticate_producer(
 ) -> Result<(Arc<AccountSpace>, String), ImageRouteError> {
     let token = header_token.unwrap_or(path_token).to_owned();
     let lookup = state.clone();
-    tokio::task::spawn_blocking(move || {
-        let accounts = lookup
-            .identity()
-            .accounts()
-            .map_err(|_| ImageRouteError::Internal)?;
-        for account in accounts {
-            let space = lookup.account_space(&account.id);
-            if let Some(source_id) = space.image_sources.authenticate(&token) {
-                return Ok((space, source_id));
-            }
-        }
-        Err(ImageRouteError::ProducerUnauthorized)
-    })
-    .await
-    .map_err(|_| ImageRouteError::WorkerFailed)?
-}
-
-async fn operator_space(state: &ServerState) -> Result<Arc<AccountSpace>, ImageRouteError> {
-    let lookup = state.clone();
-    tokio::task::spawn_blocking(move || lookup.operator_space())
+    tokio::task::spawn_blocking(move || lookup.authenticate_image_producer(&token))
         .await
         .map_err(|_| ImageRouteError::WorkerFailed)?
-        .map_err(|error| match error {
-            crate::app_api::AppApiError::NotFound { .. } => ImageRouteError::NotFound,
-            _ => ImageRouteError::Internal,
-        })
+        .ok_or(ImageRouteError::ProducerUnauthorized)
+}
+
+async fn account_space(
+    state: &ServerState,
+    session: &AccountSession,
+) -> Result<Arc<AccountSpace>, ImageRouteError> {
+    let lookup = state.clone();
+    let account_id = session.account.id.clone();
+    tokio::task::spawn_blocking(move || lookup.account_space(&account_id))
+        .await
+        .map_err(|_| ImageRouteError::WorkerFailed)
 }
 
 fn map_ingest_error(error: ImageIngestError) -> ImageRouteError {
@@ -648,7 +637,7 @@ mod tests {
         name: &str,
         kind: &str,
     ) -> crate::image_sources::MintedSource {
-        let space = state.operator_space().expect("operator space");
+        let space = state.account_space(&state.instance_owner().expect("instance owner").id);
         let source = space.image_sources.mint(name).expect("mint source");
         crate::data_cards::create_face(state, &space, &source.id, kind).expect("create face");
         source
@@ -674,7 +663,7 @@ mod tests {
     #[tokio::test]
     async fn helper_revokes_the_source_removes_only_its_face_and_cancels_its_task() {
         let (_root, state) = state();
-        let space = state.operator_space().unwrap();
+        let space = state.account_space(&state.instance_owner().unwrap().id);
         let removed = mint_face(&state, "Weather", "weather");
         let retained = mint_face(&state, "News", "rss");
         let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
@@ -713,7 +702,7 @@ mod tests {
     #[tokio::test]
     async fn source_persistence_failure_skips_face_removal() {
         let (_root, state) = state();
-        let space = state.operator_space().unwrap();
+        let space = state.account_space(&state.instance_owner().unwrap().id);
         let source = mint_face(&state, "Weather", "weather");
         let spec_path = space.root.join("data-cards.json");
         let before = std::fs::read(&spec_path).expect("face specs");
@@ -739,7 +728,7 @@ mod tests {
     #[tokio::test]
     async fn face_persistence_failure_leaves_the_source_revoked_and_face_state_unchanged() {
         let (_root, state) = state();
-        let space = state.operator_space().unwrap();
+        let space = state.account_space(&state.instance_owner().unwrap().id);
         let source = mint_face(&state, "Weather", "weather");
         let spec_path = space.root.join("data-cards.json");
         let backup = replace_file_with_directory(&spec_path);
@@ -766,7 +755,7 @@ mod tests {
             .expect("test runtime");
         runtime.block_on(async {
             let (_root, state) = state();
-            let space = state.operator_space().unwrap();
+            let space = state.account_space(&state.instance_owner().unwrap().id);
             let source = mint_face(&state, "Weather", "weather");
             let (started_tx, started_rx) = tokio::sync::oneshot::channel();
             let (release_tx, release_rx) = std::sync::mpsc::channel();

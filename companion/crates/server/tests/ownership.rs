@@ -28,7 +28,12 @@ async fn spawn_state(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app(state)).await.unwrap();
+        axum::serve(
+            listener,
+            app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     (
         format!("127.0.0.1:{}", address.port()),
@@ -634,7 +639,12 @@ async fn admin_status_reports_defaults_used_after_stored_config_validation_failu
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app(state)).await.unwrap();
+        axum::serve(
+            listener,
+            app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     let host = format!("127.0.0.1:{}", address.port());
     let mut socket = connect_device(&host, &identity.token)
@@ -684,7 +694,12 @@ async fn linked_config_recovery_remains_visible_until_explicit_save() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app(state)).await.unwrap();
+        axum::serve(
+            listener,
+            app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     let host = format!("127.0.0.1:{}", address.port());
     let client = reqwest::Client::new();
@@ -701,11 +716,9 @@ async fn linked_config_recovery_remains_visible_until_explicit_save() {
     let healthy_apply = support::drive_until_config(&mut healthy_socket, "clock-1").await;
     assert_eq!(healthy_apply.cards[0].card_id, "clock-1");
 
-    let refused_snapshot =
-        companion_snapshot(&client, &host, &refused.device_id, ADMIN_TOKEN).await;
+    let refused_snapshot = companion_snapshot(&client, &host, &refused.device_id, &owner).await;
     assert_recoverable_unsupported(&refused_snapshot);
-    let healthy_snapshot =
-        companion_snapshot(&client, &host, &healthy.device_id, ADMIN_TOKEN).await;
+    let healthy_snapshot = companion_snapshot(&client, &host, &healthy.device_id, &owner).await;
     assert_eq!(healthy_snapshot["persistence"]["kind"], "clean");
 
     let status = admin_status(&client, &host, &refused.device_id, ADMIN_TOKEN).await;
@@ -714,13 +727,13 @@ async fn linked_config_recovery_remains_visible_until_explicit_save() {
     assert_eq!(status["config"]["fallback_reason"], "recovery");
     assert_recoverable_unsupported(&status["snapshot"]);
 
-    let event = first_app_state_event(&client, &host, &refused.device_id, ADMIN_TOKEN).await;
+    let event = first_app_state_event(&client, &host, &refused.device_id, &owner).await;
     assert_recoverable_unsupported(&event);
 
     drop(refused_socket);
     let mut refused_socket = connect_after_release(&host, &refused.token).await;
     support::bootstrap_runtime(&mut refused_socket).await;
-    let after_reconnect = companion_snapshot(&client, &host, &refused.device_id, ADMIN_TOKEN).await;
+    let after_reconnect = companion_snapshot(&client, &host, &refused.device_id, &owner).await;
     assert_recoverable_unsupported(&after_reconnect);
     assert_eq!(std::fs::read(&refused_path).unwrap(), refused_bytes);
     assert_eq!(std::fs::read_to_string(&healthy_path).unwrap(), valid);
@@ -739,7 +752,7 @@ async fn linked_config_recovery_remains_visible_until_explicit_save() {
     assert_eq!(saved.status(), 200);
     assert_eq!(applied.cards[0].card_id, "clock-1");
 
-    let cleared = companion_snapshot(&client, &host, &refused.device_id, ADMIN_TOKEN).await;
+    let cleared = companion_snapshot(&client, &host, &refused.device_id, &owner).await;
     assert_eq!(cleared["persistence"]["kind"], "clean");
     let status = admin_status(&client, &host, &refused.device_id, ADMIN_TOKEN).await;
     assert_eq!(status["config"]["origin"], "current");
@@ -752,11 +765,12 @@ async fn companion_snapshot(
     client: &reqwest::Client,
     host: &str,
     device_id: &str,
-    admin_token: &str,
+    account: &support::TestAccount,
 ) -> serde_json::Value {
     let response = client
         .get(format!("http://{host}/v1/app/{device_id}/snapshot"))
-        .bearer_auth(admin_token)
+        .header("cookie", &account.cookie)
+        .header("origin", "https://deskmate.test")
         .send()
         .await
         .expect("companion snapshot");
@@ -794,11 +808,12 @@ async fn first_app_state_event(
     client: &reqwest::Client,
     host: &str,
     device_id: &str,
-    admin_token: &str,
+    account: &support::TestAccount,
 ) -> serde_json::Value {
     let mut response = client
         .get(format!("http://{host}/v1/app/{device_id}/events"))
-        .bearer_auth(admin_token)
+        .header("cookie", &account.cookie)
+        .header("origin", "https://deskmate.test")
         .send()
         .await
         .expect("event stream");

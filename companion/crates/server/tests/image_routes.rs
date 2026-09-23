@@ -18,8 +18,22 @@ async fn spawn() -> TestServer {
 }
 
 async fn spawn_with(state: ServerState) -> TestServer {
-    support::owner_account(&state);
-    support::spawn_http(app(support::with_fake_faces(state))).await
+    let account = support::owner_account(&state);
+    support::spawn_http(app(support::with_fake_faces(state)))
+        .await
+        .with_account(account)
+}
+
+fn account_request(
+    client: &Client,
+    server: &TestServer,
+    method: reqwest::Method,
+    path: &str,
+) -> reqwest::RequestBuilder {
+    client
+        .request(method, format!("{}{path}", server.base_url))
+        .header("cookie", &server.account().cookie)
+        .header("origin", "https://deskmate.test")
 }
 
 fn account_root(config_root: &std::path::Path) -> std::path::PathBuf {
@@ -47,9 +61,7 @@ async fn mint_with_face(
     name: &str,
     face_kind: Option<&str>,
 ) -> MintedSource {
-    let response = client
-        .post(format!("{}/v1/images", server.base_url))
-        .bearer_auth(ADMIN_TOKEN)
+    let response = account_request(client, server, reqwest::Method::POST, "/v1/images")
         .header("content-type", "application/json")
         .body(serde_json::json!({ "name": name, "face_kind": face_kind }).to_string())
         .send()
@@ -156,12 +168,15 @@ async fn a_revoked_token_is_unauthorized() {
     let server = spawn().await;
     let client = Client::new();
     let source = mint(&client, &server, "Revoked panel").await;
-    let revoked = client
-        .delete(format!("{}/v1/images/{}", server.base_url, source.id))
-        .bearer_auth(ADMIN_TOKEN)
-        .send()
-        .await
-        .expect("revoke image source");
+    let revoked = account_request(
+        &client,
+        &server,
+        reqwest::Method::DELETE,
+        &format!("/v1/images/{}", source.id),
+    )
+    .send()
+    .await
+    .expect("revoke image source");
     assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
 
     let response = push(
@@ -190,12 +205,15 @@ async fn deleting_a_source_removes_its_face_preserves_others_and_revokes_its_tok
     let removed = mint_with_face(&client, &server, "Weather", Some("weather")).await;
     let retained = mint_with_face(&client, &server, "News", Some("rss")).await;
 
-    let response = client
-        .delete(format!("{}/v1/images/{}", server.base_url, removed.id))
-        .bearer_auth(ADMIN_TOKEN)
-        .send()
-        .await
-        .expect("delete image source");
+    let response = account_request(
+        &client,
+        &server,
+        reqwest::Method::DELETE,
+        &format!("/v1/images/{}", removed.id),
+    )
+    .send()
+    .await
+    .expect("delete image source");
 
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     let bytes = std::fs::read(account_root(root.path()).join("data-cards.json"))
@@ -232,12 +250,15 @@ async fn delete_source_persistence_failure_is_internal_and_leaves_the_face_untou
     let before = std::fs::read(&spec_path).expect("face specs");
     replace_file_with_directory(&account_root(root.path()).join("image-sources.json"));
 
-    let response = client
-        .delete(format!("{}/v1/images/{}", server.base_url, source.id))
-        .bearer_auth(ADMIN_TOKEN)
-        .send()
-        .await
-        .expect("delete image source");
+    let response = account_request(
+        &client,
+        &server,
+        reqwest::Method::DELETE,
+        &format!("/v1/images/{}", source.id),
+    )
+    .send()
+    .await
+    .expect("delete image source");
 
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(
@@ -245,9 +266,7 @@ async fn delete_source_persistence_failure_is_internal_and_leaves_the_face_untou
         serde_json::json!({ "kind": "internal" })
     );
     assert_eq!(std::fs::read(spec_path).expect("unchanged specs"), before);
-    let listed = client
-        .get(format!("{}/v1/images", server.base_url))
-        .bearer_auth(ADMIN_TOKEN)
+    let listed = account_request(&client, &server, reqwest::Method::GET, "/v1/images")
         .send()
         .await
         .expect("list sources");
@@ -275,12 +294,15 @@ async fn delete_face_persistence_failure_is_internal_after_the_token_is_revoked(
     let spec_path = account_root(root.path()).join("data-cards.json");
     replace_file_with_directory(&spec_path);
 
-    let response = client
-        .delete(format!("{}/v1/images/{}", server.base_url, source.id))
-        .bearer_auth(ADMIN_TOKEN)
-        .send()
-        .await
-        .expect("delete image source");
+    let response = account_request(
+        &client,
+        &server,
+        reqwest::Method::DELETE,
+        &format!("/v1/images/{}", source.id),
+    )
+    .send()
+    .await
+    .expect("delete image source");
 
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(
@@ -412,9 +434,7 @@ async fn minting_returns_the_plaintext_exactly_once() {
     let source = mint(&client, &server, "One-time token panel").await;
     assert_eq!(source.token.len(), 64);
 
-    let list = client
-        .get(format!("{}/v1/images", server.base_url))
-        .bearer_auth(ADMIN_TOKEN)
+    let list = account_request(&client, &server, reqwest::Method::GET, "/v1/images")
         .send()
         .await
         .expect("list image sources");
@@ -426,12 +446,15 @@ async fn minting_returns_the_plaintext_exactly_once() {
     assert_eq!(listed[0]["name"], "One-time token panel");
     assert!(listed[0]["face"].is_null());
 
-    let by_id = client
-        .get(format!("{}/v1/images/{}", server.base_url, source.id))
-        .bearer_auth(ADMIN_TOKEN)
-        .send()
-        .await
-        .expect("GET source route");
+    let by_id = account_request(
+        &client,
+        &server,
+        reqwest::Method::GET,
+        &format!("/v1/images/{}", source.id),
+    )
+    .send()
+    .await
+    .expect("GET source route");
     assert_eq!(by_id.status(), StatusCode::METHOD_NOT_ALLOWED);
     assert!(
         !by_id
@@ -441,12 +464,15 @@ async fn minting_returns_the_plaintext_exactly_once() {
             .contains(&source.token)
     );
 
-    let response = client
-        .delete(format!("{}/v1/images/{}", server.base_url, source.id))
-        .bearer_auth(ADMIN_TOKEN)
-        .send()
-        .await
-        .expect("delete image source");
+    let response = account_request(
+        &client,
+        &server,
+        reqwest::Method::DELETE,
+        &format!("/v1/images/{}", source.id),
+    )
+    .send()
+    .await
+    .expect("delete image source");
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert!(response.text().await.expect("delete body").is_empty());
 }
@@ -460,9 +486,7 @@ async fn minting_a_ninth_source_preserves_the_capacity_response() {
         mint(&client, &server, &format!("Source {index}")).await;
     }
 
-    let response = client
-        .post(format!("{}/v1/images", server.base_url))
-        .bearer_auth(ADMIN_TOKEN)
+    let response = account_request(&client, &server, reqwest::Method::POST, "/v1/images")
         .header("content-type", "application/json")
         .body(serde_json::json!({ "name": "One too many" }).to_string())
         .send()
@@ -526,14 +550,17 @@ async fn a_source_without_a_server_face_refuses_settings_updates() {
     let client = Client::new();
     let source = mint(&client, &server, "External producer").await;
 
-    let response = client
-        .put(format!("{}/v1/images/{}/face", server.base_url, source.id))
-        .bearer_auth(ADMIN_TOKEN)
-        .header("content-type", "application/json")
-        .body(r#"{"fields":{"location":"Berlin"}}"#)
-        .send()
-        .await
-        .expect("update external source");
+    let response = account_request(
+        &client,
+        &server,
+        reqwest::Method::PUT,
+        &format!("/v1/images/{}/face", source.id),
+    )
+    .header("content-type", "application/json")
+    .body(r#"{"fields":{"location":"Berlin"}}"#)
+    .send()
+    .await
+    .expect("update external source");
 
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let body: serde_json::Value =
@@ -558,14 +585,15 @@ async fn local_json_request(
 
     // Picture sources belong to an account; these routes resolve the instance
     // owner's space until account sessions arrive, so one must exist.
-    support::owner_account(state);
+    let account = support::owner_account(state);
 
     let response = app(state.clone())
         .oneshot(
             axum::http::Request::builder()
                 .method(method)
                 .uri(path)
-                .header("authorization", format!("Bearer {ADMIN_TOKEN}"))
+                .header("cookie", &account.cookie)
+                .header("origin", "https://deskmate.test")
                 .header("content-type", "application/json")
                 .body(Body::from(body.to_string()))
                 .unwrap(),

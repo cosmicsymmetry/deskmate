@@ -245,12 +245,17 @@ never walk past page 4 of an hour-old front page.
   pages, not invented ones.
 - **Weather.** A tap flips between current conditions and the coming days; tapping again
   flips back. The approved design is the resting view and does not change a pixel. The
+  flipped view leads with **tomorrow in the same hero component** the approved view uses --
+  eyebrow, numeral, words, glyph, range -- with the four days after it in the strip. A first
+  draft spent that module on the words "Coming days" beside an icon, which is the label above
+  a heading `DESIGN.md` rules out; both views now draw one hero, so they cannot drift. The
   forecast view is a new layout, so it also goes to the owner as PNGs for approval before
   it ships. `forecast_days` moves from 2 to 5 in the same Open-Meteo request. Tracked
   runs use `trackedWidth`/`fitTracked`, and every coordinate goes through `kit/svg.ts`'s
   `fixed`, never `toFixed`.
 
-The existing 19 golden SVGs stay byte-identical; new goldens are added per new view.
+The existing goldens (32, not the 19 `CLAUDE.md` quotes) stay byte-identical; new
+goldens are added per new view.
 
 ## Phase 2: the stream deck
 

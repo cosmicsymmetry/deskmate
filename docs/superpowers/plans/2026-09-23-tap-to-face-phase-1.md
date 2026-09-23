@@ -1100,6 +1100,28 @@ A skipped job is grey, not red: CI was silently skipping the companion gates for
 
 ---
 
+## What execution changed, recorded after the fact
+
+Six defects were found reviewing the workers' output, none of which failed a test:
+
+1. `process.stdout.write` plus an immediate `process.exit` can truncate a ~60 KB envelope
+   (this plan said to write it that way; `Bun.write` is awaited and is what shipped).
+2. Lowering a picture to `StartPause` **before** consulting its action swallowed
+   `requires-capability` for a host-only action, silently changing its tap meaning.
+3. Classifying malformed package output by matching the error message's leading text; a
+   typed `FaceRenderError::Malformed` carries it now.
+4. `MAX_PNG_BYTES` silently became a cap on base64 rather than on a PNG (now 2 MB).
+5. A second `Arc<AtomicU64>` threaded through the runtime to count dropped taps, beside the
+   counters struct that was already there.
+6. **`MIN_PUSH_INTERVAL`**: the frame store refuses any frame within 5 s of the last, so a
+   second tap rendered, was refused as `TooSoon`, and left the panel unchanged with the
+   face's advanced state discarded. Server-rendered frames now use
+   `accept_server_rendered`; the producer route still rate limits.
+
+Two facts this plan stated were already stale: there are **32** goldens, not 19, and the
+approved weather golden is `weather--clear-day.svg`. The weather forecast view was reworked
+after its first draft (see the spec).
+
 ## Self-review
 
 - **Spec coverage.** Lowering → Task 7. The sink → Task 5. Routing and coalescing → Task 6. The seam and both compatibility directions → Tasks 1-2. State storage and its caps → Task 3. `tap` in the descriptor → Task 4. The window → Task 10. The two faces and the 10-minute rule → Tasks 8-9. Testing, deploy and hardware → Task 11. Phase 2 (the stream deck) is deliberately **not** in this plan: the spec says it starts only after phase 1 is observed on the board, and its plan is written at this plan's exit.

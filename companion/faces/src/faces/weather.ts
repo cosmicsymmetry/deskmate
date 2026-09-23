@@ -43,7 +43,6 @@ import {
   HAIRLINE,
   HERO_STEPS,
   INK,
-  INK_2,
   INK_3,
   MARGIN,
   RADIUS_MODULE,
@@ -51,7 +50,6 @@ import {
   SIZE_CAPTION,
   SIZE_EYEBROW,
   SIZE_SUBHEAD,
-  SIZE_TITLE,
   SURFACE,
   TRACKING_EYEBROW,
   WEIGHT_SEMIBOLD,
@@ -89,6 +87,8 @@ export interface DailyStep {
   high: number;
   low: number;
   condition: Condition;
+  /** The same words the current conditions use, so a day can fill the hero. */
+  summary: string;
 }
 
 export interface WeatherFace {
@@ -358,7 +358,7 @@ function dailySteps(document: Json): DailyStep[] {
   }
 
   const steps: DailyStep[] = [];
-  for (let index = 0; index < time.length && steps.length < 5; index += 1) {
+  for (let index = 0; index < time.length && steps.length < 6; index += 1) {
     const date = time[index];
     const label = typeof date === "string" ? weekdayOf(date) : undefined;
     const code = finite(codes[index]);
@@ -379,6 +379,7 @@ function dailySteps(document: Json): DailyStep[] {
       high: wholeDegrees(Math.max(maximum, minimum)),
       low: wholeDegrees(Math.min(maximum, minimum)),
       condition: conditionFromWmo(code, true),
+      summary: summaryFromWmo(code),
     });
   }
   return steps;
@@ -423,7 +424,7 @@ export async function fetchWeather(settings: Settings, get: FetchText): Promise<
     ["current", "temperature_2m,weather_code,is_day"],
     ["daily", "weather_code,temperature_2m_max,temperature_2m_min"],
     ["hourly", "temperature_2m,weather_code,is_day"],
-    ["forecast_days", "5"],
+    ["forecast_days", "6"],
     ["timezone", "auto"],
   ];
   if (text(settings, "units") === "imperial") {
@@ -450,78 +451,39 @@ const f2 = (value: number): string => fixed(value, 2);
 export function renderWeather(face: WeatherFace): string {
   const canvas = new Canvas(CANVAS_WIDTH, CANVAS_HEIGHT);
   canvas.rect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT, GROUND);
-  drawHero(canvas, face, PALETTES[face.condition]);
+  drawHero(canvas, nowContent(face), PALETTES[face.condition]);
   drawStrip(canvas, face);
   return canvas.finish();
 }
 
-const DAYS_HERO_HEIGHT = 112;
-const DAYS_STRIP_TOP = MARGIN + DAYS_HERO_HEIGHT + 2 * GRID;
-const DAYS_STRIP_BOTTOM = CANVAS_HEIGHT - MARGIN;
-const DAYS_STRIP_HEIGHT = DAYS_STRIP_BOTTOM - DAYS_STRIP_TOP;
-const DAYS_COLUMNS = 5;
 const DAYS_GLYPH_SCALE = 18;
+/** Tomorrow takes the hero, so the strip carries the four days after it. */
+const DAYS_IN_STRIP = 4;
+/** Between a day's high and the low that trails it. */
+const READING_GAP = 7;
 
-/** The second view: the same coloured hero and equal-column strip, now at day scale. */
+/**
+ * The second view: tomorrow in the hero the current conditions usually hold, and
+ * the days after it in the strip the hours usually hold.
+ *
+ * It is the same two modules in the same places, because it is the same face
+ * saying the same kind of thing about a later moment. An earlier draft spent the
+ * hero on the words "Coming days" beside an icon, which told the owner what they
+ * were looking at instead of telling them the weather -- a label above a heading,
+ * which `DESIGN.md` rules out.
+ */
 export function renderWeatherDays(face: WeatherFace): string {
   const canvas = new Canvas(CANVAS_WIDTH, CANVAS_HEIGHT);
   canvas.rect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT, GROUND);
 
-  const leadCondition = face.daily[0]?.condition ?? face.condition;
-  const palette = PALETTES[leadCondition];
-  canvas.roundedRect(
-    MARGIN,
-    MARGIN,
-    CONTENT_WIDTH,
-    DAYS_HERO_HEIGHT,
-    RADIUS_MODULE,
-    palette.ground,
-  );
-
-  const inset = MARGIN + 2.5 * GRID;
-  const glyphCenterX = MARGIN + CONTENT_WIDTH - 7 * GRID;
-  const glyphCenterY = MARGIN + DAYS_HERO_HEIGHT / 2 + GRID / 2;
-  const typeRoom = glyphCenterX - DAYS_GLYPH_SCALE * 2 - inset - GRID;
-  const place = fitTracked(
-    normalizeWhitespace(face.place).toUpperCase(),
-    SIZE_EYEBROW,
-    WEIGHT_SEMIBOLD,
-    TRACKING_EYEBROW,
-    typeRoom,
-  );
-  if (place !== "") {
-    canvas.text({
-      x: inset,
-      baseline: baselineFromCapTop(MARGIN + 2.5 * GRID, SIZE_EYEBROW),
-      content: place,
-      size: SIZE_EYEBROW,
-      fill: palette.muted,
-      weight: WEIGHT_SEMIBOLD,
-      tracking: TRACKING_EYEBROW,
-    });
-  }
-  canvas.text({
-    x: inset,
-    baseline: baselineFromCapTop(MARGIN + 7 * GRID, SIZE_TITLE),
-    content: fit("Coming days", SIZE_TITLE, WEIGHT_SEMIBOLD, typeRoom),
-    size: SIZE_TITLE,
-    fill: INK,
-    weight: WEIGHT_SEMIBOLD,
-  });
-  drawGlyph(canvas, glyphCenterX, glyphCenterY, DAYS_GLYPH_SCALE * 1.75, leadCondition, palette);
-
-  canvas.roundedRect(
-    MARGIN,
-    DAYS_STRIP_TOP,
-    CONTENT_WIDTH,
-    DAYS_STRIP_HEIGHT,
-    RADIUS_MODULE,
-    SURFACE,
-  );
-  if (face.daily.length === 0) {
+  // `daily[0]` is today, which the resting view already covers.
+  const lead = face.daily[1] ?? face.daily[0];
+  if (lead === undefined) {
+    drawHero(canvas, nowContent(face), PALETTES[face.condition]);
+    canvas.roundedRect(MARGIN, STRIP_TOP, CONTENT_WIDTH, STRIP_HEIGHT, RADIUS_MODULE, SURFACE);
     canvas.text({
       x: CANVAS_WIDTH / 2,
-      baseline: baselineFromCenter(DAYS_STRIP_TOP + DAYS_STRIP_HEIGHT / 2, SIZE_CAPTION),
+      baseline: baselineFromCenter(STRIP_TOP + STRIP_HEIGHT / 2, SIZE_CAPTION),
       content: "Daily forecast unavailable",
       size: SIZE_CAPTION,
       fill: INK_3,
@@ -530,30 +492,45 @@ export function renderWeatherDays(face: WeatherFace): string {
     return canvas.finish();
   }
 
-  const columns = Math.min(face.daily.length, DAYS_COLUMNS);
-  const columnWidth = CONTENT_WIDTH / columns;
-  for (let index = 1; index < columns; index += 1) {
+  const eyebrow = face.daily[1] === undefined ? lead.label : "Tomorrow";
+  drawHero(canvas, dayContent(lead, eyebrow), PALETTES[lead.condition]);
+
+  canvas.roundedRect(MARGIN, STRIP_TOP, CONTENT_WIDTH, STRIP_HEIGHT, RADIUS_MODULE, SURFACE);
+  const rest = face.daily.slice(face.daily[1] === undefined ? 1 : 2, DAYS_IN_STRIP + 2);
+  if (rest.length === 0) {
+    canvas.text({
+      x: CANVAS_WIDTH / 2,
+      baseline: baselineFromCenter(STRIP_TOP + STRIP_HEIGHT / 2, SIZE_CAPTION),
+      content: "No further days forecast",
+      size: SIZE_CAPTION,
+      fill: INK_3,
+      anchor: "middle",
+    });
+    return canvas.finish();
+  }
+
+  const columnWidth = CONTENT_WIDTH / rest.length;
+  for (let index = 1; index < rest.length; index += 1) {
     canvas.rect(
       MARGIN + index * columnWidth,
-      DAYS_STRIP_TOP + 2 * GRID,
+      STRIP_TOP + 2 * GRID,
       1,
-      DAYS_STRIP_HEIGHT - 4 * GRID,
+      STRIP_HEIGHT - 4 * GRID,
       HAIRLINE,
     );
   }
-  face.daily.slice(0, columns).forEach((step, index) => {
+  rest.forEach((step, index) => {
     const centerX = MARGIN + (index + 0.5) * columnWidth;
-    const label = fitTracked(
-      step.label,
-      SIZE_EYEBROW,
-      WEIGHT_SEMIBOLD,
-      TRACKING_EYEBROW,
-      columnWidth - 2 * GRID,
-    );
     canvas.text({
       x: centerX,
-      baseline: baselineFromCapTop(DAYS_STRIP_TOP + 2 * GRID, SIZE_EYEBROW),
-      content: label,
+      baseline: baselineFromCapTop(STRIP_TOP + 2 * GRID, SIZE_EYEBROW),
+      content: fitTracked(
+        step.label,
+        SIZE_EYEBROW,
+        WEIGHT_SEMIBOLD,
+        TRACKING_EYEBROW,
+        columnWidth - 2 * GRID,
+      ),
       size: SIZE_EYEBROW,
       fill: INK_3,
       weight: WEIGHT_SEMIBOLD,
@@ -563,28 +540,37 @@ export function renderWeatherDays(face: WeatherFace): string {
     drawGlyph(
       canvas,
       centerX,
-      DAYS_STRIP_TOP + 8.5 * GRID,
+      STRIP_TOP + STRIP_HEIGHT * 0.5,
       DAYS_GLYPH_SCALE,
       step.condition,
       PALETTES[step.condition],
     );
+    // The strip is the hourly strip's height, which holds three rows, so the two
+    // readings share the last one: the high in full ink, the low behind it.
+    const high = `${step.high}°`;
+    const low = `${step.low}°`;
+    const highWidth = textWidth(high, SIZE_BODY, WEIGHT_SEMIBOLD);
+    const lowWidth = textWidth(low, SIZE_CAPTION, WEIGHT_SEMIBOLD);
+    const readingsLeft = centerX - (highWidth + READING_GAP + lowWidth) / 2;
+    const readingsBaseline = baselineFromCapTop(
+      STRIP_BOTTOM - 2 * GRID - SIZE_BODY * CAP_HEIGHT,
+      SIZE_BODY,
+    );
     canvas.text({
-      x: centerX,
-      baseline: baselineFromCapTop(DAYS_STRIP_TOP + 14.5 * GRID, SIZE_BODY),
-      content: `H ${step.high}°`,
+      x: readingsLeft,
+      baseline: readingsBaseline,
+      content: high,
       size: SIZE_BODY,
       fill: INK,
       weight: WEIGHT_SEMIBOLD,
-      anchor: "middle",
     });
     canvas.text({
-      x: centerX,
-      baseline: baselineFromCapTop(DAYS_STRIP_TOP + 18.5 * GRID, SIZE_CAPTION),
-      content: `L ${step.low}°`,
+      x: readingsLeft + highWidth + READING_GAP,
+      baseline: readingsBaseline,
+      content: low,
       size: SIZE_CAPTION,
-      fill: INK_2,
+      fill: INK_3,
       weight: WEIGHT_SEMIBOLD,
-      anchor: "middle",
     });
   });
   return canvas.finish();
@@ -627,14 +613,32 @@ export function renderWeatherResult(
   };
 }
 
-function drawHero(canvas: Canvas, face: WeatherFace, palette: Palette): void {
+/**
+ * What the hero module says, whichever view is drawing it.
+ *
+ * Both views use this one component deliberately: the current conditions and
+ * tomorrow are the same thing said about a different moment, and giving the second
+ * view its own layout would mean two designs to keep in step. The eyebrow is the
+ * only part that differs -- the place when the reading is now, the day when it is
+ * not.
+ */
+interface HeroContent {
+  eyebrow: string;
+  reading: string;
+  summary: string;
+  condition: Condition;
+  high: number;
+  low: number;
+}
+
+function drawHero(canvas: Canvas, content: HeroContent, palette: Palette): void {
   canvas.roundedRect(MARGIN, HERO_TOP, CONTENT_WIDTH, HERO_HEIGHT, RADIUS_MODULE, palette.ground);
 
   const inset = MARGIN + 2.5 * GRID;
   const glyphCenterX = MARGIN + CONTENT_WIDTH - HERO_GLYPH_SCALE - 2.5 * GRID;
   const typeRoom = glyphCenterX - HERO_GLYPH_SCALE - inset - GRID;
 
-  const range = `H ${face.high}°   L ${face.low}°`;
+  const range = `H ${content.high}°   L ${content.low}°`;
   const rangeWidth = textWidth(range, SIZE_CAPTION, WEIGHT_SEMIBOLD);
   const eyebrowBaseline = baselineFromCapTop(HERO_TOP + 2.5 * GRID, SIZE_EYEBROW);
   canvas.text({
@@ -652,7 +656,7 @@ function drawHero(canvas: Canvas, face: WeatherFace, palette: Palette): void {
   // long "city, country" drew straight through the range beside it.
   const placeRoom = CONTENT_WIDTH - 5 * GRID - rangeWidth - 2 * GRID;
   const place = fitTracked(
-    normalizeWhitespace(face.place).toUpperCase(),
+    normalizeWhitespace(content.eyebrow).toUpperCase(),
     SIZE_EYEBROW,
     WEIGHT_SEMIBOLD,
     TRACKING_EYEBROW,
@@ -670,7 +674,7 @@ function drawHero(canvas: Canvas, face: WeatherFace, palette: Palette): void {
     });
   }
 
-  const reading = `${face.temperature}°`;
+  const reading = content.reading;
   const size = fitSize(reading, WEIGHT_SEMIBOLD, typeRoom, HERO_STEPS);
   const readingCapTop = HERO_TOP + 6.5 * GRID;
   canvas.text({
@@ -683,7 +687,12 @@ function drawHero(canvas: Canvas, face: WeatherFace, palette: Palette): void {
   });
 
   const summaryTop = readingCapTop + size * CAP_HEIGHT + 1.5 * GRID;
-  const summary = fit(normalizeWhitespace(face.summary), SIZE_SUBHEAD, WEIGHT_SEMIBOLD, typeRoom);
+  const summary = fit(
+    normalizeWhitespace(content.summary),
+    SIZE_SUBHEAD,
+    WEIGHT_SEMIBOLD,
+    typeRoom,
+  );
   if (summary !== "") {
     canvas.text({
       x: inset,
@@ -701,9 +710,33 @@ function drawHero(canvas: Canvas, face: WeatherFace, palette: Palette): void {
     glyphCenterX,
     readingCapTop + (size * CAP_HEIGHT) / 2,
     HERO_GLYPH_SCALE,
-    face.condition,
+    content.condition,
     palette,
   );
+}
+
+/** The current conditions as hero content. */
+function nowContent(face: WeatherFace): HeroContent {
+  return {
+    eyebrow: face.place,
+    reading: `${face.temperature}°`,
+    summary: face.summary,
+    condition: face.condition,
+    high: face.high,
+    low: face.low,
+  };
+}
+
+/** A forecast day as hero content, read as that day's high. */
+function dayContent(step: DailyStep, eyebrow: string): HeroContent {
+  return {
+    eyebrow,
+    reading: `${step.high}°`,
+    summary: step.summary,
+    condition: step.condition,
+    high: step.high,
+    low: step.low,
+  };
 }
 
 function drawStrip(canvas: Canvas, face: WeatherFace): void {

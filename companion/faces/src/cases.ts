@@ -41,7 +41,8 @@ const day = (
   high: number,
   low: number,
   condition: Condition,
-): DailyStep => ({ date, label, high, low, condition });
+  summary: string,
+): DailyStep => ({ date, label, high, low, condition, summary });
 
 const HN_CAPTURED_AT = new Date("2026-09-23T05:00:00Z");
 const HN_CAPTURED_ITEMS = (await Bun.file(
@@ -503,11 +504,12 @@ function weatherCases(): Case[] {
         low: 27,
         hourly: [],
         daily: [
-          day("2026-09-12", "SAT", 38, 27, "clear-day"),
-          day("2026-09-13", "SUN", 37, 28, "partly-cloudy-day"),
-          day("2026-09-14", "MON", 35, 26, "rain"),
-          day("2026-09-15", "TUE", 35, 25, "cloudy"),
-          day("2026-09-16", "WED", 37, 25, "clear-day"),
+          day("2026-09-12", "SAT", 38, 27, "clear-day", "Clear"),
+          day("2026-09-13", "SUN", 37, 28, "partly-cloudy-day", "Partly cloudy"),
+          day("2026-09-14", "MON", 35, 26, "rain", "Rain"),
+          day("2026-09-15", "TUE", 35, 25, "cloudy", "Overcast"),
+          day("2026-09-16", "WED", 37, 25, "clear-day", "Clear"),
+          day("2026-09-17", "THU", 36, 24, "partly-cloudy-day", "Partly cloudy"),
         ],
       }),
     },
@@ -522,11 +524,12 @@ function weatherCases(): Case[] {
         low: -24,
         hourly: [],
         daily: [
-          day("2026-12-14", "MON", -9, -24, "snow"),
-          day("2026-12-15", "TUE", -7, -19, "sleet"),
-          day("2026-12-16", "WED", -12, -22, "cloudy"),
-          day("2026-12-17", "THU", -15, -26, "snow"),
-          day("2026-12-18", "FRI", -11, -20, "partly-cloudy-day"),
+          day("2026-12-14", "MON", -9, -24, "snow", "Snow"),
+          day("2026-12-15", "TUE", -7, -19, "sleet", "Sleet"),
+          day("2026-12-16", "WED", -12, -22, "cloudy", "Overcast"),
+          day("2026-12-17", "THU", -15, -26, "snow", "Snow"),
+          day("2026-12-18", "FRI", -11, -20, "partly-cloudy-day", "Partly cloudy"),
+          day("2026-12-19", "SAT", -14, -23, "snow", "Snow"),
         ],
       }),
     },

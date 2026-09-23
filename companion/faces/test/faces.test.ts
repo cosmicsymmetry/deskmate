@@ -368,7 +368,9 @@ describe("weather", () => {
     expect(get.asked[1]).toContain("latitude=25.07&longitude=55.17");
     expect(get.asked[1]).toContain("timezone=auto");
     expect(get.asked[1]).toContain("daily=weather_code%2Ctemperature_2m_max%2Ctemperature_2m_min");
-    expect(get.asked[1]).toContain("forecast_days=5");
+    // Six: today, tomorrow for the flipped view's hero, and the four days its
+    // strip carries after it.
+    expect(get.asked[1]).toContain("forecast_days=6");
     expect(get.asked[1]).not.toContain("temperature_unit");
   });
 
@@ -396,11 +398,42 @@ describe("weather", () => {
 
   test("the coming days are parsed with weekdays from the forecast's own dates", () => {
     expect(parseForecast(forecast({}), "Dubai").daily).toEqual([
-      { date: "2026-09-12", label: "SAT", high: 38, low: 27, condition: "clear-day" },
-      { date: "2026-09-13", label: "SUN", high: 37, low: 28, condition: "partly-cloudy-day" },
-      { date: "2026-09-14", label: "MON", high: 35, low: 26, condition: "rain" },
-      { date: "2026-09-15", label: "TUE", high: 35, low: 25, condition: "cloudy" },
-      { date: "2026-09-16", label: "WED", high: 37, low: 25, condition: "clear-day" },
+      {
+        date: "2026-09-12",
+        label: "SAT",
+        high: 38,
+        low: 27,
+        condition: "clear-day",
+        // WMO code 1 is "mainly clear": the glyph and the words come from two
+        // existing mappings that have always disagreed here, and this pins what
+        // they actually do rather than changing the approved view.
+        summary: "Partly cloudy",
+      },
+      {
+        date: "2026-09-13",
+        label: "SUN",
+        high: 37,
+        low: 28,
+        condition: "partly-cloudy-day",
+        summary: "Partly cloudy",
+      },
+      { date: "2026-09-14", label: "MON", high: 35, low: 26, condition: "rain", summary: "Rain" },
+      {
+        date: "2026-09-15",
+        label: "TUE",
+        high: 35,
+        low: 25,
+        condition: "cloudy",
+        summary: "Overcast",
+      },
+      {
+        date: "2026-09-16",
+        label: "WED",
+        high: 37,
+        low: 25,
+        condition: "clear-day",
+        summary: "Clear",
+      },
     ]);
   });
 
@@ -442,17 +475,46 @@ describe("weather", () => {
       { label: "19", temperature: 29, condition: "clear-night" as const },
     ],
     daily: [
-      { date: "2026-09-12", label: "SAT", high: 38, low: 27, condition: "clear-day" as const },
+      {
+        date: "2026-09-12",
+        label: "SAT",
+        high: 38,
+        low: 27,
+        condition: "clear-day" as const,
+        summary: "Clear",
+      },
       {
         date: "2026-09-13",
         label: "SUN",
         high: 37,
         low: 28,
         condition: "partly-cloudy-day" as const,
+        summary: "Partly cloudy",
       },
-      { date: "2026-09-14", label: "MON", high: 35, low: 26, condition: "rain" as const },
-      { date: "2026-09-15", label: "TUE", high: 35, low: 25, condition: "cloudy" as const },
-      { date: "2026-09-16", label: "WED", high: 37, low: 25, condition: "clear-day" as const },
+      {
+        date: "2026-09-14",
+        label: "MON",
+        high: 35,
+        low: 26,
+        condition: "rain" as const,
+        summary: "Rain",
+      },
+      {
+        date: "2026-09-15",
+        label: "TUE",
+        high: 35,
+        low: 25,
+        condition: "cloudy" as const,
+        summary: "Overcast",
+      },
+      {
+        date: "2026-09-16",
+        label: "WED",
+        high: 37,
+        low: 25,
+        condition: "clear-day" as const,
+        summary: "Clear",
+      },
     ],
   };
   const svgOf = (result: RenderResult): string =>

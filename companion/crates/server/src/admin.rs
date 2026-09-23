@@ -34,12 +34,31 @@ async fn create_device(
     State(state): State<ServerState>,
     _admin: AdminAuthenticated,
 ) -> Result<Json<MintDeviceResponse>, AdminError> {
-    let identity = tokio::task::spawn_blocking(move || state.registry().mint())
-        .await
-        .map_err(|_| AdminError::WorkerFailed)?
-        .map_err(|error| AdminError::Store {
+    let identity = tokio::task::spawn_blocking(move || {
+        let owner = state.instance_owner().map_err(|error| match error {
+            crate::identity::IdentityError::NotFound => AdminError::SetupRequired,
+            other => AdminError::Store {
+                message: other.to_string(),
+            },
+        })?;
+        let identity = state.registry().mint().map_err(|error| AdminError::Store {
             message: error.to_string(),
         })?;
+        if let Err(error) = state.identity().assign_device(
+            &identity.device_id,
+            &owner.id,
+            crate::identity::DeviceState::Active,
+            chrono::Utc::now(),
+        ) {
+            let _ = state.registry().revoke(&identity.device_id);
+            return Err(AdminError::Store {
+                message: error.to_string(),
+            });
+        }
+        Ok(identity)
+    })
+    .await
+    .map_err(|_| AdminError::WorkerFailed)??;
     Ok(Json(MintDeviceResponse {
         device_id: identity.device_id,
         token: identity.token,
@@ -61,14 +80,12 @@ async fn put_config(
     Path(device_id): Path<String>,
     payload: Result<Json<AppConfig>, JsonRejection>,
 ) -> Result<Json<SaveReceipt>, AdminError> {
-    if !state.registry().contains_device(&device_id) {
-        return Err(AdminError::NotFound);
-    }
+    let space = device_space(&state, &device_id).await?;
     let Json(config) = payload.map_err(|rejection| AdminError::InvalidJson {
         status: rejection.status(),
         message: rejection.body_text(),
     })?;
-    let device_config = state.configs().for_device(&device_id);
+    let device_config = space.configs.for_device(&device_id);
     let _update = device_config.update.lock().await;
 
     let saved_config = config.clone();
@@ -108,9 +125,7 @@ async fn post_scene(
     Path(device_id): Path<String>,
     payload: Result<Json<PushSceneRequest>, JsonRejection>,
 ) -> Result<StatusCode, AdminError> {
-    if !state.registry().contains_device(&device_id) {
-        return Err(AdminError::NotFound);
-    }
+    let _space = device_space(&state, &device_id).await?;
     let Json(request) = payload.map_err(|rejection| AdminError::InvalidJson {
         status: rejection.status(),
         message: rejection.body_text(),
@@ -180,10 +195,8 @@ async fn get_device(
     _admin: AdminAuthenticated,
     Path(device_id): Path<String>,
 ) -> Result<Json<DeviceStatus>, AdminError> {
-    if !state.registry().contains_device(&device_id) {
-        return Err(AdminError::NotFound);
-    }
-    let device_config = state.configs().for_device(&device_id);
+    let space = device_space(&state, &device_id).await?;
+    let device_config = space.configs.for_device(&device_id);
     let _update = device_config.update.lock().await;
     let link = state.device_link(&device_id);
     let connected = link.as_ref().is_some_and(|link| link.is_live());
@@ -213,6 +226,21 @@ async fn get_device(
         config,
         snapshot,
     }))
+}
+
+async fn device_space(
+    state: &ServerState,
+    device_id: &str,
+) -> Result<std::sync::Arc<crate::AccountSpace>, AdminError> {
+    if !state.registry().contains_device(device_id) {
+        return Err(AdminError::NotFound);
+    }
+    let lookup = state.clone();
+    let device_id = device_id.to_owned();
+    tokio::task::spawn_blocking(move || lookup.space_for_device(&device_id))
+        .await
+        .map_err(|_| AdminError::WorkerFailed)?
+        .ok_or(AdminError::NotFound)
 }
 
 #[derive(Debug, Serialize)]
@@ -427,7 +455,20 @@ mod tests {
     #[tokio::test]
     async fn unknown_scene_template_is_a_typed_bad_request() {
         let state = crate::ServerState::in_memory();
+        let owner = state
+            .identity()
+            .create_account("owner@example.com", true, true, chrono::Utc::now())
+            .unwrap();
         let identity = state.registry().mint().expect("mint test device");
+        state
+            .identity()
+            .assign_device(
+                &identity.device_id,
+                &owner.id,
+                crate::identity::DeviceState::Active,
+                chrono::Utc::now(),
+            )
+            .unwrap();
         let response = post_scene_request(
             state.clone(),
             &identity.device_id,
@@ -456,6 +497,7 @@ mod tests {
 #[derive(Debug)]
 enum AdminError {
     NotFound,
+    SetupRequired,
     InvalidJson { status: StatusCode, message: String },
     InvalidScene { message: String },
     InvalidConfig { issues: Vec<ValidationIssue> },
@@ -516,6 +558,11 @@ impl IntoResponse for AdminError {
     fn into_response(self) -> Response {
         match self {
             Self::NotFound => StatusCode::NOT_FOUND.into_response(),
+            Self::SetupRequired => (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({"error": "set up this server first"})),
+            )
+                .into_response(),
             Self::InvalidJson { status, message } => {
                 (status, Json(ErrorBody::InvalidJson { message: &message })).into_response()
             }

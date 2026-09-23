@@ -18,7 +18,17 @@ async fn spawn() -> TestServer {
 }
 
 async fn spawn_with(state: ServerState) -> TestServer {
+    support::owner_account(&state);
     support::spawn_http(app(support::with_fake_faces(state))).await
+}
+
+fn account_root(config_root: &std::path::Path) -> std::path::PathBuf {
+    std::fs::read_dir(config_root.join("accounts"))
+        .expect("accounts directory")
+        .next()
+        .expect("owner account")
+        .expect("account entry")
+        .path()
 }
 
 #[derive(Debug, Deserialize)]
@@ -188,7 +198,8 @@ async fn deleting_a_source_removes_its_face_preserves_others_and_revokes_its_tok
         .expect("delete image source");
 
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    let bytes = std::fs::read(root.path().join("data-cards.json")).expect("persisted face specs");
+    let bytes = std::fs::read(account_root(root.path()).join("data-cards.json"))
+        .expect("persisted face specs");
     let persisted: serde_json::Value =
         serde_json::from_slice(&bytes).expect("persisted face specs parse");
     let specs = persisted.as_array().expect("persisted face spec list");
@@ -217,9 +228,9 @@ async fn delete_source_persistence_failure_is_internal_and_leaves_the_face_untou
     let server = spawn_with(state).await;
     let client = Client::new();
     let source = mint_with_face(&client, &server, "Weather", Some("weather")).await;
-    let spec_path = root.path().join("data-cards.json");
+    let spec_path = account_root(root.path()).join("data-cards.json");
     let before = std::fs::read(&spec_path).expect("face specs");
-    replace_file_with_directory(&root.path().join("image-sources.json"));
+    replace_file_with_directory(&account_root(root.path()).join("image-sources.json"));
 
     let response = client
         .delete(format!("{}/v1/images/{}", server.base_url, source.id))
@@ -261,7 +272,7 @@ async fn delete_face_persistence_failure_is_internal_after_the_token_is_revoked(
     let server = spawn_with(state).await;
     let client = Client::new();
     let source = mint_with_face(&client, &server, "Weather", Some("weather")).await;
-    let spec_path = root.path().join("data-cards.json");
+    let spec_path = account_root(root.path()).join("data-cards.json");
     replace_file_with_directory(&spec_path);
 
     let response = client
@@ -545,6 +556,10 @@ async fn local_json_request(
     use axum::body::{Body, to_bytes};
     use tower::ServiceExt as _;
 
+    // Picture sources belong to an account; these routes resolve the instance
+    // owner's space until account sessions arrive, so one must exist.
+    support::owner_account(state);
+
     let response = app(state.clone())
         .oneshot(
             axum::http::Request::builder()
@@ -634,9 +649,10 @@ async fn server_owned_faces_accept_and_persist_partial_settings() {
                 .unwrap()["face"],
             expected
         );
-        let persisted: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(root.path().join("data-cards.json")).unwrap())
-                .unwrap();
+        let persisted: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(account_root(root.path()).join("data-cards.json")).unwrap(),
+        )
+        .unwrap();
         let spec = persisted
             .as_array()
             .unwrap()

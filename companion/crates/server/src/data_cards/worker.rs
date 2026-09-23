@@ -5,6 +5,7 @@ use tokio::task::JoinHandle;
 
 use super::faces_package::{self, FaceCommand, FaceRenderError};
 use super::{DataCardSpec, RefreshOutcome, record_outcome};
+use crate::accounts::AccountSpace;
 use crate::image_ingest::{CanonicalFrame, canonical_frame_from_png};
 use crate::image_sources::AcceptOutcome;
 use crate::{ImageNotificationOrigin, ServerState};
@@ -19,11 +20,12 @@ const MAX_REFRESH: Duration = Duration::from_hours(6);
 pub(super) fn spawn_refresher(
     runtime: &tokio::runtime::Handle,
     state: ServerState,
+    space: std::sync::Arc<AccountSpace>,
     faces: FaceCommand,
     spec: DataCardSpec,
 ) -> JoinHandle<()> {
     let refresh = clamped_refresh(spec.refresh_seconds);
-    runtime.spawn(async move { refresh_loop(state, faces, spec, refresh).await })
+    runtime.spawn(async move { refresh_loop(state, space, faces, spec, refresh).await })
 }
 
 fn clamped_refresh(refresh_seconds: u64) -> Duration {
@@ -89,6 +91,7 @@ fn next_attempt(
 /// is a bug rather than an outcome, and ends the refresher.
 async fn refresh_once(
     state: &ServerState,
+    space: &std::sync::Arc<AccountSpace>,
     faces: &FaceCommand,
     spec: &DataCardSpec,
 ) -> Option<RefreshOutcome> {
@@ -122,17 +125,17 @@ async fn refresh_once(
         }
     };
 
-    let accept_state = state.clone();
     let accept_source = source_id.clone();
+    let accept_space = std::sync::Arc::clone(space);
     let accepted = tokio::task::spawn_blocking(move || {
-        accept_state
-            .image_sources()
+        accept_space
+            .image_sources
             .accept(&accept_source, frame, Utc::now())
     })
     .await;
     match accepted {
         Ok(Ok(outcome)) => {
-            if !notify_image_source_outcome(state, source_id, &outcome) {
+            if !notify_image_source_outcome(state, space, source_id, &outcome) {
                 tracing::debug!(target: "server::data_cards", source_id = %source_id, kind, "the face is unchanged");
             }
             Some(RefreshOutcome::Drawn)
@@ -152,6 +155,7 @@ async fn refresh_once(
 
 async fn refresh_loop(
     state: ServerState,
+    space: std::sync::Arc<AccountSpace>,
     faces: FaceCommand,
     spec: DataCardSpec,
     refresh: Duration,
@@ -169,7 +173,7 @@ async fn refresh_loop(
     // The first attempt is immediate, which is what fills a freshly started server's
     // panels instead of leaving them blank for fifteen minutes.
     loop {
-        let Some(outcome) = refresh_once(&state, &faces, &spec).await else {
+        let Some(outcome) = refresh_once(&state, &space, &faces, &spec).await else {
             return;
         };
         consecutive_failures = match outcome {
@@ -177,19 +181,21 @@ async fn refresh_loop(
             RefreshOutcome::Drawn | RefreshOutcome::NeedsAttention(_) => 0,
         };
         let wait = next_attempt(refresh, &outcome, consecutive_failures);
-        record_outcome(&state, &spec.source_id, task, outcome);
+        record_outcome(&space, &spec.source_id, task, outcome);
         tokio::time::sleep(wait).await;
     }
 }
 
 fn notify_image_source_outcome(
     state: &ServerState,
+    space: &AccountSpace,
     source_id: &str,
     outcome: &AcceptOutcome,
 ) -> bool {
     match outcome {
         AcceptOutcome::Changed { digest } => {
             state.notify_image_source_changed(
+                &space.account_id,
                 source_id.to_owned(),
                 *digest,
                 ImageNotificationOrigin::ServerRenderedRefresh,
@@ -308,24 +314,33 @@ mod tests {
     #[tokio::test]
     async fn changed_outcomes_notify_devices_and_unchanged_outcomes_do_not() {
         let state = ServerState::in_memory();
+        let account = state
+            .identity()
+            .create_account("owner@example.com", true, true, Utc::now())
+            .unwrap();
+        let space = state.account_space(&account.id);
         let digest = [0x5a; protocol::ASSET_DIGEST_LEN];
 
         assert!(notify_image_source_outcome(
             &state,
+            &space,
             "server-face",
             &AcceptOutcome::Changed { digest },
         ));
         assert_eq!(
             state.image_notifications_for_test(),
             [(
+                account.id,
                 "server-face".to_owned(),
                 digest,
                 ImageNotificationOrigin::ServerRenderedRefresh,
+                Vec::new(),
             )]
         );
 
         assert!(!notify_image_source_outcome(
             &state,
+            &space,
             "server-face",
             &AcceptOutcome::Unchanged,
         ));

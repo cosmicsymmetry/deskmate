@@ -9,6 +9,63 @@ pub type DeviceSocket =
 
 pub const IN_MEMORY_ADMIN_TOKEN: &str = "in-memory-admin-token";
 
+pub struct TestAccount {
+    pub id: server::identity::AccountId,
+    pub cookie: String,
+}
+
+pub fn owner_account(state: &server::ServerState) -> TestAccount {
+    let account = state
+        .identity()
+        .accounts()
+        .expect("list test accounts")
+        .into_iter()
+        .find(|account| account.is_instance_owner)
+        .unwrap_or_else(|| {
+            state
+                .identity()
+                .create_account("owner@example.com", true, true, chrono::Utc::now())
+                .expect("create instance owner")
+        });
+    test_account(state, account)
+}
+
+pub fn second_account(state: &server::ServerState, email: &str) -> TestAccount {
+    let account = state
+        .identity()
+        .create_account(email, true, false, chrono::Utc::now())
+        .expect("create second account");
+    test_account(state, account)
+}
+
+fn test_account(state: &server::ServerState, account: server::identity::Account) -> TestAccount {
+    let sid = state
+        .identity()
+        .create_session(&account.id, chrono::Utc::now())
+        .expect("create account session");
+    TestAccount {
+        id: account.id,
+        cookie: format!("__Host-deskmate_session={sid}"),
+    }
+}
+
+pub fn mint_owned_device(
+    state: &server::ServerState,
+    account: &TestAccount,
+) -> server::registry::DeviceIdentity {
+    let identity = state.registry().mint().expect("mint device identity");
+    state
+        .identity()
+        .assign_device(
+            &identity.device_id,
+            &account.id,
+            server::identity::DeviceState::Active,
+            chrono::Utc::now(),
+        )
+        .expect("assign device owner");
+    identity
+}
+
 pub struct HttpTestServer {
     pub base_url: String,
 }

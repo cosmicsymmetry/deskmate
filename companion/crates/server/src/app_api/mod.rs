@@ -34,8 +34,8 @@ use chrono::{Duration as ChronoDuration, Utc};
 use futures_util::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
 
-use crate::ServerState;
 use crate::oauth::session::{OperatorAuthenticated, SessionSigner, set_cookie_header};
+use crate::{AccountSpace, ServerState};
 
 /// How long a companion session lasts. Longer than the OAuth-console session
 /// (`oauth::routes::SESSION_TTL`, 12 h) on purpose: that one fronts a consent
@@ -231,13 +231,29 @@ struct DeviceRow {
 async fn list_devices(
     State(state): State<ServerState>,
     _operator: OperatorAuthenticated,
-) -> Json<Vec<DeviceRow>> {
-    let ids = state.registry_device_ids();
+) -> Result<Json<Vec<DeviceRow>>, AppApiError> {
+    let space = operator_space(&state).await?;
+    let identity_state = state.clone();
+    let account_id = space.account_id.clone();
+    let ids = tokio::task::spawn_blocking(move || {
+        identity_state
+            .identity()
+            .devices_for(&account_id)
+            .map(|owners| {
+                owners
+                    .into_iter()
+                    .map(|owner| owner.device_id)
+                    .collect::<Vec<_>>()
+            })
+    })
+    .await
+    .map_err(|_| worker_failed())?
+    .map_err(|error| AppApiError::internal(error.to_string()))?;
     let rows = ids
         .into_iter()
         .map(|id| {
             let connected = state.device_is_linked(&id);
-            let path = state.configs().for_device(&id).store.path().to_path_buf();
+            let path = space.configs.for_device(&id).store.path().to_path_buf();
             let configured_at = std::fs::metadata(&path)
                 .and_then(|metadata| metadata.modified())
                 .ok()
@@ -255,7 +271,7 @@ async fn list_devices(
             }
         })
         .collect();
-    Json(rows)
+    Ok(Json(rows))
 }
 
 // ---------------------------------------------------------------------------
@@ -283,8 +299,9 @@ async fn snapshot(
     _operator: OperatorAuthenticated,
     Path(device_id): Path<String>,
 ) -> Result<Json<CompanionSnapshot>, AppApiError> {
-    known_device(&state, &device_id)?;
-    let snapshot = read_snapshot(&state, device_id).await?;
+    let space = operator_space(&state).await?;
+    known_device(&state, &space, &device_id).await?;
+    let snapshot = read_snapshot(&state, space, device_id).await?;
     Ok(Json(snapshot))
 }
 
@@ -297,9 +314,10 @@ async fn snapshot(
 /// device facts that may no longer be true.
 async fn read_snapshot(
     state: &ServerState,
+    space: Arc<AccountSpace>,
     device_id: String,
 ) -> Result<CompanionSnapshot, AppApiError> {
-    let device_config = state.configs().for_device(&device_id);
+    let device_config = space.configs.for_device(&device_id);
     let _update = device_config.update.lock().await;
     if let Some(runtime) = live_runtime(state, &device_id) {
         let mut app = tokio::task::spawn_blocking(move || runtime.snapshot())
@@ -359,13 +377,38 @@ fn live_runtime(state: &ServerState, device_id: &str) -> Option<Arc<RuntimeHandl
     state.device_link(device_id).and_then(|link| link.runtime())
 }
 
-fn known_device(state: &ServerState, device_id: &str) -> Result<(), AppApiError> {
-    if state.registry().contains_device(device_id) {
-        return Ok(());
-    }
-    Err(AppApiError::NotFound {
-        message: format!("no device with id {device_id:?}"),
+async fn operator_space(state: &ServerState) -> Result<Arc<AccountSpace>, AppApiError> {
+    let lookup = state.clone();
+    tokio::task::spawn_blocking(move || lookup.operator_space())
+        .await
+        .map_err(|_| worker_failed())?
+}
+
+async fn known_device(
+    state: &ServerState,
+    space: &AccountSpace,
+    device_id: &str,
+) -> Result<(), AppApiError> {
+    let lookup = state.clone();
+    let account_id = space.account_id.clone();
+    let device_id = device_id.to_owned();
+    let lookup_device_id = device_id.clone();
+    let owned = tokio::task::spawn_blocking(move || {
+        lookup
+            .identity()
+            .device_owner(&lookup_device_id)
+            .map(|owner| owner.is_some_and(|owner| owner.account_id == account_id))
     })
+    .await
+    .map_err(|_| worker_failed())?
+    .map_err(|error| AppApiError::internal(error.to_string()))?;
+    if owned {
+        Ok(())
+    } else {
+        Err(AppApiError::NotFound {
+            message: format!("no device with id {device_id:?}"),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -381,10 +424,12 @@ async fn events(
     _operator: OperatorAuthenticated,
     Path(device_id): Path<String>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, AppApiError> {
-    known_device(&state, &device_id)?;
+    let space = operator_space(&state).await?;
+    known_device(&state, &space, &device_id).await?;
     let shutdown = state.subscribe_shutdown();
     let start = (
         state,
+        space,
         device_id,
         None::<String>,
         tokio::time::Instant::now(),
@@ -392,7 +437,7 @@ async fn events(
     );
     let stream = stream::unfold(
         start,
-        |(state, device_id, last, last_sent, mut shutdown)| async move {
+        |(state, space, device_id, last, last_sent, mut shutdown)| async move {
             loop {
                 if *shutdown.borrow() {
                     return None;
@@ -407,7 +452,9 @@ async fn events(
                     }
                     () = tokio::time::sleep(EVENT_POLL) => {}
                 }
-                let Ok(snapshot) = read_snapshot(&state, device_id.clone()).await else {
+                let Ok(snapshot) =
+                    read_snapshot(&state, Arc::clone(&space), device_id.clone()).await
+                else {
                     continue;
                 };
                 let Ok(value) = serde_json::to_value(&snapshot) else {
@@ -420,7 +467,10 @@ async fn events(
                 }
                 let event = Event::default().event("app-state").data(value.to_string());
                 let now = tokio::time::Instant::now();
-                return Some((Ok(event), (state, device_id, Some(key), now, shutdown)));
+                return Some((
+                    Ok(event),
+                    (state, space, device_id, Some(key), now, shutdown),
+                ));
             }
         },
     );
@@ -505,9 +555,10 @@ async fn validate_config(
     Path(device_id): Path<String>,
     payload: Json<DraftPayload>,
 ) -> Result<Json<DraftValidation>, AppApiError> {
-    known_device(&state, &device_id)?;
+    let space = operator_space(&state).await?;
+    known_device(&state, &space, &device_id).await?;
     let config = parse_draft(&payload)?;
-    let device = read_snapshot(&state, device_id).await?.app.device;
+    let device = read_snapshot(&state, space, device_id).await?.app.device;
     let issues = match config.compile(1) {
         Ok(compiled) => missing_capability_issues(&device, compiled.required_capabilities),
         Err(error) => error.issues,
@@ -580,10 +631,25 @@ async fn save_config(
     Path(device_id): Path<String>,
     payload: Json<DraftPayload>,
 ) -> Result<Json<ConfigApplyResult>, AppApiError> {
-    known_device(&state, &device_id)?;
+    let space = operator_space(&state).await?;
+    known_device(&state, &space, &device_id).await?;
     let config = parse_draft(&payload)?;
+    let maximum = state
+        .entitlements()
+        .max_cards(&space.account_id)
+        .min(app_core::MAX_CONFIG_CARDS);
+    if config.cards.len() > maximum {
+        return Err(AppApiError::Validation {
+            message: "the configuration is not valid".into(),
+            issues: vec![ValidationIssue {
+                path: "cards".into(),
+                code: app_core::ValidationCode::TooMany,
+                message: format!("This account can have at most {maximum} cards."),
+            }],
+        });
+    }
 
-    let device_config = state.configs().for_device(&device_id);
+    let device_config = space.configs.for_device(&device_id);
     let _update = device_config.update.lock().await;
 
     let saved = config.clone();
@@ -601,7 +667,7 @@ async fn save_config(
             },
         })?;
 
-    reconcile_image_sources(&state, &config).await?;
+    reconcile_image_sources(&state, Arc::clone(&space), &config).await?;
 
     if let Some(runtime) = live_runtime(&state, &device_id) {
         tokio::task::spawn_blocking(move || runtime.apply_config(config))
@@ -633,6 +699,7 @@ async fn save_config(
 /// still names every source a card uses. Do not move this above the validation.
 async fn reconcile_image_sources(
     state: &ServerState,
+    space: Arc<AccountSpace>,
     config: &AppConfig,
 ) -> Result<(), AppApiError> {
     let declared: std::collections::BTreeSet<&str> = config
@@ -640,8 +707,8 @@ async fn reconcile_image_sources(
         .iter()
         .map(|source| source.id.as_str())
         .collect();
-    let undeclared: Vec<String> = state
-        .image_sources()
+    let undeclared: Vec<String> = space
+        .image_sources
         .summaries(Utc::now())
         .into_iter()
         .filter(|source| !declared.contains(source.id.as_str()))
@@ -652,7 +719,13 @@ async fn reconcile_image_sources(
     }
 
     for source_id in undeclared {
-        match crate::images::revoke_image_source(state.clone(), source_id.clone()).await {
+        match crate::images::revoke_image_source(
+            state.clone(),
+            Arc::clone(&space),
+            source_id.clone(),
+        )
+        .await
+        {
             Ok(()) => {}
             Err(crate::images::RevokeImageSourceError::WorkerFailed) => {
                 return Err(worker_failed());
@@ -695,7 +768,8 @@ async fn pomodoro(
     Path(device_id): Path<String>,
     payload: Json<PomodoroRequest>,
 ) -> Result<StatusCode, AppApiError> {
-    known_device(&state, &device_id)?;
+    let space = operator_space(&state).await?;
+    known_device(&state, &space, &device_id).await?;
     validate_card_id(&payload.card_id)?;
     let Some(runtime) = live_runtime(&state, &device_id) else {
         return Err(AppApiError::RuntimeUnavailable {
@@ -750,10 +824,13 @@ async fn preview(
     Path(device_id): Path<String>,
     payload: Json<PreviewRequest>,
 ) -> Result<Json<PreviewFrame>, AppApiError> {
-    known_device(&state, &device_id)?;
+    let space = operator_space(&state).await?;
+    known_device(&state, &space, &device_id).await?;
     validate_card_id(&payload.card_id)?;
     let card_id = payload.0.card_id;
-    let snapshot = read_snapshot(&state, device_id).await?.app;
+    let snapshot = read_snapshot(&state, Arc::clone(&space), device_id)
+        .await?
+        .app;
 
     let card = snapshot
         .config
@@ -771,9 +848,10 @@ async fn preview(
     // to draw one.
     if let CardSettings::Picture { source_id, .. } = card {
         let source_id = source_id.clone();
+        let image_space = Arc::clone(&space);
         let png = tokio::task::spawn_blocking(move || {
-            state
-                .image_sources()
+            image_space
+                .image_sources
                 .frame(&source_id, Utc::now())
                 .and_then(|frame| crate::image_ingest::png_from_canonical_frame(&frame.bytes))
         })
@@ -945,12 +1023,17 @@ mod tests {
             FirmwareCatalog::in_memory(),
             root.path().to_path_buf(),
         );
+        state
+            .identity()
+            .create_account("owner@example.com", true, true, Utc::now())
+            .expect("owner account");
         (root, state)
     }
 
     fn mint_face(state: &ServerState) -> crate::image_sources::MintedSource {
-        let source = state.image_sources().mint("Weather").expect("mint source");
-        crate::data_cards::create_face(state, &source.id, "weather").expect("create face");
+        let space = state.operator_space().expect("operator space");
+        let source = space.image_sources.mint("Weather").expect("mint source");
+        crate::data_cards::create_face(state, &space, &source.id, "weather").expect("create face");
         source
     }
 
@@ -962,36 +1045,38 @@ mod tests {
 
     #[tokio::test]
     async fn reconciliation_tolerates_source_failure_and_skips_its_face() {
-        let (root, state) = state();
+        let (_root, state) = state();
+        let space = state.operator_space().unwrap();
         let source = mint_face(&state);
         replace_file_with_directory(
-            &root
-                .path()
+            &space
+                .root
                 .join(crate::image_sources::IMAGE_SOURCE_STORE_FILE),
         );
 
-        reconcile_image_sources(&state, &AppConfig::default())
+        reconcile_image_sources(&state, Arc::clone(&space), &AppConfig::default())
             .await
             .expect("ordinary source storage failure does not fail a saved config");
 
         assert_eq!(
-            state.image_sources().authenticate(&source.token),
+            space.image_sources.authenticate(&source.token),
             Some(source.id.clone())
         );
-        assert!(crate::data_cards::descriptor_for_source(&state, &source.id).is_some());
+        assert!(crate::data_cards::descriptor_for_source(&state, &space, &source.id).is_some());
     }
 
     #[tokio::test]
     async fn reconciliation_tolerates_face_failure_after_revoking_the_source() {
-        let (root, state) = state();
+        let (_root, state) = state();
+        let space = state.operator_space().unwrap();
         let source = mint_face(&state);
-        replace_file_with_directory(&root.path().join("data-cards.json"));
+        replace_file_with_directory(&space.root.join("data-cards.json"));
 
-        reconcile_image_sources(&state, &AppConfig::default())
+        reconcile_image_sources(&state, Arc::clone(&space), &AppConfig::default())
             .await
             .expect("ordinary face storage failure does not fail a saved config");
 
-        assert_eq!(state.image_sources().authenticate(&source.token), None);
-        assert!(crate::data_cards::descriptor_for_source(&state, &source.id).is_some());
+        assert_eq!(space.image_sources.authenticate(&source.token), None);
+        assert!(crate::data_cards::descriptor_for_source(&state, &space, &source.id).is_some());
     }
 }

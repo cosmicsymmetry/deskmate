@@ -28,6 +28,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::ServerState;
+use crate::accounts::AccountSpace;
 
 mod faces_package;
 mod worker;
@@ -258,13 +259,20 @@ fn face_is_complete(descriptor: &FaceDescriptor) -> bool {
     })
 }
 
-/// Server-owned data-card state. The path, parsed specs, and every live task
-/// stay together so an update can atomically replace the persisted spec and the
-/// one refresher that consumes it.
-pub(crate) struct DataCardState {
+/// Per-account data-card specs and live refresh state.
+pub(crate) struct DataCardSpecs {
     spec_path: PathBuf,
     specs: Vec<DataCardSpec>,
     tasks: HashMap<String, tokio::task::JoinHandle<()>>,
+    /// The last refresh outcome per source. Forgotten whenever that source's
+    /// refresher is replaced or removed, so a status never describes settings that
+    /// are no longer the ones in force.
+    outcomes: HashMap<String, (RefreshOutcome, chrono::DateTime<chrono::Utc>)>,
+}
+
+/// Process-wide faces-package state. The executable and its catalog are shared;
+/// only specs, outcomes, and refresher tasks are per account.
+pub(crate) struct FaceCatalogState {
     /// How to run the faces package. `None` means this deployment has none, and
     /// then there is no catalog, no add-menu entry and no refresher.
     faces: Option<FaceCommand>,
@@ -272,39 +280,16 @@ pub(crate) struct DataCardState {
     /// listener binds, so no request handler ever pays for the subprocess.
     catalog: Option<Arc<Vec<CatalogFace>>>,
     catalog_reloader: Option<tokio::task::JoinHandle<()>>,
-    /// The last refresh outcome per source. Forgotten whenever that source's
-    /// refresher is replaced or removed, so a status never describes settings that
-    /// are no longer the ones in force.
-    outcomes: HashMap<String, (RefreshOutcome, chrono::DateTime<chrono::Utc>)>,
 }
 
-impl DataCardState {
-    pub(crate) fn new(spec_path: PathBuf, faces: Option<FaceCommand>) -> Self {
+impl DataCardSpecs {
+    pub(crate) fn new(spec_path: PathBuf) -> Self {
         Self {
             spec_path,
             specs: Vec::new(),
             tasks: HashMap::new(),
-            faces,
-            catalog: None,
-            catalog_reloader: None,
             outcomes: HashMap::new(),
         }
-    }
-
-    fn catalog(&mut self) -> Arc<Vec<CatalogFace>> {
-        if self.catalog.is_none() {
-            self.catalog = Some(Arc::new(load_catalog(self.faces.as_ref())));
-        }
-        Arc::clone(self.catalog.as_ref().expect("just loaded"))
-    }
-
-    /// The descriptor for one spec, or `None` when the package no longer draws
-    /// that kind -- the spec is kept, because the package can come back.
-    fn descriptor(&mut self, face: &FaceSpec) -> Option<FaceDescriptor> {
-        self.catalog()
-            .iter()
-            .find(|candidate| candidate.kind == face.kind)
-            .map(|candidate| describe_face(candidate, &face.settings))
     }
 
     /// Starts the refresher for `spec` if its face is complete and drawable.
@@ -312,25 +297,34 @@ impl DataCardState {
         &mut self,
         runtime: &tokio::runtime::Handle,
         state: &ServerState,
+        space: Arc<AccountSpace>,
         spec: &DataCardSpec,
     ) {
-        let Some(faces) = self.faces.clone() else {
+        let (faces, descriptor) = {
+            let mut catalog = state
+                .inner
+                .face_catalog
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (catalog.faces.clone(), catalog.descriptor(&spec.face))
+        };
+        let Some(faces) = faces else {
             return;
         };
-        match self.descriptor(&spec.face) {
+        match descriptor {
             Some(descriptor) if face_is_complete(&descriptor) => {
                 self.tasks.insert(
                     spec.source_id.clone(),
-                    worker::spawn_refresher(runtime, state.clone(), faces, spec.clone()),
+                    worker::spawn_refresher(runtime, state.clone(), space, faces, spec.clone()),
                 );
             }
-            // A card added from the menu is stored blank and stays unfetched until
-            // its settings are filled in, so restarting must not start it either.
             Some(_) => tracing::info!(
+                account_id = %space.account_id,
                 source_id = %spec.source_id,
                 "a server-rendered card has no settings yet and is not being fetched"
             ),
             None => tracing::warn!(
+                account_id = %space.account_id,
                 source_id = %spec.source_id,
                 kind = %spec.face.kind,
                 "the faces package does not draw this kind; the card is kept but not refreshed"
@@ -358,12 +352,38 @@ impl DataCardState {
     }
 }
 
+impl FaceCatalogState {
+    pub(crate) fn new(faces: Option<FaceCommand>) -> Self {
+        Self {
+            faces,
+            catalog: None,
+            catalog_reloader: None,
+        }
+    }
+
+    fn catalog(&mut self) -> Arc<Vec<CatalogFace>> {
+        if self.catalog.is_none() {
+            self.catalog = Some(Arc::new(load_catalog(self.faces.as_ref())));
+        }
+        Arc::clone(self.catalog.as_ref().expect("just loaded"))
+    }
+
+    /// The descriptor for one spec, or `None` when the package no longer draws
+    /// that kind -- the spec is kept, because the package can come back.
+    fn descriptor(&mut self, face: &FaceSpec) -> Option<FaceDescriptor> {
+        self.catalog()
+            .iter()
+            .find(|candidate| candidate.kind == face.kind)
+            .map(|candidate| describe_face(candidate, &face.settings))
+    }
+}
+
 /// Tells the server how to run the faces package. Called once at startup, before
 /// [`start_data_cards`]; a deployment that never calls it has no server faces.
 pub fn set_faces(state: &ServerState, faces: FaceCommand) {
     let mut data_cards = state
         .inner
-        .data_cards
+        .face_catalog
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     data_cards.faces = Some(faces);
@@ -406,16 +426,40 @@ pub(crate) enum FaceUpdateError {
     Persist(String),
 }
 
-/// Loads the server-owned specs before listener binding and starts their refreshers.
+/// Loads every account's specs before listener binding and starts their refreshers.
 ///
 /// # Errors
 /// Returns the existing load error when the spec file cannot be read or parsed.
-pub fn start_data_cards(state: &ServerState, spec_path: PathBuf) -> Result<(), String> {
-    let specs = load_specs(&spec_path)?;
-    if specs.is_empty() {
+pub fn start_data_cards(state: &ServerState) -> Result<(), String> {
+    let accounts = state
+        .identity()
+        .accounts()
+        .map_err(|error| error.to_string())?;
+    if accounts.is_empty() {
         tracing::info!(target: "server", "no server-rendered data cards configured");
     }
-    spawn_refreshers(state, spec_path, specs);
+    for account in accounts {
+        let space = state.account_space(&account.id);
+        start_account_data_cards(state, &space)?;
+    }
+    start_catalog_reloader(state);
+    Ok(())
+}
+
+pub(crate) fn start_account_data_cards(
+    state: &ServerState,
+    space: &Arc<AccountSpace>,
+) -> Result<(), String> {
+    let spec_path = {
+        space
+            .data_cards
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .spec_path
+            .clone()
+    };
+    let specs = load_specs(&spec_path)?;
+    spawn_refreshers(state, space, specs);
     Ok(())
 }
 
@@ -460,7 +504,15 @@ fn load_specs(path: &Path) -> Result<Vec<DataCardSpec>, String> {
 /// [`ServerState`]. Each card gets its own task so a slow feed cannot delay a
 /// token price, and retaining the handles lets a settings update replace only
 /// the source it changed.
-fn spawn_refreshers(state: &ServerState, spec_path: PathBuf, specs: Vec<DataCardSpec>) {
+fn spawn_refreshers(state: &ServerState, space: &Arc<AccountSpace>, specs: Vec<DataCardSpec>) {
+    let spec_path = {
+        space
+            .data_cards
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .spec_path
+            .clone()
+    };
     // Drop specs whose image source no longer exists, before anything is
     // spawned for them. Until `revoke_source` learned to remove a face, every
     // revoke left its spec behind and its refresher fetching on schedule: the
@@ -469,8 +521,8 @@ fn spawn_refreshers(state: &ServerState, spec_path: PathBuf, specs: Vec<DataCard
     // failing with "unknown or revoked image source". A spec with no source can
     // do nothing but fail, so this is self-healing rather than a migration --
     // and it is cheap, running once at startup.
-    let live: std::collections::BTreeSet<String> = state
-        .image_sources()
+    let live: std::collections::BTreeSet<String> = space
+        .image_sources
         .summaries(chrono::Utc::now())
         .into_iter()
         .map(|source| source.id)
@@ -494,9 +546,16 @@ fn spawn_refreshers(state: &ServerState, spec_path: PathBuf, specs: Vec<DataCard
         tracing::warn!(%operation, %message, "could not persist the pruned data-card specs");
     }
 
-    let runtime = tokio::runtime::Handle::current();
-    let mut data_cards = state
-        .inner
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        let mut data_cards = space
+            .data_cards
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        data_cards.specs = specs;
+        data_cards.spec_path = spec_path;
+        return;
+    };
+    let mut data_cards = space
         .data_cards
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -506,17 +565,27 @@ fn spawn_refreshers(state: &ServerState, spec_path: PathBuf, specs: Vec<DataCard
     data_cards.outcomes.clear();
     data_cards.spec_path = spec_path;
     data_cards.specs = specs;
-    // Read fresh at every start, here, so no request handler pays for it later.
-    data_cards.catalog = None;
     for spec in data_cards.specs.clone() {
-        data_cards.start_if_complete(&runtime, state, &spec);
+        data_cards.start_if_complete(&runtime, state, Arc::clone(space), &spec);
     }
+}
 
-    if let Some(reloader) = data_cards.catalog_reloader.take() {
+fn start_catalog_reloader(state: &ServerState) {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let mut catalog = state
+        .inner
+        .face_catalog
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    catalog.catalog = None;
+    let _ = catalog.catalog();
+    if let Some(reloader) = catalog.catalog_reloader.take() {
         reloader.abort();
     }
-    if let Some(faces) = data_cards.faces.clone() {
-        data_cards.catalog_reloader = Some(runtime.spawn(reload_catalog(state.clone(), faces)));
+    if let Some(faces) = catalog.faces.clone() {
+        catalog.catalog_reloader = Some(runtime.spawn(reload_catalog(state.clone(), faces)));
     }
 }
 
@@ -536,7 +605,7 @@ async fn reload_catalog(state: ServerState, faces: FaceCommand) {
         };
         state
             .inner
-            .data_cards
+            .face_catalog
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .catalog = Some(Arc::new(catalog));
@@ -546,15 +615,29 @@ async fn reload_catalog(state: ServerState, faces: FaceCommand) {
 /// Stops every retained data-card refresher. Called from the server's existing
 /// graceful shutdown path before the runtime state is released.
 pub(crate) fn stop_refreshers(state: &ServerState) {
-    let mut data_cards = state
+    let spaces = state
         .inner
-        .data_cards
+        .accounts
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    for space in spaces {
+        let mut data_cards = space
+            .data_cards
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (_, task) in data_cards.tasks.drain() {
+            task.abort();
+        }
+    }
+    let mut catalog = state
+        .inner
+        .face_catalog
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    for (_, task) in data_cards.tasks.drain() {
-        task.abort();
-    }
-    if let Some(reloader) = data_cards.catalog_reloader.take() {
+    if let Some(reloader) = catalog.catalog_reloader.take() {
         reloader.abort();
     }
 }
@@ -568,7 +651,7 @@ pub(crate) fn stop_refreshers(state: &ServerState) {
 pub(crate) fn creatable_faces(state: &ServerState) -> Vec<FaceDescriptor> {
     state
         .inner
-        .data_cards
+        .face_catalog
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .catalog()
@@ -579,10 +662,10 @@ pub(crate) fn creatable_faces(state: &ServerState) -> Vec<FaceDescriptor> {
 
 pub(crate) fn descriptor_for_source(
     state: &ServerState,
+    space: &AccountSpace,
     source_id: &str,
 ) -> Option<FaceDescriptor> {
-    let mut data_cards = state
-        .inner
+    let data_cards = space
         .data_cards
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -592,14 +675,23 @@ pub(crate) fn descriptor_for_source(
         .find(|spec| spec.source_id == source_id)?
         .face
         .clone();
-    data_cards.descriptor(&face)
+    drop(data_cards);
+    state
+        .inner
+        .face_catalog
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .descriptor(&face)
 }
 
 /// What to tell the owner about `source_id`'s face, or `None` for a source that has
 /// no server face (an external producer's).
-pub(crate) fn status_for_source(state: &ServerState, source_id: &str) -> Option<FaceStatus> {
-    let mut data_cards = state
-        .inner
+pub(crate) fn status_for_source(
+    state: &ServerState,
+    space: &AccountSpace,
+    source_id: &str,
+) -> Option<FaceStatus> {
+    let data_cards = space
         .data_cards
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -614,7 +706,13 @@ pub(crate) fn status_for_source(state: &ServerState, source_id: &str) -> Option<
         message: None,
         at_unix_seconds: None,
     };
-    let Some(descriptor) = data_cards.descriptor(&face) else {
+    let descriptor = state
+        .inner
+        .face_catalog
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .descriptor(&face);
+    let Some(descriptor) = descriptor else {
         return Some(plain(FaceState::Unavailable));
     };
     if !face_is_complete(&descriptor) {
@@ -647,13 +745,12 @@ pub(crate) fn status_for_source(state: &ServerState, source_id: &str) -> Option<
 /// refresher has since been replaced or removed: an aborted task can still be
 /// inside its blocking render, and its verdict is about settings no longer in force.
 pub(super) fn record_outcome(
-    state: &ServerState,
+    space: &AccountSpace,
     source_id: &str,
     task: tokio::task::Id,
     outcome: RefreshOutcome,
 ) {
-    let mut data_cards = state
-        .inner
+    let mut data_cards = space
         .data_cards
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -674,12 +771,12 @@ pub(super) fn record_outcome(
 /// function knows field *types* and nothing about any face.
 pub(crate) fn update_face_fields(
     state: &ServerState,
+    space: &Arc<AccountSpace>,
     runtime: &tokio::runtime::Handle,
     source_id: &str,
     fields: &BTreeMap<String, String>,
 ) -> Result<FaceDescriptor, FaceUpdateError> {
-    let mut data_cards = state
-        .inner
+    let mut data_cards = space
         .data_cards
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -689,7 +786,11 @@ pub(crate) fn update_face_fields(
         .position(|spec| spec.source_id == source_id)
         .ok_or(FaceUpdateError::NoFace)?;
     let current = data_cards.specs[index].face.clone();
-    let descriptor = data_cards
+    let descriptor = state
+        .inner
+        .face_catalog
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .descriptor(&current)
         .ok_or(FaceUpdateError::NoFace)?;
     validate_face_fields(&descriptor, fields)?;
@@ -709,8 +810,12 @@ pub(crate) fn update_face_fields(
         task.abort();
     }
     data_cards.outcomes.remove(source_id);
-    data_cards.start_if_complete(runtime, state, &updated_spec);
-    data_cards
+    data_cards.start_if_complete(runtime, state, Arc::clone(space), &updated_spec);
+    state
+        .inner
+        .face_catalog
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .descriptor(&updated_spec.face)
         .ok_or(FaceUpdateError::NoFace)
 }
@@ -724,15 +829,19 @@ pub(crate) fn update_face_fields(
 /// is complete at birth starts refreshing here; there is no later save to do it.
 pub(crate) fn create_face(
     state: &ServerState,
+    space: &Arc<AccountSpace>,
     source_id: &str,
     kind: &str,
 ) -> Result<FaceDescriptor, FaceUpdateError> {
-    let mut data_cards = state
-        .inner
+    let mut data_cards = space
         .data_cards
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let face = data_cards
+    let face = state
+        .inner
+        .face_catalog
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .catalog()
         .iter()
         .find(|candidate| candidate.kind == kind)
@@ -763,9 +872,13 @@ pub(crate) fn create_face(
     // from inside `spawn_blocking`. A plain thread has none, and then the face
     // simply waits for the next start like any other.
     if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-        data_cards.start_if_complete(&runtime, state, &spec);
+        data_cards.start_if_complete(&runtime, state, Arc::clone(space), &spec);
     }
-    data_cards
+    state
+        .inner
+        .face_catalog
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .descriptor(&spec.face)
         .ok_or_else(|| FaceUpdateError::UnknownField(kind.to_owned()))
 }
@@ -774,9 +887,8 @@ pub(crate) fn create_face(
 ///
 /// Idempotent: a source with no face is not an error, because most sources are
 /// fed by an external producer and never had one.
-pub(crate) fn remove_face(state: &ServerState, source_id: &str) -> Result<(), FaceUpdateError> {
-    let mut data_cards = state
-        .inner
+pub(crate) fn remove_face(space: &AccountSpace, source_id: &str) -> Result<(), FaceUpdateError> {
+    let mut data_cards = space
         .data_cards
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -875,6 +987,37 @@ fn validate_face_fields(
 mod tests {
     use super::*;
 
+    fn test_space(state: &ServerState) -> Arc<AccountSpace> {
+        let account = state
+            .identity()
+            .accounts()
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| {
+                state
+                    .identity()
+                    .create_account("owner@example.com", true, true, chrono::Utc::now())
+                    .unwrap()
+            });
+        state.account_space(&account.id)
+    }
+
+    fn start_at(
+        state: &ServerState,
+        space: &Arc<AccountSpace>,
+        path: PathBuf,
+    ) -> Result<(), String> {
+        let specs = load_specs(&path)?;
+        space
+            .data_cards
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .spec_path = path;
+        spawn_refreshers(state, space, specs);
+        Ok(())
+    }
+
     /// A face of `kind` with exactly these settings -- the shape a spec file holds.
     fn face(kind: &str, settings: serde_json::Value) -> FaceSpec {
         let serde_json::Value::Object(settings) = settings else {
@@ -935,10 +1078,11 @@ mod tests {
         let directory = tempfile::tempdir().expect("a temp directory");
         let path = directory.path().join("override.json");
         let state = ServerState::in_memory();
+        let space = test_space(&state);
         let task = tokio::spawn(std::future::pending::<()>());
         let abort = task.abort_handle();
         {
-            let mut retained = state.inner.data_cards.lock().expect("data cards");
+            let mut retained = space.data_cards.lock().expect("data cards");
             retained.specs.push(DataCardSpec {
                 source_id: "old".into(),
                 refresh_seconds: 900,
@@ -947,10 +1091,10 @@ mod tests {
             retained.tasks.insert("old".into(), task);
         }
 
-        start_data_cards(&state, path.clone()).expect("missing specs are valid");
+        start_at(&state, &space, path.clone()).expect("missing specs are valid");
         tokio::task::yield_now().await;
         {
-            let retained = state.inner.data_cards.lock().expect("data cards");
+            let retained = space.data_cards.lock().expect("data cards");
             assert_eq!(retained.spec_path, path);
             assert!(retained.specs.is_empty());
             assert!(retained.tasks.is_empty());
@@ -967,6 +1111,7 @@ mod tests {
         let bytes = std::fs::read(&path).expect("original bytes");
         let expected_error = load_specs(&path).expect_err("malformed specs");
         let state = ServerState::in_memory();
+        let space = test_space(&state);
         let original = vec![DataCardSpec {
             source_id: "old".into(),
             refresh_seconds: 900,
@@ -976,16 +1121,16 @@ mod tests {
         let task_id = task.id();
         let abort = task.abort_handle();
         let original_path = {
-            let mut retained = state.inner.data_cards.lock().expect("data cards");
+            let mut retained = space.data_cards.lock().expect("data cards");
             retained.specs = original.clone();
             retained.tasks.insert("old".into(), task);
             retained.spec_path.clone()
         };
 
-        assert_eq!(start_data_cards(&state, path.clone()), Err(expected_error));
+        assert_eq!(start_at(&state, &space, path.clone()), Err(expected_error));
         tokio::task::yield_now().await;
         {
-            let retained = state.inner.data_cards.lock().expect("data cards");
+            let retained = space.data_cards.lock().expect("data cards");
             assert_eq!(retained.spec_path, original_path);
             assert_eq!(retained.specs, original);
             assert_eq!(retained.tasks.len(), 1);
@@ -1071,7 +1216,8 @@ mod tests {
         // spec outliving its face must survive a start untouched -- the package can
         // come back -- while doing nothing in the meantime.
         let state = ServerState::in_memory();
-        let source = state.image_sources().mint("Calendar").expect("a source");
+        let space = test_space(&state);
+        let source = space.image_sources.mint("Calendar").expect("a source");
         let directory = write(&format!(
             r#"[{{"source_id": "{}", "face": {{"kind": "calendar", "url": "https://example.test/cal"}}}}]"#,
             source.id
@@ -1079,20 +1225,21 @@ mod tests {
         let path = directory.path().join("cards.json");
         let bytes = std::fs::read(&path).expect("original bytes");
 
-        start_data_cards(&state, path.clone()).expect("an unknown kind is not a load error");
+        start_at(&state, &space, path.clone()).expect("an unknown kind is not a load error");
         {
-            let retained = state.inner.data_cards.lock().expect("data cards");
+            let retained = space.data_cards.lock().expect("data cards");
             assert_eq!(retained.specs.len(), 1, "the spec is kept");
             assert!(retained.tasks.is_empty(), "and nothing refreshes it");
         }
-        assert_eq!(descriptor_for_source(&state, &source.id), None);
+        assert_eq!(descriptor_for_source(&state, &space, &source.id), None);
         assert_eq!(
-            status_for_source(&state, &source.id).map(|status| status.state),
+            status_for_source(&state, &space, &source.id).map(|status| status.state),
             Some(FaceState::Unavailable)
         );
         assert!(matches!(
             update_face_fields(
                 &state,
+                &space,
                 &tokio::runtime::Handle::current(),
                 &source.id,
                 &BTreeMap::from([("url".into(), "https://example.test/other".into())]),
@@ -1125,13 +1272,14 @@ mod tests {
     async fn a_server_with_no_faces_package_offers_no_faces() {
         let state = ServerState::in_memory();
         {
-            let mut retained = state.inner.data_cards.lock().expect("data cards");
+            let mut retained = state.inner.face_catalog.lock().expect("data cards");
             retained.faces = None;
             retained.catalog = None;
         }
+        let space = test_space(&state);
         assert!(creatable_faces(&state).is_empty());
         assert!(matches!(
-            create_face(&state, "source", "weather"),
+            create_face(&state, &space, "source", "weather"),
             Err(FaceUpdateError::UnknownField(kind)) if kind == "weather"
         ));
         state.shutdown();
@@ -1140,11 +1288,12 @@ mod tests {
     /// Polls until the face's status satisfies `done`, the way the window does.
     async fn status_when(
         state: &ServerState,
+        space: &AccountSpace,
         source_id: &str,
         done: impl Fn(&FaceStatus) -> bool,
     ) -> FaceStatus {
         for _ in 0..200 {
-            if let Some(status) = status_for_source(state, source_id)
+            if let Some(status) = status_for_source(state, space, source_id)
                 && done(&status)
             {
                 return status;
@@ -1153,7 +1302,7 @@ mod tests {
         }
         panic!(
             "the status never settled: {:?}",
-            status_for_source(state, source_id)
+            status_for_source(state, space, source_id)
         );
     }
 
@@ -1163,30 +1312,34 @@ mod tests {
         // "Waiting for the first picture", the window said "Saved to the server", and
         // the reason was a log line on a VM.
         let state = ServerState::in_memory();
+        let space = test_space(&state);
         let runtime = tokio::runtime::Handle::current();
-        let source = state.image_sources().mint("Token price").expect("a source");
+        let source = space.image_sources.mint("Token price").expect("a source");
         let field = |value: &str| BTreeMap::from([("coin_id".to_owned(), value.to_owned())]);
 
         assert_eq!(
-            status_for_source(&state, "an-external-producers-source"),
+            status_for_source(&state, &space, "an-external-producers-source"),
             None
         );
-        create_face(&state, &source.id, "token").expect("create");
+        create_face(&state, &space, &source.id, "token").expect("create");
         assert_eq!(
-            status_for_source(&state, &source.id).map(|status| status.state),
+            status_for_source(&state, &space, &source.id).map(|status| status.state),
             Some(FaceState::NeedsSettings),
             "a blank coin ID is not an error yet, it is an unfinished form"
         );
 
         update_face_fields(
             &state,
+            &space,
             &runtime,
             &source.id,
             &field("refuse-as-configuration"),
         )
         .expect("the field is well-formed; only the faces package can judge the coin");
-        let refused =
-            status_when(&state, &source.id, |s| s.state == FaceState::NeedsAttention).await;
+        let refused = status_when(&state, &space, &source.id, |s| {
+            s.state == FaceState::NeedsAttention
+        })
+        .await;
         assert_eq!(
             refused.message.as_deref(),
             Some("the coin was not found; check the coin ID"),
@@ -1194,20 +1347,29 @@ mod tests {
         );
         assert!(refused.at_unix_seconds.is_some());
 
-        update_face_fields(&state, &runtime, &source.id, &field("solana")).expect("update");
-        let drawn = status_when(&state, &source.id, |s| s.state == FaceState::Drawn).await;
+        update_face_fields(&state, &space, &runtime, &source.id, &field("solana")).expect("update");
+        let drawn = status_when(&state, &space, &source.id, |s| s.state == FaceState::Drawn).await;
         assert_eq!(drawn.message, None);
 
         // New settings start from a clean slate: "drawn" was about the OLD coin.
-        update_face_fields(&state, &runtime, &source.id, &field("refuse-as-transient"))
-            .expect("update");
-        let first = status_for_source(&state, &source.id).expect("a status");
+        update_face_fields(
+            &state,
+            &space,
+            &runtime,
+            &source.id,
+            &field("refuse-as-transient"),
+        )
+        .expect("update");
+        let first = status_for_source(&state, &space, &source.id).expect("a status");
         assert_ne!(
             first.state,
             FaceState::Drawn,
             "a stale verdict must not survive new settings"
         );
-        let retrying = status_when(&state, &source.id, |s| s.state == FaceState::Retrying).await;
+        let retrying = status_when(&state, &space, &source.id, |s| {
+            s.state == FaceState::Retrying
+        })
+        .await;
         assert_eq!(
             retrying.message.as_deref(),
             Some("api.example returned HTTP 503")
@@ -1221,43 +1383,35 @@ mod tests {
         // An aborted task can still be inside its blocking render. When it finishes,
         // its verdict is about settings that are no longer in force.
         let state = ServerState::in_memory();
+        let space = test_space(&state);
         let current = tokio::spawn(std::future::pending::<()>());
         let replaced = tokio::spawn(std::future::pending::<()>());
         let (current_id, replaced_id) = (current.id(), replaced.id());
-        state
-            .inner
+        space
             .data_cards
             .lock()
             .expect("data cards")
             .tasks
             .insert("target".into(), current);
 
-        record_outcome(&state, "target", replaced_id, RefreshOutcome::Drawn);
+        record_outcome(&space, "target", replaced_id, RefreshOutcome::Drawn);
         assert!(
-            state
-                .inner
+            space
                 .data_cards
                 .lock()
                 .expect("data cards")
                 .outcomes
                 .is_empty()
         );
-        record_outcome(&state, "target", current_id, RefreshOutcome::Drawn);
+        record_outcome(&space, "target", current_id, RefreshOutcome::Drawn);
         assert_eq!(
-            state
-                .inner
-                .data_cards
-                .lock()
-                .expect("data cards")
-                .outcomes
-                .len(),
+            space.data_cards.lock().expect("data cards").outcomes.len(),
             1
         );
 
-        remove_face(&state, "target").expect("remove");
+        remove_face(&space, "target").expect("remove");
         assert!(
-            state
-                .inner
+            space
                 .data_cards
                 .lock()
                 .expect("data cards")
@@ -1273,11 +1427,11 @@ mod tests {
         // Every field of `headlines` has a default, so there is no later settings
         // save to start it: creating it has to.
         let state = ServerState::in_memory();
-        let descriptor = create_face(&state, "target", "headlines").expect("create");
+        let space = test_space(&state);
+        let descriptor = create_face(&state, &space, "target", "headlines").expect("create");
         assert!(face_is_complete(&descriptor));
         assert!(
-            state
-                .inner
+            space
                 .data_cards
                 .lock()
                 .expect("data cards")
@@ -1334,6 +1488,7 @@ mod tests {
     #[tokio::test]
     async fn blank_faces_persist_their_defaults_without_starting_tasks() {
         let state = ServerState::in_memory();
+        let space = test_space(&state);
         for (kind, expected) in [
             (
                 "weather",
@@ -1348,7 +1503,7 @@ mod tests {
                 serde_json::json!({"kind":"token", "coin_id":"", "currency":"usd"}),
             ),
         ] {
-            let descriptor = create_face(&state, kind, kind).expect("create blank face");
+            let descriptor = create_face(&state, &space, kind, kind).expect("create blank face");
             assert_eq!(
                 descriptor,
                 creatable_faces(&state)
@@ -1356,7 +1511,7 @@ mod tests {
                     .find(|face| face.kind == kind)
                     .unwrap()
             );
-            let retained = state.inner.data_cards.lock().unwrap();
+            let retained = space.data_cards.lock().unwrap();
             assert!(retained.tasks.is_empty());
             let persisted = load_specs(&retained.spec_path).unwrap();
             let spec = persisted.last().unwrap();
@@ -1370,11 +1525,12 @@ mod tests {
 
     async fn assert_partial_update_stays_dormant(kind: &str, partial: BTreeMap<String, String>) {
         let state = ServerState::in_memory();
+        let space = test_space(&state);
         let runtime = tokio::runtime::Handle::current();
-        create_face(&state, "target", kind).unwrap();
-        update_face_fields(&state, &runtime, "target", &partial).unwrap();
+        create_face(&state, &space, "target", kind).unwrap();
+        update_face_fields(&state, &space, &runtime, "target", &partial).unwrap();
         {
-            let retained = state.inner.data_cards.lock().unwrap();
+            let retained = space.data_cards.lock().unwrap();
             assert!(
                 retained.tasks.is_empty(),
                 "incomplete {kind} must remain dormant"
@@ -1397,18 +1553,18 @@ mod tests {
             "token" => BTreeMap::from([("coin_id".into(), "solana".into())]),
             _ => unreachable!(),
         };
-        update_face_fields(&state, &runtime, "target", &remaining).unwrap();
+        update_face_fields(&state, &space, &runtime, "target", &remaining).unwrap();
         let (first_id, first_abort) = {
-            let retained = state.inner.data_cards.lock().unwrap();
+            let retained = space.data_cards.lock().unwrap();
             assert_eq!(retained.tasks.len(), 1);
             (
                 retained.tasks["target"].id(),
                 retained.tasks["target"].abort_handle(),
             )
         };
-        update_face_fields(&state, &runtime, "target", &BTreeMap::new()).unwrap();
+        update_face_fields(&state, &space, &runtime, "target", &BTreeMap::new()).unwrap();
         {
-            let retained = state.inner.data_cards.lock().unwrap();
+            let retained = space.data_cards.lock().unwrap();
             assert_eq!(retained.tasks.len(), 1);
             assert_ne!(retained.tasks["target"].id(), first_id);
         }
@@ -1442,9 +1598,10 @@ mod tests {
     #[tokio::test]
     async fn public_token_updates_preserve_private_key_and_refresh_interval() {
         let state = ServerState::in_memory();
+        let space = test_space(&state);
         let runtime = tokio::runtime::Handle::current();
         {
-            let mut retained = state.inner.data_cards.lock().unwrap();
+            let mut retained = space.data_cards.lock().unwrap();
             retained.specs.push(DataCardSpec {
                 source_id: "target".into(),
                 refresh_seconds: 3_600,
@@ -1456,13 +1613,14 @@ mod tests {
         }
         update_face_fields(
             &state,
+            &space,
             &runtime,
             "target",
             &BTreeMap::from([("currency".into(), "eur".into())]),
         )
         .unwrap();
         {
-            let retained = state.inner.data_cards.lock().unwrap();
+            let retained = space.data_cards.lock().unwrap();
             assert_eq!(retained.tasks.len(), 1);
             let persisted = load_specs(&retained.spec_path).unwrap();
             assert_eq!(persisted[0].refresh_seconds, 3_600);
@@ -1479,6 +1637,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("cards.json");
         let state = ServerState::in_memory();
+        let space = test_space(&state);
         let task = tokio::spawn(std::future::pending::<()>());
         let task_id = task.id();
         let abort = task.abort_handle();
@@ -1490,7 +1649,7 @@ mod tests {
         persist_specs(&path, &original).unwrap();
         let bytes = std::fs::read(&path).unwrap();
         {
-            let mut retained = state.inner.data_cards.lock().unwrap();
+            let mut retained = space.data_cards.lock().unwrap();
             retained.spec_path = path.clone();
             retained.specs = original.clone();
             retained.tasks.insert("target".into(), task);
@@ -1499,13 +1658,14 @@ mod tests {
             assert!(
                 update_face_fields(
                     &state,
+                    &space,
                     &tokio::runtime::Handle::current(),
                     "target",
                     &BTreeMap::from([(key.into(), value.into())])
                 )
                 .is_err()
             );
-            let retained = state.inner.data_cards.lock().unwrap();
+            let retained = space.data_cards.lock().unwrap();
             assert_eq!(retained.specs, original);
             assert_eq!(retained.tasks.len(), 1);
             assert_eq!(retained.tasks["target"].id(), task_id);
@@ -1524,8 +1684,9 @@ mod tests {
         let path = parent.join("cards.json");
         let backup = directory.path().join("backup");
         let state = ServerState::in_memory();
-        let removed = state.image_sources().mint("Removed").unwrap();
-        let retained = state.image_sources().mint("Retained").unwrap();
+        let space = test_space(&state);
+        let removed = space.image_sources.mint("Removed").unwrap();
+        let retained = space.image_sources.mint("Retained").unwrap();
         let original: Vec<_> = [&removed.id, &retained.id]
             .into_iter()
             .map(|id| DataCardSpec {
@@ -1539,21 +1700,21 @@ mod tests {
         let task = tokio::spawn(std::future::pending::<()>());
         let abort = task.abort_handle();
         {
-            let mut cards = state.inner.data_cards.lock().unwrap();
+            let mut cards = space.data_cards.lock().unwrap();
             cards.spec_path = path.clone();
             cards.specs = original.clone();
             cards.tasks.insert(removed.id.clone(), task);
         }
         tokio::task::yield_now().await;
-        state.image_sources().revoke(&removed.id).unwrap();
+        space.image_sources.revoke(&removed.id).unwrap();
         std::fs::rename(&parent, &backup).unwrap();
         std::fs::write(&parent, b"not a directory").unwrap();
         assert!(matches!(
-            remove_face(&state, &removed.id),
+            remove_face(&space, &removed.id),
             Err(FaceUpdateError::Persist(_))
         ));
         {
-            let cards = state.inner.data_cards.lock().unwrap();
+            let cards = space.data_cards.lock().unwrap();
             assert!(
                 !cards.tasks.contains_key(&removed.id),
                 "revoked refresher must be removed even if persistence fails"
@@ -1566,9 +1727,9 @@ mod tests {
         assert_eq!(std::fs::read(&parent).unwrap(), b"not a directory");
         std::fs::remove_file(&parent).unwrap();
         std::fs::rename(&backup, &parent).unwrap();
-        remove_face(&state, &removed.id).expect("internal retry persists the removal");
+        remove_face(&space, &removed.id).expect("internal retry persists the removal");
         assert_eq!(load_specs(&path).unwrap(), original[1..]);
-        assert_eq!(state.inner.data_cards.lock().unwrap().specs, original[1..]);
+        assert_eq!(space.data_cards.lock().unwrap().specs, original[1..]);
         assert!(std::fs::read(&path).unwrap().ends_with(b"\n"));
         #[cfg(unix)]
         {
@@ -1584,17 +1745,17 @@ mod tests {
     #[tokio::test]
     async fn removing_an_absent_spec_still_cancels_its_task() {
         let state = ServerState::in_memory();
+        let space = test_space(&state);
         let task = tokio::spawn(std::future::pending::<()>());
         let abort = task.abort_handle();
-        state
-            .inner
+        space
             .data_cards
             .lock()
             .unwrap()
             .tasks
             .insert("absent".into(), task);
-        remove_face(&state, "absent").unwrap();
-        assert!(state.inner.data_cards.lock().unwrap().tasks.is_empty());
+        remove_face(&space, "absent").unwrap();
+        assert!(space.data_cards.lock().unwrap().tasks.is_empty());
         tokio::task::yield_now().await;
         assert!(abort.is_finished());
         state.shutdown();
@@ -1603,21 +1764,22 @@ mod tests {
     #[tokio::test]
     async fn successful_removal_cancels_only_the_matching_task_and_spec() {
         let state = ServerState::in_memory();
+        let space = test_space(&state);
         for id in ["removed", "retained"] {
-            create_face(&state, id, "weather").unwrap();
+            create_face(&state, &space, id, "weather").unwrap();
         }
         let removed = tokio::spawn(std::future::pending::<()>());
         let abort = removed.abort_handle();
         let retained = tokio::spawn(std::future::pending::<()>());
         let retained_id = retained.id();
         {
-            let mut cards = state.inner.data_cards.lock().unwrap();
+            let mut cards = space.data_cards.lock().unwrap();
             cards.tasks.insert("removed".into(), removed);
             cards.tasks.insert("retained".into(), retained);
         }
-        remove_face(&state, "removed").unwrap();
+        remove_face(&space, "removed").unwrap();
         {
-            let cards = state.inner.data_cards.lock().unwrap();
+            let cards = space.data_cards.lock().unwrap();
             assert_eq!(cards.specs.len(), 1);
             assert_eq!(cards.specs[0].source_id, "retained");
             assert_eq!(load_specs(&cards.spec_path).unwrap(), cards.specs);
@@ -1635,8 +1797,9 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("cards.json");
             let state = ServerState::in_memory();
-            let removed = state.image_sources().mint("Removed").unwrap();
-            let retained = state.image_sources().mint("Retained").unwrap();
+            let space = test_space(&state);
+            let removed = space.image_sources.mint("Removed").unwrap();
+            let retained = space.image_sources.mint("Retained").unwrap();
             let original: Vec<_> = [&removed.id, &retained.id]
                 .into_iter()
                 .map(|id| DataCardSpec {
@@ -1646,22 +1809,19 @@ mod tests {
                 })
                 .collect();
             persist_specs(&path, &original).unwrap();
-            state.image_sources().revoke(&removed.id).unwrap();
+            space.image_sources.revoke(&removed.id).unwrap();
             if blocked {
                 let blocker = directory.path().join("not-a-directory");
                 std::fs::write(&blocker, b"blocked").unwrap();
-                spawn_refreshers(
-                    &state,
-                    blocker.join("cards.json"),
-                    load_specs(&path).unwrap(),
-                );
+                space.data_cards.lock().unwrap().spec_path = blocker.join("cards.json");
+                spawn_refreshers(&state, &space, load_specs(&path).unwrap());
                 assert_eq!(load_specs(&path).unwrap(), original);
             } else {
-                start_data_cards(&state, path.clone()).unwrap();
+                start_at(&state, &space, path.clone()).unwrap();
                 assert_eq!(load_specs(&path).unwrap(), original[1..]);
             }
             {
-                let cards = state.inner.data_cards.lock().unwrap();
+                let cards = space.data_cards.lock().unwrap();
                 assert_eq!(cards.specs, original[1..]);
                 assert!(cards.tasks.is_empty());
             }
@@ -1676,6 +1836,7 @@ mod tests {
         std::fs::write(&blocker, b"retained bytes").expect("write blocker");
         let path = blocker.join("cards.json");
         let state = ServerState::in_memory();
+        let space = test_space(&state);
         let original = vec![DataCardSpec {
             source_id: "target".into(),
             refresh_seconds: 900,
@@ -1685,7 +1846,7 @@ mod tests {
         let task_id = task.id();
         let abort = task.abort_handle();
         {
-            let mut retained = state.inner.data_cards.lock().expect("data cards");
+            let mut retained = space.data_cards.lock().expect("data cards");
             retained.spec_path = path.clone();
             retained.specs = original.clone();
             retained.tasks.insert("target".into(), task);
@@ -1694,19 +1855,20 @@ mod tests {
         let result = match operation {
             "update" => update_face_fields(
                 &state,
+                &space,
                 &runtime,
                 "target",
                 &BTreeMap::from([("location".into(), "Berlin".into())]),
             )
             .map(|_| ()),
-            "create" => create_face(&state, "new-source", "weather").map(|_| ()),
-            "remove" => remove_face(&state, "target"),
+            "create" => create_face(&state, &space, "new-source", "weather").map(|_| ()),
+            "remove" => remove_face(&space, "target"),
             _ => panic!("unknown test operation"),
         };
         assert!(matches!(result, Err(FaceUpdateError::Persist(_))));
         tokio::task::yield_now().await;
         {
-            let retained = state.inner.data_cards.lock().expect("data cards");
+            let retained = space.data_cards.lock().expect("data cards");
             assert_eq!(retained.spec_path, path);
             assert_eq!(retained.specs, original);
             if operation == "remove" {
@@ -1747,9 +1909,9 @@ mod tests {
     #[tokio::test]
     async fn rewriting_one_spec_preserves_every_other_entry() {
         let state = ServerState::in_memory();
+        let space = test_space(&state);
         let path = {
-            state
-                .inner
+            space
                 .data_cards
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1781,8 +1943,7 @@ mod tests {
         )
         .expect("write fixture");
         {
-            let mut retained = state
-                .inner
+            let mut retained = space
                 .data_cards
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1795,6 +1956,7 @@ mod tests {
         ]);
         update_face_fields(
             &state,
+            &space,
             &tokio::runtime::Handle::current(),
             "target",
             &fields,

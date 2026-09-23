@@ -37,8 +37,9 @@ CREATE TABLE IF NOT EXISTS device_owners (
 CREATE TABLE IF NOT EXISTS instance (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ";
 
+#[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct AccountId(pub(crate) String);
+pub struct AccountId(pub String);
 
 impl fmt::Display for AccountId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -47,16 +48,18 @@ impl fmt::Display for AccountId {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Account {
-    pub(crate) id: AccountId,
-    pub(crate) email: String,
-    pub(crate) email_verified: bool,
-    pub(crate) created_at: DateTime<Utc>,
-    pub(crate) is_instance_owner: bool,
+#[doc(hidden)]
+pub struct Account {
+    pub id: AccountId,
+    pub email: String,
+    pub email_verified: bool,
+    pub created_at: DateTime<Utc>,
+    pub is_instance_owner: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DeviceState {
+#[doc(hidden)]
+pub enum DeviceState {
     Pending,
     Active,
 }
@@ -81,15 +84,17 @@ impl DeviceState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DeviceOwner {
-    pub(crate) device_id: String,
-    pub(crate) account_id: AccountId,
-    pub(crate) state: DeviceState,
-    pub(crate) claimed_at: DateTime<Utc>,
+#[doc(hidden)]
+pub struct DeviceOwner {
+    pub device_id: String,
+    pub account_id: AccountId,
+    pub state: DeviceState,
+    pub claimed_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
-pub(crate) enum IdentityError {
+#[doc(hidden)]
+pub enum IdentityError {
     #[error("identity database error: {0}")]
     Sqlite(String),
     #[error("an account already uses that email")]
@@ -100,12 +105,13 @@ pub(crate) enum IdentityError {
     NotFound,
 }
 
-pub(crate) struct IdentityStore {
+#[doc(hidden)]
+pub struct IdentityStore {
     connection: Mutex<Connection>,
 }
 
 impl IdentityStore {
-    pub(crate) fn open(path: &Path) -> Result<Self, IdentityError> {
+    pub fn open(path: &Path) -> Result<Self, IdentityError> {
         let parent = secure_file::usable_parent(path).ok_or_else(|| {
             IdentityError::Sqlite(format!(
                 "identity database path has no parent: {}",
@@ -137,7 +143,7 @@ impl IdentityStore {
         })
     }
 
-    pub(crate) fn account_count(&self) -> Result<u64, IdentityError> {
+    pub fn account_count(&self) -> Result<u64, IdentityError> {
         let connection = self.lock()?;
         let count: i64 = connection
             .query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))
@@ -146,7 +152,7 @@ impl IdentityStore {
             .map_err(|_| IdentityError::Sqlite(format!("invalid account count {count}")))
     }
 
-    pub(crate) fn create_account(
+    pub fn create_account(
         &self,
         email: &str,
         verified: bool,
@@ -179,18 +185,18 @@ impl IdentityStore {
         }
     }
 
-    pub(crate) fn account(&self, id: &AccountId) -> Result<Option<Account>, IdentityError> {
+    pub fn account(&self, id: &AccountId) -> Result<Option<Account>, IdentityError> {
         let connection = self.lock()?;
         select_account(&connection, "accounts.id = ?1", &id.0)
     }
 
-    pub(crate) fn account_by_email(&self, email: &str) -> Result<Option<Account>, IdentityError> {
+    pub fn account_by_email(&self, email: &str) -> Result<Option<Account>, IdentityError> {
         let email = normalize_email(email).ok_or(IdentityError::InvalidEmail)?;
         let connection = self.lock()?;
         select_account(&connection, "accounts.email = ?1", &email)
     }
 
-    pub(crate) fn accounts(&self) -> Result<Vec<Account>, IdentityError> {
+    pub fn accounts(&self) -> Result<Vec<Account>, IdentityError> {
         let connection = self.lock()?;
         let mut statement = connection
             .prepare(
@@ -204,7 +210,7 @@ impl IdentityStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)
     }
 
-    pub(crate) fn mark_email_verified(&self, id: &AccountId) -> Result<(), IdentityError> {
+    pub fn mark_email_verified(&self, id: &AccountId) -> Result<(), IdentityError> {
         let connection = self.lock()?;
         require_changed(
             connection
@@ -216,7 +222,7 @@ impl IdentityStore {
         )
     }
 
-    pub(crate) fn delete_account(&self, id: &AccountId) -> Result<Vec<String>, IdentityError> {
+    pub fn delete_account(&self, id: &AccountId) -> Result<Vec<String>, IdentityError> {
         let mut connection = self.lock()?;
         let transaction = connection.transaction().map_err(sqlite_error)?;
         let device_ids = {
@@ -240,7 +246,7 @@ impl IdentityStore {
         Ok(device_ids)
     }
 
-    pub(crate) fn create_session(
+    pub fn create_session(
         &self,
         account: &AccountId,
         now: DateTime<Utc>,
@@ -264,7 +270,7 @@ impl IdentityStore {
         Ok(plaintext)
     }
 
-    pub(crate) fn session_account(
+    pub fn session_account(
         &self,
         plaintext: &str,
         now: DateTime<Utc>,
@@ -308,7 +314,7 @@ impl IdentityStore {
         Ok(Some(account))
     }
 
-    pub(crate) fn delete_session(&self, plaintext: &str) -> Result<(), IdentityError> {
+    pub fn delete_session(&self, plaintext: &str) -> Result<(), IdentityError> {
         let digest = token_digest(plaintext);
         let connection = self.lock()?;
         connection
@@ -320,7 +326,7 @@ impl IdentityStore {
         Ok(())
     }
 
-    pub(crate) fn delete_sessions_for(&self, account: &AccountId) -> Result<(), IdentityError> {
+    pub fn delete_sessions_for(&self, account: &AccountId) -> Result<(), IdentityError> {
         let connection = self.lock()?;
         connection
             .execute("DELETE FROM sessions WHERE account_id = ?1", [&account.0])
@@ -328,7 +334,7 @@ impl IdentityStore {
         Ok(())
     }
 
-    pub(crate) fn create_login_token(
+    pub fn create_login_token(
         &self,
         email: &str,
         now: DateTime<Utc>,
@@ -351,7 +357,7 @@ impl IdentityStore {
         Ok(plaintext)
     }
 
-    pub(crate) fn consume_login_token(
+    pub fn consume_login_token(
         &self,
         plaintext: &str,
         now: DateTime<Utc>,
@@ -375,7 +381,7 @@ impl IdentityStore {
         Ok(email)
     }
 
-    pub(crate) fn account_for_google(&self, sub: &str) -> Result<Option<Account>, IdentityError> {
+    pub fn account_for_google(&self, sub: &str) -> Result<Option<Account>, IdentityError> {
         let connection = self.lock()?;
         connection
             .query_row(
@@ -391,7 +397,7 @@ impl IdentityStore {
             .map_err(sqlite_error)
     }
 
-    pub(crate) fn link_google(&self, sub: &str, account: &AccountId) -> Result<(), IdentityError> {
+    pub fn link_google(&self, sub: &str, account: &AccountId) -> Result<(), IdentityError> {
         let connection = self.lock()?;
         connection
             .execute(
@@ -402,7 +408,7 @@ impl IdentityStore {
         Ok(())
     }
 
-    pub(crate) fn assign_device(
+    pub fn assign_device(
         &self,
         device_id: &str,
         account: &AccountId,
@@ -420,10 +426,7 @@ impl IdentityStore {
         Ok(())
     }
 
-    pub(crate) fn device_owner(
-        &self,
-        device_id: &str,
-    ) -> Result<Option<DeviceOwner>, IdentityError> {
+    pub fn device_owner(&self, device_id: &str) -> Result<Option<DeviceOwner>, IdentityError> {
         let connection = self.lock()?;
         connection
             .query_row(
@@ -445,10 +448,7 @@ impl IdentityStore {
             .transpose()
     }
 
-    pub(crate) fn devices_for(
-        &self,
-        account: &AccountId,
-    ) -> Result<Vec<DeviceOwner>, IdentityError> {
+    pub fn devices_for(&self, account: &AccountId) -> Result<Vec<DeviceOwner>, IdentityError> {
         let connection = self.lock()?;
         let mut statement = connection
             .prepare(
@@ -470,7 +470,7 @@ impl IdentityStore {
             .collect()
     }
 
-    pub(crate) fn activate_device(&self, device_id: &str) -> Result<(), IdentityError> {
+    pub fn activate_device(&self, device_id: &str) -> Result<(), IdentityError> {
         let connection = self.lock()?;
         require_changed(
             connection
@@ -482,7 +482,7 @@ impl IdentityStore {
         )
     }
 
-    pub(crate) fn release_device(&self, device_id: &str) -> Result<(), IdentityError> {
+    pub fn release_device(&self, device_id: &str) -> Result<(), IdentityError> {
         let connection = self.lock()?;
         connection
             .execute(
@@ -493,7 +493,7 @@ impl IdentityStore {
         Ok(())
     }
 
-    pub(crate) fn stale_pending(
+    pub fn stale_pending(
         &self,
         claimed_before: DateTime<Utc>,
     ) -> Result<Vec<String>, IdentityError> {
@@ -510,7 +510,7 @@ impl IdentityStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_error)
     }
 
-    pub(crate) fn signups_open(&self) -> Result<Option<bool>, IdentityError> {
+    pub fn signups_open(&self) -> Result<Option<bool>, IdentityError> {
         let connection = self.lock()?;
         let value: Option<String> = connection
             .query_row(
@@ -531,7 +531,7 @@ impl IdentityStore {
             .transpose()
     }
 
-    pub(crate) fn set_signups_open(&self, open: bool) -> Result<(), IdentityError> {
+    pub fn set_signups_open(&self, open: bool) -> Result<(), IdentityError> {
         let connection = self.lock()?;
         connection
             .execute(

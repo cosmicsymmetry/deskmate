@@ -22,11 +22,37 @@ use support::{HttpTestServer as TestServer, json_body, replace_file_with_directo
 const ADMIN_TOKEN: &str = "in-memory-admin-token";
 
 async fn spawn_with(state: ServerState, web_root: Option<std::path::PathBuf>) -> TestServer {
+    support::owner_account(&state);
     support::spawn_http(app_with_web(support::with_fake_faces(state), web_root)).await
+}
+
+fn mint_test_device(state: &ServerState) -> server::registry::DeviceIdentity {
+    let owner = support::owner_account(state);
+    support::mint_owned_device(state, &owner)
+}
+
+fn device_config_path(state: &ServerState, device_id: &str) -> std::path::PathBuf {
+    let owner = support::owner_account(state);
+    state
+        .account_space(&owner.id)
+        .root
+        .join("devices")
+        .join(format!("{device_id}.json"))
+}
+
+fn account_root(config_root: &std::path::Path) -> std::path::PathBuf {
+    std::fs::read_dir(config_root.join("accounts"))
+        .expect("accounts directory")
+        .next()
+        .expect("owner account")
+        .expect("account entry")
+        .path()
 }
 
 async fn spawn() -> (TestServer, ServerState) {
     let state = ServerState::in_memory();
+    // Minting a device needs an owner to give it to.
+    support::owner_account(&state);
     let server = spawn_with(state.clone(), None).await;
     (server, state)
 }
@@ -105,7 +131,7 @@ async fn event_stream_ends_when_shutdown_begins_without_a_socket() {
     use tokio::time::timeout;
 
     let state = ServerState::in_memory();
-    let device = state.registry().mint().expect("mint device");
+    let device = mint_test_device(&state);
     let response = app(state.clone())
         .oneshot(event_request(&device.device_id))
         .await
@@ -140,7 +166,7 @@ async fn event_stream_opened_after_shutdown_ends_immediately() {
     use std::time::Duration;
 
     let state = ServerState::in_memory();
-    let device = state.registry().mint().expect("mint device");
+    let device = mint_test_device(&state);
     state.begin_shutdown();
     let response = app(state)
         .oneshot(event_request(&device.device_id))
@@ -189,6 +215,7 @@ async fn open_event_stream_allows_graceful_server_shutdown() {
     use tokio::time::timeout;
 
     let state = ServerState::in_memory();
+    support::owner_account(&state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind shutdown test server");
@@ -388,8 +415,9 @@ async fn an_unlinked_device_reports_malformed_saved_settings_without_rewriting_t
         FirmwareCatalog::in_memory(),
         root.path().to_path_buf(),
     );
-    let device = state.registry().mint().expect("mint device");
-    let path = root.path().join(format!("{}.json", device.device_id));
+    let device = mint_test_device(&state);
+    let path = device_config_path(&state, &device.device_id);
+    std::fs::create_dir_all(path.parent().unwrap()).expect("create devices directory");
     let saved = b"{ definitely not json";
     std::fs::write(&path, saved).expect("write malformed saved settings");
 
@@ -419,8 +447,9 @@ async fn an_unlinked_device_reports_invalid_saved_settings_without_rewriting_the
         FirmwareCatalog::in_memory(),
         root.path().to_path_buf(),
     );
-    let device = state.registry().mint().expect("mint device");
-    let path = root.path().join(format!("{}.json", device.device_id));
+    let device = mint_test_device(&state);
+    let path = device_config_path(&state, &device.device_id);
+    std::fs::create_dir_all(path.parent().unwrap()).expect("create devices directory");
     let mut invalid =
         serde_json::to_value(app_core::AppConfig::default()).expect("default config JSON");
     invalid["cards"][0]["dwell_seconds"] = serde_json::json!(app_core::MIN_DWELL_SECONDS - 1);
@@ -460,26 +489,27 @@ async fn unsupported_device_config_does_not_block_startup_listing_or_other_devic
         FirmwareCatalog::in_memory(),
         root.path().to_path_buf(),
     );
-    let valid = initial.registry().mint().expect("mint valid device");
-    let unsupported = initial.registry().mint().expect("mint unsupported device");
-    let malformed = initial.registry().mint().expect("mint malformed device");
-    let unreadable = initial.registry().mint().expect("mint unreadable device");
+    let valid = mint_test_device(&initial);
+    let unsupported = mint_test_device(&initial);
+    let malformed = mint_test_device(&initial);
+    let unreadable = mint_test_device(&initial);
 
     let mut valid_config = app_core::AppConfig::default();
     valid_config.preferences.timezone = "Asia/Tbilisi".into();
     let valid_bytes = serde_json::to_vec_pretty(&valid_config).expect("encode valid config");
-    let valid_path = root.path().join(format!("{}.json", valid.device_id));
+    let valid_path = device_config_path(&initial, &valid.device_id);
+    std::fs::create_dir_all(valid_path.parent().unwrap()).expect("create devices directory");
     std::fs::write(&valid_path, &valid_bytes).expect("write valid config");
 
     let unsupported_bytes = br#"{"schema_version":11,"future_body":true}"#;
-    let unsupported_path = root.path().join(format!("{}.json", unsupported.device_id));
+    let unsupported_path = device_config_path(&initial, &unsupported.device_id);
     std::fs::write(&unsupported_path, unsupported_bytes).expect("write unsupported config");
 
     let malformed_bytes = b"{ definitely not json";
-    let malformed_path = root.path().join(format!("{}.json", malformed.device_id));
+    let malformed_path = device_config_path(&initial, &malformed.device_id);
     std::fs::write(&malformed_path, malformed_bytes).expect("write malformed config");
 
-    let unreadable_path = root.path().join(format!("{}.json", unreadable.device_id));
+    let unreadable_path = device_config_path(&initial, &unreadable.device_id);
     std::fs::create_dir(&unreadable_path).expect("create unreadable stand-in");
     drop(initial);
 
@@ -1174,7 +1204,8 @@ async fn saving_a_configuration_removes_an_abandoned_face_and_preserves_a_declar
             .await
             .contains(&abandoned)
     );
-    let bytes = std::fs::read(root.path().join("data-cards.json")).expect("persisted face specs");
+    let bytes = std::fs::read(account_root(root.path()).join("data-cards.json"))
+        .expect("persisted face specs");
     let persisted: serde_json::Value =
         serde_json::from_slice(&bytes).expect("persisted face specs parse");
     let specs = persisted.as_array().expect("persisted face spec list");
@@ -1195,9 +1226,9 @@ async fn config_save_succeeds_when_source_reconciliation_persistence_fails() {
     let device = mint_device(&client, &server).await;
     let source = mint_face_source(&client, &server, "Weather", "weather").await;
     let config = snapshot(&client, &server, &device.device_id).await["config"].clone();
-    let spec_path = root.path().join("data-cards.json");
+    let spec_path = account_root(root.path()).join("data-cards.json");
     let before = std::fs::read(&spec_path).expect("face specs");
-    replace_file_with_directory(&root.path().join("image-sources.json"));
+    replace_file_with_directory(&account_root(root.path()).join("image-sources.json"));
 
     let saved = save_config(&client, &server, &device.device_id, &config).await;
 
@@ -1219,7 +1250,7 @@ async fn config_save_succeeds_when_face_reconciliation_persistence_fails() {
     let device = mint_device(&client, &server).await;
     let source = mint_face_source(&client, &server, "Weather", "weather").await;
     let config = snapshot(&client, &server, &device.device_id).await["config"].clone();
-    let spec_path = root.path().join("data-cards.json");
+    let spec_path = account_root(root.path()).join("data-cards.json");
     replace_file_with_directory(&spec_path);
 
     let saved = save_config(&client, &server, &device.device_id, &config).await;

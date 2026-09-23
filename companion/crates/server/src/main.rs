@@ -2,11 +2,11 @@
 //! serves the device and companion routes until it receives `SIGINT`/`SIGTERM`,
 //! following the deployment contract in `deploy/README.md`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use server::firmware::FirmwareCatalog;
-use server::{ServerState, app_with_web};
+use server::{ServerOptions, ServerState, app_with_web};
 
 // Loopback, not `0.0.0.0`: per `deploy/README.md` §4, a Cloudflare Tunnel is
 // the *only* sanctioned ingress. A default that binds every interface would
@@ -281,15 +281,15 @@ async fn main() {
             web_dir.display()
         );
     }
-    let data_card_spec_path = data_card_spec_path(&config_dir);
     let firmware_version = required_firmware_version(std::env::var("DESKMATE_FIRMWARE_VERSION"));
     let admin_token = std::env::var("DESKMATE_ADMIN_TOKEN")
         .expect("DESKMATE_ADMIN_TOKEN must be set -- see deploy/README.md");
     let google_oauth = google_oauth_config_from_env();
+    let server_options = server_options_from_env();
 
     // `config_dir` is cloned because the integration store below opens against
     // it after the state has taken ownership.
-    let state = ServerState::new(
+    let state = ServerState::new_with_options(
         admin_token,
         FirmwareCatalog::new(firmware_dir, firmware_version).unwrap_or_else(|error| {
             panic!(
@@ -298,6 +298,7 @@ async fn main() {
             )
         }),
         config_dir.clone(),
+        server_options,
     );
 
     if let Some(oauth) = google_oauth {
@@ -330,8 +331,8 @@ async fn main() {
     } else {
         tracing::info!("no faces package configured (DESKMATE_FACES_DIR unset)");
     }
-    server::start_data_cards(&state, data_card_spec_path)
-        .unwrap_or_else(|error| panic!("DESKMATE_DATA_CARDS is unreadable: {error}"));
+    server::start_data_cards(&state)
+        .unwrap_or_else(|error| panic!("an account's data-cards.json is unreadable: {error}"));
 
     let listener = tokio::net::TcpListener::bind(&bind_address)
         .await
@@ -359,21 +360,31 @@ async fn main() {
         .expect("device runtime shutdown worker panicked");
 }
 
+fn server_options_from_env() -> ServerOptions {
+    let public_url = std::env::var("DESKMATE_PUBLIC_URL")
+        .expect("DESKMATE_PUBLIC_URL must be set -- see deploy/README.md");
+    let public_url = url::Url::parse(&public_url)
+        .expect("DESKMATE_PUBLIC_URL must be an absolute URL -- see deploy/README.md");
+    let signups_default = match std::env::var("DESKMATE_SIGNUPS").as_deref() {
+        Ok("open") => true,
+        Ok("closed") | Err(std::env::VarError::NotPresent) => false,
+        Ok(_) => panic!("DESKMATE_SIGNUPS must be either 'open' or 'closed'"),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("DESKMATE_SIGNUPS must be valid Unicode")
+        }
+    };
+    ServerOptions {
+        public_url,
+        signups_default,
+        ..ServerOptions::default()
+    }
+}
+
 fn required_firmware_version(value: Result<String, std::env::VarError>) -> String {
     value.expect(
         "DESKMATE_FIRMWARE_VERSION must be set to the published image's exact \
          firmware/version.txt value -- see deploy/README.md",
     )
-}
-
-/// Where the server-rendered card specs live.
-///
-/// `DESKMATE_DATA_CARDS` overrides it; the default sits beside the rest of the
-/// server's state in the config directory, so a deployment that backs that up
-/// backs up its cards too.
-fn data_card_spec_path(config_dir: &Path) -> PathBuf {
-    std::env::var("DESKMATE_DATA_CARDS")
-        .map_or_else(|_| config_dir.join("data-cards.json"), PathBuf::from)
 }
 
 /// How to run the faces package, if this deployment has one.

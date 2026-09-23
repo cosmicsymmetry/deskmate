@@ -44,9 +44,26 @@ pub(crate) fn routes() -> Router<ServerState> {
 async fn dashboard(
     State(state): State<ServerState>,
     _operator: OperatorAuthenticated,
-) -> Html<String> {
-    let devices = state
-        .registry_device_ids()
+) -> Result<Html<String>, crate::app_api::AppApiError> {
+    let lookup = state.clone();
+    let (space, device_ids) = tokio::task::spawn_blocking(move || {
+        let space = lookup.operator_space()?;
+        let devices = lookup
+            .identity()
+            .devices_for(&space.account_id)
+            .map_err(|error| crate::app_api::AppApiError::Internal {
+                message: error.to_string(),
+            })?
+            .into_iter()
+            .map(|owner| owner.device_id)
+            .collect::<Vec<_>>();
+        Ok::<_, crate::app_api::AppApiError>((space, devices))
+    })
+    .await
+    .map_err(|_| crate::app_api::AppApiError::Internal {
+        message: "a worker task failed".into(),
+    })??;
+    let devices = device_ids
         .into_iter()
         .map(|id| {
             let connected = state.device_is_linked(&id);
@@ -71,8 +88,8 @@ async fn dashboard(
         None => Vec::new(),
     };
 
-    let sources = state
-        .image_sources()
+    let sources = space
+        .image_sources
         .summaries(Utc::now())
         .into_iter()
         .map(|summary| SourceRow {
@@ -84,11 +101,11 @@ async fn dashboard(
         })
         .collect();
 
-    Html(view::render_dashboard(&DashboardModel {
+    Ok(Html(view::render_dashboard(&DashboardModel {
         devices,
         integrations,
         sources,
-    }))
+    })))
 }
 
 /// Always reachable: a 401 with no way to authenticate would make the page

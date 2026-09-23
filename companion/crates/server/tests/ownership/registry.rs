@@ -332,16 +332,16 @@ fn unreadable_registry_degrades_to_empty() {
 #[test]
 fn mint_does_not_release_a_token_when_persistence_fails() {
     // Catches returning a credential that works only in memory: the config
-    // root is a regular file, so its registry child cannot be atomically saved.
+    // registry path is a directory, so it cannot be atomically replaced.
     let temp = tempfile::tempdir().expect("registry test temp dir");
-    let config_root = temp.path().join("not-a-directory");
-    std::fs::write(&config_root, b"blocks registry directory creation")
-        .expect("create unwritable registry parent");
+    let config_root = temp.path().join("configs");
     let state = ServerState::new(
         "failed-mint-admin-token".to_string(),
         server::firmware::FirmwareCatalog::in_memory(),
-        config_root,
+        config_root.clone(),
     );
+    std::fs::create_dir(config_root.join("device-identities.json"))
+        .expect("block registry replacement");
 
     assert!(state.registry().mint().is_err());
     assert!(!state.registry().contains_device("dev-0001"));
@@ -352,14 +352,15 @@ async fn failed_mint_http_response_keeps_the_store_error_contract() {
     const ADMIN_TOKEN: &str = "failed-mint-http-admin-token";
 
     let temp = tempfile::tempdir().expect("registry test temp dir");
-    let config_root = temp.path().join("not-a-directory");
+    let config_root = temp.path().join("configs");
     let state = ServerState::new(
         ADMIN_TOKEN.to_string(),
         server::firmware::FirmwareCatalog::in_memory(),
         config_root.clone(),
     );
-    std::fs::write(&config_root, b"blocks registry directory creation")
-        .expect("create unwritable registry parent");
+    super::support::owner_account(&state);
+    std::fs::create_dir(config_root.join("device-identities.json"))
+        .expect("block registry replacement");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test server");
@@ -384,7 +385,7 @@ async fn failed_mint_http_response_keeps_the_store_error_contract() {
     assert!(
         body["message"]
             .as_str()
-            .is_some_and(|message| message.starts_with("create device identity store directory:")),
+            .is_some_and(|message| message.starts_with("sync and replace device identity store:")),
         "unexpected failed-mint response: {body}"
     );
 }

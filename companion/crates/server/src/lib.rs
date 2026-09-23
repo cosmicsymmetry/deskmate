@@ -13,7 +13,9 @@
 //! guard every route, on top of the per-route defenses in `device_link` and
 //! `firmware`.
 
+mod accounts;
 mod admin;
+pub use accounts::AccountSpace;
 // The browser companion's authenticated HTTP API.
 mod app_api;
 mod auth;
@@ -27,14 +29,14 @@ mod device_link;
 // The SSRF egress guard, and the one HTTP client the provider layer is
 // allowed to use.
 mod egress;
+mod entitlements;
+pub use entitlements::{Edition, Entitlements, SelfHosted};
 // The server-authored data-card faces: the SVG authoring (`faces`) and the
 // rasterizer that turns one into the frame a picture producer would have
 // pushed (`face_render`).
 pub mod firmware;
-// This module is the foundation for the account routes added by the following
-// plan tasks. Keep its crate-private surface intact while those callers land.
-#[allow(dead_code)]
-mod identity;
+#[doc(hidden)]
+pub mod identity;
 mod image_ingest;
 mod image_sources;
 mod image_staleness;
@@ -120,8 +122,10 @@ pub struct ServerState {
 
 struct StateInner {
     registry: Registry,
-    image_sources: Arc<image_sources::ImageSourceStore>,
-    data_cards: Mutex<data_cards::DataCardState>,
+    identity: identity::IdentityStore,
+    config_directory: PathBuf,
+    accounts: Mutex<HashMap<identity::AccountId, Arc<AccountSpace>>>,
+    face_catalog: Mutex<data_cards::FaceCatalogState>,
     producer_credentials: Arc<producer_credentials::ProducerCredentialStore>,
     admin_token: String,
     /// How the per-device `app-core` runtime is paced.
@@ -140,7 +144,7 @@ struct StateInner {
     /// carries a cookie, independently of any configured OAuth provider.
     sessions: oauth::session::SessionSigner,
     firmware: FirmwareCatalog,
-    configs: store::DeviceConfigStores,
+    options: ServerOptions,
     /// The OAuth integration runtime, attached at startup by `set_integrations`
     /// when integrations are configured. `OnceLock` so existing constructors are
     /// untouched and a deployment without integrations simply never sets it.
@@ -156,13 +160,37 @@ struct StateInner {
     /// socket task that outlives the handler which acquired it.
     link_slots: Arc<tokio::sync::Semaphore>,
     #[cfg(test)]
-    image_notifications: Mutex<
-        Vec<(
-            String,
-            [u8; protocol::ASSET_DIGEST_LEN],
-            ImageNotificationOrigin,
-        )>,
-    >,
+    image_notifications: Mutex<Vec<ImageNotification>>,
+}
+
+#[cfg(test)]
+type ImageNotification = (
+    identity::AccountId,
+    String,
+    [u8; protocol::ASSET_DIGEST_LEN],
+    ImageNotificationOrigin,
+    Vec<registry::DeviceId>,
+);
+
+pub struct ServerOptions {
+    pub public_url: url::Url,
+    pub edition: Edition,
+    pub entitlements: Arc<dyn Entitlements>,
+    pub signups_default: bool,
+    pub extra_routes: Option<Router<ServerState>>,
+}
+
+impl Default for ServerOptions {
+    fn default() -> Self {
+        Self {
+            public_url: url::Url::parse("https://deskmate.test/")
+                .expect("the default public URL is valid"),
+            edition: Edition::SelfHosted,
+            entitlements: Arc::new(SelfHosted),
+            signups_default: false,
+            extra_routes: None,
+        }
+    }
 }
 
 /// The faces package a freshly built state starts with.
@@ -190,6 +218,21 @@ pub(crate) enum ImageNotificationOrigin {
 impl ServerState {
     #[must_use]
     pub fn new(admin_token: String, firmware: FirmwareCatalog, config_directory: PathBuf) -> Self {
+        Self::new_with_options(
+            admin_token,
+            firmware,
+            config_directory,
+            ServerOptions::default(),
+        )
+    }
+
+    #[must_use]
+    pub fn new_with_options(
+        admin_token: String,
+        firmware: FirmwareCatalog,
+        config_directory: PathBuf,
+        options: ServerOptions,
+    ) -> Self {
         let registry = Registry::load(config_directory.join(DEVICE_IDENTITY_STORE_FILE));
         Self::with_config_temp_dir(
             admin_token,
@@ -198,6 +241,7 @@ impl ServerState {
             registry,
             None,
             app_core::RuntimeOptions::default(),
+            options,
         )
     }
 
@@ -208,27 +252,26 @@ impl ServerState {
         registry: Registry,
         config_temp_dir: Option<tempfile::TempDir>,
         runtime_options: app_core::RuntimeOptions,
+        options: ServerOptions,
     ) -> Self {
-        let data_card_spec_path = config_directory.join("data-cards.json");
-        let image_sources = image_sources::ImageSourceStore::new(config_directory.clone())
-            .expect("failed to load the image-source store");
+        let identity = identity::IdentityStore::open(&config_directory.join("identity.db"))
+            .expect("failed to open the identity store");
         let producer_credentials =
             producer_credentials::ProducerCredentialStore::open(config_directory.clone())
                 .expect("failed to load the producer credential store");
         Self {
             inner: Arc::new(StateInner {
                 registry,
-                image_sources: Arc::new(image_sources),
-                data_cards: Mutex::new(data_cards::DataCardState::new(
-                    data_card_spec_path,
-                    default_faces(),
-                )),
+                identity,
+                config_directory,
+                accounts: Mutex::new(HashMap::new()),
+                face_catalog: Mutex::new(data_cards::FaceCatalogState::new(default_faces())),
                 producer_credentials: Arc::new(producer_credentials),
                 sessions: oauth::session::SessionSigner::from_admin_token(&admin_token),
                 admin_token,
                 runtime_options,
                 firmware,
-                configs: store::DeviceConfigStores::new(config_directory),
+                options,
                 integrations: OnceLock::new(),
                 _config_temp_dir: config_temp_dir,
                 shutdown: tokio::sync::watch::channel(false).0,
@@ -269,6 +312,7 @@ impl ServerState {
             Registry::new(),
             Some(config_temp_dir),
             runtime_options,
+            ServerOptions::default(),
         )
     }
 
@@ -282,24 +326,107 @@ impl ServerState {
         &self.inner.registry
     }
 
+    #[doc(hidden)]
+    #[must_use]
+    pub fn identity(&self) -> &identity::IdentityStore {
+        &self.inner.identity
+    }
+
+    #[doc(hidden)]
+    pub fn account_space(&self, account: &identity::AccountId) -> Arc<AccountSpace> {
+        let (space, opened) = {
+            let mut spaces = self
+                .inner
+                .accounts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(space) = spaces.get(account) {
+                (Arc::clone(space), false)
+            } else {
+                let space = Arc::new(AccountSpace::open(
+                    &self.inner.config_directory,
+                    account.clone(),
+                ));
+                spaces.insert(account.clone(), Arc::clone(&space));
+                (space, true)
+            }
+        };
+        if opened && let Err(error) = data_cards::start_account_data_cards(self, &space) {
+            tracing::error!(
+                account_id = %account,
+                %error,
+                "the account's server-rendered cards could not be started"
+            );
+        }
+        space
+    }
+
+    // Task 7 uses this when account deletion evicts the cached space.
+    #[allow(dead_code)]
+    pub(crate) fn drop_account_space(
+        &self,
+        account: &identity::AccountId,
+    ) -> Option<Arc<AccountSpace>> {
+        self.inner
+            .accounts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(account)
+    }
+
+    pub(crate) fn space_for_device(&self, device_id: &str) -> Option<Arc<AccountSpace>> {
+        let owner = self.identity().device_owner(device_id).ok()??;
+        Some(self.account_space(&owner.account_id))
+    }
+
+    pub(crate) fn operator_space(&self) -> Result<Arc<AccountSpace>, app_api::AppApiError> {
+        let owner = self
+            .identity()
+            .accounts()
+            .map_err(|error| app_api::AppApiError::Internal {
+                message: error.to_string(),
+            })?
+            .into_iter()
+            .find(|account| account.is_instance_owner)
+            .ok_or_else(|| app_api::AppApiError::NotFound {
+                message: "set up this server first".into(),
+            })?;
+        Ok(self.account_space(&owner.id))
+    }
+
+    pub(crate) fn instance_owner(&self) -> Result<identity::Account, identity::IdentityError> {
+        self.identity()
+            .accounts()?
+            .into_iter()
+            .find(|account| account.is_instance_owner)
+            .ok_or(identity::IdentityError::NotFound)
+    }
+
+    // Task 5 uses these in the instance and email-link routes.
+    #[allow(dead_code)]
+    pub(crate) fn public_url(&self) -> &url::Url {
+        &self.inner.options.public_url
+    }
+
+    pub(crate) fn entitlements(&self) -> &dyn Entitlements {
+        self.inner.options.entitlements.as_ref()
+    }
+
+    // Task 5 reports the edition from the instance route.
+    #[allow(dead_code)]
+    pub(crate) fn edition(&self) -> Edition {
+        self.inner.options.edition
+    }
+
     /// The operator session signer. Always present -- see the field's own note.
     pub(crate) fn sessions(&self) -> &oauth::session::SessionSigner {
         &self.inner.sessions
-    }
-
-    pub(crate) fn image_sources(&self) -> &Arc<image_sources::ImageSourceStore> {
-        &self.inner.image_sources
     }
 
     pub(crate) fn producer_credentials(
         &self,
     ) -> &Arc<producer_credentials::ProducerCredentialStore> {
         &self.inner.producer_credentials
-    }
-
-    /// Every minted device id, for the management surface's device table.
-    pub(crate) fn registry_device_ids(&self) -> Vec<String> {
-        self.inner.registry.device_ids()
     }
 
     /// Whether a device currently holds a live link. A board at rest is the
@@ -332,10 +459,6 @@ impl ServerState {
         Arc::clone(&self.inner.link_slots)
     }
 
-    pub(crate) fn configs(&self) -> &store::DeviceConfigStores {
-        &self.inner.configs
-    }
-
     /// The OAuth integration runtime, if one was attached at startup.
     #[must_use]
     pub fn integrations(&self) -> Option<Arc<oauth::IntegrationRuntime>> {
@@ -354,28 +477,45 @@ impl ServerState {
     /// whether the visible card subscribes to this source.
     pub(crate) fn notify_image_source_changed(
         &self,
+        account: &identity::AccountId,
         source_id: String,
         digest: [u8; protocol::ASSET_DIGEST_LEN],
         origin: ImageNotificationOrigin,
     ) {
-        #[cfg(test)]
-        self.inner
-            .image_notifications
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push((source_id.clone(), digest, origin));
-        let runtimes: Vec<_> = {
+        let (device_ids, runtimes) = {
             let links = self
                 .inner
                 .device_links
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            links
-                .values()
-                .filter(|link| link.is_live())
-                .filter_map(|link| link.runtime())
-                .collect()
+            let matching = links
+                .iter()
+                .filter(|(_, link)| link.account_id == *account && link.is_live())
+                .collect::<Vec<_>>();
+            let device_ids = matching
+                .iter()
+                .map(|(device_id, _)| (*device_id).clone())
+                .collect::<Vec<_>>();
+            let runtimes = matching
+                .into_iter()
+                .filter_map(|(_, link)| link.runtime())
+                .collect::<Vec<_>>();
+            (device_ids, runtimes)
         };
+        #[cfg(test)]
+        self.inner
+            .image_notifications
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((
+                account.clone(),
+                source_id.clone(),
+                digest,
+                origin,
+                device_ids,
+            ));
+        #[cfg(not(test))]
+        let _ = device_ids;
         tokio::task::spawn_blocking(move || {
             if let Err(error) = notify_runtimes(runtimes, |runtime| {
                 runtime.image_source_updated(&source_id, digest)
@@ -386,13 +526,7 @@ impl ServerState {
     }
 
     #[cfg(test)]
-    fn image_notifications_for_test(
-        &self,
-    ) -> Vec<(
-        String,
-        [u8; protocol::ASSET_DIGEST_LEN],
-        ImageNotificationOrigin,
-    )> {
+    fn image_notifications_for_test(&self) -> Vec<ImageNotification> {
         self.inner
             .image_notifications
             .lock()
@@ -403,14 +537,28 @@ impl ServerState {
     /// Atomically reserves the one live ownership slot for `device_id`.
     /// The reservation happens before the 101 response, so two simultaneous
     /// upgrades cannot both believe they won.
-    pub(crate) fn claim_link(&self, device_id: registry::DeviceId) -> Option<LinkLease> {
+    pub(crate) fn claim_link(
+        &self,
+        device_id: registry::DeviceId,
+        account_id: identity::AccountId,
+    ) -> Option<LinkLease> {
         let link = {
             let mut links = self
                 .inner
                 .device_links
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            Arc::clone(links.entry(device_id).or_default())
+            match links.entry(device_id) {
+                std::collections::hash_map::Entry::Occupied(entry) => {
+                    if entry.get().account_id != account_id {
+                        return None;
+                    }
+                    Arc::clone(entry.get())
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    Arc::clone(entry.insert(Arc::new(LiveLink::new(account_id))))
+                }
+            }
         };
         if !link.claim() {
             return None;
@@ -498,8 +646,8 @@ fn warn_image_notification_failure(
     }
 }
 
-#[derive(Default)]
 pub(crate) struct LiveLink {
+    account_id: identity::AccountId,
     live: AtomicBool,
     runtime: Mutex<Option<ManagedRuntime>>,
     last_seen_unix_ms: Arc<AtomicU64>,
@@ -511,6 +659,15 @@ struct ManagedRuntime {
 }
 
 impl LiveLink {
+    fn new(account_id: identity::AccountId) -> Self {
+        Self {
+            account_id,
+            live: AtomicBool::new(false),
+            runtime: Mutex::new(None),
+            last_seen_unix_ms: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
     fn claim(&self) -> bool {
         self.live
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -626,7 +783,7 @@ pub fn app_with_web(state: ServerState, web_root: Option<PathBuf>) -> Router {
         .layer(GlobalConcurrencyLimitLayer::new(MAX_CONCURRENT_REQUESTS))
         .timeout(REQUEST_TIMEOUT);
 
-    let router = Router::new()
+    let mut router = Router::new()
         .route("/v1/device/link", get(device_link::handler))
         .route("/v1/device/firmware", get(firmware::check))
         .route("/v1/firmware/{filename}", get(firmware::download))
@@ -634,9 +791,11 @@ pub fn app_with_web(state: ServerState, web_root: Option<PathBuf>) -> Router {
         .merge(app_api::routes())
         .merge(images::routes())
         .merge(manage::routes())
-        .merge(oauth::routes::routes())
-        .layer(middleware)
-        .with_state(state);
+        .merge(oauth::routes::routes());
+    if let Some(extra_routes) = state.inner.options.extra_routes.clone() {
+        router = router.merge(extra_routes);
+    }
+    let router = router.layer(middleware).with_state(state);
     match web_root {
         Some(root) => router.merge(web::routes(web::WebRoot::new(root))),
         None => router,
@@ -779,9 +938,14 @@ mod tests {
         // Catches reintroducing the production defect's path derivation in the
         // test constructor, where it would teach callers the wrong pattern.
         let state = ServerState::in_memory();
+        let account = state
+            .identity()
+            .create_account("owner@example.com", true, true, chrono::Utc::now())
+            .unwrap();
+        let space = state.account_space(&account.id);
         let identity = state.registry().mint().expect("mint identity");
-        let config_path = state
-            .configs()
+        let config_path = space
+            .configs
             .for_device(&identity.device_id)
             .store
             .path()
@@ -798,17 +962,50 @@ mod tests {
     #[test]
     fn link_claim_refuses_a_second_live_owner_and_releases_on_drop() {
         let state = ServerState::in_memory();
+        let account = identity::AccountId("acc_owner".into());
         let first = state
-            .claim_link("dev-0001".into())
+            .claim_link("dev-0001".into(), account.clone())
             .expect("first owner claims the link");
         assert!(
-            state.claim_link("dev-0001".into()).is_none(),
+            state
+                .claim_link("dev-0001".into(), account.clone())
+                .is_none(),
             "a second concurrent owner was accepted"
         );
         drop(first);
         assert!(
-            state.claim_link("dev-0001".into()).is_some(),
+            state.claim_link("dev-0001".into(), account).is_some(),
             "the ownership slot was not released with its lease"
+        );
+    }
+
+    #[tokio::test]
+    async fn image_notifications_name_only_live_devices_in_the_owning_account() {
+        let state = ServerState::in_memory();
+        let account_a = identity::AccountId("acc_a".into());
+        let account_b = identity::AccountId("acc_b".into());
+        let _lease_a = state
+            .claim_link("dev-0001".into(), account_a.clone())
+            .unwrap();
+        let _lease_b = state.claim_link("dev-0002".into(), account_b).unwrap();
+        let digest = [0x42; protocol::ASSET_DIGEST_LEN];
+
+        state.notify_image_source_changed(
+            &account_a,
+            "weather".into(),
+            digest,
+            ImageNotificationOrigin::ExternalProducerPush,
+        );
+
+        assert_eq!(
+            state.image_notifications_for_test(),
+            [(
+                account_a,
+                "weather".into(),
+                digest,
+                ImageNotificationOrigin::ExternalProducerPush,
+                vec!["dev-0001".into()],
+            )]
         );
     }
 }

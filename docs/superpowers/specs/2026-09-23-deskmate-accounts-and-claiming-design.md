@@ -66,7 +66,7 @@ Secrets are stored only as SHA-256 digests. The database is written with the sam
 
 ### One folder per account
 
-Everything that is global today moves under `configs/accounts/<account_id>/`:
+What an account's panels show moves under `configs/accounts/<account_id>/`:
 
 ```
 configs/
@@ -76,10 +76,15 @@ configs/
     image-sources.json
     image-frames/<source>.bin
     data-cards.json
-    producer-credentials.json
-    secrets.enc                   # same DESKMATE_SECRETS_KEY, one file per account
     devices/<device_id>.json      # the v10 config document, unchanged
 ```
+
+**OAuth integrations stay instance-wide** (amended while planning, 2026-09-23):
+`secrets.enc` and `producer-credentials.json` remain at the config root and only the
+instance owner can reach them. They exist for the Google Calendar producer, which was
+withdrawn with V3's exit, so no card uses them; splitting them per account would be
+work and risk with no user. They move per account if and when an integration comes
+back as a product feature.
 
 The existing store types keep their code and are opened with an account root instead of
 the config root. A panel that changes owner starts from a clean config because the old
@@ -106,7 +111,8 @@ with its own bearer and one live socket per device.
   and the recovery route (section 3). **It is no longer a way to sign in to the web
   app.** The three routes that trade it for a cookie -- `POST /v1/app/session`,
   `POST /v1/session/login`, `POST /v1/manage/login` -- are removed.
-- `/v1/manage/*` requires an account session belonging to the instance owner.
+- `/v1/manage/*` and `/v1/integrations/*` require an account session belonging to the
+  instance owner.
 - State-changing requests (`POST`, `PUT`, `PATCH`, `DELETE`) authenticated by cookie
   must carry an `Origin` equal to `DESKMATE_PUBLIC_URL`'s origin, in addition to
   `SameSite=Lax`. Bearer-authenticated requests (devices, producers, admin) are exempt.
@@ -210,7 +216,9 @@ There is no invite system.
 ### Recovery
 
 `POST /v1/admin/signin-link {email}` with the admin bearer returns a working sign-in
-link for an existing account, and `deskmate-cli signin-link` wraps it. The admin token
+link for an existing account; the self-host docs give the one `curl` line. (Amended while
+planning: `deskmate-cli` has no HTTP client at all -- it speaks only USB serial -- so a
+`signin-link` subcommand would add an HTTP stack for a break-glass path.) The admin token
 is the break-glass key: it never signs anyone in by itself, but it can always mint a way
 back in.
 
@@ -219,7 +227,9 @@ back in.
 ### Where
 
 "Add a panel" in `SettingsSheet`, where device ownership already lives. An account with
-no panels sees one line in the window pointing there. Without `navigator.serial`, the
+no panels has no window to show -- the window needs a snapshot, and a snapshot needs a
+device -- so its startup screen **is** the setup flow (amended while planning); the
+settings entry covers the second panel onwards. Without `navigator.serial`, the
 control is replaced by "Setting up a panel needs Chrome or Edge on a computer."
 
 ### Flow
@@ -305,8 +315,11 @@ flat layout is present (any of `device-identities.json`, `image-sources.json`,
 2. Creates `identity.db` under a temporary name with the owner account
    (`is_instance_owner`, email unverified) and one `active` `device_owners` row per
    registry device.
-3. Copies each flat store into `accounts/<id>/` (device configs into `devices/`).
-4. Renames `identity.db` into place, then moves the originals into
+3. Copies `image-sources.json`, `image-frames/` and `data-cards.json` into
+   `accounts/<id>/`, and each `dev-*.json` into `accounts/<id>/devices/`.
+   `device-identities.json`, `secrets.enc` and `producer-credentials.json` stay where
+   they are.
+4. Renames `identity.db` into place, then moves the copied originals into
    `configs/legacy-<UTC timestamp>/`. They are kept, never deleted.
 
 A crash before step 4 leaves no `identity.db`, so the next start migrates again from the

@@ -290,9 +290,22 @@ fn configure_google(
     tracing::info!("Google sign-in and OAuth integration enabled");
 }
 
+/// An unset `RUST_LOG` used to mean ERROR only, which hid every device-link
+/// diagnostic and, since accounts, the first-run setup code and the sign-in
+/// links a server without SMTP prints: a self-hoster who never set `RUST_LOG`
+/// was locked out of their own server. Unset now means info.
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+}
+
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
+    init_tracing();
 
     let bind_address =
         std::env::var("DESKMATE_SERVER_BIND").unwrap_or_else(|_| DEFAULT_BIND_ADDRESS.to_string());

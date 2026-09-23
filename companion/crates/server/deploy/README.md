@@ -48,16 +48,10 @@ file; never type it on a command line where it lands in shell history, and never
 commit `/etc/deskmate/server.env` (it is deliberately outside this repo). The
 0600 mode above is load-bearing.
 
-**`RUST_LOG` is load-bearing too, and its absence is silent.**
-`tracing_subscriber::fmt::init()` defaults its `EnvFilter` to **ERROR** when
-`RUST_LOG` is unset, so an unset value discards every device-link diagnostic --
-including `device link established`, `device link refused: owner already live`,
-and the unknown-token warnings. The startup line you still see comes from a
-`println!`, so logging *looks* alive while reporting nothing. The launchd plist
-sets `RUST_LOG` in its own `EnvironmentVariables`; the systemd unit reads this
-file only, so a Linux deployment that omits it runs blind. A live server was
-found in exactly that state on 2026-08-19, which made accepted connections
-impossible to observe. Keep `info`
+**`RUST_LOG` defaults to `info` when unset.** Until 2026-09-23 an unset value
+meant ERROR only, which silently discarded every device-link diagnostic (a live
+server ran that way on 2026-08-19) and, with accounts, would also hide the
+first-run setup code and the sign-in links a server without SMTP prints. Keep `info`
 unless you have a reason not to; `info,server=debug` additionally logs each
 device's firmware check, which is useful while diagnosing updates.
 

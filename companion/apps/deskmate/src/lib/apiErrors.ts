@@ -16,8 +16,9 @@ export class DeskmateApiError extends Error {
  * A 401 arrives with no body -- the server answers bare, so it never echoes what
  * was presented -- so the client is what turns it into a message.
  */
-export const SESSION_REQUIRED_MESSAGE =
-  "This browser is not signed in. Enter the admin token to continue.";
+export const SESSION_REQUIRED_MESSAGE = "This browser is not signed in.";
+
+export const NO_PANELS_MESSAGE = "No panels are set up for this account.";
 
 /**
  * Whether this failure is "no session" rather than anything else.
@@ -29,4 +30,8 @@ export const SESSION_REQUIRED_MESSAGE =
  */
 export function isSessionMissing(error: ApiError): boolean {
   return error.category === "runtime-unavailable" && error.message === SESSION_REQUIRED_MESSAGE;
+}
+
+export function isNoPanels(error: ApiError): boolean {
+  return error.category === "not-found" && error.message === NO_PANELS_MESSAGE;
 }

@@ -7,7 +7,7 @@
  * client and never reaches this file.
  *
  * Scenarios let a whole device state be selected from the URL — `?scenario=offline`,
- * `?scenario=invalid`, `?scenario=firstrun`, `?scenario=empty` —
+ * `?scenario=invalid`, `?scenario=firstrun`, `?scenario=signedout` —
  * so every state the UI must handle can be opened, reviewed and screenshotted without
  * hardware. `?scenario=list` prints the set to the console.
  */
@@ -25,6 +25,7 @@ import type {
   PreviewFrame,
   ValidationIssue,
 } from "../lib/types";
+import type { PanelRow } from "../lib/account";
 import { mockCardData, mockConfig, mockNetworkSettings, mockSnapshot } from "./fixture";
 import { renderMockFrame } from "./mockPreview";
 import { mockPictureConfig } from "./pictureFixture";
@@ -39,6 +40,9 @@ export const SCENARIOS = [
   "empty",
   "carderror",
   "picture",
+  "signedout",
+  "setup",
+  "nopanels",
 ] as const;
 export type Scenario = (typeof SCENARIOS)[number];
 
@@ -356,6 +360,85 @@ window.setInterval(() => {
 
 const delay = <T>(value: T, ms = 90): Promise<T> =>
   new Promise((resolve) => window.setTimeout(() => resolve(value), ms));
+
+const mockAccount = {
+  id: "account-owner",
+  email: "owner@example.com",
+  email_verified: true,
+  is_instance_owner: true,
+};
+let setupRequired = scenario === "setup";
+let signupsOpen = true;
+let panels: PanelRow[] =
+  scenario === "nopanels"
+    ? []
+    : [
+        {
+          id: network.device_id,
+          connected: snapshot.device.connection.kind === "online",
+          has_saved_config: snapshot.has_saved_config,
+          configured_at: 1_795_000_000,
+          state: "active" as const,
+        },
+      ];
+
+export async function mockAccountRequest(
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<unknown> {
+  const payload = body as Record<string, unknown> | undefined;
+  switch (`${method} ${path}`) {
+    case "GET /v1/app/instance":
+      return delay({
+        setup_required: setupRequired,
+        google_enabled: true,
+        signups_open: signupsOpen,
+        edition: "self-hosted" as const,
+      });
+    case "POST /v1/app/setup":
+      setupRequired = false;
+      return delay({ account: { ...mockAccount, email: String(payload?.email ?? "") } });
+    case "POST /v1/app/auth/email":
+      return delay({});
+    case "POST /v1/app/auth/link":
+      if (payload?.token === "expired") throw new Error("This sign-in link has expired.");
+      return delay({ account: mockAccount });
+    case "GET /v1/app/account":
+      return delay(mockAccount);
+    case "DELETE /v1/app/session":
+    case "POST /v1/app/sessions/revoke-all":
+    case "DELETE /v1/app/account":
+      return delay(undefined);
+    case "PUT /v1/app/instance/signups":
+      signupsOpen = payload?.open === true;
+      return delay({ signups_open: signupsOpen });
+    case "GET /v1/app/devices":
+      return delay(panels.map((panel) => ({ ...panel })));
+    case "POST /v1/app/devices/claim": {
+      const panel = {
+        id: "desk-claimed",
+        connected: false,
+        has_saved_config: false,
+        configured_at: null,
+        state: "pending" as const,
+      };
+      panels = [...panels, panel];
+      return delay({
+        device_id: panel.id,
+        token: "claim-token-shown-once",
+        link_url: "wss://deskmate.rodi.one/v1/device/link",
+      });
+    }
+    default:
+      if (method === "DELETE" && path.startsWith("/v1/app/devices/")) {
+        const id = decodeURIComponent(path.slice("/v1/app/devices/".length));
+        panels = panels.filter((panel) => panel.id !== id);
+        return delay(undefined);
+      }
+      throw new Error(`The mock backend does not implement ${method} ${path}.`);
+  }
+}
 
 export function mockGetAppSnapshot(): Promise<AppSnapshot> {
   return delay(snapshot);

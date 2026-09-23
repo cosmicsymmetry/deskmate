@@ -68,6 +68,14 @@ export function installHttpLifecycle(cleanup: () => Promise<void>) {
     http.failures.length = 0;
     http.handlers.clear();
     httpState.creatableFacesResponse = [];
+    http.handlers.set("GET /v1/app/instance", () =>
+      jsonResponse({
+        setup_required: false,
+        google_enabled: false,
+        signups_open: true,
+        edition: "self-hosted",
+      }),
+    );
     http.handlers.set("GET /v1/faces", () => jsonResponse(httpState.creatableFacesResponse));
     globalThis.fetch = Object.assign(http.fetch, { preconnect: originalFetch.preconnect });
   });

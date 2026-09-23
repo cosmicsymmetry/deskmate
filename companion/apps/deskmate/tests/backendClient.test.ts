@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 
+import * as account from "../src/lib/account";
+
 import {
   resetBackendMocks,
   realMintImageSource,
   realListenToAppState,
-  realSignInAndSelectDevice,
-  realSignIn,
 } from "./support/backendMock";
 import { installDomLifecycle } from "./support/dom";
 import {
@@ -15,6 +15,7 @@ import {
   createHttpMock,
   httpHandlers,
   expectJsonRequest,
+  jsonResponse,
 } from "./support/http";
 
 beforeEach(resetBackendMocks);
@@ -58,28 +59,120 @@ test("HTTP teardown records handler assertions and JSON parsing failures", async
   expect(() => http.assertNoFailures()).toThrow();
 });
 
-test("a linked display outranks a newer refused-config row unless it was explicitly remembered", async () => {
-  const client = await import("../src/lib/backendClient.ts?production-client");
+test("account calls use the committed routes and unwrap their response envelopes", async () => {
+  const row = {
+    id: "account-1",
+    email: "owner@example.com",
+    email_verified: true,
+    is_instance_owner: true,
+  };
+  httpHandlers.set("GET /v1/app/instance", () =>
+    jsonResponse({
+      setup_required: false,
+      google_enabled: true,
+      signups_open: true,
+      edition: "hosted",
+    }),
+  );
+  httpHandlers.set("POST /v1/app/setup", (body, init) => {
+    expectJsonRequest(init);
+    expect(body).toEqual({ code: "ABCD-EFGH", email: row.email });
+    return jsonResponse({ account: row });
+  });
+  httpHandlers.set("POST /v1/app/auth/email", (body, init) => {
+    expectJsonRequest(init);
+    expect(body).toEqual({ email: row.email });
+    return new Response("{}", { status: 202 });
+  });
+  httpHandlers.set("POST /v1/app/auth/link", (body, init) => {
+    expectJsonRequest(init);
+    expect(body).toEqual({ token: "link-token" });
+    return jsonResponse({ account: row });
+  });
+  httpHandlers.set("GET /v1/app/account", () => jsonResponse(row));
+  httpHandlers.set("DELETE /v1/app/session", () => new Response(null, { status: 204 }));
+  httpHandlers.set("POST /v1/app/sessions/revoke-all", () => new Response(null, { status: 204 }));
+  httpHandlers.set("DELETE /v1/app/account", () => new Response(null, { status: 204 }));
+  httpHandlers.set("PUT /v1/app/instance/signups", (body, init) => {
+    expectJsonRequest(init);
+    expect(body).toEqual({ open: false });
+    return jsonResponse({ signups_open: false });
+  });
+  httpHandlers.set("GET /v1/app/devices", () =>
+    jsonResponse([
+      {
+        id: "desk-1",
+        connected: true,
+        has_saved_config: true,
+        configured_at: 123,
+        state: "active",
+      },
+    ]),
+  );
+  httpHandlers.set(
+    "POST /v1/app/devices/claim",
+    () =>
+      new Response(
+        JSON.stringify({ device_id: "desk-2", token: "once", link_url: "wss://desk/link" }),
+        { status: 201 },
+      ),
+  );
+  httpHandlers.set("DELETE /v1/app/devices/desk%2F2", () => new Response(null, { status: 204 }));
+
+  expect(await account.getInstance()).toMatchObject({ edition: "hosted", google_enabled: true });
+  expect(await account.completeSetup("ABCD-EFGH", row.email)).toEqual(row);
+  await account.requestSignInLink(row.email);
+  expect(await account.consumeSignInLink("link-token")).toEqual(row);
+  expect(account.googleSignInUrl()).toBe("/v1/app/auth/google/start");
+  expect(await account.getAccount()).toEqual(row);
+  await account.signOut();
+  await account.signOutEverywhere();
+  await account.deleteAccount();
+  expect(await account.setSignupsOpen(false)).toBe(false);
+  expect(await account.listPanels()).toEqual([
+    {
+      id: "desk-1",
+      connected: true,
+      has_saved_config: true,
+      configured_at: 123,
+      state: "active",
+    },
+  ]);
+  expect(await account.claimPanel()).toEqual({
+    device_id: "desk-2",
+    token: "once",
+    link_url: "wss://desk/link",
+  });
+  await account.removePanel("desk/2");
+});
+
+test("account route errors keep the server's recovery sentence", async () => {
+  httpHandlers.set(
+    "POST /v1/app/auth/email",
+    () =>
+      new Response(JSON.stringify({ error: "Try again in 12 minutes." }), {
+        status: 429,
+        headers: { "content-type": "application/json" },
+      }),
+  );
+  await expect(account.requestSignInLink("owner@example.com")).rejects.toMatchObject({
+    message: "Try again in 12 minutes.",
+  });
+});
+
+test("a linked display outranks a newer refused-config row", async () => {
   const remembered = window.localStorage.getItem("deskmate.device_id");
   const devices = [
     { id: "refused", connected: false, has_saved_config: true, configured_at: 200 },
     { id: "healthy", connected: true, has_saved_config: true, configured_at: 100 },
   ];
-  httpHandlers.set("POST /v1/app/session", (_body, init) => {
-    expectJsonRequest(init);
-    return new Response(null, { status: 204 });
-  });
   httpHandlers.set("GET /v1/app/devices", () => new Response(JSON.stringify(devices)));
 
   try {
     window.localStorage.removeItem("deskmate.device_id");
-    expect(await client.signInAndSelectDevice("", "session-token")).toMatchObject({
+    const client = await import("../src/lib/backendClient.ts?production-client");
+    expect(await client.getNetworkSettings()).toMatchObject({
       device_id: "healthy",
-    });
-
-    window.localStorage.setItem("deskmate.device_id", "refused");
-    expect(await client.signInAndSelectDevice("", "session-token")).toMatchObject({
-      device_id: "refused",
     });
   } finally {
     if (remembered === null) window.localStorage.removeItem("deskmate.device_id");
@@ -87,7 +180,7 @@ test("a linked display outranks a newer refused-config row unless it was explici
   }
 });
 
-test("real event streams preserve selection, credentials, parsing and stale-source cleanup", async () => {
+test("real event streams preserve credentials, parsing and stale-source cleanup", async () => {
   const { startAppStateSubscription } = await import("../src/lib/useAppState");
   const { snapshot } = await import("./support/fixtures");
   const sources: FakeEventSource[] = [];
@@ -110,11 +203,15 @@ test("real event streams preserve selection, credentials, parsing and stale-sour
   const original = globalThis.EventSource;
   const remembered = window.localStorage.getItem("deskmate.device_id");
   globalThis.EventSource = FakeEventSource as unknown as typeof EventSource;
-  httpHandlers.set("POST /v1/app/session", (body, init) => {
-    expectJsonRequest(init);
-    expect(body).toEqual({ token: "session-token" });
-    return new Response(null, { status: 204 });
-  });
+  httpHandlers.set(
+    "GET /v1/app/devices",
+    () =>
+      new Response(
+        JSON.stringify([
+          { id: "desk A/α", connected: true, has_saved_config: true, configured_at: 100 },
+        ]),
+      ),
+  );
   const accepted: string[] = [];
   const stops: (() => void)[] = [];
   const settle = async () => {
@@ -136,8 +233,7 @@ test("real event streams preserve selection, credentials, parsing and stale-sour
     return stop;
   };
   try {
-    await realSignInAndSelectDevice("desk A/α", "session-token");
-    await realSignIn("session-token");
+    window.localStorage.setItem("deskmate.device_id", "desk A/α");
     const stopA = subscribe();
     await settle();
     expect(sources[0].url).toBe("/v1/app/desk%20A%2F%CE%B1/events");
@@ -149,12 +245,11 @@ test("real event streams preserve selection, credentials, parsing and stale-sour
     sources[0].frame(JSON.stringify(snapshot));
     expect(accepted).toEqual([snapshot.config.preferences.timezone]);
 
-    await realSignInAndSelectDevice("desk-B", "session-token");
     stopA();
     subscribe();
     await settle();
     expect(sources[0].closes).toBe(1);
-    expect(sources[1].url).toBe("/v1/app/desk-B/events");
+    expect(sources[1].url).toBe("/v1/app/desk%20A%2F%CE%B1/events");
     expect(sources[1].options).toEqual({ withCredentials: true });
     accepted.length = 0;
     sources[0].frame(JSON.stringify(snapshot));

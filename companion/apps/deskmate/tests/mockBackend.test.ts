@@ -63,21 +63,18 @@ function twoPomodoroConfig() {
 }
 
 describe("mock backend contract", () => {
-  test("requires sign-in and selects a device only after sign-in succeeds", async () => {
+  test("requires sign-in and accepts the same link route as the shipped app", async () => {
     await expect(backend.getAppSnapshot()).rejects.toMatchObject({
       details: { category: "runtime-unavailable", message: backend.SESSION_REQUIRED_MESSAGE },
     });
-    await expect(backend.signInAndSelectDevice("rejected-device", " ")).rejects.toBeInstanceOf(
-      backend.DeskmateApiError,
-    );
-    expect((await finish(backend.getNetworkSettings())).device_id).toBe("desk-01");
-    const selected = backend.signInAndSelectDevice(" chosen-device ", "token");
-    expect(timers).toHaveLength(0);
-    await Promise.resolve();
-    expect((await finish(selected)).device_id).toBe(" chosen-device ");
-    const blank = backend.signInAndSelectDevice(" ", "token");
-    await Promise.resolve();
-    expect((await finish(blank)).device_id).toBe(" chosen-device ");
+    const instance = backend.request<{ setup_required: boolean }>("GET", "/v1/app/instance");
+    expect((await finish(instance)).setup_required).toBe(false);
+    await expect(backend.request("GET", "/v1/app/devices")).rejects.toMatchObject({
+      details: { message: backend.SESSION_REQUIRED_MESSAGE },
+    });
+    const signedIn = backend.request("POST", "/v1/app/auth/link", { token: "token" });
+    expect(timers).toHaveLength(1);
+    await finish(signedIn);
     expect((await finish(backend.getAppSnapshot())).config).toBeDefined();
   });
 
@@ -85,15 +82,16 @@ describe("mock backend contract", () => {
     expect(Object.keys(backend).sort()).toEqual(
       [
         "DeskmateApiError",
+        "NO_PANELS_MESSAGE",
         "SESSION_REQUIRED_MESSAGE",
+        "isNoPanels",
         "isSessionMissing",
         "toApiError",
-        "signIn",
+        "request",
         "getAppSnapshot",
         "validateConfigDraft",
         "saveConfig",
         "getNetworkSettings",
-        "signInAndSelectDevice",
         "resumePushing",
         "controlPomodoro",
         "renderCardPreview",
@@ -490,7 +488,7 @@ describe("mock backend contract", () => {
   });
 
   test("targets pomodoro actions by card id with exhaustive state semantics", async () => {
-    await backend.signIn("token");
+    await finish(backend.request("POST", "/v1/app/auth/link", { token: "token" }));
     const { draft } = twoPomodoroConfig();
     await finish(backend.saveConfig(draft), 350);
     const firstState = (await finish(backend.getAppSnapshot())).pomodoros.find(
@@ -535,7 +533,7 @@ describe("mock backend contract", () => {
   });
 
   test("reconciles pomodoros across unchanged, edited, added, and removed cards", async () => {
-    await backend.signIn("token");
+    await finish(backend.request("POST", "/v1/app/auth/link", { token: "token" }));
     const { draft, first, second } = twoPomodoroConfig();
     await finish(backend.saveConfig(draft), 350);
     await finish(backend.controlPomodoro("pomodoro-two", "start"));

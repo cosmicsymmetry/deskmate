@@ -3,12 +3,14 @@ import { useEffect, useRef, useState } from "react";
 import { CardEditor } from "./components/CardEditor";
 import { CardList } from "./components/CardList";
 import { DevicePreview } from "./components/DevicePreview";
+import { LinkLanding, SetupScreen, SignInScreen } from "./components/AuthScreens";
 import { Icon } from "./components/Icon";
 import { LoopRing } from "./components/LoopRing";
 import { NetworkPanel, ownershipLabel } from "./components/NetworkPanel";
 import { SaveBar, type SaveState, type ValidationState } from "./components/SaveBar";
 import { SettingsSheet } from "./components/SettingsSheet";
 import { TopBar } from "./components/TopBar";
+import { getInstance, type Instance } from "./lib/account";
 import {
   type AddCardRequest,
   addCard,
@@ -62,17 +64,97 @@ function linkLabel(snapshot: AppSnapshot): string {
 const validDraft: DraftValidation = { valid: true, issues: [] };
 
 export function App() {
+  const [instance, setInstance] = useState<Instance | null>(null);
+  const [instanceError, setInstanceError] = useState<ApiError | null>(null);
+  const [instanceGeneration, setInstanceGeneration] = useState(0);
+  const [routeGeneration, setRouteGeneration] = useState(0);
+
+  // `instanceGeneration` is an explicit retry signal; the request itself has
+  // no argument for the linter to trace as a dependency.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: retrying must rerun this effect
+  useEffect(() => {
+    let active = true;
+    setInstanceError(null);
+    void getInstance()
+      .then((next) => {
+        if (active) setInstance(next);
+      })
+      .catch((next) => {
+        if (active) setInstanceError(toApiError(next));
+      });
+    return () => {
+      active = false;
+    };
+  }, [instanceGeneration]);
+
+  if (!instance) {
+    if (instanceError) {
+      return (
+        <main className="startup startup--error">
+          <span className="startup__ring startup__ring--error" aria-hidden="true" />
+          <h1>Settings could not be loaded</h1>
+          <p role="alert">{instanceError.message}</p>
+          <button
+            className="button button--primary"
+            type="button"
+            onClick={() => setInstanceGeneration((current) => current + 1)}
+          >
+            Try again
+          </button>
+        </main>
+      );
+    }
+    return (
+      <main className="startup" aria-busy="true">
+        <span className="startup__ring" aria-hidden="true" />
+        <h1>Waking the display…</h1>
+        <p>The server keeps the display updated whether or not this page is open.</p>
+      </main>
+    );
+  }
+
+  if (instance.setup_required) {
+    return (
+      <SetupScreen
+        onComplete={() =>
+          setInstance((current) => (current ? { ...current, setup_required: false } : current))
+        }
+      />
+    );
+  }
+
+  const route = `${window.location.pathname}?${routeGeneration}`;
+  if (window.location.pathname === "/signin") {
+    return (
+      <LinkLanding
+        token={new URLSearchParams(window.location.search).get("token") ?? ""}
+        onComplete={() => setRouteGeneration((current) => current + 1)}
+        onBack={() => {
+          window.history.replaceState(null, "", "/");
+          setRouteGeneration((current) => current + 1);
+        }}
+      />
+    );
+  }
+
+  return (
+    <DeviceApp
+      key={route}
+      instance={instance}
+      signInError={new URLSearchParams(window.location.search).get("signin_error")}
+    />
+  );
+}
+
+function DeviceApp({ instance, signInError }: { instance: Instance; signInError: string | null }) {
   const {
     snapshot,
     loading,
     error: stateError,
     refresh,
     dataGeneration,
-    networkSettings,
     ownershipTier,
     saveConfig,
-    signIn,
-    signInAndSelectDevice,
   } = useAppState();
   const [draft, setDraft] = useState<AppConfig | null>(null);
   const draftRef = useRef<AppConfig | null>(draft);
@@ -93,9 +175,6 @@ export function App() {
   const [actionError, setActionError] = useState<ApiError | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [signInToken, setSignInToken] = useState("");
-  const [signingIn, setSigningIn] = useState(false);
-  const [signInError, setSignInError] = useState<string | null>(null);
   const [mintedPicture, setMintedPicture] = useState<{
     cardId: string;
     access: MintedImageSource;
@@ -185,54 +264,10 @@ export function App() {
 
   if (!snapshot || !draft) {
     // A missing session is the one failure with a specific answer, so it gets a
-    // specific screen. Everything else is "retry", and offering only that when
-    // the real problem is "sign in" made the page a dead end: it named the
-    // admin token and then gave nowhere to type it.
+    // specific screen. Everything else is "retry"; offering only that when the
+    // real problem is "sign in" would make the page a dead end.
     if (stateError && isSessionMissing(stateError)) {
-      return (
-        <main className="startup startup--error">
-          <span className="startup__ring startup__ring--error" aria-hidden="true" />
-          <h1>Sign in to Deskmate</h1>
-          <p role="alert">{stateError.message}</p>
-          <form
-            className="startup__form"
-            onSubmit={(event) => {
-              event.preventDefault();
-              setSigningIn(true);
-              setSignInError(null);
-              void signIn(signInToken)
-                .then(() => {
-                  setSignInToken("");
-                  return refresh();
-                })
-                .catch((next) => setSignInError(toApiError(next).message))
-                .finally(() => setSigningIn(false));
-            }}
-          >
-            <label className="field">
-              <span>Admin token</span>
-              <input
-                type="password"
-                value={signInToken}
-                autoComplete="current-password"
-                onChange={(event) => setSignInToken(event.currentTarget.value)}
-              />
-            </label>
-            <button
-              className="button button--primary"
-              type="submit"
-              disabled={signingIn || signInToken === ""}
-            >
-              {signingIn ? "Signing in…" : "Sign in"}
-            </button>
-            {signInError && (
-              <span className="save-error" role="alert">
-                {signInError}
-              </span>
-            )}
-          </form>
-        </main>
-      );
+      return <SignInScreen instance={instance} signInError={signInError} />;
     }
     return (
       <main className="startup startup--error">
@@ -728,14 +763,6 @@ export function App() {
               ip: snapshot.device.ip ?? "",
               lastNetworkError: snapshot.device.last_network_error,
               otaState: snapshot.device.ota_state,
-            }}
-            settings={{
-              serverUrl: networkSettings.server_url,
-              deviceId: networkSettings.device_id,
-            }}
-            onSignIn={async (deviceId, adminToken) => {
-              await signInAndSelectDevice(deviceId, adminToken);
-              await refresh();
             }}
           />
         </section>

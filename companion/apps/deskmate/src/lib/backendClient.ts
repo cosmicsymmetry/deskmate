@@ -5,9 +5,9 @@
  * routes or response parsing. Requests normalize failures into the shared
  * `ApiError` union, while snapshots arrive through an `EventSource` subscription.
  *
- * Authentication is a session cookie, obtained by trading the admin token
- * through `signInAndSelectDevice`. The cookie is `HttpOnly`, so this file can neither
- * read nor forge it; `credentials: "same-origin"` is what attaches it.
+ * Authentication is an opaque session cookie created by the account routes. The
+ * cookie is `HttpOnly`, so this file can neither read nor forge it;
+ * `credentials: "same-origin"` is what attaches it.
  */
 
 import type {
@@ -26,9 +26,15 @@ import type {
   PreviewFrame,
 } from "./types";
 
-import { DeskmateApiError, SESSION_REQUIRED_MESSAGE } from "./apiErrors";
+import { DeskmateApiError, NO_PANELS_MESSAGE, SESSION_REQUIRED_MESSAGE } from "./apiErrors";
 
-export { DeskmateApiError, SESSION_REQUIRED_MESSAGE, isSessionMissing } from "./apiErrors";
+export {
+  DeskmateApiError,
+  NO_PANELS_MESSAGE,
+  SESSION_REQUIRED_MESSAGE,
+  isNoPanels,
+  isSessionMissing,
+} from "./apiErrors";
 
 const APP_STATE_EVENT = "app-state";
 const MAX_DRAFT_BYTES = 64 * 1024;
@@ -69,17 +75,11 @@ function fail(details: ApiError): never {
   throw new DeskmateApiError(details);
 }
 
-/** Signs this browser in with the admin token, without selecting a display. */
-export async function signIn(adminToken: string): Promise<void> {
-  await request<void>("POST", "/v1/app/session", { token: adminToken });
-}
-
 /**
  * The device selected in this browser.
  *
  * Every route below is device-scoped while the UI speaks about "the display",
- * so one id has to be chosen from an explicit remembered selection or the
- * server's registry.
+ * so one id has to be chosen from a remembered selection or the account's panels.
  */
 let selectedDeviceId: string | null = null;
 
@@ -96,14 +96,6 @@ function rememberedDeviceId(): string | null {
   }
 }
 
-function rememberDeviceId(id: string): void {
-  try {
-    window.localStorage.setItem(DEVICE_KEY, id);
-  } catch {
-    // See `rememberedDeviceId`.
-  }
-}
-
 /**
  * Picks the display the page should open on.
  *
@@ -113,8 +105,8 @@ function rememberDeviceId(id: string): void {
  * configured" is not enough on its own -- the live server has three configured
  * identities and one panel.
  *
- * So: an id the operator typed wins outright, then a display that is linked
- * right now, then the one configured most recently, then the first id. The
+ * So: a remembered id wins outright, then a display that is linked right now,
+ * then the one configured most recently, then the first id. The
  * recency step is what actually resolves a retired identity from the working
  * one, because the working one is the one being saved to.
  */
@@ -132,7 +124,7 @@ function pickDevice(devices: DeviceRow[]): DeviceRow | undefined {
   );
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+export async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   let response: Response;
   try {
     response = await fetch(path, {
@@ -166,7 +158,13 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     } catch {
       parsed = null;
     }
-    const details = toApiError(parsed);
+    const details: ApiError =
+      typeof parsed === "object" &&
+      parsed !== null &&
+      "error" in parsed &&
+      typeof parsed.error === "string"
+        ? { category: "invalid-payload", message: parsed.error }
+        : toApiError(parsed);
     if (parsed === null) {
       details.message = `${response.status} ${response.statusText}`.trim();
     }
@@ -188,7 +186,7 @@ async function deviceId(): Promise<string> {
   if (!chosen) {
     fail({
       category: "not-found",
-      message: "This server owns no display yet. Mint one before configuring it.",
+      message: NO_PANELS_MESSAGE,
     });
   }
   selectedDeviceId = chosen.id;
@@ -256,30 +254,6 @@ export function getNetworkSettings(): Promise<NetworkSettings> {
       device_id: "",
       tier: "networked" as const,
     }));
-}
-
-/**
- * Signs this browser in and optionally selects a display.
- *
- * The server endpoint is already fixed by the page's origin; the token is traded
- * for a session cookie, and a non-empty device id selects one display from a
- * multi-display server.
- */
-export async function signInAndSelectDevice(
-  requestedDeviceId: string,
-  adminToken: string,
-): Promise<NetworkSettings> {
-  await request<void>("POST", "/v1/app/session", { token: adminToken });
-  const requested = requestedDeviceId.trim();
-  if (requested === "") {
-    selectedDeviceId = null;
-  } else {
-    // An id typed into the panel is an explicit choice and outlives the tab,
-    // which is the only way to reach a second display on a multi-display server.
-    selectedDeviceId = requested;
-    rememberDeviceId(requested);
-  }
-  return getNetworkSettings();
 }
 
 // Provisioning, factory reset and the local-ownership switch are not here.

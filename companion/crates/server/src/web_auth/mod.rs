@@ -1,3 +1,4 @@
+pub(crate) mod google;
 #[allow(dead_code)] // Consumed by Task 5's sign-in abuse limits.
 mod rate_limit;
 pub(crate) mod routes;

@@ -28,6 +28,7 @@ pub(crate) fn routes() -> Router<ServerState> {
         .route("/v1/app/sessions/revoke-all", post(revoke_all_sessions))
         .route("/v1/app/instance/signups", put(set_signups))
         .route("/v1/admin/signin-link", post(admin_signin_link))
+        .merge(super::google::routes())
 }
 
 #[derive(Serialize)]
@@ -52,7 +53,7 @@ async fn instance(State(state): State<ServerState>) -> Result<Json<InstanceRespo
     .map_err(|_| RouteError::WorkerFailed)??;
     Ok(Json(InstanceResponse {
         setup_required: account_count == 0 && state.inner.setup_code.is_active(),
-        google_enabled: false,
+        google_enabled: state.google_sign_in().is_some(),
         signups_open,
         edition: state.edition(),
     }))
@@ -348,7 +349,7 @@ fn check_and_record_email_limits(
     Ok(())
 }
 
-fn ensure_failure_attempt_allowed(
+pub(super) fn ensure_failure_attempt_allowed(
     state: &ServerState,
     ip: std::net::IpAddr,
 ) -> Result<(), RouteError> {
@@ -359,7 +360,7 @@ fn ensure_failure_attempt_allowed(
         .map_err(RouteError::rate_limited)
 }
 
-fn record_failure(state: &ServerState, ip: std::net::IpAddr) {
+pub(super) fn record_failure(state: &ServerState, ip: std::net::IpAddr) {
     state
         .inner
         .failure_limiter
@@ -399,7 +400,7 @@ impl From<Account> for AccountResponse {
 }
 
 #[derive(Debug)]
-enum RouteError {
+pub(super) enum RouteError {
     BadRequest(&'static str),
     NotFound,
     RateLimited(u64),

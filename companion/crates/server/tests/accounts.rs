@@ -1,12 +1,113 @@
 mod support;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use base64::prelude::{BASE64_URL_SAFE_NO_PAD as B, Engine as _};
+use chrono::Utc;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use server::mailer::RecordingMailer;
+use server::oauth::GoogleOAuthConfig;
+use server::oauth::transport::{FetchResponse, OAuthFuture, OAuthTransport, TransportError};
 use server::{ServerOptions, ServerState, app};
+use sha2::{Digest, Sha256};
 use support::*;
+
+#[derive(Default)]
+struct FakeGoogleTransport {
+    id_token: Mutex<Option<String>>,
+    calls: Mutex<Vec<TransportCall>>,
+}
+
+type TransportCall = (String, Vec<(String, String)>);
+
+impl FakeGoogleTransport {
+    fn answer_id_token(&self, claims: &Value) {
+        *self.id_token.lock().unwrap() = Some(id_token(claims));
+    }
+}
+
+impl OAuthTransport for FakeGoogleTransport {
+    fn post_form(
+        &self,
+        url: String,
+        form: Vec<(String, String)>,
+    ) -> OAuthFuture<'_, Result<FetchResponse, TransportError>> {
+        self.calls.lock().unwrap().push((url, form));
+        let token = self.id_token.lock().unwrap().clone();
+        Box::pin(async move {
+            let token = token.ok_or_else(|| TransportError("no fake response".to_string()))?;
+            Ok(FetchResponse {
+                status: 200,
+                body: json!({
+                    "id_token": token,
+                    "access_token": "x",
+                    "expires_in": 3600,
+                })
+                .to_string()
+                .into_bytes(),
+            })
+        })
+    }
+}
+
+fn id_token(claims: &Value) -> String {
+    format!(
+        "{}.{}.sig",
+        B.encode(br#"{"alg":"RS256"}"#),
+        B.encode(claims.to_string())
+    )
+}
+
+fn google_claims(sub: &str, email: &str, verified: bool) -> Value {
+    json!({
+        "iss": "https://accounts.google.com",
+        "aud": "test-google-client",
+        "sub": sub,
+        "email": email,
+        "email_verified": verified,
+        "exp": Utc::now().timestamp() + 60,
+    })
+}
+
+fn google_world(signups_open: bool) -> (ServerState, Arc<FakeGoogleTransport>) {
+    let state = ServerState::in_memory_with_options(ServerOptions {
+        signups_default: signups_open,
+        ..ServerOptions::default()
+    });
+    owner_account(&state);
+    let transport = Arc::new(FakeGoogleTransport::default());
+    state.set_google_sign_in(
+        GoogleOAuthConfig {
+            client_id: "test-google-client".to_string(),
+            client_secret: "test-google-secret".to_string(),
+            auth_uri: "https://accounts.google.test/authorize".to_string(),
+            token_uri: "https://oauth2.googleapis.com/token".to_string(),
+            ..GoogleOAuthConfig::default()
+        },
+        transport.clone(),
+    );
+    (state, transport)
+}
+
+async fn no_redirect_get(server: &HttpTestServer, path: &str) -> reqwest::Response {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap()
+        .get(format!("{}{path}", server.base_url))
+        .send()
+        .await
+        .expect("GET without redirects")
+}
+
+fn query_param(url: &str, name: &str) -> String {
+    url::Url::parse(url)
+        .expect("valid URL")
+        .query_pairs()
+        .find_map(|(key, value)| (key == name).then(|| value.into_owned()))
+        .unwrap_or_else(|| panic!("missing {name} query parameter"))
+}
 
 fn state_with_mailer() -> (ServerState, Arc<RecordingMailer>) {
     let mailer = Arc::new(RecordingMailer::default());
@@ -56,6 +157,171 @@ async fn wait_for_mail(mailer: &RecordingMailer, count: usize) {
     })
     .await
     .expect("mailer did not record the message");
+}
+
+#[tokio::test]
+async fn instance_reports_google_only_when_google_sign_in_is_set() {
+    let disabled = ServerState::in_memory();
+    owner_account(&disabled);
+    let disabled_server = spawn_http(app(disabled)).await;
+    assert_eq!(
+        get_json(&disabled_server, "/v1/app/instance").await["google_enabled"],
+        false
+    );
+    assert_eq!(
+        no_redirect_get(&disabled_server, "/v1/app/auth/google/start")
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        no_redirect_get(
+            &disabled_server,
+            "/v1/app/auth/google/callback?state=nope&code=c",
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+
+    let (enabled, _transport) = google_world(false);
+    let enabled_server = spawn_http(app(enabled)).await;
+    assert_eq!(
+        get_json(&enabled_server, "/v1/app/instance").await["google_enabled"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn google_sign_in_links_to_the_account_with_the_same_verified_email() {
+    let (state, transport) = google_world(false);
+    let server = spawn_http(app(state.clone())).await;
+    let start = no_redirect_get(&server, "/v1/app/auth/google/start").await;
+    assert_eq!(start.status(), StatusCode::SEE_OTHER);
+    let location = start.headers()["location"].to_str().unwrap();
+    let state_param = query_param(location, "state");
+    let challenge = query_param(location, "code_challenge");
+    assert_eq!(query_param(location, "scope"), "openid email");
+    assert_eq!(
+        query_param(location, "redirect_uri"),
+        "https://deskmate.test/v1/app/auth/google/callback"
+    );
+
+    transport.answer_id_token(&google_claims("g-1", "owner@example.com", true));
+    let callback = no_redirect_get(
+        &server,
+        &format!("/v1/app/auth/google/callback?state={state_param}&code=c"),
+    )
+    .await;
+    assert_eq!(callback.status(), StatusCode::SEE_OTHER);
+    assert_eq!(callback.headers()["location"], "/");
+    assert!(
+        callback.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .starts_with("__Host-deskmate_session=")
+    );
+    assert!(
+        state
+            .identity()
+            .account_for_google("g-1")
+            .unwrap()
+            .is_some()
+    );
+
+    let calls = transport.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, "https://oauth2.googleapis.com/token");
+    let form = calls[0]
+        .1
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(form.get("code").map(String::as_str), Some("c"));
+    assert_eq!(
+        form.get("redirect_uri").map(String::as_str),
+        Some("https://deskmate.test/v1/app/auth/google/callback")
+    );
+    let verifier = form.get("code_verifier").expect("PKCE verifier");
+    assert_eq!(B.encode(Sha256::digest(verifier.as_bytes())), challenge);
+}
+
+#[tokio::test]
+async fn google_sign_in_does_not_create_accounts_while_signups_are_closed() {
+    let (state, transport) = google_world(false);
+    let server = spawn_http(app(state.clone())).await;
+    let start = no_redirect_get(&server, "/v1/app/auth/google/start").await;
+    let state_param = query_param(start.headers()["location"].to_str().unwrap(), "state");
+    transport.answer_id_token(&google_claims("g-stranger", "stranger@example.com", true));
+
+    let callback = no_redirect_get(
+        &server,
+        &format!("/v1/app/auth/google/callback?state={state_param}&code=c"),
+    )
+    .await;
+    assert_eq!(callback.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        callback.headers()["location"],
+        "/?signin_error=signups-closed"
+    );
+    assert!(callback.headers().get("set-cookie").is_none());
+    assert!(
+        state
+            .identity()
+            .account_by_email("stranger@example.com")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn google_sign_in_refuses_an_unverified_email() {
+    let (state, transport) = google_world(true);
+    let server = spawn_http(app(state.clone())).await;
+    let start = no_redirect_get(&server, "/v1/app/auth/google/start").await;
+    let state_param = query_param(start.headers()["location"].to_str().unwrap(), "state");
+    transport.answer_id_token(&google_claims("g-unverified", "person@example.com", false));
+
+    let callback = no_redirect_get(
+        &server,
+        &format!("/v1/app/auth/google/callback?state={state_param}&code=c"),
+    )
+    .await;
+    assert_eq!(callback.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        callback.headers()["location"],
+        "/?signin_error=email-unverified"
+    );
+    assert!(
+        state
+            .identity()
+            .account_by_email("person@example.com")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn a_google_callback_with_an_unknown_state_is_refused_without_a_token_call() {
+    let (state, transport) = google_world(false);
+    let server = spawn_http(app(state)).await;
+    let callback = no_redirect_get(&server, "/v1/app/auth/google/callback?state=nope&code=c").await;
+    assert_eq!(callback.status(), StatusCode::SEE_OTHER);
+    assert_eq!(callback.headers()["location"], "/?signin_error=expired");
+    assert!(transport.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn google_callback_failures_are_rate_limited_per_ip() {
+    let (state, _transport) = google_world(false);
+    let server = spawn_http(app(state)).await;
+    for _ in 0..5 {
+        let response =
+            no_redirect_get(&server, "/v1/app/auth/google/callback?state=nope&code=c").await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+    let limited = no_redirect_get(&server, "/v1/app/auth/google/callback?state=nope&code=c").await;
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
 }
 
 #[tokio::test]

@@ -238,6 +238,34 @@ fn validate_google_url(value: &str, variable: &'static str) -> Result<(), Google
     Ok(())
 }
 
+fn configure_google(
+    state: &ServerState,
+    config_dir: &std::path::Path,
+    google_oauth: Option<server::oauth::GoogleOAuthConfig>,
+) {
+    let Some(oauth) = google_oauth else {
+        return;
+    };
+    let transport: Arc<dyn server::oauth::transport::OAuthTransport> =
+        Arc::new(server::oauth::transport::EgressTransport);
+    state.set_google_sign_in(oauth.clone(), Arc::clone(&transport));
+    let store = server::secrets::open_integration_store(config_dir).unwrap_or_else(|error| {
+        panic!(
+            "Google OAuth is configured but the integration secrets store could not open \
+             (fail-closed): {error}"
+        )
+    });
+    let token_manager = Arc::new(server::oauth::TokenManager::new(
+        Arc::new(store),
+        transport,
+        oauth,
+    ));
+    state.set_integrations(Arc::new(server::oauth::IntegrationRuntime::new(
+        token_manager,
+    )));
+    tracing::info!("Google sign-in and OAuth integration enabled");
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
@@ -301,22 +329,7 @@ async fn main() {
         server_options,
     );
 
-    if let Some(oauth) = google_oauth {
-        let store = server::secrets::open_integration_store(&config_dir).unwrap_or_else(|error| {
-            panic!(
-                "Google OAuth is configured but the integration secrets store could not open \
-                 (fail-closed): {error}"
-            )
-        });
-        let token_manager = Arc::new(server::oauth::TokenManager::new(
-            Arc::new(store),
-            Arc::new(server::oauth::transport::EgressTransport),
-            oauth,
-        ));
-        let runtime = Arc::new(server::oauth::IntegrationRuntime::new(token_manager));
-        state.set_integrations(runtime);
-        tracing::info!("google oauth integration enabled");
-    }
+    configure_google(&state, &config_dir, google_oauth);
 
     // Server-rendered data cards, if this deployment has any. The specs are
     // read before the listener binds so a malformed file fails the start

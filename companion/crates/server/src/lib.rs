@@ -147,6 +147,10 @@ struct StateInner {
     email_address_limiter: web_auth::RateLimiter,
     email_ip_limiter: web_auth::RateLimiter,
     failure_limiter: web_auth::RateLimiter,
+    /// Google account sign-in, attached only when the Google client is
+    /// configured. Separate from the instance-owner integration runtime: the
+    /// two flows have different redirects, scopes and pending state.
+    google_sign_in: OnceLock<web_auth::google::GoogleSignIn>,
     /// The OAuth integration runtime, attached at startup by `set_integrations`
     /// when integrations are configured. `OnceLock` so existing constructors are
     /// untouched and a deployment without integrations simply never sets it.
@@ -294,6 +298,7 @@ impl ServerState {
                 email_address_limiter: web_auth::RateLimiter::new(5, Duration::from_hours(1)),
                 email_ip_limiter: web_auth::RateLimiter::new(20, Duration::from_hours(1)),
                 failure_limiter: web_auth::RateLimiter::new(5, Duration::from_mins(15)),
+                google_sign_in: OnceLock::new(),
                 integrations: OnceLock::new(),
                 _config_temp_dir: config_temp_dir,
                 shutdown: tokio::sync::watch::channel(false).0,
@@ -509,6 +514,29 @@ impl ServerState {
     /// are ignored (the first attachment wins).
     pub fn set_integrations(&self, runtime: Arc<oauth::IntegrationRuntime>) {
         let _ = self.inner.integrations.set(runtime);
+    }
+
+    /// Enables Google account sign-in with the same client and guarded POST
+    /// transport used by Google integrations. The account callback always comes
+    /// from this server's public URL, regardless of the integration redirect.
+    pub fn set_google_sign_in(
+        &self,
+        mut config: oauth::GoogleOAuthConfig,
+        transport: Arc<dyn oauth::transport::OAuthTransport>,
+    ) {
+        config.redirect_uri = self
+            .public_url()
+            .join("/v1/app/auth/google/callback")
+            .expect("the Google sign-in callback path joins the public URL")
+            .into();
+        let _ = self
+            .inner
+            .google_sign_in
+            .set(web_auth::google::GoogleSignIn::new(config, transport));
+    }
+
+    pub(crate) fn google_sign_in(&self) -> Option<&web_auth::google::GoogleSignIn> {
+        self.inner.google_sign_in.get()
     }
 
     /// Snapshot live handles without holding the server's link-map lock while a

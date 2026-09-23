@@ -106,9 +106,17 @@ async fn lists_are_scoped_to_the_signed_in_account() {
 #[tokio::test]
 async fn owner_only_surfaces_are_404_for_other_accounts() {
     let world = world().await;
-    for (method, path) in [("GET", "/v1/manage"), ("POST", "/v1/integrations/google")] {
+    for (method, path, body) in [
+        ("GET", "/v1/manage", None),
+        ("POST", "/v1/integrations/google", None),
+        (
+            "PUT",
+            "/v1/app/instance/signups",
+            Some(serde_json::json!({"open": true})),
+        ),
+    ] {
         assert_eq!(
-            cookie_request(&world.server, &world.b, method, path, None)
+            cookie_request(&world.server, &world.b, method, path, body)
                 .await
                 .status(),
             StatusCode::NOT_FOUND,

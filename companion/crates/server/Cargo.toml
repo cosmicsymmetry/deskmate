@@ -46,6 +46,7 @@ url = "2"
 tempfile = "3"
 chacha20poly1305 = "=0.10.1"
 zeroize = { version = "=1.9.0", features = ["derive"] }
+lettre = { version = "0.11.23", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "ring", "webpki-roots"] }
 
 [dev-dependencies]
 protocol = { path = "../protocol", features = ["test-support"] }

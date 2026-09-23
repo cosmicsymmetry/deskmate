@@ -41,6 +41,7 @@ mod image_ingest;
 mod image_sources;
 mod image_staleness;
 mod images;
+pub mod mailer;
 mod manage;
 pub mod oauth;
 // The one LVGL simulator this process owns, and the card previews it renders.
@@ -141,6 +142,11 @@ struct StateInner {
     runtime_options: app_core::RuntimeOptions,
     firmware: FirmwareCatalog,
     options: ServerOptions,
+    setup_code: web_auth::setup_code::SetupCode,
+    setup_lock: Mutex<()>,
+    email_address_limiter: web_auth::RateLimiter,
+    email_ip_limiter: web_auth::RateLimiter,
+    failure_limiter: web_auth::RateLimiter,
     /// The OAuth integration runtime, attached at startup by `set_integrations`
     /// when integrations are configured. `OnceLock` so existing constructors are
     /// untouched and a deployment without integrations simply never sets it.
@@ -173,6 +179,7 @@ pub struct ServerOptions {
     pub edition: Edition,
     pub entitlements: Arc<dyn Entitlements>,
     pub signups_default: bool,
+    pub mailer: Arc<dyn mailer::Mailer>,
     pub extra_routes: Option<Router<ServerState>>,
 }
 
@@ -184,6 +191,7 @@ impl Default for ServerOptions {
             edition: Edition::SelfHosted,
             entitlements: Arc::new(SelfHosted),
             signups_default: false,
+            mailer: Arc::new(mailer::LogMailer),
             extra_routes: None,
         }
     }
@@ -252,6 +260,20 @@ impl ServerState {
     ) -> Self {
         let identity = identity::IdentityStore::open(&config_directory.join("identity.db"))
             .expect("failed to open the identity store");
+        let setup_code = if identity
+            .account_count()
+            .expect("failed to inspect the identity store")
+            == 0
+        {
+            let (setup_code, code) = web_auth::setup_code::SetupCode::generate();
+            tracing::warn!(target: "deskmate_server::setup",
+                "\n==============================================\n  Deskmate setup code: {code}\n  Open {url} to set up this server.\n==============================================",
+                url = options.public_url
+            );
+            setup_code
+        } else {
+            web_auth::setup_code::SetupCode::inactive()
+        };
         let producer_credentials =
             producer_credentials::ProducerCredentialStore::open(config_directory.clone())
                 .expect("failed to load the producer credential store");
@@ -267,6 +289,11 @@ impl ServerState {
                 runtime_options,
                 firmware,
                 options,
+                setup_code,
+                setup_lock: Mutex::new(()),
+                email_address_limiter: web_auth::RateLimiter::new(5, Duration::from_hours(1)),
+                email_ip_limiter: web_auth::RateLimiter::new(20, Duration::from_hours(1)),
+                failure_limiter: web_auth::RateLimiter::new(5, Duration::from_mins(15)),
                 integrations: OnceLock::new(),
                 _config_temp_dir: config_temp_dir,
                 shutdown: tokio::sync::watch::channel(false).0,
@@ -296,6 +323,19 @@ impl ServerState {
     /// being tested.
     #[must_use]
     pub fn in_memory_with_runtime_options(runtime_options: app_core::RuntimeOptions) -> Self {
+        Self::in_memory_with_runtime_and_options(runtime_options, ServerOptions::default())
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn in_memory_with_options(options: ServerOptions) -> Self {
+        Self::in_memory_with_runtime_and_options(app_core::RuntimeOptions::default(), options)
+    }
+
+    fn in_memory_with_runtime_and_options(
+        runtime_options: app_core::RuntimeOptions,
+        options: ServerOptions,
+    ) -> Self {
         let firmware = FirmwareCatalog::in_memory();
         let config_temp_dir = tempfile::tempdir()
             .expect("failed to create a dedicated temp config directory for server state");
@@ -307,7 +347,7 @@ impl ServerState {
             Registry::new(),
             Some(config_temp_dir),
             runtime_options,
-            ServerOptions::default(),
+            options,
         )
     }
 
@@ -384,6 +424,20 @@ impl ServerState {
 
     pub(crate) fn public_url(&self) -> &url::Url {
         &self.inner.options.public_url
+    }
+
+    pub(crate) fn signups_default(&self) -> bool {
+        self.inner.options.signups_default
+    }
+
+    pub(crate) fn mailer(&self) -> Arc<dyn mailer::Mailer> {
+        Arc::clone(&self.inner.options.mailer)
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn setup_code_for_tests(&self) -> Option<String> {
+        self.inner.setup_code.display_for_tests()
     }
 
     pub(crate) fn entitlements(&self) -> &dyn Entitlements {
@@ -777,7 +831,8 @@ pub fn app_with_web(state: ServerState, web_root: Option<PathBuf>) -> Router {
         .merge(app_api::routes())
         .merge(images::routes())
         .merge(manage::routes())
-        .merge(oauth::routes::routes());
+        .merge(oauth::routes::routes())
+        .merge(web_auth::routes::routes());
     if let Some(extra_routes) = state.inner.options.extra_routes.clone() {
         router = router.merge(extra_routes);
     }

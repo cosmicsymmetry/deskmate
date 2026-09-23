@@ -62,6 +62,6 @@ can write a plugin and either self-host it or submit it to run on ours.
 | B | Not started | -- | -- |
 | C1 | Not started | -- | -- |
 | C2 | Not started | -- | C1 |
-| D | Not started | -- | -- |
+| D | Spec approved 2026-09-23; building | `deskmate-site`, own repo | Real photographs, and a domain before E launches |
 | E | Not started | -- | -- |
 | F | Not started | -- | A |

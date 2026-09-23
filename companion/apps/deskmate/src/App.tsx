@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
+import { AccountSection } from "./components/AccountSection";
 import { CardEditor } from "./components/CardEditor";
 import { CardList } from "./components/CardList";
 import { DevicePreview } from "./components/DevicePreview";
@@ -7,6 +8,7 @@ import { LinkLanding, SetupScreen, SignInScreen } from "./components/AuthScreens
 import { Icon } from "./components/Icon";
 import { LoopRing } from "./components/LoopRing";
 import { NetworkPanel, ownershipLabel } from "./components/NetworkPanel";
+import { PanelSetup } from "./components/PanelSetup";
 import { SaveBar, type SaveState, type ValidationState } from "./components/SaveBar";
 import { SettingsSheet } from "./components/SettingsSheet";
 import { TopBar } from "./components/TopBar";
@@ -31,6 +33,7 @@ import {
   resumePushing,
   toApiError,
   validateConfigDraft,
+  isNoPanels,
   isSessionMissing,
 } from "./lib/backend";
 import type {
@@ -142,11 +145,20 @@ export function App() {
       key={route}
       instance={instance}
       signInError={new URLSearchParams(window.location.search).get("signin_error")}
+      onSessionEnded={() => setRouteGeneration((current) => current + 1)}
     />
   );
 }
 
-function DeviceApp({ instance, signInError }: { instance: Instance; signInError: string | null }) {
+function DeviceApp({
+  instance,
+  signInError,
+  onSessionEnded,
+}: {
+  instance: Instance;
+  signInError: string | null;
+  onSessionEnded: () => void;
+}) {
   const {
     snapshot,
     loading,
@@ -175,6 +187,7 @@ function DeviceApp({ instance, signInError }: { instance: Instance; signInError:
   const [actionError, setActionError] = useState<ApiError | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsVisited, setSettingsVisited] = useState(false);
   const [mintedPicture, setMintedPicture] = useState<{
     cardId: string;
     access: MintedImageSource;
@@ -268,6 +281,13 @@ function DeviceApp({ instance, signInError }: { instance: Instance; signInError:
     // real problem is "sign in" would make the page a dead end.
     if (stateError && isSessionMissing(stateError)) {
       return <SignInScreen instance={instance} signInError={signInError} />;
+    }
+    if (stateError && isNoPanels(stateError)) {
+      return (
+        <main className="startup">
+          <PanelSetup standalone onDone={() => window.location.assign("/")} />
+        </main>
+      );
     }
     return (
       <main className="startup startup--error">
@@ -499,7 +519,13 @@ function DeviceApp({ instance, signInError }: { instance: Instance; signInError:
 
   return (
     <div className="app">
-      <TopBar attention={needsAttention} onOpenSettings={() => setSettingsOpen(true)} />
+      <TopBar
+        attention={needsAttention}
+        onOpenSettings={() => {
+          setSettingsVisited(true);
+          setSettingsOpen(true);
+        }}
+      />
 
       <div className="face">
         {/* The rail is the face: what the panel is showing, what the loop looks
@@ -691,6 +717,16 @@ function DeviceApp({ instance, signInError }: { instance: Instance; signInError:
           a troubleshooting task, and nothing you look at while arranging cards. It
           answers for itself here rather than taxing every session for the privilege. */}
       <SettingsSheet open={settingsOpen} title="Settings" onClose={() => setSettingsOpen(false)}>
+        {settingsVisited && (
+          <AccountSection
+            open={settingsOpen}
+            instance={instance}
+            onSessionEnded={onSessionEnded}
+            onSignupsChanged={() => {}}
+            onPanelsChanged={() => void refresh()}
+          />
+        )}
+
         <section className="sheet__section" aria-labelledby="preferences-heading">
           <h3 id="preferences-heading">Display</h3>
           <div className="form-grid">

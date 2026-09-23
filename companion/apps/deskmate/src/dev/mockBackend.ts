@@ -26,6 +26,8 @@ import type {
   ValidationIssue,
 } from "../lib/types";
 import type { PanelRow } from "../lib/account";
+import { crc32c, MessageType, rawDecoded } from "../lib/serial/codec";
+import type { PanelPort } from "../lib/serial/port";
 import { mockCardData, mockConfig, mockNetworkSettings, mockSnapshot } from "./fixture";
 import { renderMockFrame } from "./mockPreview";
 import { mockPictureConfig } from "./pictureFixture";
@@ -381,6 +383,173 @@ let panels: PanelRow[] =
           state: "active" as const,
         },
       ];
+
+function cobsEncode(decoded: Uint8Array): Uint8Array {
+  const encoded: number[] = [0];
+  let codeIndex = 0;
+  let code = 1;
+  for (const byte of decoded) {
+    if (byte === 0) {
+      encoded[codeIndex] = code;
+      codeIndex = encoded.length;
+      encoded.push(0);
+      code = 1;
+    } else {
+      encoded.push(byte);
+      code += 1;
+      if (code === 0xff) {
+        encoded[codeIndex] = code;
+        codeIndex = encoded.length;
+        encoded.push(0);
+        code = 1;
+      }
+    }
+  }
+  encoded[codeIndex] = code;
+  return Uint8Array.from([...encoded, 0]);
+}
+
+function responseFrame(messageType: number, requestId: number, payload: Uint8Array): Uint8Array {
+  const decoded = new Uint8Array(10 + payload.byteLength + 4);
+  const view = new DataView(decoded.buffer);
+  decoded[0] = 2;
+  decoded[1] = messageType;
+  view.setUint32(4, requestId, true);
+  view.setUint16(8, payload.byteLength, true);
+  decoded.set(payload, 10);
+  view.setUint32(decoded.byteLength - 4, crc32c(decoded.subarray(0, -4)), true);
+  return cobsEncode(decoded);
+}
+
+function statusResponse(requestId: number, configured: boolean): Uint8Array {
+  const firmware = new TextEncoder().encode("deskmate-mock");
+  const ip = new TextEncoder().encode(configured ? "192.0.2.1" : "");
+  const payload = Uint8Array.from([
+    0xb4,
+    0x00,
+    0x02,
+    0x01,
+    0x60 + firmware.byteLength,
+    ...firmware,
+    0x02,
+    0x01,
+    0x03,
+    0x01,
+    0x04,
+    0x00,
+    0x05,
+    0x18,
+    0x18,
+    0x06,
+    0x00,
+    0x07,
+    0x18,
+    0x5a,
+    0x08,
+    0x01,
+    0x09,
+    0x00,
+    0x0a,
+    0x00,
+    0x0b,
+    0x00,
+    0x0c,
+    0x00,
+    0x0d,
+    0x00,
+    0x0e,
+    0x00,
+    0x0f,
+    0x00,
+    0x17,
+    0x19,
+    0x07,
+    0xe0,
+    0x18,
+    0x18,
+    configured ? 0x01 : 0x00,
+    0x18,
+    0x19,
+    configured ? 0x02 : 0x00,
+    0x18,
+    0x1b,
+    0x60 + ip.byteLength,
+    ...ip,
+  ]);
+  return responseFrame(MessageType.StatusResponse, requestId, payload);
+}
+
+/**
+ * The no-panels harness speaks at the same seam as Web Serial. It deliberately
+ * answers only the two requests the real setup page sends and the real board
+ * accepts: StatusRequest and NetworkConfig.
+ */
+export class MockPanelPort implements PanelPort {
+  private readonly chunks: Uint8Array[] = [];
+  private wakeReader: (() => void) | null = null;
+  private opened = false;
+  private configured = false;
+
+  async open(): Promise<void> {
+    this.opened = true;
+  }
+
+  async write(bytes: Uint8Array): Promise<void> {
+    if (!this.opened) throw new Error("The mock panel is not open.");
+    const request = rawDecoded(bytes);
+    const view = new DataView(request.buffer, request.byteOffset, request.byteLength);
+    const requestId = view.getUint32(4, true);
+    if (request[1] === MessageType.StatusRequest) {
+      this.enqueue(statusResponse(requestId, this.configured));
+    } else if (request[1] === MessageType.NetworkConfig) {
+      this.configured = true;
+      panels = panels.map((panel) =>
+        panel.state === "pending" ? { ...panel, connected: true, state: "active" } : panel,
+      );
+      this.enqueue(
+        responseFrame(
+          MessageType.Ack,
+          requestId,
+          Uint8Array.of(0xa1, 0x00, MessageType.NetworkConfig),
+        ),
+      );
+    }
+  }
+
+  async *readable(): AsyncIterable<Uint8Array> {
+    while (this.opened) {
+      const chunk = this.chunks.shift();
+      if (chunk) {
+        yield chunk;
+        continue;
+      }
+      await new Promise<void>((resolve) => {
+        this.wakeReader = resolve;
+      });
+      this.wakeReader = null;
+    }
+  }
+
+  async close(): Promise<void> {
+    this.opened = false;
+    this.wakeReader?.();
+  }
+
+  onDisconnect(_listener: () => void): void {}
+
+  private enqueue(chunk: Uint8Array): void {
+    this.chunks.push(chunk);
+    this.wakeReader?.();
+  }
+}
+
+if (scenario === "nopanels") {
+  (
+    globalThis as typeof globalThis & {
+      __DESKMATE_MOCK_PANEL_PORT__?: () => PanelPort;
+    }
+  ).__DESKMATE_MOCK_PANEL_PORT__ = () => new MockPanelPort();
+}
 
 export async function mockAccountRequest(
   method: string,

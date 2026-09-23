@@ -149,7 +149,11 @@ export function SignInScreen({
         >
           {busy ? "Sending…" : "Email me a sign-in link"}
         </button>
-        {instance.google_enabled && <a href={googleSignInUrl()}>Sign in with Google</a>}
+        {instance.google_enabled && (
+          <a className="button button--secondary" href={googleSignInUrl()}>
+            Sign in with Google
+          </a>
+        )}
         {error && (
           <span className="save-error" role="alert">
             {error}

@@ -16,7 +16,13 @@ import {
 } from "./faces/hackernews";
 import { type FeedEntry, renderRss } from "./faces/rss";
 import { type Candle, renderToken, type TokenFace } from "./faces/token";
-import { type Condition, type HourlyStep, renderWeather } from "./faces/weather";
+import {
+  type Condition,
+  type DailyStep,
+  type HourlyStep,
+  renderWeather,
+  renderWeatherDays,
+} from "./faces/weather";
 
 export interface Case {
   name: string;
@@ -29,6 +35,13 @@ const hour = (label: string, temperature: number, condition: Condition): HourlyS
   temperature,
   condition,
 });
+const day = (
+  date: string,
+  label: string,
+  high: number,
+  low: number,
+  condition: Condition,
+): DailyStep => ({ date, label, high, low, condition });
 
 const HN_CAPTURED_AT = new Date("2026-09-23T05:00:00Z");
 const HN_CAPTURED_ITEMS = (await Bun.file(
@@ -340,6 +353,7 @@ function weatherCases(): Case[] {
           hour("18", 30, "cloudy"),
           hour("19", 29, "clear-night"),
         ],
+        daily: [],
       }),
     },
     {
@@ -359,6 +373,7 @@ function weatherCases(): Case[] {
           hour("13", 13, "partly-cloudy-day"),
           hour("14", 12, "rain"),
         ],
+        daily: [],
       }),
     },
     {
@@ -378,6 +393,7 @@ function weatherCases(): Case[] {
           hour("10", -11, "partly-cloudy-day"),
           hour("11", -9, "clear-day"),
         ],
+        daily: [],
       }),
     },
     {
@@ -397,6 +413,7 @@ function weatherCases(): Case[] {
           hour("02", 26, "partly-cloudy-night"),
           hour("03", 26, "clear-night"),
         ],
+        daily: [],
       }),
     },
     {
@@ -416,6 +433,7 @@ function weatherCases(): Case[] {
           hour("11", 16, "clear-day"),
           hour("12", 17, "clear-day"),
         ],
+        daily: [],
       }),
     },
     {
@@ -438,6 +456,7 @@ function weatherCases(): Case[] {
           hour("23", 33, "clear-night"),
           hour("00", 32, "clear-night"),
         ],
+        daily: [],
       }),
     },
     {
@@ -457,6 +476,7 @@ function weatherCases(): Case[] {
           hour("16", 6, "cloudy"),
           hour("17", 5, "partly-cloudy-night"),
         ],
+        daily: [],
       }),
     },
     {
@@ -469,6 +489,58 @@ function weatherCases(): Case[] {
         high: 6,
         low: 1,
         hourly: [],
+        daily: [],
+      }),
+    },
+    {
+      name: "weather--dubai-days",
+      svg: renderWeatherDays({
+        place: "Dubai, United Arab Emirates",
+        temperature: 34,
+        summary: "Mostly clear",
+        condition: "clear-day",
+        high: 38,
+        low: 27,
+        hourly: [],
+        daily: [
+          day("2026-09-12", "SAT", 38, 27, "clear-day"),
+          day("2026-09-13", "SUN", 37, 28, "partly-cloudy-day"),
+          day("2026-09-14", "MON", 35, 26, "rain"),
+          day("2026-09-15", "TUE", 35, 25, "cloudy"),
+          day("2026-09-16", "WED", 37, 25, "clear-day"),
+        ],
+      }),
+    },
+    {
+      name: "weather--tromso-days",
+      svg: renderWeatherDays({
+        place: "Tromso, Norway",
+        temperature: -18,
+        summary: "Heavy snow",
+        condition: "snow",
+        high: -9,
+        low: -24,
+        hourly: [],
+        daily: [
+          day("2026-12-14", "MON", -9, -24, "snow"),
+          day("2026-12-15", "TUE", -7, -19, "sleet"),
+          day("2026-12-16", "WED", -12, -22, "cloudy"),
+          day("2026-12-17", "THU", -15, -26, "snow"),
+          day("2026-12-18", "FRI", -11, -20, "partly-cloudy-day"),
+        ],
+      }),
+    },
+    {
+      name: "weather--no-daily-days",
+      svg: renderWeatherDays({
+        place: "Reykjavik",
+        temperature: 4,
+        summary: "Overcast",
+        condition: "cloudy",
+        high: 6,
+        low: 1,
+        hourly: [],
+        daily: [],
       }),
     },
   ];

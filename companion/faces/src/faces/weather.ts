@@ -14,6 +14,8 @@
 import {
   ConfigurationError,
   type FaceDefinition,
+  type RenderContext,
+  type RenderResult,
   type Settings,
   text,
   TransientError,
@@ -38,8 +40,10 @@ import {
   CONTENT_WIDTH,
   GRID,
   GROUND,
+  HAIRLINE,
   HERO_STEPS,
   INK,
+  INK_2,
   INK_3,
   MARGIN,
   RADIUS_MODULE,
@@ -47,6 +51,7 @@ import {
   SIZE_CAPTION,
   SIZE_EYEBROW,
   SIZE_SUBHEAD,
+  SIZE_TITLE,
   SURFACE,
   TRACKING_EYEBROW,
   WEIGHT_SEMIBOLD,
@@ -76,6 +81,16 @@ export interface HourlyStep {
   condition: Condition;
 }
 
+export interface DailyStep {
+  /** Open-Meteo's local calendar date, kept intact rather than converted by the host. */
+  date: string;
+  /** A fixed English weekday derived from `date`, independent of the host's locale. */
+  label: string;
+  high: number;
+  low: number;
+  condition: Condition;
+}
+
 export interface WeatherFace {
   /** The geocoder's own display name, so the panel says what the forecast is for. */
   place: string;
@@ -85,6 +100,12 @@ export interface WeatherFace {
   high: number;
   low: number;
   hourly: HourlyStep[];
+  daily: DailyStep[];
+}
+
+export interface WeatherState {
+  view: "now" | "days";
+  tappedAt: string | null;
 }
 
 interface Palette {
@@ -249,6 +270,7 @@ export function parseForecast(body: string, place: string): WeatherFace {
     high: wholeDegrees(high),
     low: wholeDegrees(low),
     hourly: hourlySteps(document, typeof current.time === "string" ? current.time : ""),
+    daily: dailySteps(document),
   };
 }
 
@@ -293,6 +315,75 @@ function hourlySteps(document: Json, currentTime: string): HourlyStep[] {
   return steps;
 }
 
+const WEEKDAYS = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"] as const;
+
+/** Open-Meteo returns local dates with no offset; read the calendar, not the host clock. */
+function weekdayOf(date: string): string | undefined {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (match === null) {
+    return undefined;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const instant = new Date(Date.UTC(year, month - 1, day));
+  if (
+    instant.getUTCFullYear() !== year ||
+    instant.getUTCMonth() !== month - 1 ||
+    instant.getUTCDate() !== day
+  ) {
+    return undefined;
+  }
+  return WEEKDAYS[instant.getUTCDay()];
+}
+
+function dailySteps(document: Json): DailyStep[] {
+  const daily = document.daily;
+  if (!isObject(daily)) {
+    return [];
+  }
+  const {
+    time,
+    weather_code: codes,
+    temperature_2m_max: maximums,
+    temperature_2m_min: minimums,
+  } = daily;
+  if (
+    !Array.isArray(time) ||
+    !Array.isArray(codes) ||
+    !Array.isArray(maximums) ||
+    !Array.isArray(minimums)
+  ) {
+    return [];
+  }
+
+  const steps: DailyStep[] = [];
+  for (let index = 0; index < time.length && steps.length < 5; index += 1) {
+    const date = time[index];
+    const label = typeof date === "string" ? weekdayOf(date) : undefined;
+    const code = finite(codes[index]);
+    const maximum = temperature(maximums[index]);
+    const minimum = temperature(minimums[index]);
+    if (
+      typeof date !== "string" ||
+      label === undefined ||
+      code === undefined ||
+      maximum === undefined ||
+      minimum === undefined
+    ) {
+      continue;
+    }
+    steps.push({
+      date,
+      label,
+      high: wholeDegrees(Math.max(maximum, minimum)),
+      low: wholeDegrees(Math.min(maximum, minimum)),
+      condition: conditionFromWmo(code, true),
+    });
+  }
+  return steps;
+}
+
 export async function fetchWeather(settings: Settings, get: FetchText): Promise<WeatherFace> {
   const location = text(settings, "location");
   if (location === "") {
@@ -330,9 +421,9 @@ export async function fetchWeather(settings: Settings, get: FetchText): Promise<
     ["latitude", String(latitude)],
     ["longitude", String(longitude)],
     ["current", "temperature_2m,weather_code,is_day"],
-    ["daily", "temperature_2m_max,temperature_2m_min"],
+    ["daily", "weather_code,temperature_2m_max,temperature_2m_min"],
     ["hourly", "temperature_2m,weather_code,is_day"],
-    ["forecast_days", "2"],
+    ["forecast_days", "5"],
     ["timezone", "auto"],
   ];
   if (text(settings, "units") === "imperial") {
@@ -362,6 +453,178 @@ export function renderWeather(face: WeatherFace): string {
   drawHero(canvas, face, PALETTES[face.condition]);
   drawStrip(canvas, face);
   return canvas.finish();
+}
+
+const DAYS_HERO_HEIGHT = 112;
+const DAYS_STRIP_TOP = MARGIN + DAYS_HERO_HEIGHT + 2 * GRID;
+const DAYS_STRIP_BOTTOM = CANVAS_HEIGHT - MARGIN;
+const DAYS_STRIP_HEIGHT = DAYS_STRIP_BOTTOM - DAYS_STRIP_TOP;
+const DAYS_COLUMNS = 5;
+const DAYS_GLYPH_SCALE = 18;
+
+/** The second view: the same coloured hero and equal-column strip, now at day scale. */
+export function renderWeatherDays(face: WeatherFace): string {
+  const canvas = new Canvas(CANVAS_WIDTH, CANVAS_HEIGHT);
+  canvas.rect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT, GROUND);
+
+  const leadCondition = face.daily[0]?.condition ?? face.condition;
+  const palette = PALETTES[leadCondition];
+  canvas.roundedRect(
+    MARGIN,
+    MARGIN,
+    CONTENT_WIDTH,
+    DAYS_HERO_HEIGHT,
+    RADIUS_MODULE,
+    palette.ground,
+  );
+
+  const inset = MARGIN + 2.5 * GRID;
+  const glyphCenterX = MARGIN + CONTENT_WIDTH - 7 * GRID;
+  const glyphCenterY = MARGIN + DAYS_HERO_HEIGHT / 2 + GRID / 2;
+  const typeRoom = glyphCenterX - DAYS_GLYPH_SCALE * 2 - inset - GRID;
+  const place = fitTracked(
+    normalizeWhitespace(face.place).toUpperCase(),
+    SIZE_EYEBROW,
+    WEIGHT_SEMIBOLD,
+    TRACKING_EYEBROW,
+    typeRoom,
+  );
+  if (place !== "") {
+    canvas.text({
+      x: inset,
+      baseline: baselineFromCapTop(MARGIN + 2.5 * GRID, SIZE_EYEBROW),
+      content: place,
+      size: SIZE_EYEBROW,
+      fill: palette.muted,
+      weight: WEIGHT_SEMIBOLD,
+      tracking: TRACKING_EYEBROW,
+    });
+  }
+  canvas.text({
+    x: inset,
+    baseline: baselineFromCapTop(MARGIN + 7 * GRID, SIZE_TITLE),
+    content: fit("Coming days", SIZE_TITLE, WEIGHT_SEMIBOLD, typeRoom),
+    size: SIZE_TITLE,
+    fill: INK,
+    weight: WEIGHT_SEMIBOLD,
+  });
+  drawGlyph(canvas, glyphCenterX, glyphCenterY, DAYS_GLYPH_SCALE * 1.75, leadCondition, palette);
+
+  canvas.roundedRect(
+    MARGIN,
+    DAYS_STRIP_TOP,
+    CONTENT_WIDTH,
+    DAYS_STRIP_HEIGHT,
+    RADIUS_MODULE,
+    SURFACE,
+  );
+  if (face.daily.length === 0) {
+    canvas.text({
+      x: CANVAS_WIDTH / 2,
+      baseline: baselineFromCenter(DAYS_STRIP_TOP + DAYS_STRIP_HEIGHT / 2, SIZE_CAPTION),
+      content: "Daily forecast unavailable",
+      size: SIZE_CAPTION,
+      fill: INK_3,
+      anchor: "middle",
+    });
+    return canvas.finish();
+  }
+
+  const columns = Math.min(face.daily.length, DAYS_COLUMNS);
+  const columnWidth = CONTENT_WIDTH / columns;
+  for (let index = 1; index < columns; index += 1) {
+    canvas.rect(
+      MARGIN + index * columnWidth,
+      DAYS_STRIP_TOP + 2 * GRID,
+      1,
+      DAYS_STRIP_HEIGHT - 4 * GRID,
+      HAIRLINE,
+    );
+  }
+  face.daily.slice(0, columns).forEach((step, index) => {
+    const centerX = MARGIN + (index + 0.5) * columnWidth;
+    const label = fitTracked(
+      step.label,
+      SIZE_EYEBROW,
+      WEIGHT_SEMIBOLD,
+      TRACKING_EYEBROW,
+      columnWidth - 2 * GRID,
+    );
+    canvas.text({
+      x: centerX,
+      baseline: baselineFromCapTop(DAYS_STRIP_TOP + 2 * GRID, SIZE_EYEBROW),
+      content: label,
+      size: SIZE_EYEBROW,
+      fill: INK_3,
+      weight: WEIGHT_SEMIBOLD,
+      anchor: "middle",
+      tracking: TRACKING_EYEBROW,
+    });
+    drawGlyph(
+      canvas,
+      centerX,
+      DAYS_STRIP_TOP + 8.5 * GRID,
+      DAYS_GLYPH_SCALE,
+      step.condition,
+      PALETTES[step.condition],
+    );
+    canvas.text({
+      x: centerX,
+      baseline: baselineFromCapTop(DAYS_STRIP_TOP + 14.5 * GRID, SIZE_BODY),
+      content: `H ${step.high}°`,
+      size: SIZE_BODY,
+      fill: INK,
+      weight: WEIGHT_SEMIBOLD,
+      anchor: "middle",
+    });
+    canvas.text({
+      x: centerX,
+      baseline: baselineFromCapTop(DAYS_STRIP_TOP + 18.5 * GRID, SIZE_CAPTION),
+      content: `L ${step.low}°`,
+      size: SIZE_CAPTION,
+      fill: INK_2,
+      weight: WEIGHT_SEMIBOLD,
+      anchor: "middle",
+    });
+  });
+  return canvas.finish();
+}
+
+const TEMPORARY_VIEW_MS = 10 * 60 * 1_000;
+
+function weatherState(value: unknown): WeatherState {
+  if (typeof value !== "object" || value === null) {
+    return { view: "now", tappedAt: null };
+  }
+  const candidate = value as { view?: unknown; tappedAt?: unknown };
+  return {
+    view: candidate.view === "days" ? "days" : "now",
+    tappedAt: typeof candidate.tappedAt === "string" ? candidate.tappedAt : null,
+  };
+}
+
+/** Chooses a view and returns the state the next scheduled refresh or tap will receive. */
+export function renderWeatherResult(
+  face: WeatherFace,
+  now: Date,
+  context?: RenderContext,
+): RenderResult {
+  let state = weatherState(context?.state);
+  if (context?.event !== undefined) {
+    if (context.event.taps % 2 !== 0) {
+      state = { ...state, view: state.view === "now" ? "days" : "now" };
+    }
+    state = { ...state, tappedAt: now.toISOString() };
+  } else if (state.view === "days") {
+    const tappedAt = state.tappedAt === null ? Number.NaN : Date.parse(state.tappedAt);
+    if (!Number.isFinite(tappedAt) || now.getTime() - tappedAt > TEMPORARY_VIEW_MS) {
+      state = { view: "now", tappedAt: null };
+    }
+  }
+  return {
+    svg: state.view === "days" ? renderWeatherDays(face) : renderWeather(face),
+    state,
+  };
 }
 
 function drawHero(canvas: Canvas, face: WeatherFace, palette: Palette): void {
@@ -667,6 +930,7 @@ function drawFog(canvas: Canvas, cx: number, cy: number, scale: number, color: s
 export const weather: FaceDefinition = {
   kind: "weather",
   label: "Weather",
+  tap: "Tap the panel for the coming days.",
   fields: [
     { type: "text", key: "location", label: "Location", placeholder: "Dubai" },
     {
@@ -680,7 +944,7 @@ export const weather: FaceDefinition = {
       ],
     },
   ],
-  async render(settings) {
-    return renderWeather(await fetchWeather(settings, fetchText));
+  async render(settings, now, context) {
+    return renderWeatherResult(await fetchWeather(settings, fetchText), now, context);
   },
 };

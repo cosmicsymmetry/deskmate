@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { ConfigurationError, TransientError } from "../src/face";
+import { readFileSync } from "node:fs";
+import { ConfigurationError, type RenderResult, TransientError } from "../src/face";
 import {
   fetchHackerNews,
   hackernews,
@@ -16,7 +17,14 @@ import {
   renderToken,
   splitPrice,
 } from "../src/faces/token";
-import { conditionFromWmo, fetchWeather, parseForecast } from "../src/faces/weather";
+import {
+  conditionFromWmo,
+  fetchWeather,
+  parseForecast,
+  renderWeather,
+  renderWeatherResult,
+  weather,
+} from "../src/faces/weather";
 import type { FetchText } from "../src/kit/http";
 import { pngFromSvg, textInk } from "../src/kit/raster";
 import { BAD, GOOD } from "../src/kit/theme";
@@ -339,7 +347,12 @@ describe("weather", () => {
         is_day: 1,
         ...current,
       },
-      daily: { temperature_2m_max: [38.4], temperature_2m_min: [27.2] },
+      daily: {
+        time: ["2026-09-12", "2026-09-13", "2026-09-14", "2026-09-15", "2026-09-16"],
+        weather_code: [1, 2, 61, 3, 0],
+        temperature_2m_max: [38.4, 37.2, 34.8, 35.1, 36.6],
+        temperature_2m_min: [27.2, 28.1, 25.6, 24.9, 25.2],
+      },
       hourly: hourly ?? {
         time: ["2026-09-12T13:00", "2026-09-12T14:00", "2026-09-12T15:00", "2026-09-12T16:00"],
         temperature_2m: [33, 34.4, 35.5, null],
@@ -354,6 +367,8 @@ describe("weather", () => {
     expect(face.place).toBe("Dubai, United Arab Emirates");
     expect(get.asked[1]).toContain("latitude=25.07&longitude=55.17");
     expect(get.asked[1]).toContain("timezone=auto");
+    expect(get.asked[1]).toContain("daily=weather_code%2Ctemperature_2m_max%2Ctemperature_2m_min");
+    expect(get.asked[1]).toContain("forecast_days=5");
     expect(get.asked[1]).not.toContain("temperature_unit");
   });
 
@@ -379,6 +394,16 @@ describe("weather", () => {
     expect([face.temperature, face.high, face.low]).toEqual([34, 38, 27]);
   });
 
+  test("the coming days are parsed with weekdays from the forecast's own dates", () => {
+    expect(parseForecast(forecast({}), "Dubai").daily).toEqual([
+      { date: "2026-09-12", label: "SAT", high: 38, low: 27, condition: "clear-day" },
+      { date: "2026-09-13", label: "SUN", high: 37, low: 28, condition: "partly-cloudy-day" },
+      { date: "2026-09-14", label: "MON", high: 35, low: 26, condition: "rain" },
+      { date: "2026-09-15", label: "TUE", high: 35, low: 25, condition: "cloudy" },
+      { date: "2026-09-16", label: "WED", high: 37, low: 25, condition: "clear-day" },
+    ]);
+  });
+
   test("halves round away from zero in both directions", () => {
     expect(parseForecast(forecast({ temperature_2m: 18.5 }), "x").temperature).toBe(19);
     expect(parseForecast(forecast({ temperature_2m: -18.5 }), "x").temperature).toBe(-19);
@@ -399,6 +424,96 @@ describe("weather", () => {
     expect(conditionFromWmo(82, true)).toBe("rain");
     expect(conditionFromWmo(99, false)).toBe("thunderstorm");
     expect(conditionFromWmo(12345, true)).toBe("cloudy");
+  });
+
+  const approvedNow = {
+    place: "Dubai",
+    temperature: 34,
+    summary: "Mostly clear",
+    condition: "clear-day" as const,
+    high: 38,
+    low: 27,
+    hourly: [
+      { label: "14", temperature: 34, condition: "clear-day" as const },
+      { label: "15", temperature: 35, condition: "clear-day" as const },
+      { label: "16", temperature: 34, condition: "partly-cloudy-day" as const },
+      { label: "17", temperature: 32, condition: "partly-cloudy-day" as const },
+      { label: "18", temperature: 30, condition: "cloudy" as const },
+      { label: "19", temperature: 29, condition: "clear-night" as const },
+    ],
+    daily: [
+      { date: "2026-09-12", label: "SAT", high: 38, low: 27, condition: "clear-day" as const },
+      {
+        date: "2026-09-13",
+        label: "SUN",
+        high: 37,
+        low: 28,
+        condition: "partly-cloudy-day" as const,
+      },
+      { date: "2026-09-14", label: "MON", high: 35, low: 26, condition: "rain" as const },
+      { date: "2026-09-15", label: "TUE", high: 35, low: 25, condition: "cloudy" as const },
+      { date: "2026-09-16", label: "WED", high: 37, low: 25, condition: "clear-day" as const },
+    ],
+  };
+  const svgOf = (result: RenderResult): string =>
+    typeof result === "string" ? result : result.svg;
+  const viewOf = (result: RenderResult): unknown =>
+    typeof result === "string" || typeof result.state !== "object" || result.state === null
+      ? undefined
+      : (result.state as { view?: unknown }).view;
+  const minutesBefore = (instant: Date, minutes: number): string =>
+    new Date(instant.getTime() - minutes * 60_000).toISOString();
+
+  test("a tap flips to the coming days and another flips back", () => {
+    expect(weather.tap).toBe("Tap the panel for the coming days.");
+    const days = renderWeatherResult(approvedNow, NOW, {
+      state: { view: "now", tappedAt: null },
+      event: { taps: 1, point: null },
+    });
+    expect(viewOf(days)).toBe("days");
+    expect(typeof days === "string" ? undefined : days.state).toEqual({
+      view: "days",
+      tappedAt: NOW.toISOString(),
+    });
+    const back = renderWeatherResult(approvedNow, NOW, {
+      state: { view: "days", tappedAt: NOW.toISOString() },
+      event: { taps: 1, point: null },
+    });
+    expect(viewOf(back)).toBe("now");
+  });
+
+  test("an even number of coalesced taps lands where it started", () => {
+    for (const view of ["now", "days"] as const) {
+      const result = renderWeatherResult(approvedNow, NOW, {
+        state: { view, tappedAt: null },
+        event: { taps: 2, point: null },
+      });
+      expect(viewOf(result)).toBe(view);
+    }
+  });
+
+  test("a scheduled refresh more than ten minutes after a tap returns to now", () => {
+    const result = renderWeatherResult(approvedNow, NOW, {
+      state: { view: "days", tappedAt: minutesBefore(NOW, 11) },
+    });
+    expect(viewOf(result)).toBe("now");
+  });
+
+  test("a scheduled refresh exactly ten minutes after a tap keeps the days view", () => {
+    const result = renderWeatherResult(approvedNow, NOW, {
+      state: { view: "days", tappedAt: minutesBefore(NOW, 10) },
+    });
+    expect(viewOf(result)).toBe("days");
+  });
+
+  test("the current-conditions view is byte-identical to the approved design", () => {
+    const result = renderWeatherResult(approvedNow, NOW, {
+      state: { view: "now", tappedAt: null },
+    });
+    expect(svgOf(result)).toBe(
+      readFileSync(`${import.meta.dir}/golden/weather--clear-day.svg`, "utf8"),
+    );
+    expect(svgOf(result)).toBe(renderWeather(approvedNow));
   });
 });
 

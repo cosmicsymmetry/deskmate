@@ -2,6 +2,18 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. **Tick each box as its verification passes** -- see `CLAUDE.md` on plans whose boxes lie.
 
+> **STATUS (2026-09-23):** Tasks 2-12 implemented (Codex workers), reviewed and committed on
+> `feat/track-a-accounts`, each with the orchestrator running the integration tests the
+> workers' sandbox could not and mutation probes on every guard (recorded in each commit
+> message). Task 13 steps 1-3 done: full gates green (776 Rust, 215 web, faces suite);
+> step 2 was driven against the real server with `curl` over every route the page calls
+> plus headless-Chrome screenshots of the screens -- the Chrome extension kept losing its
+> tab group -- and found that an unset `RUST_LOG` hid the setup code (fixed, `f7ce7c1`);
+> step 3 migrated a copy of the live config (5 devices, 4 picture sources, the loop intact).
+> **Open:** Task 1 (Web Serial spike, needs the owner at the board); Task 13 steps 4-7.
+> **Deploy is blocked on the owner**: the live server runs Track C1's branch build, and
+> deploying this branch would replace it.
+
 **Goal:** Turn the single-owner server into a multi-account one (email-link and Google sign-in, one folder per account, a first-run setup code) and let a signed-in owner put a panel on their Wi-Fi and claim it from the web page over Web Serial.
 
 **Architecture:** A new `identity` module over one SQLite file holds accounts, sessions, sign-in tokens, Google links and device ownership. Each account gets an `AccountSpace` (its image sources, frames, data-card specs and device configs under `configs/accounts/<id>/`) that the server opens lazily. An `AccountSession` extractor replaces `OperatorAuthenticated` and scopes every `/v1/app/*` lookup to one account. The web app gains sign-in/setup screens, and a TypeScript codec for the four wire messages the setup page speaks over Web Serial.
@@ -150,7 +162,7 @@ pub const LOGIN_TOKEN_TTL_MINUTES: i64 = 15;
 pub fn normalize_email(raw: &str) -> Option<String>;
 ```
 
-- [ ] **Step 1: Write the failing tests** (in `identity/mod.rs` `#[cfg(test)] mod tests`, using `tempfile::tempdir()`):
+- [x] **Step 1: Write the failing tests** (in `identity/mod.rs` `#[cfg(test)] mod tests`, using `tempfile::tempdir()`):
 
 ```rust
 fn store() -> (tempfile::TempDir, IdentityStore) {
@@ -260,8 +272,8 @@ fn normalises_and_rejects() {
 }
 ```
 
-- [ ] **Step 2: Run to verify they fail.** `cd companion && cargo test -p server identity > /tmp/t.log 2>&1; echo $?; grep -E "error|test result" /tmp/t.log | head` -- expected: compile errors (module missing).
-- [ ] **Step 3: Implement.** Key parts:
+- [x] **Step 2: Run to verify they fail.** `cd companion && cargo test -p server identity > /tmp/t.log 2>&1; echo $?; grep -E "error|test result" /tmp/t.log | head` -- expected: compile errors (module missing).
+- [x] **Step 3: Implement.** Key parts:
 
 ```rust
 // identity/email.rs
@@ -306,9 +318,9 @@ CREATE TABLE IF NOT EXISTS instance (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 - `delete_account`: in one transaction, select device ids for the account, then `DELETE FROM accounts` (cascades).
 - `Drop` is not required: `Connection` closes on drop and SQLite checkpoints the WAL on the last close.
 
-- [ ] **Step 4: Run the tests** -- same command; expected: all `identity` tests pass.
-- [ ] **Step 5: Clippy** `cargo clippy -p server --all-targets -- -D warnings > /tmp/c.log 2>&1; echo $?` -- expected `0`.
-- [ ] **Step 6: Commit** `feat(server): identity store over SQLite` (message names the rusqlite version).
+- [x] **Step 4: Run the tests** -- same command; expected: all `identity` tests pass.
+- [x] **Step 5: Clippy** `cargo clippy -p server --all-targets -- -D warnings > /tmp/c.log 2>&1; echo $?` -- expected `0`.
+- [x] **Step 6: Commit** `feat(server): identity store over SQLite` (message names the rusqlite version).
 
 ---
 
@@ -371,7 +383,7 @@ pub fn revoke(&self, device_id: &str) -> Result<bool, RegistryError>;
 
 `ServerOptions` gains `mailer: Arc<dyn Mailer>` in Task 5, not here. `app_with_web` merges `options.extra_routes` (if any) inside the middleware layer, next to the other API routers.
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
 
 In `accounts.rs`:
 
@@ -444,8 +456,8 @@ async fn a_picture_push_wakes_only_the_owning_accounts_panels() {
 
 (The helper names in that test are defined in Step 3; `drive_until_asset_begin`/`assert_no_asset_begin_within` are thin wrappers over the existing `DeviceSocket` reading loop in `support/mod.rs`.)
 
-- [ ] **Step 2: Run to verify they fail** (`cargo test -p server > /tmp/t.log 2>&1; echo $?`) -- compile errors.
-- [ ] **Step 3: Implement.**
+- [x] **Step 2: Run to verify they fail** (`cargo test -p server > /tmp/t.log 2>&1; echo $?`) -- compile errors.
+- [x] **Step 3: Implement.**
   1. `entitlements.rs` as in Interfaces. `app_core` limits (`MAX_CONFIG_CARDS`, `MAX_IMAGE_SOURCES`) stay the hard ceiling; the trait can only lower them. The store-level checks remain; add an entitlement check where a source is minted (`images.rs::mint_source`) and where a config is saved (`app_api::save_config`), answering `AppApiError::Validation` with an issue at path `cards` / `422` for sources: "This account can have at most N picture sources."
   2. `ServerState`: add `identity: IdentityStore` (opened at `config_directory.join("identity.db")`; in `in_memory*` inside the tempdir), `accounts: Mutex<HashMap<AccountId, Arc<AccountSpace>>>`, `options: ServerOptions` fields. **Remove** `image_sources`, `configs`, and the spec half of `data_cards` from `StateInner`. `new(...)` becomes `new_with_options(..., ServerOptions::default())`.
   3. Data cards: split `DataCardState` into a global `FaceCatalogState { faces, catalog, catalog_reloader }` kept on `StateInner`, and per-account `DataCardSpecs { spec_path, specs, tasks, outcomes }` on `AccountSpace`. `start_data_cards(state)` now iterates `identity().accounts()` and calls `start_account_data_cards(state, &space)`; `account_space()` calls it for a space it opens for the first time after startup. `worker::spawn_refresher` takes `Arc<AccountSpace>` and uses `space.image_sources` for `accept`, and `notify_image_source_changed(space.account_id, ...)`. `stop_refreshers` stops every open space's tasks. `DESKMATE_DATA_CARDS` and `main.rs::data_card_spec_path` are deleted.
@@ -464,8 +476,8 @@ pub fn mint_owned_device(state: &ServerState, account: &TestAccount) -> DeviceId
 
   `AccountId` and the identity accessors must be reachable from integration tests: expose them behind the existing `test-support`-style pattern the crate already uses for test hooks (if none exists for the server crate, add `#[doc(hidden)] pub` accessors -- `identity()` and `account_space()` -- and note it in the commit). `cookie` stays unused until Task 4 but is minted now so Task 4 only changes the extractor.
   9. Update every existing test that calls `state.registry().mint()` or `POST /v1/devices` before an owner exists to call `owner_account` first (`ownership.rs::spawn_state`, `companion_api.rs`, `hostile_device.rs`, `image_routes.rs`, `device_link.rs`, `manage.rs`, `oauth_routes.rs`). Tests that reload by building a second `ServerState::new` on the same directory keep working because the identity db is in that directory.
-- [ ] **Step 4: Run the full server suite** `cargo test -p server --all-targets > /tmp/t.log 2>&1; echo $?` -- expected `0`. Then the workspace gates from `CLAUDE.md` (fmt, clippy, both test invocations).
-- [ ] **Step 5: Commit** `feat(server): per-account spaces and the entitlements seam`.
+- [x] **Step 4: Run the full server suite** `cargo test -p server --all-targets > /tmp/t.log 2>&1; echo $?` -- expected `0`. Then the workspace gates from `CLAUDE.md` (fmt, clippy, both test invocations).
+- [x] **Step 5: Commit** `feat(server): per-account spaces and the entitlements seam`.
 
 ---
 
@@ -500,7 +512,7 @@ impl RateLimiter {
 
 `AccountSession` rejects with `401` and an empty body when there is no valid session; it also enforces `SameOrigin` for unsafe methods, so no handler can forget it. `InstanceOwner` answers `404` for a non-owner session (the owner-only surface is not an oracle either).
 
-- [ ] **Step 1: Write the failing tests.** `tests/isolation.rs` is the centrepiece:
+- [x] **Step 1: Write the failing tests.** `tests/isolation.rs` is the centrepiece:
 
 ```rust
 //! Account B must not see account A's resources through any route that takes an id.
@@ -645,16 +657,16 @@ fn forwarded_for_is_trusted_only_from_loopback() {
 
 (`client_ip(peer: Option<SocketAddr>, forwarded: Option<&str>) -> IpAddr` is the pure function the extractor calls.)
 
-- [ ] **Step 2: Run to verify they fail.**
-- [ ] **Step 3: Implement** per Interfaces. Notes:
+- [x] **Step 2: Run to verify they fail.**
+- [x] **Step 3: Implement** per Interfaces. Notes:
   - Cookie parsing: take the first `__Host-deskmate_session=` value from any `Cookie` header, as `session_cookie_value` did.
   - `SameOrigin`: compare the `Origin` header string to `public_url().origin().ascii_serialization()`; `GET`/`HEAD`/`OPTIONS` pass.
   - Resolution inside an account: `app_api`'s `known_device` becomes `owned_device(&state, &session, &device_id) -> Result<Arc<AccountSpace>, AppApiError>`, checking `identity().device_owner(id)` is this account (else `NotFound { message: "no device with id ..." }` -- the same message whether it exists elsewhere or nowhere). `images.rs` resolves `{id}` through `space.image_sources.summaries()`; the push route (`POST /v1/images/{key}`, producer bearer) authenticates **across** accounts: add `ServerState::authenticate_image_producer(token) -> Option<(Arc<AccountSpace>, String)>` that tries each account's store (open all spaces at startup via `start_data_cards`, so this is a scan over open spaces).
   - The oauth callback's pending stash was keyed by `sid`; key it by the session digest hex instead, so a different session cannot complete someone else's consent.
   - Delete `SessionSigner` and the HMAC use of the admin token; `hmac` stays only if something else uses it (check with `cargo udeps`-free grep; remove the dependency if unused).
   - Update `app_api/mod.rs`'s module doc and `src/lib/types.contract.ts` regeneration if a DTO changed (run the ignored `print_typescript_contract_fixture` test and copy its output).
-- [ ] **Step 4: Run the full gates**, then **mutation probe**: temporarily replace the ownership comparison in `owned_device` with `true`, run `cargo test -p server --test isolation`, confirm it FAILS, restore. Do the same for the `SameOrigin` comparison against `tests/accounts.rs`. Record both results in the commit message.
-- [ ] **Step 5: Commit** `feat(server): account sessions replace the admin-token cookie`.
+- [x] **Step 4: Run the full gates**, then **mutation probe**: temporarily replace the ownership comparison in `owned_device` with `true`, run `cargo test -p server --test isolation`, confirm it FAILS, restore. Do the same for the `SameOrigin` comparison against `tests/accounts.rs`. Record both results in the commit message.
+- [x] **Step 5: Commit** `feat(server): account sessions replace the admin-token cookie`.
 
 ---
 
@@ -701,7 +713,7 @@ Routes (all JSON; all unsafe ones take `SameOrigin`; all take `ClientIp` where a
 
 `signups_open` = `identity().signups_open()?.unwrap_or(options.signups_default)`. The link is `public_url.join("/signin?token=<t>")`.
 
-- [ ] **Step 1: Write the failing tests** in `tests/accounts.rs` (state built with `RecordingMailer`; helper `support::state_with_mailer() -> (ServerState, Arc<RecordingMailer>)`; the setup code is read back via a `#[doc(hidden)] pub fn setup_code_for_tests(&self) -> Option<String>` on `ServerState`):
+- [x] **Step 1: Write the failing tests** in `tests/accounts.rs` (state built with `RecordingMailer`; helper `support::state_with_mailer() -> (ServerState, Arc<RecordingMailer>)`; the setup code is read back via a `#[doc(hidden)] pub fn setup_code_for_tests(&self) -> Option<String>` on `ServerState`):
 
 ```rust
 #[tokio::test]
@@ -796,8 +808,8 @@ async fn recovery_link_needs_the_admin_bearer() {
 
 `post_json` sends `Origin: https://deskmate.test`. `setup_code.rs` unit test: `generate()` yields `^[2-9A-HJKMNP-Z]{4}-[2-9A-HJKMNP-Z]{4}$`, `matches` accepts lowercase and no dash, rejects after `erase`.
 
-- [ ] **Step 2: Run to verify they fail.**
-- [ ] **Step 3: Implement.** Setup code is generated in `new_with_options` when `account_count() == 0`, and logged there:
+- [x] **Step 2: Run to verify they fail.**
+- [x] **Step 3: Implement.** Setup code is generated in `new_with_options` when `account_count() == 0`, and logged there:
 
 ```rust
 tracing::warn!(target: "deskmate_server::setup",
@@ -806,8 +818,8 @@ tracing::warn!(target: "deskmate_server::setup",
 ```
 
 `LogMailer` logs the same shape with the link. Rate-limit keys: `"email:<normalized>"`, `"ip-email:<ip>"`, `"ip-fail:<ip>"` (setup and link failures share the failure bucket). Mail sending happens on a spawned task so the 202 does not wait on SMTP; a failure is `warn!`ed.
-- [ ] **Step 4: Gates**, then **mutation probes**: (a) remove the `used_at IS NULL` clause in `consume_login_token` -> `a_link_signs_in_once...` must fail; (b) make the per-address limiter `check` always `Ok` -> `sign_in_emails_are_rate_limited...` must fail. Restore, record results in the commit.
-- [ ] **Step 5: Commit** `feat(server): email-link sign-in, first-run setup code and recovery link`.
+- [x] **Step 4: Gates**, then **mutation probes**: (a) remove the `used_at IS NULL` clause in `consume_login_token` -> `a_link_signs_in_once...` must fail; (b) make the per-address limiter `check` always `Ok` -> `sign_in_emails_are_rate_limited...` must fail. Restore, record results in the commit.
+- [x] **Step 5: Commit** `feat(server): email-link sign-in, first-run setup code and recovery link`.
 
 ---
 
@@ -830,7 +842,7 @@ pub(crate) fn claims_from_id_token(id_token: &str, client_id: &str, now: DateTim
 //         GET /v1/app/auth/google/callback?state&code -> 303 "/" with cookie, or 303 "/?signin_error=<reason>"
 ```
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
 
 ```rust
 fn id_token(claims: serde_json::Value) -> String {
@@ -880,10 +892,10 @@ async fn a_callback_with_an_unknown_state_is_refused() {
 ```
 
 `GET /v1/app/instance` reports `google_enabled: true` only when `set_google_sign_in` was called -- assert both ways.
-- [ ] **Step 2: Run to verify they fail.**
-- [ ] **Step 3: Implement.** `claims_from_id_token`: split on `.`, require 3 parts, base64url-decode (no padding) part 2, parse JSON, check `iss in ["https://accounts.google.com", "accounts.google.com"]`, `aud == client_id` (string, or array containing it), `exp > now`, `email_verified == true` (bool or `"true"`), `normalize_email(email)`. Doc-comment the reason there is no signature check: the token came straight from `token_uri` over TLS through `egress`, which OpenID Connect Core 3.1.3.7 permits. Pending entries expire after 600 s and are capped at 32, like `IntegrationRuntime`. Callback failures count toward the `ip-fail` bucket. Lookup order: `account_for_google(sub)` -> `account_by_email(email)` then `link_google` -> create (if sign-ups open) then `link_google` -> else `signups-closed`. Mark the email verified.
-- [ ] **Step 4: Gates.**
-- [ ] **Step 5: Commit** `feat(server): sign in with Google`.
+- [x] **Step 2: Run to verify they fail.**
+- [x] **Step 3: Implement.** `claims_from_id_token`: split on `.`, require 3 parts, base64url-decode (no padding) part 2, parse JSON, check `iss in ["https://accounts.google.com", "accounts.google.com"]`, `aud == client_id` (string, or array containing it), `exp > now`, `email_verified == true` (bool or `"true"`), `normalize_email(email)`. Doc-comment the reason there is no signature check: the token came straight from `token_uri` over TLS through `egress`, which OpenID Connect Core 3.1.3.7 permits. Pending entries expire after 600 s and are capped at 32, like `IntegrationRuntime`. Callback failures count toward the `ip-fail` bucket. Lookup order: `account_for_google(sub)` -> `account_by_email(email)` then `link_google` -> create (if sign-ups open) then `link_google` -> else `signups-closed`. Mark the email verified.
+- [x] **Step 4: Gates.**
+- [x] **Step 5: Commit** `feat(server): sign in with Google`.
 
 ---
 
@@ -908,7 +920,7 @@ pub(crate) async fn collect_stale_claims(state: &ServerState, now: DateTime<Utc>
 pub(crate) fn spawn_housekeeping(state: ServerState) -> JoinHandle<()>; // every hour: collect_stale_claims; stops on shutdown
 ```
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
 
 ```rust
 #[tokio::test]
@@ -969,10 +981,10 @@ async fn a_panel_linking_during_account_deletion_writes_nothing_into_the_deleted
 }
 ```
 
-- [ ] **Step 2: Run to verify they fail.**
-- [ ] **Step 3: Implement.** Ordering in account deletion matters for Review Focus 5: **revoke every device in the registry first** (so a new link cannot authenticate), then close live links, then stop data-card tasks, drop the space, delete the rows, and only then remove the folder. The link handler already refuses a device with no owner row (Task 3), which closes the window between `revoke` and `delete_account`.
-- [ ] **Step 4: Gates**; regenerate the TS contract fixture; **mutation probe**: skip `registry().revoke` in `DELETE /v1/app/devices/{id}` -> `removing_a_panel...` must fail.
-- [ ] **Step 5: Commit** `feat(server): claim, remove and delete: panels belong to accounts`.
+- [x] **Step 2: Run to verify they fail.**
+- [x] **Step 3: Implement.** Ordering in account deletion matters for Review Focus 5: **revoke every device in the registry first** (so a new link cannot authenticate), then close live links, then stop data-card tasks, drop the space, delete the rows, and only then remove the folder. The link handler already refuses a device with no owner row (Task 3), which closes the window between `revoke` and `delete_account`.
+- [x] **Step 4: Gates**; regenerate the TS contract fixture; **mutation probe**: skip `registry().revoke` in `DELETE /v1/app/devices/{id}` -> `removing_a_panel...` must fail.
+- [x] **Step 5: Commit** `feat(server): claim, remove and delete: panels belong to accounts`.
 
 ---
 
@@ -990,7 +1002,7 @@ pub enum MigrationError { OwnerEmailRequired, InvalidOwnerEmail, Io(String), Ide
 pub fn migrate_if_needed(config_dir: &Path, owner_email: Option<&str>, now: DateTime<Utc>) -> Result<MigrationOutcome, MigrationError>;
 ```
 
-- [ ] **Step 1: Write the failing tests** in `tests/migration.rs` (copy the fixture dir into a tempdir first):
+- [x] **Step 1: Write the failing tests** in `tests/migration.rs` (copy the fixture dir into a tempdir first):
 
 ```rust
 #[test]
@@ -1042,8 +1054,8 @@ fn a_fresh_empty_directory_needs_no_migration() {
 }
 ```
 
-- [ ] **Step 2: Run to verify they fail.**
-- [ ] **Step 3: Implement.**
+- [x] **Step 2: Run to verify they fail.**
+- [x] **Step 3: Implement.**
   - Trigger: `identity.db` absent **and** any of `device-identities.json`, `image-sources.json`, `data-cards.json`, `producer-credentials.json`, `secrets.enc`, `dev-*.json` present.
   - Steps as in spec section 6: build `identity.db.migrating` (delete a stale one first), create the owner (`is_instance_owner`, unverified), one `Active` `device_owners` row per registry device (parse `device-identities.json`'s `devices[].device_id`), copy (not move) the per-account files into `accounts/<id>/` (starting from an empty `accounts/<id>` -- remove any partial one from a crashed run), `std::fs::rename` `identity.db.migrating` -> `identity.db`, `sync_parent`, then move the copied originals into `legacy-<%Y%m%dT%H%M%SZ>/`. Log the outcome at `warn!` with the account id and legacy dir.
   - `main.rs`: read `DESKMATE_PUBLIC_URL` (required, must parse, scheme `https` or `http` only for a loopback host; error text names the variable), `DESKMATE_SMTP_URL` + `DESKMATE_MAIL_FROM` (both or neither), `DESKMATE_SIGNUPS` (`open`/`closed`, default closed), `DESKMATE_OWNER_EMAIL`; call `migrate_if_needed` before `ServerState::new_with_options`; exit 1 with the error text on `OwnerEmailRequired`; `spawn_housekeeping`; serve with connect info. Delete `data_card_spec_path` and `DESKMATE_DATA_CARDS`.
@@ -1056,9 +1068,9 @@ curl -sS -X POST https://<host>/v1/admin/signin-link \
   -d '{"email":"you@example.com"}'
 ```
 
-- [ ] **Step 4: Gates.**
-- [ ] **Step 5: Update `CLAUDE.md`**: the "THE COMPANION IS A WEB APP" bullet says the API is "gated by the operator session cookie the page trades the admin token for" and the "No edge auth" bullet says `/v1/app/*` needs "the operator session cookie traded for `DESKMATE_ADMIN_TOKEN`" -- rewrite both to: account sessions (email link, Google), first-run setup code, admin token = CLI/recovery only, and the login rate limit now exists. Keep the path-scoped edge-gate warning as is. Add the `DESKMATE_DATA_CARDS` removal to the faces bullet (it mentions the variable).
-- [ ] **Step 6: Commit** `feat(server): one-time migration into the owner's account, and startup wiring`.
+- [x] **Step 4: Gates.**
+- [x] **Step 5: Update `CLAUDE.md`**: the "THE COMPANION IS A WEB APP" bullet says the API is "gated by the operator session cookie the page trades the admin token for" and the "No edge auth" bullet says `/v1/app/*` needs "the operator session cookie traded for `DESKMATE_ADMIN_TOKEN`" -- rewrite both to: account sessions (email link, Google), first-run setup code, admin token = CLI/recovery only, and the login rate limit now exists. Keep the path-scoped edge-gate warning as is. Add the `DESKMATE_DATA_CARDS` removal to the faces bullet (it mentions the variable).
+- [x] **Step 6: Commit** `feat(server): one-time migration into the owner's account, and startup wiring`.
 
 ---
 
@@ -1092,7 +1104,7 @@ export function validateNetworkConfig(config: NetworkConfig): string | null;    
 export function rawDecoded(wire: Uint8Array): Uint8Array;                         // COBS-decode one wire frame (test helper)
 ```
 
-- [ ] **Step 1: Write the failing tests**, driven by the Rust-generated fixtures shared with the firmware:
+- [x] **Step 1: Write the failing tests**, driven by the Rust-generated fixtures shared with the firmware:
 
 ```ts
 import { expect, test } from "bun:test";
@@ -1161,10 +1173,10 @@ test("network config limits match the wire", () => {
 ```
 
 (Adjust fixture names to what `protocol/fixtures/v2/manifest.txt` lists; `rawDecoded` is an exported test helper that COBS-decodes one wire frame. `NETWORK_CONFIG_FIXTURE_VALUES` is a constant in the test file copied from `generate-fixtures.rs`.)
-- [ ] **Step 2: Run to verify they fail** (`cd companion/apps/deskmate && bun test tests/serialCodec.test.ts`).
-- [ ] **Step 3: Implement.** Canonical CBOR subset: unsigned/negative ints (major 0/1, shortest form), text strings (major 3), maps (major 5) with **integer keys in ascending order**, booleans, and `u64` capabilities read as `bigint`. The decoder rejects duplicate keys, indefinite lengths and trailing bytes; unknown keys are skipped except where `docs/protocol/v2.md` says closed. Limits: `MAX_DECODED_FRAME` 2048, `MAX_WIRE_FRAME` 2058; UTF-8 byte lengths via `TextEncoder`: ssid ≤ 32, psk ≤ 64, server_url ≤ 128, device_id ≤ 32, token ≤ 128, `utcOffsetMinutes` in `-840..=840`. Flags must be 0; version must be 2 (a v1 frame decodes as `invalid: version`).
-- [ ] **Step 4: Run** `bun test && bun run check && bun run format:check` from `apps/deskmate`.
-- [ ] **Step 5: Commit** `feat(web): wire codec for panel setup, tested on the firmware's own fixtures`.
+- [x] **Step 2: Run to verify they fail** (`cd companion/apps/deskmate && bun test tests/serialCodec.test.ts`).
+- [x] **Step 3: Implement.** Canonical CBOR subset: unsigned/negative ints (major 0/1, shortest form), text strings (major 3), maps (major 5) with **integer keys in ascending order**, booleans, and `u64` capabilities read as `bigint`. The decoder rejects duplicate keys, indefinite lengths and trailing bytes; unknown keys are skipped except where `docs/protocol/v2.md` says closed. Limits: `MAX_DECODED_FRAME` 2048, `MAX_WIRE_FRAME` 2058; UTF-8 byte lengths via `TextEncoder`: ssid ≤ 32, psk ≤ 64, server_url ≤ 128, device_id ≤ 32, token ≤ 128, `utcOffsetMinutes` in `-840..=840`. Flags must be 0; version must be 2 (a v1 frame decodes as `invalid: version`).
+- [x] **Step 4: Run** `bun test && bun run check && bun run format:check` from `apps/deskmate`.
+- [x] **Step 5: Commit** `feat(web): wire codec for panel setup, tested on the firmware's own fixtures`.
 
 ---
 
@@ -1221,7 +1233,7 @@ export class PanelSetup {
 }
 ```
 
-- [ ] **Step 1: Write the failing tests** with a `FakePort` that answers from a script (it uses the codec to build responses, so the fake speaks the real wire):
+- [x] **Step 1: Write the failing tests** with a `FakePort` that answers from a script (it uses the codec to build responses, so the fake speaks the real wire):
 
 ```ts
 test("a board that never answers ends in no-response after 10 s", async () => { ... expect(last).toEqual({ kind: "no-response" }); });
@@ -1243,10 +1255,10 @@ test("happy path ends in linked", async () => { ... });
 ```
 
 `FakePort` spec: constructed with a list of `StatusResponse` overrides answered in order to successive `StatusRequest`s (the last one repeats), an `ackNetworkConfig: boolean | DeviceError`, an optional `silent: true` (answers nothing), and `disconnectAfterAck: boolean` (fires the disconnect listener once, then answers again after the next `open()`). It records every decoded frame written (`written`). The fake clock advances `now()` by each `sleep(ms)`. Write each test body fully against that fake; each asserts the final `SetupStep` and the relevant `written` frames.
-- [ ] **Step 2: Run to verify they fail.**
-- [ ] **Step 3: Implement.** Request ids start at 1 and wrap skipping 0. `PanelLink` drops `DeviceEvent`s (type 11, request id 0) and responses with a stale id. `connect()` tolerates the reset measured in Task 1 by polling; on `onDisconnect` during `submitWifi` it re-`open()`s up to 3 times with 1 s between tries. The claim result is memoised in the `PanelSetup` instance so a retry never mints again.
-- [ ] **Step 4: Run** the web gates.
-- [ ] **Step 5: Commit** `feat(web): panel setup over Web Serial`.
+- [x] **Step 2: Run to verify they fail.**
+- [x] **Step 3: Implement.** Request ids start at 1 and wrap skipping 0. `PanelLink` drops `DeviceEvent`s (type 11, request id 0) and responses with a stale id. `connect()` tolerates the reset measured in Task 1 by polling; on `onDisconnect` during `submitWifi` it re-`open()`s up to 3 times with 1 s between tries. The claim result is memoised in the `PanelSetup` instance so a retry never mints again.
+- [x] **Step 4: Run** the web gates.
+- [x] **Step 5: Commit** `feat(web): panel setup over Web Serial`.
 
 ---
 
@@ -1286,11 +1298,11 @@ Screens (`AuthScreens.tsx`), each a `<main className="startup">` like today's:
 
 App order: `getInstance()` first; `setup_required` -> `SetupScreen`; `/signin` -> `LinkLanding`; session missing -> `SignInScreen`; `isNoPanels` -> the Task 12 `PanelSetup` screen; else the window.
 
-- [ ] **Step 1: Write the failing tests** (`tests/authScreens.test.tsx`, with `backendMocks`-style mocks for `account.ts`): the setup screen submits code+email and then loads the window; the sign-in screen shows the inbox screen after submit and never says whether the email exists; the Google button appears only when `google_enabled`; `?signin_error=signups-closed` shows its sentence; `/signin?token=abc` does **not** call `consumeSignInLink` until the button is pressed (Review Focus: mail scanners); a failed link shows "This sign-in link has expired."; the old "Admin token" field is gone from the app (`expect(container.textContent).not.toContain("Admin token")`).
-- [ ] **Step 2: Run to verify they fail.**
-- [ ] **Step 3: Implement.** Remove the admin-token form from `NetworkPanel.tsx` (its `onSignIn` prop and the Server base URL / Device ID / Admin token fields); keep its status `<dl>`. Update its doc comment: panels are set up from "Add a panel", `deskmate-cli` remains for cable maintenance.
-- [ ] **Step 4: Run** the web gates, then `VITE_DESKMATE_MOCK=1 bun run dev` and look at `?scenario=signedout`, `?scenario=setup`, `?scenario=nopanels` in Chrome.
-- [ ] **Step 5: Commit** `feat(web): sign in with an email link or Google, and first-run setup`.
+- [x] **Step 1: Write the failing tests** (`tests/authScreens.test.tsx`, with `backendMocks`-style mocks for `account.ts`): the setup screen submits code+email and then loads the window; the sign-in screen shows the inbox screen after submit and never says whether the email exists; the Google button appears only when `google_enabled`; `?signin_error=signups-closed` shows its sentence; `/signin?token=abc` does **not** call `consumeSignInLink` until the button is pressed (Review Focus: mail scanners); a failed link shows "This sign-in link has expired."; the old "Admin token" field is gone from the app (`expect(container.textContent).not.toContain("Admin token")`).
+- [x] **Step 2: Run to verify they fail.**
+- [x] **Step 3: Implement.** Remove the admin-token form from `NetworkPanel.tsx` (its `onSignIn` prop and the Server base URL / Device ID / Admin token fields); keep its status `<dl>`. Update its doc comment: panels are set up from "Add a panel", `deskmate-cli` remains for cable maintenance.
+- [x] **Step 4: Run** the web gates, then `VITE_DESKMATE_MOCK=1 bun run dev` and look at `?scenario=signedout`, `?scenario=setup`, `?scenario=nopanels` in Chrome.
+- [x] **Step 5: Commit** `feat(web): sign in with an email link or Google, and first-run setup`.
 
 ---
 
@@ -1313,19 +1325,19 @@ App order: `getInstance()` first; `setup_required` -> `SetupScreen`; `/signin` -
 - Account section: the email; "Sign out"; "Sign out everywhere"; "Delete account" behind a confirm step in the same sheet ("This deletes your cards and releases your panels. It can't be undone." + "Delete my account" / "Keep it") -- **no browser `confirm()`**; for the instance owner, a switch "Let new people sign up".
 - Panels section: one row per panel -- id, "Online"/"Offline"/"Waiting for first connection" (pending), and "Remove" behind the same in-sheet confirm; then "Add a panel" (opens `PanelSetup` inside the sheet).
 
-- [ ] **Step 1: Write the failing tests**: the unsupported-browser sentence replaces "Add a panel" when `serialSupported()` is false; `PanelSetup` renders each `SetupStep` kind with the copy above (drive a mocked `PanelSetup` class, not hardware); "Delete account" needs two presses and calls `deleteAccount` once; a non-owner sees no sign-ups switch; removing a panel calls `removePanel` and drops the row.
-- [ ] **Step 2: Run to verify they fail.**
-- [ ] **Step 3: Implement.** `PanelSetup.tsx` owns one `PanelSetup` (Task 10) per attempt, created on "Connect" with `requestPanelPort()` and `SetupDeps` wired to `claimPanel`, `listPanels` (linked = row with `connected && state === "active"`), `() => -new Date().getTimezoneOffset()`.
-- [ ] **Step 4: Run** the web gates; `bun run build`.
-- [ ] **Step 5: Commit** `feat(web): add a panel from the page, and account settings`.
+- [x] **Step 1: Write the failing tests**: the unsupported-browser sentence replaces "Add a panel" when `serialSupported()` is false; `PanelSetup` renders each `SetupStep` kind with the copy above (drive a mocked `PanelSetup` class, not hardware); "Delete account" needs two presses and calls `deleteAccount` once; a non-owner sees no sign-ups switch; removing a panel calls `removePanel` and drops the row.
+- [x] **Step 2: Run to verify they fail.**
+- [x] **Step 3: Implement.** `PanelSetup.tsx` owns one `PanelSetup` (Task 10) per attempt, created on "Connect" with `requestPanelPort()` and `SetupDeps` wired to `claimPanel`, `listPanels` (linked = row with `connected && state === "active"`), `() => -new Date().getTimezoneOffset()`.
+- [x] **Step 4: Run** the web gates; `bun run build`.
+- [x] **Step 5: Commit** `feat(web): add a panel from the page, and account settings`.
 
 ---
 
 ### Task 13: Real checks, gates, merge and deploy
 
-- [ ] **Step 1: Full local gates** (all of `CLAUDE.md` "Verification", companion part, plus the faces suite). Record counts.
-- [ ] **Step 2: Drive the real build locally in Chrome.** `bun run build`; run the server with a fresh `DESKMATE_CONFIG_DIR` in the scratch dir, `DESKMATE_PUBLIC_URL=http://localhost:8443`, `DESKMATE_WEB_DIR=<dist>`, no SMTP. Walk: setup code from the log -> owner -> open sign-ups -> a second browser profile signs up with a link from the log -> confirm it sees no panel and none of the owner's picture sources -> sign out everywhere -> the owner's other tab is signed out. (Add `http` + loopback as an accepted `DESKMATE_PUBLIC_URL` if Task 8 did not.) Note that `__Host-` cookies need `Secure`, which Chrome allows on `http://localhost` -- if it does not in the installed version, run Caddy locally with `tls internal` instead.
-- [ ] **Step 3: Migration dry run on a copy of the live config.** `rsync` `/var/lib/private/deskmate/configs` from docker-vm into the scratch dir, run the new binary locally against the copy with `DESKMATE_OWNER_EMAIL` set, confirm the migration log line, then sign in via the logged link and see the live loop in the window.
+- [x] **Step 1: Full local gates** (all of `CLAUDE.md` "Verification", companion part, plus the faces suite). Record counts.
+- [x] **Step 2: Drive the real build locally in Chrome.** `bun run build`; run the server with a fresh `DESKMATE_CONFIG_DIR` in the scratch dir, `DESKMATE_PUBLIC_URL=http://localhost:8443`, `DESKMATE_WEB_DIR=<dist>`, no SMTP. Walk: setup code from the log -> owner -> open sign-ups -> a second browser profile signs up with a link from the log -> confirm it sees no panel and none of the owner's picture sources -> sign out everywhere -> the owner's other tab is signed out. (Add `http` + loopback as an accepted `DESKMATE_PUBLIC_URL` if Task 8 did not.) Note that `__Host-` cookies need `Secure`, which Chrome allows on `http://localhost` -- if it does not in the installed version, run Caddy locally with `tls internal` instead.
+- [x] **Step 3: Migration dry run on a copy of the live config.** `rsync` `/var/lib/private/deskmate/configs` from docker-vm into the scratch dir, run the new binary locally against the copy with `DESKMATE_OWNER_EMAIL` set, confirm the migration log line, then sign in via the logged link and see the live loop in the window.
 - [ ] **Step 4: Push the branch, open a PR, confirm CI green with `gh run list`** (not grey/skipped).
 - [ ] **Step 5: Deploy.** Add `DESKMATE_PUBLIC_URL=https://deskmate.rodi.one`, `DESKMATE_OWNER_EMAIL=<owner's>` and (optionally) SMTP to `/etc/deskmate/server.env` on docker-vm; `deploy.sh` (binary + web together). Check: the log shows the migration; `dev-0005` re-links (server side); the owner signs in with the logged link. Say exactly which of these were observed.
 - [ ] **Step 6: Claim `dev-0005` from the deployed page -- only when the owner says so.** It re-provisions the live panel with a new identity. Record the observed steps (Wi-Fi join time, link time) in `docs/hardware/board-notes.md`.

@@ -68,13 +68,15 @@ pub(crate) async fn handler(
     let ownership_state = state.clone();
     let ownership_device_id = device_id.clone();
     let owned = tokio::task::spawn_blocking(move || {
-        let space = ownership_state.space_for_device(&ownership_device_id);
-        if space.is_some() {
-            ownership_state
-                .identity()
-                .activate_device(&ownership_device_id)?;
-        }
-        Ok::<_, crate::identity::IdentityError>(space)
+        ownership_state.with_device_lifecycle(|| {
+            let space = ownership_state.space_for_device(&ownership_device_id);
+            if space.is_some() {
+                ownership_state
+                    .identity()
+                    .activate_device(&ownership_device_id)?;
+            }
+            Ok::<_, crate::identity::IdentityError>(space)
+        })
     })
     .await;
     let space = match owned {

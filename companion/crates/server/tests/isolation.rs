@@ -68,6 +68,7 @@ async fn account_b_gets_404_for_every_route_naming_account_a_resources() {
             format!("/v1/app/{device}/pomodoro"),
             Some(serde_json::json!({"card_id": "p", "action": "start"})),
         ),
+        ("DELETE", format!("/v1/app/devices/{device}"), None),
         ("DELETE", format!("/v1/images/{source}"), None),
         (
             "PUT",

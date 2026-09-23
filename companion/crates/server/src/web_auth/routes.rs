@@ -24,7 +24,10 @@ pub(crate) fn routes() -> Router<ServerState> {
         .route("/v1/app/setup", post(setup))
         .route("/v1/app/auth/email", post(request_email_link))
         .route("/v1/app/auth/link", post(consume_email_link))
-        .route("/v1/app/account", get(account))
+        .route(
+            "/v1/app/account",
+            get(account).delete(crate::claim::delete_account),
+        )
         .route("/v1/app/sessions/revoke-all", post(revoke_all_sessions))
         .route("/v1/app/instance/signups", put(set_signups))
         .route("/v1/admin/signin-link", post(admin_signin_link))

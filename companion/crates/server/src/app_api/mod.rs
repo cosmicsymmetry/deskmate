@@ -61,7 +61,6 @@ const EVENT_HEARTBEAT: Duration = Duration::from_secs(30);
 pub(crate) fn routes() -> Router<ServerState> {
     Router::new()
         .route("/v1/app/session", axum::routing::delete(logout))
-        .route("/v1/app/devices", get(list_devices))
         .route("/v1/app/{id}/snapshot", get(snapshot))
         .route("/v1/app/{id}/events", get(events))
         .route("/v1/app/{id}/config", put(save_config))
@@ -179,9 +178,9 @@ async fn logout(
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
-struct DeviceRow {
-    id: String,
-    connected: bool,
+pub(crate) struct DeviceRow {
+    pub(crate) id: String,
+    pub(crate) connected: bool,
     /// Whether this identity has ever been configured.
     ///
     /// Reported because the companion page has to select *a* display and the registry's
@@ -189,7 +188,7 @@ struct DeviceRow {
     /// identities over time lists several that were never configured, and
     /// opening on the first of those shows an empty loop for a display that is
     /// not the one on the desk.
-    has_saved_config: bool,
+    pub(crate) has_saved_config: bool,
     /// When that configuration was last written, in unix seconds.
     ///
     /// The tie-breaker `has_saved_config` alone could not provide. The live
@@ -198,59 +197,8 @@ struct DeviceRow {
     /// that is a fact the filesystem already knows. `None` when there is no
     /// saved configuration, or when the timestamp cannot be read -- a missing
     /// value ranks last rather than pretending to be old.
-    configured_at: Option<i64>,
-}
-
-async fn list_devices(
-    State(state): State<ServerState>,
-    session: AccountSession,
-) -> Result<Json<Vec<DeviceRow>>, AppApiError> {
-    let space = account_space(&state, &session).await?;
-    let identity_state = state.clone();
-    let account_id = space.account_id.clone();
-    let config_space = Arc::clone(&space);
-    let stored = tokio::task::spawn_blocking(move || {
-        let owners = identity_state
-            .identity()
-            .devices_for(&account_id)
-            .map_err(|error| AppApiError::internal(error.to_string()))?;
-        Ok::<_, AppApiError>(
-            owners
-                .into_iter()
-                .map(|owner| {
-                    let id = owner.device_id;
-                    let path = config_space
-                        .configs
-                        .for_device(&id)
-                        .store
-                        .path()
-                        .to_path_buf();
-                    let configured_at = std::fs::metadata(&path)
-                        .and_then(|metadata| metadata.modified())
-                        .ok()
-                        .and_then(|modified| {
-                            modified
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .ok()
-                                .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
-                        });
-                    (id, path.exists(), configured_at)
-                })
-                .collect::<Vec<_>>(),
-        )
-    })
-    .await
-    .map_err(|_| worker_failed())??;
-    let rows = stored
-        .into_iter()
-        .map(|(id, has_saved_config, configured_at)| DeviceRow {
-            connected: state.device_is_linked(&id),
-            id,
-            has_saved_config,
-            configured_at,
-        })
-        .collect();
-    Ok(Json(rows))
+    pub(crate) configured_at: Option<i64>,
+    pub(crate) state: &'static str,
 }
 
 // ---------------------------------------------------------------------------
@@ -353,17 +301,6 @@ async fn read_snapshot(
 
 fn live_runtime(state: &ServerState, device_id: &str) -> Option<Arc<RuntimeHandle>> {
     state.device_link(device_id).and_then(|link| link.runtime())
-}
-
-async fn account_space(
-    state: &ServerState,
-    session: &AccountSession,
-) -> Result<Arc<AccountSpace>, AppApiError> {
-    let lookup = state.clone();
-    let account_id = session.account.id.clone();
-    tokio::task::spawn_blocking(move || lookup.account_space(&account_id))
-        .await
-        .map_err(|_| worker_failed())
 }
 
 async fn owned_device(

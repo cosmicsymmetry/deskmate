@@ -19,6 +19,9 @@ pub use accounts::AccountSpace;
 // The browser companion's authenticated HTTP API.
 mod app_api;
 mod auth;
+mod claim;
+#[doc(hidden)]
+pub use claim::{collect_stale_claims, spawn_housekeeping};
 mod credential;
 // Server-rendered data cards: the server pushing frames to its own image
 // sources, so a weather/RSS/token face reaches the device through the same
@@ -159,6 +162,11 @@ struct StateInner {
     /// Production paths are operator-owned and leave this as `None`.
     _config_temp_dir: Option<tempfile::TempDir>,
     shutdown: tokio::sync::watch::Sender<bool>,
+    /// Serializes device admission with identity revocation. Authentication
+    /// happens before the WebSocket handler, so this closes the gap where a
+    /// request authenticated just before deletion could otherwise claim a link
+    /// after deletion had already looked for live links to close.
+    device_lifecycle: Mutex<()>,
     device_links: Mutex<HashMap<registry::DeviceId, Arc<LiveLink>>>,
     /// Bounds concurrent `/v1/device/link` connections. `Arc`-wrapped
     /// separately from `StateInner` because `Semaphore::try_acquire_owned`
@@ -302,6 +310,7 @@ impl ServerState {
                 integrations: OnceLock::new(),
                 _config_temp_dir: config_temp_dir,
                 shutdown: tokio::sync::watch::channel(false).0,
+                device_lifecycle: Mutex::new(()),
                 device_links: Mutex::new(HashMap::new()),
                 link_slots: Arc::new(tokio::sync::Semaphore::new(
                     device_link::MAX_CONCURRENT_LINKS,
@@ -412,6 +421,22 @@ impl ServerState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(account)
+    }
+
+    pub(crate) fn account_root(&self, account: &identity::AccountId) -> PathBuf {
+        self.inner
+            .config_directory
+            .join("accounts")
+            .join(&account.0)
+    }
+
+    pub(crate) fn with_device_lifecycle<T>(&self, operation: impl FnOnce() -> T) -> T {
+        let _guard = self
+            .inner
+            .device_lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        operation()
     }
 
     pub(crate) fn space_for_device(&self, device_id: &str) -> Option<Arc<AccountSpace>> {
@@ -610,6 +635,21 @@ impl ServerState {
         device_id: registry::DeviceId,
         account_id: identity::AccountId,
     ) -> Option<LinkLease> {
+        let _lifecycle = self
+            .inner
+            .device_lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !self.registry().contains_device(&device_id)
+            || !self
+                .identity()
+                .device_owner(&device_id)
+                .ok()
+                .flatten()
+                .is_some_and(|owner| owner.account_id == account_id)
+        {
+            return None;
+        }
         let link = {
             let mut links = self
                 .inner
@@ -632,6 +672,25 @@ impl ServerState {
             return None;
         }
         Some(LinkLease { link })
+    }
+
+    pub(crate) fn close_link(&self, device_id: &str) {
+        let link = self
+            .inner
+            .device_links
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(device_id);
+        let Some(link) = link else {
+            return;
+        };
+        let Some(runtime) = link.close() else {
+            return;
+        };
+        runtime.connector.detach();
+        if let Err(error) = runtime.handle.shutdown() {
+            tracing::warn!(device_id = %device_id, %error, "revoked device runtime shutdown failed");
+        }
     }
 
     pub(crate) fn device_link(&self, device_id: &str) -> Option<Arc<LiveLink>> {
@@ -717,6 +776,7 @@ fn warn_image_notification_failure(
 pub(crate) struct LiveLink {
     account_id: identity::AccountId,
     live: AtomicBool,
+    closed: AtomicBool,
     runtime: Mutex<Option<ManagedRuntime>>,
     last_seen_unix_ms: Arc<AtomicU64>,
 }
@@ -731,6 +791,7 @@ impl LiveLink {
         Self {
             account_id,
             live: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
             runtime: Mutex::new(None),
             last_seen_unix_ms: Arc::new(AtomicU64::new(0)),
         }
@@ -751,10 +812,18 @@ impl LiveLink {
     }
 
     pub(crate) fn set_runtime(&self, runtime: Arc<RuntimeHandle>, connector: SocketConnector) {
-        *self
+        let mut retained = self
             .runtime
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ManagedRuntime {
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.closed.load(Ordering::Acquire) {
+            connector.detach();
+            if let Err(error) = runtime.shutdown() {
+                tracing::warn!(%error, "revoked device runtime shutdown failed during startup");
+            }
+            return;
+        }
+        *retained = Some(ManagedRuntime {
             handle: runtime,
             connector,
         });
@@ -789,6 +858,12 @@ impl LiveLink {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
+    }
+
+    fn close(&self) -> Option<ManagedRuntime> {
+        self.closed.store(true, Ordering::Release);
+        self.live.store(false, Ordering::Release);
+        self.take_runtime()
     }
 
     pub(crate) fn last_seen_counter(&self) -> Arc<AtomicU64> {
@@ -856,6 +931,7 @@ pub fn app_with_web(state: ServerState, web_root: Option<PathBuf>) -> Router {
         .route("/v1/device/firmware", get(firmware::check))
         .route("/v1/firmware/{filename}", get(firmware::download))
         .merge(admin::routes())
+        .merge(claim::routes())
         .merge(app_api::routes())
         .merge(images::routes())
         .merge(manage::routes())
@@ -1031,36 +1107,121 @@ mod tests {
     #[test]
     fn link_claim_refuses_a_second_live_owner_and_releases_on_drop() {
         let state = ServerState::in_memory();
-        let account = identity::AccountId("acc_owner".into());
+        let account = state
+            .identity()
+            .create_account("owner@example.com", true, true, chrono::Utc::now())
+            .unwrap();
+        let device = state.registry().mint().unwrap();
+        state
+            .identity()
+            .assign_device(
+                &device.device_id,
+                &account.id,
+                identity::DeviceState::Active,
+                chrono::Utc::now(),
+            )
+            .unwrap();
         let first = state
-            .claim_link("dev-0001".into(), account.clone())
+            .claim_link(device.device_id.clone(), account.id.clone())
             .expect("first owner claims the link");
         assert!(
             state
-                .claim_link("dev-0001".into(), account.clone())
+                .claim_link(device.device_id.clone(), account.id.clone())
                 .is_none(),
             "a second concurrent owner was accepted"
         );
         drop(first);
         assert!(
-            state.claim_link("dev-0001".into(), account).is_some(),
+            state.claim_link(device.device_id, account.id).is_some(),
             "the ownership slot was not released with its lease"
+        );
+    }
+
+    #[test]
+    fn link_claim_rechecks_registry_identity_and_account_ownership() {
+        let state = ServerState::in_memory();
+        let account = state
+            .identity()
+            .create_account("owner@example.com", true, true, chrono::Utc::now())
+            .unwrap();
+
+        let revoked = state.registry().mint().unwrap();
+        state
+            .identity()
+            .assign_device(
+                &revoked.device_id,
+                &account.id,
+                identity::DeviceState::Active,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        state.registry().revoke(&revoked.device_id).unwrap();
+        assert!(
+            state
+                .claim_link(revoked.device_id, account.id.clone())
+                .is_none(),
+            "a request authenticated just before revocation claimed a link"
+        );
+
+        let released = state.registry().mint().unwrap();
+        state
+            .identity()
+            .assign_device(
+                &released.device_id,
+                &account.id,
+                identity::DeviceState::Active,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        state
+            .identity()
+            .release_device(&released.device_id)
+            .unwrap();
+        assert!(
+            state.claim_link(released.device_id, account.id).is_none(),
+            "a device whose ownership row was deleted claimed a link"
         );
     }
 
     #[tokio::test]
     async fn image_notifications_name_only_live_devices_in_the_owning_account() {
         let state = ServerState::in_memory();
-        let account_a = identity::AccountId("acc_a".into());
-        let account_b = identity::AccountId("acc_b".into());
-        let _lease_a = state
-            .claim_link("dev-0001".into(), account_a.clone())
+        let account_a = state
+            .identity()
+            .create_account("a@example.com", true, true, chrono::Utc::now())
             .unwrap();
-        let _lease_b = state.claim_link("dev-0002".into(), account_b).unwrap();
+        let account_b = state
+            .identity()
+            .create_account("b@example.com", true, false, chrono::Utc::now())
+            .unwrap();
+        let device_a = state.registry().mint().unwrap();
+        let device_b = state.registry().mint().unwrap();
+        state
+            .identity()
+            .assign_device(
+                &device_a.device_id,
+                &account_a.id,
+                identity::DeviceState::Active,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        state
+            .identity()
+            .assign_device(
+                &device_b.device_id,
+                &account_b.id,
+                identity::DeviceState::Active,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        let _lease_a = state
+            .claim_link(device_a.device_id.clone(), account_a.id.clone())
+            .unwrap();
+        let _lease_b = state.claim_link(device_b.device_id, account_b.id).unwrap();
         let digest = [0x42; protocol::ASSET_DIGEST_LEN];
 
         state.notify_image_source_changed(
-            &account_a,
+            &account_a.id,
             "weather".into(),
             digest,
             ImageNotificationOrigin::ExternalProducerPush,
@@ -1069,11 +1230,11 @@ mod tests {
         assert_eq!(
             state.image_notifications_for_test(),
             [(
-                account_a,
+                account_a.id,
                 "weather".into(),
                 digest,
                 ImageNotificationOrigin::ExternalProducerPush,
-                vec!["dev-0001".into()],
+                vec![device_a.device_id],
             )]
         );
     }

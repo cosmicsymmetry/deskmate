@@ -346,6 +346,7 @@ async fn main() {
     }
     server::start_data_cards(&state)
         .unwrap_or_else(|error| panic!("an account's data-cards.json is unreadable: {error}"));
+    let housekeeping = server::spawn_housekeeping(state.clone());
 
     let listener = tokio::net::TcpListener::bind(&bind_address)
         .await
@@ -371,6 +372,9 @@ async fn main() {
     .with_graceful_shutdown(shutdown_signal(shutdown_state.clone()))
     .await
     .expect("server exited with an error");
+    housekeeping
+        .await
+        .expect("claim housekeeping task panicked");
     tokio::task::spawn_blocking(move || shutdown_state.shutdown())
         .await
         .expect("device runtime shutdown worker panicked");

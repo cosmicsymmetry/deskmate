@@ -624,13 +624,7 @@ pub(crate) fn stop_refreshers(state: &ServerState) {
         .cloned()
         .collect::<Vec<_>>();
     for space in spaces {
-        let mut data_cards = space
-            .data_cards
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for (_, task) in data_cards.tasks.drain() {
-            task.abort();
-        }
+        stop_account_refreshers(&space);
     }
     let mut catalog = state
         .inner
@@ -639,6 +633,16 @@ pub(crate) fn stop_refreshers(state: &ServerState) {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(reloader) = catalog.catalog_reloader.take() {
         reloader.abort();
+    }
+}
+
+pub(crate) fn stop_account_refreshers(space: &AccountSpace) {
+    let mut data_cards = space
+        .data_cards
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (_, task) in data_cards.tasks.drain() {
+        task.abort();
     }
 }
 

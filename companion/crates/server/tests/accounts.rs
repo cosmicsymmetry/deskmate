@@ -1,6 +1,8 @@
 mod support;
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use base64::prelude::{BASE64_URL_SAFE_NO_PAD as B, Engine as _};
 use chrono::Utc;
@@ -9,7 +11,7 @@ use serde_json::{Value, json};
 use server::mailer::RecordingMailer;
 use server::oauth::GoogleOAuthConfig;
 use server::oauth::transport::{FetchResponse, OAuthFuture, OAuthTransport, TransportError};
-use server::{ServerOptions, ServerState, app};
+use server::{Entitlements, ServerOptions, ServerState, app};
 use sha2::{Digest, Sha256};
 use support::*;
 
@@ -157,6 +159,258 @@ async fn wait_for_mail(mailer: &RecordingMailer, count: usize) {
     })
     .await
     .expect("mailer did not record the message");
+}
+
+#[allow(clippy::result_large_err)]
+async fn connect_device(
+    server: &HttpTestServer,
+    token: &str,
+) -> Result<support::DeviceSocket, tokio_tungstenite::tungstenite::Error> {
+    let host = server
+        .base_url
+        .strip_prefix("http://")
+        .expect("test server uses HTTP");
+    let request = http::Request::builder()
+        .uri(format!("ws://{host}/v1/device/link"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Host", host)
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header(
+            "Sec-WebSocket-Key",
+            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+        )
+        .body(())
+        .unwrap();
+    tokio_tungstenite::connect_async(request)
+        .await
+        .map(|(socket, _)| socket)
+}
+
+async fn expect_socket_closed(socket: &mut support::DeviceSocket) {
+    use futures_util::StreamExt as _;
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match socket.next().await {
+                None | Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)) | Err(_)) => {
+                    return;
+                }
+                Some(Ok(_)) => {}
+            }
+        }
+    })
+    .await
+    .expect("device socket stayed open after revocation");
+}
+
+#[derive(Debug)]
+struct OnePanel;
+
+impl Entitlements for OnePanel {
+    fn max_cards(&self, _account: &server::identity::AccountId) -> usize {
+        app_core::MAX_CONFIG_CARDS
+    }
+
+    fn max_image_sources(&self, _account: &server::identity::AccountId) -> usize {
+        app_core::config::MAX_IMAGE_SOURCES
+    }
+
+    fn max_panels(&self, _account: &server::identity::AccountId) -> Option<usize> {
+        Some(1)
+    }
+
+    fn feature_enabled(&self, _account: &server::identity::AccountId, _feature: &str) -> bool {
+        true
+    }
+}
+
+#[tokio::test]
+async fn a_claimed_panel_is_pending_until_it_links_then_active() {
+    let state = ServerState::in_memory();
+    let account = owner_account(&state);
+    let server = spawn_http(app(state)).await;
+
+    let claimed = cookie_request(&server, &account, "POST", "/v1/app/devices/claim", None).await;
+    assert_eq!(claimed.status(), StatusCode::CREATED);
+    let claimed = json_body(claimed).await;
+    assert_eq!(claimed["link_url"], "wss://deskmate.test/v1/device/link");
+    let rows =
+        json_body(cookie_request(&server, &account, "GET", "/v1/app/devices", None).await).await;
+    assert_eq!(rows[0]["state"], "pending");
+
+    let _socket = connect_device(&server, claimed["token"].as_str().unwrap())
+        .await
+        .expect("claimed panel connects");
+    let rows =
+        json_body(cookie_request(&server, &account, "GET", "/v1/app/devices", None).await).await;
+    assert_eq!(rows[0]["state"], "active");
+}
+
+#[tokio::test]
+async fn claiming_respects_the_accounts_panel_limit() {
+    let state = ServerState::in_memory_with_options(ServerOptions {
+        entitlements: Arc::new(OnePanel),
+        ..ServerOptions::default()
+    });
+    let account = owner_account(&state);
+    let server = spawn_http(app(state)).await;
+
+    assert_eq!(
+        cookie_request(&server, &account, "POST", "/v1/app/devices/claim", None,)
+            .await
+            .status(),
+        StatusCode::CREATED
+    );
+    let refused = cookie_request(&server, &account, "POST", "/v1/app/devices/claim", None).await;
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        json_body(refused).await,
+        json!({"error": "Your account has reached its panel limit."})
+    );
+}
+
+#[tokio::test]
+async fn stale_pending_claims_are_revoked_after_a_day() {
+    let state = ServerState::in_memory();
+    let account = owner_account(&state);
+    let pending = state.registry().mint().expect("mint pending panel");
+    state
+        .identity()
+        .assign_device(
+            &pending.device_id,
+            &account.id,
+            server::identity::DeviceState::Pending,
+            Utc::now() - chrono::Duration::hours(25),
+        )
+        .expect("assign pending panel");
+
+    assert_eq!(server::collect_stale_claims(&state, Utc::now()).await, 1);
+    assert!(!state.registry().contains_device(&pending.device_id));
+    assert!(
+        state
+            .identity()
+            .device_owner(&pending.device_id)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn removing_a_panel_revokes_it_and_drops_its_live_link() {
+    let state = ServerState::in_memory();
+    let account = owner_account(&state);
+    let panel = mint_owned_device(&state, &account);
+    let config_path = state
+        .account_space(&account.id)
+        .root
+        .join("devices")
+        .join(format!("{}.json", panel.device_id));
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(&config_path, b"saved config").unwrap();
+    let server = spawn_http(app(state.clone())).await;
+    let mut socket = connect_device(&server, &panel.token)
+        .await
+        .expect("owned panel connects");
+
+    assert_eq!(
+        cookie_request(
+            &server,
+            &account,
+            "DELETE",
+            &format!("/v1/app/devices/{}", panel.device_id),
+            None,
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    expect_socket_closed(&mut socket).await;
+    assert!(!state.registry().contains_device(&panel.device_id));
+    assert!(!config_path.exists());
+    assert!(connect_device(&server, &panel.token).await.is_err());
+}
+
+#[tokio::test]
+async fn deleting_an_account_removes_its_folder_and_refuses_its_panel() {
+    let state = ServerState::in_memory();
+    let owner = owner_account(&state);
+    let account = second_account(&state, "b@example.com");
+    let panel = mint_owned_device(&state, &account);
+    let root = state.account_space(&account.id).root.clone();
+    let server = spawn_http(app(state)).await;
+
+    let owner_refused = cookie_request(&server, &owner, "DELETE", "/v1/app/account", None).await;
+    assert_eq!(owner_refused.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        json_body(owner_refused).await,
+        json!({"error": "Other accounts use this server. Remove them first."})
+    );
+    let deleted = cookie_request(&server, &account, "DELETE", "/v1/app/account", None).await;
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        deleted.headers()["set-cookie"],
+        "__Host-deskmate_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0"
+    );
+    assert!(!root.exists());
+    assert!(connect_device(&server, &panel.token).await.is_err());
+    assert_eq!(
+        cookie_request(&server, &account, "GET", "/v1/app/devices", None)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn a_panel_linking_during_account_deletion_writes_nothing_into_the_deleted_folder() {
+    let state = ServerState::in_memory();
+    let _owner = owner_account(&state);
+    let account = second_account(&state, "racing@example.com");
+    let panel = mint_owned_device(&state, &account);
+    let root = state.account_space(&account.id).root.clone();
+    let server = spawn_http(app(state.clone())).await;
+    let stop = Arc::new(AtomicBool::new(false));
+    let attempts = Arc::new(AtomicUsize::new(0));
+
+    let reconnect_server = HttpTestServer::at(server.base_url.clone());
+    let reconnect_token = panel.token.clone();
+    let reconnect_stop = Arc::clone(&stop);
+    let reconnect_attempts = Arc::clone(&attempts);
+    let reconnects = tokio::spawn(async move {
+        while !reconnect_stop.load(Ordering::Acquire) {
+            reconnect_attempts.fetch_add(1, Ordering::Release);
+            if let Ok(socket) = connect_device(&reconnect_server, &reconnect_token).await {
+                drop(socket);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while attempts.load(Ordering::Acquire) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("reconnect task did not start");
+    assert_eq!(
+        cookie_request(&server, &account, "DELETE", "/v1/app/account", None)
+            .await
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    stop.store(true, Ordering::Release);
+    reconnects.await.expect("reconnect task");
+
+    assert!(!root.exists(), "a racing link recreated the account folder");
+    assert!(
+        !state.registry().contains_device(&panel.device_id),
+        "the deleted account's device identity survived"
+    );
+    assert!(connect_device(&server, &panel.token).await.is_err());
 }
 
 #[tokio::test]

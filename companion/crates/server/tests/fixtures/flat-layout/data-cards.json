@@ -1,0 +1,11 @@
+[
+  {
+    "source_id": "image-0123456789abcdef01234567",
+    "refresh_seconds": 900,
+    "face": {
+      "kind": "weather",
+      "location": "Tbilisi",
+      "units": "metric"
+    }
+  }
+]

@@ -46,6 +46,8 @@ mod image_staleness;
 mod images;
 pub mod mailer;
 mod manage;
+#[doc(hidden)]
+pub mod migrate;
 pub mod oauth;
 // The one LVGL simulator this process owns, and the card previews it renders.
 mod preview;

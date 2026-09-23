@@ -23,6 +23,12 @@ const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:8443";
 const DEFAULT_FIRMWARE_DIR: &str = "/var/lib/deskmate/firmware";
 const DEFAULT_CONFIG_DIR: &str = "/var/lib/deskmate/configs";
 
+const ENV_PUBLIC_URL: &str = "DESKMATE_PUBLIC_URL";
+const ENV_SMTP_URL: &str = "DESKMATE_SMTP_URL";
+const ENV_MAIL_FROM: &str = "DESKMATE_MAIL_FROM";
+const ENV_SIGNUPS: &str = "DESKMATE_SIGNUPS";
+const ENV_OWNER_EMAIL: &str = "DESKMATE_OWNER_EMAIL";
+
 const ENV_GOOGLE_CLIENT_ID: &str = "DESKMATE_GOOGLE_CLIENT_ID";
 const ENV_GOOGLE_CLIENT_SECRET: &str = "DESKMATE_GOOGLE_CLIENT_SECRET";
 const ENV_GOOGLE_CLIENT_SECRET_FILE: &str = "DESKMATE_GOOGLE_CLIENT_SECRET_FILE";
@@ -97,6 +103,24 @@ enum GoogleOAuthConfigError {
          it holds an OAuth client secret and must be 0600"
     )]
     SecretFilePermissive { mode: u32 },
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+enum ServerConfigError {
+    #[error("{variable} must be set -- see deploy/README.md")]
+    Missing { variable: &'static str },
+    #[error("{variable} must be valid Unicode")]
+    NotUnicode { variable: &'static str },
+    #[error("DESKMATE_PUBLIC_URL must be an absolute http(s) URL")]
+    InvalidPublicUrl,
+    #[error("DESKMATE_PUBLIC_URL may use http only for localhost or a loopback IP address")]
+    InsecurePublicUrl,
+    #[error("DESKMATE_SIGNUPS must be either 'open' or 'closed'")]
+    InvalidSignups,
+    #[error("DESKMATE_SMTP_URL and DESKMATE_MAIL_FROM must be set together")]
+    IncompleteSmtp,
+    #[error("DESKMATE_SMTP_URL or DESKMATE_MAIL_FROM is invalid")]
+    InvalidSmtp,
 }
 
 fn read_google_env(variable: &'static str) -> Result<Option<String>, GoogleOAuthConfigError> {
@@ -313,7 +337,17 @@ async fn main() {
     let admin_token = std::env::var("DESKMATE_ADMIN_TOKEN")
         .expect("DESKMATE_ADMIN_TOKEN must be set -- see deploy/README.md");
     let google_oauth = google_oauth_config_from_env();
-    let server_options = server_options_from_env();
+    let server_options = server_options_from_env()
+        .unwrap_or_else(|error| panic!("invalid server configuration: {error}"));
+    let owner_email = read_optional_server_env(ENV_OWNER_EMAIL)
+        .unwrap_or_else(|error| panic!("invalid server configuration: {error}"));
+
+    if let Err(error) =
+        server::migrate::migrate_if_needed(&config_dir, owner_email.as_deref(), chrono::Utc::now())
+    {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
 
     // `config_dir` is cloned because the integration store below opens against
     // it after the state has taken ownership.
@@ -380,23 +414,68 @@ async fn main() {
         .expect("device runtime shutdown worker panicked");
 }
 
-fn server_options_from_env() -> ServerOptions {
-    let public_url = std::env::var("DESKMATE_PUBLIC_URL")
-        .expect("DESKMATE_PUBLIC_URL must be set -- see deploy/README.md");
-    let public_url = url::Url::parse(&public_url)
-        .expect("DESKMATE_PUBLIC_URL must be an absolute URL -- see deploy/README.md");
-    let signups_default = match std::env::var("DESKMATE_SIGNUPS").as_deref() {
-        Ok("open") => true,
-        Ok("closed") | Err(std::env::VarError::NotPresent) => false,
-        Ok(_) => panic!("DESKMATE_SIGNUPS must be either 'open' or 'closed'"),
-        Err(std::env::VarError::NotUnicode(_)) => {
-            panic!("DESKMATE_SIGNUPS must be valid Unicode")
-        }
+fn server_options_from_env() -> Result<ServerOptions, ServerConfigError> {
+    let public_url =
+        read_optional_server_env(ENV_PUBLIC_URL)?.ok_or(ServerConfigError::Missing {
+            variable: ENV_PUBLIC_URL,
+        })?;
+    server_options_from_values(
+        &public_url,
+        read_optional_server_env(ENV_SIGNUPS)?.as_deref(),
+        read_optional_server_env(ENV_SMTP_URL)?.as_deref(),
+        read_optional_server_env(ENV_MAIL_FROM)?.as_deref(),
+    )
+}
+
+fn read_optional_server_env(variable: &'static str) -> Result<Option<String>, ServerConfigError> {
+    match std::env::var(variable) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(ServerConfigError::NotUnicode { variable }),
+    }
+}
+
+fn server_options_from_values(
+    public_url: &str,
+    signups: Option<&str>,
+    smtp_url: Option<&str>,
+    mail_from: Option<&str>,
+) -> Result<ServerOptions, ServerConfigError> {
+    let public_url =
+        url::Url::parse(public_url).map_err(|_| ServerConfigError::InvalidPublicUrl)?;
+    if !matches!(public_url.scheme(), "http" | "https") {
+        return Err(ServerConfigError::InvalidPublicUrl);
+    }
+    if public_url.scheme() == "http" && !is_loopback_url(&public_url) {
+        return Err(ServerConfigError::InsecurePublicUrl);
+    }
+    let signups_default = match signups {
+        Some("open") => true,
+        Some("closed") | None => false,
+        Some(_) => return Err(ServerConfigError::InvalidSignups),
     };
-    ServerOptions {
+    let mailer: Arc<dyn server::mailer::Mailer> = match (smtp_url, mail_from) {
+        (None, None) => Arc::new(server::mailer::LogMailer),
+        (Some(smtp_url), Some(mail_from)) => Arc::new(
+            server::mailer::SmtpMailer::from_url(smtp_url, mail_from)
+                .map_err(|_| ServerConfigError::InvalidSmtp)?,
+        ),
+        _ => return Err(ServerConfigError::IncompleteSmtp),
+    };
+    Ok(ServerOptions {
         public_url,
         signups_default,
+        mailer,
         ..ServerOptions::default()
+    })
+}
+
+fn is_loopback_url(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
     }
 }
 
@@ -468,6 +547,15 @@ async fn shutdown_signal(state: ServerState) {
 
 #[cfg(test)]
 mod tests {
+    fn server_options(
+        public_url: &str,
+        signups: Option<&str>,
+        smtp_url: Option<&str>,
+        mail_from: Option<&str>,
+    ) -> Result<server::ServerOptions, super::ServerConfigError> {
+        super::server_options_from_values(public_url, signups, smtp_url, mail_from)
+    }
+
     fn complete_google_env() -> super::GoogleOAuthEnv {
         super::GoogleOAuthEnv {
             client_id: Some("client-id.apps.googleusercontent.com".to_string()),
@@ -484,6 +572,89 @@ mod tests {
         let config = super::google_oauth_config_from_values(super::GoogleOAuthEnv::default())
             .expect("absent config is valid");
         assert!(config.is_none());
+    }
+
+    #[test]
+    fn public_url_requires_https_except_on_loopback() {
+        for accepted in [
+            "https://deskmate.example",
+            "http://localhost:8443",
+            "http://127.0.0.1:8443",
+            "http://[::1]:8443",
+        ] {
+            assert!(
+                server_options(accepted, None, None, None).is_ok(),
+                "{accepted}"
+            );
+        }
+        for refused in [
+            "http://deskmate.example",
+            "ftp://deskmate.example",
+            "not a URL",
+        ] {
+            assert!(
+                server_options(refused, None, None, None).is_err(),
+                "{refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn signups_accept_only_open_or_closed_and_default_closed() {
+        assert!(
+            !server_options("https://deskmate.example", None, None, None)
+                .unwrap()
+                .signups_default
+        );
+        assert!(
+            server_options("https://deskmate.example", Some("open"), None, None)
+                .unwrap()
+                .signups_default
+        );
+        assert!(matches!(
+            server_options("https://deskmate.example", Some("yes"), None, None),
+            Err(super::ServerConfigError::InvalidSignups)
+        ));
+    }
+
+    #[test]
+    fn smtp_url_and_sender_are_required_together() {
+        assert!(matches!(
+            server_options(
+                "https://deskmate.example",
+                None,
+                Some("smtps://smtp.example.com"),
+                None,
+            ),
+            Err(super::ServerConfigError::IncompleteSmtp)
+        ));
+        assert!(matches!(
+            server_options(
+                "https://deskmate.example",
+                None,
+                None,
+                Some("Deskmate <mail@example.com>"),
+            ),
+            Err(super::ServerConfigError::IncompleteSmtp)
+        ));
+        assert!(
+            server_options(
+                "https://deskmate.example",
+                None,
+                Some("smtps://smtp.example.com"),
+                Some("Deskmate <mail@example.com>"),
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            server_options(
+                "https://deskmate.example",
+                None,
+                Some("not-an-smtp-url"),
+                Some("Deskmate <mail@example.com>"),
+            ),
+            Err(super::ServerConfigError::InvalidSmtp)
+        ));
     }
 
     #[test]

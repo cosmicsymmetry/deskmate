@@ -260,7 +260,7 @@ fn normalises_and_rejects() {
 }
 ```
 
-- [ ] **Step 2: Run to verify they fail.** `cd companion && cargo test -p deskmate-server identity > /tmp/t.log 2>&1; echo $?; grep -E "error|test result" /tmp/t.log | head` -- expected: compile errors (module missing).
+- [ ] **Step 2: Run to verify they fail.** `cd companion && cargo test -p server identity > /tmp/t.log 2>&1; echo $?; grep -E "error|test result" /tmp/t.log | head` -- expected: compile errors (module missing).
 - [ ] **Step 3: Implement.** Key parts:
 
 ```rust
@@ -307,7 +307,7 @@ CREATE TABLE IF NOT EXISTS instance (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 - `Drop` is not required: `Connection` closes on drop and SQLite checkpoints the WAL on the last close.
 
 - [ ] **Step 4: Run the tests** -- same command; expected: all `identity` tests pass.
-- [ ] **Step 5: Clippy** `cargo clippy -p deskmate-server --all-targets -- -D warnings > /tmp/c.log 2>&1; echo $?` -- expected `0`.
+- [ ] **Step 5: Clippy** `cargo clippy -p server --all-targets -- -D warnings > /tmp/c.log 2>&1; echo $?` -- expected `0`.
 - [ ] **Step 6: Commit** `feat(server): identity store over SQLite` (message names the rusqlite version).
 
 ---
@@ -444,7 +444,7 @@ async fn a_picture_push_wakes_only_the_owning_accounts_panels() {
 
 (The helper names in that test are defined in Step 3; `drive_until_asset_begin`/`assert_no_asset_begin_within` are thin wrappers over the existing `DeviceSocket` reading loop in `support/mod.rs`.)
 
-- [ ] **Step 2: Run to verify they fail** (`cargo test -p deskmate-server > /tmp/t.log 2>&1; echo $?`) -- compile errors.
+- [ ] **Step 2: Run to verify they fail** (`cargo test -p server > /tmp/t.log 2>&1; echo $?`) -- compile errors.
 - [ ] **Step 3: Implement.**
   1. `entitlements.rs` as in Interfaces. `app_core` limits (`MAX_CONFIG_CARDS`, `MAX_IMAGE_SOURCES`) stay the hard ceiling; the trait can only lower them. The store-level checks remain; add an entitlement check where a source is minted (`images.rs::mint_source`) and where a config is saved (`app_api::save_config`), answering `AppApiError::Validation` with an issue at path `cards` / `422` for sources: "This account can have at most N picture sources."
   2. `ServerState`: add `identity: IdentityStore` (opened at `config_directory.join("identity.db")`; in `in_memory*` inside the tempdir), `accounts: Mutex<HashMap<AccountId, Arc<AccountSpace>>>`, `options: ServerOptions` fields. **Remove** `image_sources`, `configs`, and the spec half of `data_cards` from `StateInner`. `new(...)` becomes `new_with_options(..., ServerOptions::default())`.
@@ -464,7 +464,7 @@ pub fn mint_owned_device(state: &ServerState, account: &TestAccount) -> DeviceId
 
   `AccountId` and the identity accessors must be reachable from integration tests: expose them behind the existing `test-support`-style pattern the crate already uses for test hooks (if none exists for the server crate, add `#[doc(hidden)] pub` accessors -- `identity()` and `account_space()` -- and note it in the commit). `cookie` stays unused until Task 4 but is minted now so Task 4 only changes the extractor.
   9. Update every existing test that calls `state.registry().mint()` or `POST /v1/devices` before an owner exists to call `owner_account` first (`ownership.rs::spawn_state`, `companion_api.rs`, `hostile_device.rs`, `image_routes.rs`, `device_link.rs`, `manage.rs`, `oauth_routes.rs`). Tests that reload by building a second `ServerState::new` on the same directory keep working because the identity db is in that directory.
-- [ ] **Step 4: Run the full server suite** `cargo test -p deskmate-server --all-targets > /tmp/t.log 2>&1; echo $?` -- expected `0`. Then the workspace gates from `CLAUDE.md` (fmt, clippy, both test invocations).
+- [ ] **Step 4: Run the full server suite** `cargo test -p server --all-targets > /tmp/t.log 2>&1; echo $?` -- expected `0`. Then the workspace gates from `CLAUDE.md` (fmt, clippy, both test invocations).
 - [ ] **Step 5: Commit** `feat(server): per-account spaces and the entitlements seam`.
 
 ---
@@ -653,7 +653,7 @@ fn forwarded_for_is_trusted_only_from_loopback() {
   - The oauth callback's pending stash was keyed by `sid`; key it by the session digest hex instead, so a different session cannot complete someone else's consent.
   - Delete `SessionSigner` and the HMAC use of the admin token; `hmac` stays only if something else uses it (check with `cargo udeps`-free grep; remove the dependency if unused).
   - Update `app_api/mod.rs`'s module doc and `src/lib/types.contract.ts` regeneration if a DTO changed (run the ignored `print_typescript_contract_fixture` test and copy its output).
-- [ ] **Step 4: Run the full gates**, then **mutation probe**: temporarily replace the ownership comparison in `owned_device` with `true`, run `cargo test -p deskmate-server --test isolation`, confirm it FAILS, restore. Do the same for the `SameOrigin` comparison against `tests/accounts.rs`. Record both results in the commit message.
+- [ ] **Step 4: Run the full gates**, then **mutation probe**: temporarily replace the ownership comparison in `owned_device` with `true`, run `cargo test -p server --test isolation`, confirm it FAILS, restore. Do the same for the `SameOrigin` comparison against `tests/accounts.rs`. Record both results in the commit message.
 - [ ] **Step 5: Commit** `feat(server): account sessions replace the admin-token cookie`.
 
 ---

@@ -16,9 +16,9 @@ A plugin is how someone other than us puts a face on a Deskmate panel. This spec
 the contract — what a plugin *is*, what runs it, what it may reach, how it fails, how it
 is tested.
 
-It defines no submission flow, no review queue, no directory UI, no per-author identity
-and no per-author identity. Those wait: the first three on there being an outside author
-at all, identity and plan limits on Track A.
+It defines no submission flow, no review queue, no directory UI and no per-author
+identity. Those wait: the first three on there being an outside author at all, identity
+and plan limits on Track A.
 
 **Tap and state are in, and are Track C1's shapes, not new ones.** PR #4 gives every face
 a `state` that round-trips through the server and an `event: {taps, point}` for a tap, and

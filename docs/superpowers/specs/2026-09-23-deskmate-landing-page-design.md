@@ -175,6 +175,17 @@ the object exists and works.
 ## Plumbing
 
 - **Astro**, because the page is static content plus exactly one interactive island.
+  The owner asked on 2026-09-24 whether the site should be written in Rust; the answer
+  is no, and it was settled rather than left open. A WASM framework would ship hundreds
+  of kilobytes to swap an image source and would break the JavaScript-off requirement,
+  since WASM needs JavaScript to boot. A Rust static site generator such as Zola is
+  sound on its own terms but is a *new* toolchain here — the tree already runs Bun,
+  TypeScript and Biome for `apps/deskmate` and `faces` — and the interactive panel and
+  the waitlist function would still be JavaScript. Serving the page from the existing
+  Rust server would couple marketing uptime to the homelab and make every copy edit a
+  deploy, which is the coupling `DESKMATE_WEB_DIR` exists to avoid. Rust does own the
+  part where it matters: the frame exporter, which links the firmware's own scene
+  interpreter. Astro was kept over plain hand-authored HTML on the owner's direction.
 - **Its own repository**, `~/dev/deskmate-site`, deploying independently of the server.
 - **Cloudflare Pages**, which is free, static, already where the DNS lives, and keeps a
   launch-day marketing site off a home VM.

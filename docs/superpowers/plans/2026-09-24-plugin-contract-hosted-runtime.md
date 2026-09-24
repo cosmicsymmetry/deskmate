@@ -360,8 +360,9 @@ export function runInSandbox<T>(
   limits: Partial<SandboxLimits> = {},
 ): T {
   const { memoryBytes, deadlineMs, sourceBytes } = { ...SANDBOX_LIMITS, ...limits };
-  if (source.length > sourceBytes) {
-    throw new SandboxError(`this plugin's source is too large: ${source.length} bytes, the limit is ${sourceBytes}`);
+  const size = Buffer.byteLength(source, "utf8");
+  if (size > sourceBytes) {
+    throw new SandboxError(`this plugin's source is too large: ${size} bytes, the limit is ${sourceBytes}`);
   }
   if (quickjs === undefined) {
     throw new SandboxError("the sandbox was not warmed; call warmSandbox() first");
@@ -375,19 +376,32 @@ export function runInSandbox<T>(
   try {
     // `export function f` becomes a plain declaration: QuickJS evaluates a script,
     // not a module, and the plugin's own source is never trusted to import anything.
-    const script = `${source.replace(/export\s+(?=function|const|let)/g, "")}
+    // Anchored to statement position, or a plugin's own string containing the text
+    // "export const" is silently mangled. The real cure is the publish-time bundle,
+    // which need not contain `export` at all (Task 9).
+    const script = `${source.replace(/^[ \t]*export[ \t]+(?=function|const|let)/gm, "")}
 if (typeof ${fn} !== "function") { throw new Error("this plugin exports no ${fn}()"); }
-JSON.stringify(${fn}(${JSON.stringify(input)}) ?? null)`;
+${fn}(${JSON.stringify(input)}) ?? null`;
     const evaluated = context.evalCode(script);
     if (evaluated.error) {
-      const dumped = context.dump(evaluated.error) as { message?: string } | string;
+      // Anything can be thrown, including null, so normalize every shape: every
+      // path out of this function is a SandboxError, because that is what the
+      // error taxonomy catches.
+      const dumped: unknown = context.dump(evaluated.error);
       evaluated.error.dispose();
-      const message = typeof dumped === "string" ? dumped : (dumped.message ?? JSON.stringify(dumped));
-      throw new SandboxError(message);
+      const asObject = typeof dumped === "object" && dumped !== null ? (dumped as { message?: unknown; configuration?: unknown }) : undefined;
+      const message = typeof asObject?.message === "string" ? asObject.message : String(dumped);
+      const failure = new SandboxError(message);
+      failure.configuration = Boolean(asObject?.configuration);
+      throw failure;
     }
-    const json = context.getString(evaluated.value);
+    // Read the value HOST-side. Round-tripping through the sandbox's own
+    // JSON.stringify lets a plugin reassign it and choose what the host receives,
+    // and a non-serializable return value came back as the text "undefined",
+    // which the host's own JSON.parse then threw on, outside SandboxError.
+    const value = context.dump(evaluated.value) as T;
     evaluated.value.dispose();
-    return JSON.parse(json) as T;
+    return value;
   } finally {
     context.dispose();
     runtime.dispose();

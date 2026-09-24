@@ -633,8 +633,19 @@ so the four existing faces are untouched.
 
 - [ ] **Step 1: Write the failing tests**
 
-Follow the file's existing pattern exactly: a real `Bun.serve` on 127.0.0.1 plus an
-injected resolver, never a stubbed global `fetch`.
+Follow the file's existing pattern: a real `Bun.serve` on 127.0.0.1 plus injection,
+never a stubbed global `fetch`.
+
+**Note, learned the hard way:** a request cannot reach a loopback server *through*
+`createRequest`, because the guard refuses loopback — that is its job. So `createRequest`
+takes its transport by injection too, exactly as it takes its resolver:
+`createRequest(resolve: Resolve = systemResolve, dialFn: DialFn = dial)`. A test then
+gives it a resolver returning a PUBLIC address, so the real guard runs and passes, and an
+injected dial that answers from the local server. Nothing in the guard is weakened and
+there is no production flag to misconfigure: only a test ever passes the second argument.
+One of the tests must assert the injected dial recorded ZERO calls when the resolver
+returns a private address — that is what proves the guard sits in front of the transport
+rather than beside it.
 
 ```ts
 // append to companion/faces/test/http.test.ts

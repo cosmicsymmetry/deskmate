@@ -189,7 +189,83 @@ describe("performRequests", () => {
     expect(answers[2]).toEqual({ ok: false, error: expect.stringContaining("budget") });
   });
 
-  test("a matched secret in a query parameter is substituted too", async () => {
+  test("scrubs a secret value that leaks back through a thrown error", async () => {
+    const stub = async (input: { headers?: Record<string, string> }) => {
+      throw new Error(`upstream rejected Authorization: ${input.headers?.Authorization}`);
+    };
+    const [answer] = await performRequests(
+      validateRequests(
+        [
+          {
+            url: "https://api.github.com/u",
+            as: "json",
+            headers: { Authorization: "{{secret:token}}" },
+          },
+        ],
+        manifest,
+        budget,
+      ),
+      manifest,
+      { token: "ghp_SECRETVALUE" },
+      stub,
+      budget,
+    );
+    expect(JSON.stringify(answer)).not.toContain("ghp_SECRETVALUE");
+    expect(answer).toEqual({
+      ok: false,
+      error: expect.stringContaining("[redacted]"),
+    });
+  });
+});
+
+describe("performRequests: send_as decides the one position a secret may land in", () => {
+  const positioned = parseManifest(
+    {
+      api: 1,
+      id: "p",
+      version: "1.0.0",
+      label: "P",
+      description: "d",
+      author: "a",
+      hosts: ["bearer.example", "header.example", "query.example"],
+      secrets: [
+        { key: "b", label: "B", kind: "api_key", host: "bearer.example", send_as: "bearer" },
+        { key: "h", label: "H", kind: "api_key", host: "header.example", send_as: "header" },
+        { key: "q", label: "Q", kind: "api_key", host: "query.example", send_as: "query" },
+      ],
+      fields: [],
+    },
+    "p",
+  );
+  const secrets = { b: "SECRET_B", h: "SECRET_H", q: "SECRET_Q" };
+
+  test("a bearer secret substitutes as Bearer <value> in its own header", async () => {
+    const seen: { headers?: Record<string, string> }[] = [];
+    const stub = async (input: { headers?: Record<string, string> }) => {
+      seen.push(input);
+      return { status: 200, body: "", json: undefined };
+    };
+    await performRequests(
+      validateRequests(
+        [
+          {
+            url: "https://bearer.example/x",
+            as: "text",
+            headers: { Authorization: "{{secret:b}}" },
+          },
+        ],
+        positioned,
+        budget,
+      ),
+      positioned,
+      secrets,
+      stub,
+      budget,
+    );
+    expect(seen[0]?.headers?.Authorization).toBe("Bearer SECRET_B");
+  });
+
+  test("a bearer secret's placeholder in a query parameter stays literal", async () => {
     const seen: { url: string }[] = [];
     const stub = async (input: { url: string }) => {
       seen.push(input);
@@ -197,15 +273,127 @@ describe("performRequests", () => {
     };
     await performRequests(
       validateRequests(
-        [{ url: "https://api.github.com/u?key={{secret:token}}", as: "text" }],
-        manifest,
+        [{ url: "https://bearer.example/x?b={{secret:b}}", as: "text" }],
+        positioned,
         budget,
       ),
-      manifest,
-      { token: "ghp_real" },
+      positioned,
+      secrets,
       stub,
       budget,
     );
-    expect(seen[0]?.url).toContain("ghp_real");
+    expect(new URL(seen[0]?.url ?? "").searchParams.get("b")).toBe("{{secret:b}}");
+    expect(seen[0]?.url).not.toContain("SECRET_B");
+  });
+
+  test("a header secret substitutes its raw value in its own header", async () => {
+    const seen: { headers?: Record<string, string> }[] = [];
+    const stub = async (input: { headers?: Record<string, string> }) => {
+      seen.push(input);
+      return { status: 200, body: "", json: undefined };
+    };
+    await performRequests(
+      validateRequests(
+        [{ url: "https://header.example/x", as: "text", headers: { "X-Api-Key": "{{secret:h}}" } }],
+        positioned,
+        budget,
+      ),
+      positioned,
+      secrets,
+      stub,
+      budget,
+    );
+    expect(seen[0]?.headers?.["X-Api-Key"]).toBe("SECRET_H");
+  });
+
+  test("a query secret substitutes its raw value in its own query parameter", async () => {
+    const seen: { url: string }[] = [];
+    const stub = async (input: { url: string }) => {
+      seen.push(input);
+      return { status: 200, body: "", json: undefined };
+    };
+    await performRequests(
+      validateRequests(
+        [{ url: "https://query.example/x?k={{secret:q}}", as: "text" }],
+        positioned,
+        budget,
+      ),
+      positioned,
+      secrets,
+      stub,
+      budget,
+    );
+    expect(new URL(seen[0]?.url ?? "").searchParams.get("k")).toBe("SECRET_Q");
+  });
+
+  test("a query secret's placeholder in a header stays literal", async () => {
+    const seen: { headers?: Record<string, string> }[] = [];
+    const stub = async (input: { headers?: Record<string, string> }) => {
+      seen.push(input);
+      return { status: 200, body: "", json: undefined };
+    };
+    await performRequests(
+      validateRequests(
+        [{ url: "https://query.example/x", as: "text", headers: { "X-Api-Key": "{{secret:q}}" } }],
+        positioned,
+        budget,
+      ),
+      positioned,
+      secrets,
+      stub,
+      budget,
+    );
+    expect(seen[0]?.headers?.["X-Api-Key"]).toBe("{{secret:q}}");
+  });
+
+  test("cross-host refusal still holds: a secret never substitutes for another host", async () => {
+    const seen: { headers?: Record<string, string> }[] = [];
+    const stub = async (input: { headers?: Record<string, string> }) => {
+      seen.push(input);
+      return { status: 200, body: "", json: undefined };
+    };
+    // "b" belongs to bearer.example; declaring it here would fail manifest
+    // validation (Task 1), so this proves the same thing from the request side:
+    // header.example has no secret named "b" registered to it, so the
+    // placeholder cannot resolve there even though "b" exists in this manifest.
+    await performRequests(
+      validateRequests(
+        [
+          {
+            url: "https://header.example/x",
+            as: "text",
+            headers: { Authorization: "{{secret:b}}" },
+          },
+        ],
+        positioned,
+        budget,
+      ),
+      positioned,
+      secrets,
+      stub,
+      budget,
+    );
+    expect(seen[0]?.headers?.Authorization).toBe("{{secret:b}}");
+    expect(JSON.stringify(seen)).not.toContain("SECRET_B");
+  });
+
+  test("a query with no secret placeholder reaches the wire byte-for-byte", async () => {
+    const seen: { url: string }[] = [];
+    const stub = async (input: { url: string }) => {
+      seen.push(input);
+      return { status: 200, body: "", json: undefined };
+    };
+    const url = "https://bearer.example/x?q=a+b&raw=%2Fpath";
+    await performRequests(
+      validateRequests([{ url, as: "text" }], positioned, budget),
+      positioned,
+      secrets,
+      stub,
+      budget,
+    );
+    // validateRequests already canonicalizes the URL once (`new URL(url).toString()`);
+    // compare against that canonical form, not the original literal, to isolate
+    // whether performRequests itself mangles a placeholder-free query.
+    expect(seen[0]?.url).toBe(new URL(url).toString());
   });
 });

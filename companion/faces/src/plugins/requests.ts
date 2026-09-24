@@ -40,12 +40,43 @@ export interface PluginRequest {
 }
 
 const PLACEHOLDER = /\{\{secret:([a-z0-9_]+)\}\}/gi;
+/** Existence check only (no capture group iteration state to corrupt): is there a
+ * placeholder anywhere in this string at all? Kept separate from `PLACEHOLDER`
+ * because that regex is `g` and `.test()` on a shared global regex would advance
+ * (and eventually wrap) its `lastIndex` across unrelated calls. */
+const HAS_PLACEHOLDER = /\{\{secret:[a-z0-9_]+\}\}/i;
+
+/** Where a placeholder was written: a header value, or a query-parameter value. */
+type Position = "header" | "query";
 
 /**
- * A secret is substituted ONLY into a request whose host is that secret's own.
- * An unmatched placeholder stays as literal text: leaking the value is the one
- * outcome that must never happen, and a visibly wrong header is debuggable.
+ * The one place the substitution rule lives, for both a header value and a query
+ * value: a secret is substituted ONLY when (a) the request's host equals that
+ * secret's own registered host, AND (b) `position` matches where its manifest
+ * `send_as` says it belongs -- `"bearer"`/`"header"` substitute only in a header,
+ * `"query"` substitutes only in a query parameter. A placeholder that fails either
+ * check stays as literal text: an unmatched placeholder is visible and debuggable,
+ * and leaking the value -- or silently relocating it to a URL that gets logged,
+ * cached and forwarded in a Referer header -- is the one outcome that must never
+ * happen.
  */
+function resolveSecret(
+  key: string,
+  host: string,
+  position: Position,
+  manifest: PluginManifest,
+  secrets: Record<string, string>,
+): string | undefined {
+  const spec = manifest.secrets.find((secret) => secret.key === key);
+  if (spec === undefined || spec.host.toLowerCase() !== host) return undefined;
+  const belongsInQuery = spec.send_as === "query";
+  if (position === "query" ? !belongsInQuery : belongsInQuery) return undefined;
+  const stored = secrets[key];
+  if (stored === undefined) return undefined;
+  return spec.send_as === "bearer" ? `Bearer ${stored}` : stored;
+}
+
+/** Substitutes `{{secret:<key>}}` in each header value, via `resolveSecret`. */
 function applySecrets(
   target: URL,
   headers: Record<string, string>,
@@ -55,44 +86,59 @@ function applySecrets(
   const host = target.hostname.toLowerCase();
   const out: Record<string, string> = {};
   for (const [name, value] of Object.entries(headers)) {
-    out[name] = value.replace(PLACEHOLDER, (literal, key: string) => {
-      const spec = manifest.secrets.find((secret) => secret.key === key);
-      if (spec === undefined || spec.host.toLowerCase() !== host) return literal;
-      const stored = secrets[key];
-      if (stored === undefined) return literal;
-      return spec.send_as === "bearer" ? `Bearer ${stored}` : stored;
-    });
+    out[name] = value.replace(
+      PLACEHOLDER,
+      (literal, key: string) => resolveSecret(key, host, "header", manifest, secrets) ?? literal,
+    );
   }
   return out;
 }
 
 /**
- * The same substitution rule as `applySecrets`, applied to the request's own query
- * parameters instead of its headers -- a plugin may write `{{secret:key}}` into
- * either. Same host check, same "unmatched stays literal" rule.
+ * The same substitution rule, applied to the request's own query parameters instead
+ * of its headers -- a plugin may write `{{secret:key}}` into either, and `send_as`
+ * decides which one actually substitutes. A request whose query has no placeholder
+ * at all is returned untouched: rebuilding through `URLSearchParams` re-encodes
+ * (`+` for space, its own escaping of reserved characters), and a request that never
+ * touches a secret must reach the wire exactly as the plugin wrote it.
  */
 function applySecretsToQuery(
   target: URL,
   manifest: PluginManifest,
   secrets: Record<string, string>,
 ): URL {
+  if (!HAS_PLACEHOLDER.test(target.search)) return target;
   const host = target.hostname.toLowerCase();
   const substituted = new URL(target);
   const params = new URLSearchParams();
   for (const [key, value] of target.searchParams.entries()) {
     params.append(
       key,
-      value.replace(PLACEHOLDER, (literal, secretKey: string) => {
-        const spec = manifest.secrets.find((secret) => secret.key === secretKey);
-        if (spec === undefined || spec.host.toLowerCase() !== host) return literal;
-        const stored = secrets[secretKey];
-        if (stored === undefined) return literal;
-        return spec.send_as === "bearer" ? `Bearer ${stored}` : stored;
-      }),
+      value.replace(
+        PLACEHOLDER,
+        (literal, secretKey: string) =>
+          resolveSecret(secretKey, host, "query", manifest, secrets) ?? literal,
+      ),
     );
   }
   substituted.search = params.toString();
   return substituted;
+}
+
+/**
+ * Every outward-facing error string passes through here before it is stored in an
+ * `Answer`. This does not trust a `RequestFn` -- the real one, or any stub a plugin's
+ * own review might substitute later -- to have been careful about what it throws: a
+ * value this call was handed is scrubbed regardless of where it came from, because
+ * leaking one is the one outcome that must never happen.
+ */
+function redactSecrets(text: string, secrets: Record<string, string>): string {
+  let out = text;
+  for (const stored of Object.values(secrets)) {
+    if (stored === "") continue;
+    out = out.split(stored).join("[redacted]");
+  }
+  return out;
 }
 
 /** Strips brackets from an IPv6 literal the way `URL.hostname` presents it. */
@@ -234,7 +280,10 @@ export async function performRequests(
   let bytesLeft = budget.bytes;
   for (const declared of requests) {
     if (bytesLeft <= 0) {
-      answers.push({ ok: false, error: "the byte budget for this refresh is spent" });
+      answers.push({
+        ok: false,
+        error: redactSecrets("the byte budget for this refresh is spent", secrets),
+      });
       continue;
     }
     const target = new URL(declared.url);
@@ -252,7 +301,8 @@ export async function performRequests(
       bytesLeft -= byteSize(reply.body);
       answers.push(toAnswer(reply));
     } catch (error) {
-      answers.push({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      const message = error instanceof Error ? error.message : String(error);
+      answers.push({ ok: false, error: redactSecrets(message, secrets) });
     }
   }
   return answers;

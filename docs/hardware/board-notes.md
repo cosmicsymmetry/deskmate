@@ -5479,18 +5479,23 @@ Shipped the same day, all server-side, no wire and no firmware:
   unmeasured. `runtime_device.rs` already has a test
   (`the_server_releases_a_dead_link_before_the_device_redials`) pinning the ordering that
   handles the *idle* case; the reboot case is simply faster than a ping.
-- **The tap-push interlock is not built.** The refresher coalesces taps only while parked in
-  its `select!`, so a tap arriving during a render starts another render as soon as the first
-  finishes, and its `ImageSourceUpdated` queues behind a notification that may sit for the
-  full 25 s. That wastes a render and an Open-Meteo fetch per tap, and it is worth fixing. It
-  is **not** built here for a specific reason: with no device linked, `notify_image_source_changed`
-  returns instantly, so there is no way to write a failing test first. A slow delivery needs a
-  live link with a runtime, and nothing in the server's unit tests can build one -- only
-  `device_link.rs` calls `set_runtime`, and `FaceTestServer` has no device. The seam this needs
-  is a way to install the fake faces command on a served app, which is what
-  `tests/hostile_device.rs` and `tests/device_link.rs` already have the socket half of. Until
-  that exists, shipping an untested change to the push path alongside the diagnosis of a push
-  failure is the wrong trade.
+- **The tap-push interlock is not built, and on inspection should not be.** The idea was to
+  make the refresher await its `ImageSourceUpdated` before rendering again, so a burst of taps
+  could not queue renders behind a notification that may sit for the full 25 s. Working out
+  what it would actually buy killed it. Today a tap renders at once and the frame lands in the
+  store, so the tap's intent is recorded promptly and whichever synchronize next succeeds
+  carries the *newest* view to the panel. An interlock would delay that by up to 25 s -- it
+  would make a tap during a stuck push do nothing at all for the length of the stall. What
+  today's code wastes is a render (0.66 s of CPU) and one Open-Meteo call per redundant tap;
+  what the interlock would cost is the responsiveness the whole track exists to add. The
+  coalescing that already happens while the loop is parked in its `select!` covers the case
+  that matters.
+
+  Recorded because a first pass here claimed the interlock was merely **untestable**, which was
+  simply false and would have misled the next reader: `RuntimeHandle::start_with_ports` takes a
+  `Box<dyn RuntimeDevice>` and that trait is public, so the server's own unit tests can drive a
+  runtime over a deliberately slow fake device. The seam exists. The reason not to use it here
+  is that the change is not wanted, not that it cannot be checked.
 
 Still owed, unchanged by this session: the same test at the other mounting, a tap-to-redraw
 latency measured on a build whose push path is trusted, and Hacker News paging (the live

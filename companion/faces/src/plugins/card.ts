@@ -104,11 +104,15 @@ function toElement(
   let imgSrc: string | undefined;
   if (kind === "img") {
     if (typeof src !== "string" || !src.startsWith("data:")) {
-      // Not a nicety: satori resolves a non-"data:" img.src with its OWN raw
-      // `fetch()` (node_modules/satori/dist/index.js, the `xt()` image loader),
-      // bypassing kit/http.ts's private/loopback/metadata guard entirely -- an
-      // unsanctioned SSRF surface, the same class of hole the SVG shape's href
-      // check exists to close.
+      // satori 0.33.5 does refuse a non-http(s) src outright and, for an http(s) src,
+      // resolves the hostname and refuses a private/loopback/link-local address --
+      // it is not undefended. But it validates with ONE DNS lookup and then fetches
+      // the hostname again, resolving a SECOND time: the classic DNS-rebinding
+      // time-of-check/time-of-use gap that kit/http.ts exists to close, by pinning
+      // the validated address and dialling that literal instead of re-resolving the
+      // name. We do not control or test satori's guard, so depending on a
+      // third-party SSRF check with a known-weaker threat model than our own is
+      // reason enough to require an embedded data: URI instead.
       throw new CardError(
         `an img src must be an embedded data: URI, not ${JSON.stringify(
           typeof src === "string" ? src.slice(0, 40) : typeof src,

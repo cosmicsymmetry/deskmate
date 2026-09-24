@@ -156,14 +156,18 @@ function redactSecrets(text: string, secrets: Record<string, string>): string {
 
 /** `redactSecrets`, applied to every string leaf of a JSON value at any depth -- a
  * secret hiding two or three fields deep in a response must not escape a scan that
- * only looked at the top level. Numbers, booleans and `null` pass through unchanged. */
+ * only looked at the top level. An object's OWN KEYS are scrubbed too, the same way
+ * as its values: an API that echoes a header name and value as `{"<secret>": "..."}`,
+ * or writes a marker key like `{"token_<secret>_used": true}`, leaks exactly as
+ * plainly through a key as through a value. Numbers, booleans and `null` pass through
+ * unchanged. */
 function redactJsonValue(value: unknown, secrets: Record<string, string>): unknown {
   if (typeof value === "string") return redactSecrets(value, secrets);
   if (Array.isArray(value)) return value.map((item) => redactJsonValue(item, secrets));
   if (value !== null && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
-      out[key] = redactJsonValue(val, secrets);
+      out[redactSecrets(key, secrets)] = redactJsonValue(val, secrets);
     }
     return out;
   }
@@ -176,6 +180,15 @@ function redactJsonValue(value: unknown, secrets: Record<string, string>): unkno
  * base64 form (a common way a credential ends up embedded in a response, on purpose
  * or by accident). An honest refusal is better than a silent leak, and a legitimate
  * image or other binary payload never contains the user's own API key.
+ *
+ * ASSUMPTION this relies on, and does not enforce: every secret this module handles is
+ * long enough that a chance byte-for-byte match inside arbitrary binary is effectively
+ * impossible. That holds for the API keys and tokens `manifest.ts`'s `SecretSpec`
+ * describes today (20+ characters). It stops holding for a short secret -- a 4-digit
+ * PIN, a short webhook slug -- where a few bytes of an ordinary image could coincide
+ * with the value by chance, refusing a legitimate response for no reason. If a short
+ * secret `kind` is ever added, this scan needs a minimum-length floor (or a different
+ * strategy entirely) before that kind reaches here.
  */
 function bytesContainSecret(bytes: Uint8Array, secrets: Record<string, string>): boolean {
   const haystack = Buffer.from(bytes);

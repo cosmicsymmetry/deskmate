@@ -540,4 +540,44 @@ describe("performRequests: a 200 response that echoes the secret back is scrubbe
     );
     expect(answer).toEqual({ ok: true, status: 200, text: plain });
   });
+
+  test("scrubs a secret used as a json OBJECT KEY, at the top level", async () => {
+    const stub = async () => {
+      const body = JSON.stringify({ [stolen]: "some value", other: "fine" });
+      return { status: 200, body, json: JSON.parse(body) };
+    };
+    const [answer] = await performRequests(
+      validateRequests([{ url: "https://api.github.com/u", as: "json" }], manifest, budget),
+      manifest,
+      { token: stolen },
+      stub,
+      budget,
+    );
+    expect(JSON.stringify(answer)).not.toContain(stolen);
+    expect(answer).toEqual({
+      ok: true,
+      status: 200,
+      json: { "[redacted]": "some value", other: "fine" },
+    });
+  });
+
+  test("scrubs a secret used as a json object key, nested two levels down", async () => {
+    const stub = async () => {
+      const body = JSON.stringify({ data: { seen: { [stolen]: true } } });
+      return { status: 200, body, json: JSON.parse(body) };
+    };
+    const [answer] = await performRequests(
+      validateRequests([{ url: "https://api.github.com/u", as: "json" }], manifest, budget),
+      manifest,
+      { token: stolen },
+      stub,
+      budget,
+    );
+    expect(JSON.stringify(answer)).not.toContain(stolen);
+    expect(answer).toEqual({
+      ok: true,
+      status: 200,
+      json: { data: { seen: { "[redacted]": true } } },
+    });
+  });
 });

@@ -1,5 +1,13 @@
 # Deskmate Landing Page Implementation Plan
 
+> **STATUS: DELIVERED 2026-09-25.** Every task in this plan shipped; the site is live at
+> `https://deskmate-site.pages.dev`. **The checkboxes below were never ticked** -- read the
+> commits in `~/dev/deskmate-site` and this repo's `track-d/frame-export` branch, not the
+> boxes. Ten defects in this plan's own text were found and corrected during execution,
+> and the plan has been amended in place where that happened; a task inserted after the
+> fact (the visual design pass) has no section here at all. Treat the task bodies as the
+> record of intent and the git history as the record of what was built.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship the first version of the Deskmate marketing site — a waitlist page whose

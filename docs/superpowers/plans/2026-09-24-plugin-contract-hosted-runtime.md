@@ -937,8 +937,13 @@ Rules the rest of the implementation must hold, each already covered by a test a
    a credential belongs, and a bearer secret pasted into a query string puts it somewhere
    URLs get logged, cached and sent in `Referer`. One helper holds the rule, so the header
    and query paths cannot drift.
-3b. **Every outward-facing string is scrubbed of the secret values this render was given**
-   — answers, error text, logs — in one place. The real fetch does not put headers in its
+3b. **Every outward-facing value is scrubbed of the secret values this render was given**
+   — error text AND response bodies, in one place. The success path is the one that
+   matters: a plugin does not need a network error to read its user's credential, it
+   declares a host that echoes request headers and reads the 200. Text and JSON bodies
+   are scrubbed (nested values included); a bytes answer that CONTAINS the secret's UTF-8
+   or base64 form is refused outright, because scrubbing binary is meaningless and a
+   legitimate image never contains the user's API key. The real fetch does not put headers in its
    error messages today, but relying on that is the same "another file is currently
    careful" dependency the host check refuses to make.
 4. A failure of one request is an `Answer` with `ok: false`; the plugin decides what to

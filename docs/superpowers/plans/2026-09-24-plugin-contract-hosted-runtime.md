@@ -930,9 +930,17 @@ Rules the rest of the implementation must hold, each already covered by a test a
    suffix matching, no wildcards. **An IP-literal host is refused here too**, even though
    Task 1 already refuses one in a manifest: this check is what stands between a plugin
    and the metadata address, and it must not depend on another file having been careful.
-3. `{{secret:<key>}}` in a header value or query parameter is replaced **only** when the
-   request's host equals that secret's `host`; `send_as: "bearer"` produces
-   `Bearer <value>`. Any unmatched placeholder is left as the literal text.
+3. `{{secret:<key>}}` is replaced **only** when the request's host equals that secret's
+   `host` **and the position matches its declared `send_as`**: `bearer` and `header`
+   substitute in a header only (`bearer` as `Bearer <value>`), `query` in a query
+   parameter only. A placeholder anywhere else stays literal. The declaration says where
+   a credential belongs, and a bearer secret pasted into a query string puts it somewhere
+   URLs get logged, cached and sent in `Referer`. One helper holds the rule, so the header
+   and query paths cannot drift.
+3b. **Every outward-facing string is scrubbed of the secret values this render was given**
+   — answers, error text, logs — in one place. The real fetch does not put headers in its
+   error messages today, but relying on that is the same "another file is currently
+   careful" dependency the host check refuses to make.
 4. A failure of one request is an `Answer` with `ok: false`; the plugin decides what to
    do. Only a violation of the contract itself throws.
 5. Bytes come back base64-encoded, because the answer crosses into the sandbox as JSON.

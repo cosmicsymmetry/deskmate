@@ -50,6 +50,16 @@ export async function warmSandbox(): Promise<void> {
 // a published plugin is bundled to a format with no `export` at all (Task 9's concern).
 const EXPORT_STRIP = /^[ \t]*export[ \t]+(?=function|const|let)/gm;
 
+// Names for two script-local bindings the host injects around the plugin's own
+// source (see `runInSandbox`). `const` at top-of-script scope never becomes an
+// enumerable property of `globalThis` (verified: a plugin's own
+// `Object.keys(globalThis)` still sees only its own declared function), and the
+// prefix makes an accidental collision with a plugin's own identifier vanishingly
+// unlikely -- and if one ever happens, it fails that one plugin loudly (a
+// SandboxError), not silently.
+const STRINGIFY_PROBE = "__deskmate_sandbox_json_stringify__";
+const RESULT_PROBE = "__deskmate_sandbox_result__";
+
 /** Normalizes whatever a plugin's own `throw` produced into a message and a flag. */
 function normalizeThrown(dumped: unknown): { message: string; configuration: boolean } {
   if (typeof dumped === "string") {
@@ -66,10 +76,14 @@ function normalizeThrown(dumped: unknown): { message: string; configuration: boo
 }
 
 /**
- * Converts the sandboxed return value to host data without ever routing it through
- * the sandbox's own (plugin-controllable) `JSON.stringify`. A function, symbol or
- * bigint cannot be represented as plugin output at all, so those are refused
- * explicitly rather than silently degraded to a stringified function body or similar.
+ * Converts the sandboxed return value to host data via `context.dump`, never via the
+ * sandbox's own (plugin-controllable) `JSON.stringify`. A function, symbol or bigint
+ * cannot be represented as plugin output at all, so those are refused explicitly
+ * rather than silently degraded to a stringified function body or similar -- `dump`'s
+ * own best-effort fallback for those types is exactly that silent degradation.
+ * A circular return is caught earlier, inside the script itself (see `runInSandbox`),
+ * because `dump` degrades a cycle the same way: silently, to `"[object Object]"`,
+ * rather than throwing.
  */
 function normalizeReturn<T>(
   context: QuickJSContext,
@@ -117,9 +131,20 @@ export function runInSandbox<T>(
   runtime.setInterruptHandler(() => Date.now() > deadline);
   const context = runtime.newContext();
   try {
-    const script = `${source.replace(EXPORT_STRIP, "")}
+    // The captured JSON.stringify (STRINGIFY_PROBE) is bound before a single line of
+    // the plugin's own source has run, so nothing the plugin does --
+    // reassigning `JSON.stringify`, defining a `toJSON`, anything -- can swap out
+    // what this probe calls. It exists purely to make QuickJS's own native cycle
+    // detector throw on a circular return (message: "circular reference", proven
+    // both top-level and nested inside a wrapper); its result is discarded. The
+    // actual return value is still read host-side via `context.dump` in
+    // `normalizeReturn`, never through this or any other sandboxed `JSON.stringify`.
+    const script = `const ${STRINGIFY_PROBE} = JSON.stringify;
+${source.replace(EXPORT_STRIP, "")}
 if (typeof ${fn} !== "function") { throw new Error("this plugin exports no ${fn}()"); }
-${fn}(${JSON.stringify(input)})`;
+const ${RESULT_PROBE} = ${fn}(${JSON.stringify(input)});
+${STRINGIFY_PROBE}(${RESULT_PROBE});
+${RESULT_PROBE};`;
     const evaluated = context.evalCode(script);
     if (evaluated.error) {
       const dumped = context.dump(evaluated.error);

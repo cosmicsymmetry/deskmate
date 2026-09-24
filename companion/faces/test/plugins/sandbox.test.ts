@@ -109,6 +109,26 @@ describe("the sandbox", () => {
     ).toThrow(/too large/);
   });
 
+  test("refuses a top-level circular return, naming the circular reference", () => {
+    expect(() =>
+      runInSandbox(`export function render(){ const o={}; o.self=o; return o; }`, "render", {}),
+    ).toThrow(/circular/);
+  });
+
+  test("refuses a circular return nested inside a wrapper object, naming the circular reference", () => {
+    expect(() =>
+      runInSandbox(
+        `export function render(){
+          const inner={};
+          inner.self=inner;
+          return { wrapper: { nested: inner } };
+        }`,
+        "render",
+        {},
+      ),
+    ).toThrow(/circular/);
+  });
+
   test("carries a plugin's own configuration flag across the boundary", () => {
     const source = `export function render(){ const e = new Error("no city called Xyz"); e.configuration = true; throw e; }`;
     const failure = (() => {

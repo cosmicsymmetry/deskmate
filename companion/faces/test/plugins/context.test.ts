@@ -40,4 +40,22 @@ export function render(c){ return [format.date(c.now.local, "d MMM"), format.sin
     });
     expect(out).toEqual(["23 Sep", "1h ago"]);
   });
+
+  test("format.compact handles tier boundaries correctly: 999999 → 1M, not 1000K", () => {
+    const plugin = `${FORMAT_SOURCE}
+export function render(){ return [format.compact(999999), format.compact(999950), format.compact(999999999)]; }`;
+    expect(runInSandbox<string[]>(plugin, "render", {})).toEqual(["1M", "1M", "1B"]);
+  });
+
+  test("format.compact handles negative values at boundaries", () => {
+    const plugin = `${FORMAT_SOURCE}
+export function render(){ return [format.compact(-999999), format.compact(-999999999)]; }`;
+    expect(runInSandbox<string[]>(plugin, "render", {})).toEqual(["-1M", "-1B"]);
+  });
+
+  test("format.compact preserves existing behavior for common cases", () => {
+    const plugin = `${FORMAT_SOURCE}
+export function render(){ return [format.compact(999), format.compact(1000), format.compact(1500000)]; }`;
+    expect(runInSandbox<string[]>(plugin, "render", {})).toEqual(["999", "1K", "1.5M"]);
+  });
 });

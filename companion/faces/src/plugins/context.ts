@@ -46,7 +46,7 @@ export function buildNow(instant: Date, timezone: string): NowContext {
   const minute = Number(at("minute"));
   const asUtc = Date.UTC(year, month - 1, day, hour, minute);
   const offsetMinutes = Math.round(
-    (asUtc - instant.getTime() + instant.getSeconds() * 1000) / 60_000,
+    (asUtc - instant.getTime() + instant.getSeconds() * 1000 + instant.getMilliseconds()) / 60_000,
   );
   const pad = (value: number): string => String(value).padStart(2, "0");
   return {
@@ -76,10 +76,18 @@ const format = {
   compact(value) {
     const n = Number(value);
     const units = [[1e9, "B"], [1e6, "M"], [1e3, "K"]];
-    for (const [size, suffix] of units) {
+    for (let i = 0; i < units.length; i++) {
+      const [size, suffix] = units[i];
       if (Math.abs(n) >= size) {
         const scaled = n / size;
-        return (Math.abs(scaled) >= 100 ? Math.round(scaled) : Math.round(scaled * 10) / 10) + suffix;
+        const rounded = Math.abs(scaled) >= 100 ? Math.round(scaled) : Math.round(scaled * 10) / 10;
+        if (Math.abs(rounded) >= 1000 && i > 0) {
+          const [nextSize, nextSuffix] = units[i - 1];
+          const nextScaled = n / nextSize;
+          const nextRounded = Math.abs(nextScaled) >= 100 ? Math.round(nextScaled) : Math.round(nextScaled * 10) / 10;
+          return nextRounded + nextSuffix;
+        }
+        return rounded + suffix;
       }
     }
     return String(Math.round(n));

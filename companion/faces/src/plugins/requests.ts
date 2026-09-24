@@ -126,11 +126,24 @@ function applySecretsToQuery(
 }
 
 /**
- * Every outward-facing error string passes through here before it is stored in an
- * `Answer`. This does not trust a `RequestFn` -- the real one, or any stub a plugin's
- * own review might substitute later -- to have been careful about what it throws: a
- * value this call was handed is scrubbed regardless of where it came from, because
- * leaking one is the one outcome that must never happen.
+ * Every outward-facing string this module returns -- an error message, and (below) a
+ * `text`/`json` response body -- passes through here before it is stored in an
+ * `Answer`. This does not trust a `RequestFn`, or the host it fetched, to have been
+ * careful about what comes back: a value this call was handed is scrubbed regardless
+ * of where it came from. That matters beyond a thrown error, because the module's
+ * actual guarantee is that the plugin never sees the credential -- and a plugin does
+ * not need a network failure to break that. A declared host that echoes request
+ * details in an ordinary 200 (plenty of APIs reflect headers, or partially-mask a key
+ * in a diagnostic body) is how a hostile plugin would actually try to read its user's
+ * secret back out.
+ *
+ * What this does NOT catch, left as a documented gap rather than fixed, because
+ * neither is reachable through the real fetch today: a percent-encoded rendering of a
+ * secret (`ghp%5Fsecret`) does not exact-match the raw stored value, and a secret
+ * split across non-adjacent text (chunked, or interleaved with other content) defeats
+ * a substring search entirely. Closing either needs a decode-then-scan or a streaming
+ * matcher, not a bigger regex -- revisit if a real face ever needs one. Do not read
+ * this function as "no secret can appear in any form" on the strength of its name.
  */
 function redactSecrets(text: string, secrets: Record<string, string>): string {
   let out = text;
@@ -139,6 +152,40 @@ function redactSecrets(text: string, secrets: Record<string, string>): string {
     out = out.split(stored).join("[redacted]");
   }
   return out;
+}
+
+/** `redactSecrets`, applied to every string leaf of a JSON value at any depth -- a
+ * secret hiding two or three fields deep in a response must not escape a scan that
+ * only looked at the top level. Numbers, booleans and `null` pass through unchanged. */
+function redactJsonValue(value: unknown, secrets: Record<string, string>): unknown {
+  if (typeof value === "string") return redactSecrets(value, secrets);
+  if (Array.isArray(value)) return value.map((item) => redactJsonValue(item, secrets));
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = redactJsonValue(val, secrets);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * Scrubbing binary is meaningless, so a `bytes` answer is not redacted -- it is
+ * refused outright when the raw bytes contain a stored secret's UTF-8 form, or its
+ * base64 form (a common way a credential ends up embedded in a response, on purpose
+ * or by accident). An honest refusal is better than a silent leak, and a legitimate
+ * image or other binary payload never contains the user's own API key.
+ */
+function bytesContainSecret(bytes: Uint8Array, secrets: Record<string, string>): boolean {
+  const haystack = Buffer.from(bytes);
+  for (const stored of Object.values(secrets)) {
+    if (stored === "") continue;
+    if (haystack.includes(stored, 0, "utf-8")) return true;
+    const asBase64 = Buffer.from(stored, "utf-8").toString("base64");
+    if (haystack.includes(asBase64, 0, "utf-8")) return true;
+  }
+  return false;
 }
 
 /** Strips brackets from an IPv6 literal the way `URL.hostname` presents it. */
@@ -252,14 +299,30 @@ function byteSize(body: string | Uint8Array): number {
   return typeof body === "string" ? Buffer.byteLength(body, "utf-8") : body.length;
 }
 
-function toAnswer(reply: { status: number; body: string | Uint8Array; json?: unknown }): Answer {
+/**
+ * Turns a completed reply into an `Answer`, scrubbed. Every branch that can return
+ * `ok: true` passes its payload through the redaction above first -- `toAnswer` is the
+ * one place a reply becomes something the plugin can read, so it is the one place this
+ * has to happen.
+ */
+function toAnswer(
+  reply: { status: number; body: string | Uint8Array; json?: unknown },
+  secrets: Record<string, string>,
+): Answer {
   if (reply.body instanceof Uint8Array) {
+    if (bytesContainSecret(reply.body, secrets)) {
+      return {
+        ok: false,
+        status: reply.status,
+        error: "the response echoed a stored credential and was refused",
+      };
+    }
     return { ok: true, status: reply.status, base64: Buffer.from(reply.body).toString("base64") };
   }
   if (reply.json !== undefined) {
-    return { ok: true, status: reply.status, json: reply.json };
+    return { ok: true, status: reply.status, json: redactJsonValue(reply.json, secrets) };
   }
-  return { ok: true, status: reply.status, text: reply.body };
+  return { ok: true, status: reply.status, text: redactSecrets(reply.body, secrets) };
 }
 
 /**
@@ -299,7 +362,7 @@ export async function performRequests(
       };
       const reply = await request(input);
       bytesLeft -= byteSize(reply.body);
-      answers.push(toAnswer(reply));
+      answers.push(toAnswer(reply, secrets));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       answers.push({ ok: false, error: redactSecrets(message, secrets) });

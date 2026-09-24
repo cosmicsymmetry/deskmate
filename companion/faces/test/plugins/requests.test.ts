@@ -397,3 +397,147 @@ describe("performRequests: send_as decides the one position a secret may land in
     expect(seen[0]?.url).toBe(new URL(url).toString());
   });
 });
+
+describe("performRequests: a 200 response that echoes the secret back is scrubbed too", () => {
+  const stolen = "ghp_SECRETVALUE";
+
+  test("scrubs a secret that leaks back in a 200 text response body", async () => {
+    const stub = async (input: { headers?: Record<string, string> }) => ({
+      status: 200,
+      body: `echo: ${input.headers?.Authorization}`,
+      json: undefined,
+    });
+    const [answer] = await performRequests(
+      validateRequests(
+        [
+          {
+            url: "https://api.github.com/u",
+            as: "text",
+            headers: { Authorization: "{{secret:token}}" },
+          },
+        ],
+        manifest,
+        budget,
+      ),
+      manifest,
+      { token: stolen },
+      stub,
+      budget,
+    );
+    expect(JSON.stringify(answer)).not.toContain(stolen);
+    expect(answer).toEqual({ ok: true, status: 200, text: "echo: Bearer [redacted]" });
+  });
+
+  test("scrubs a secret nested two levels deep in a 200 json response body", async () => {
+    const stub = async (input: { headers?: Record<string, string> }) => {
+      const body = JSON.stringify({ data: { seen: { header: input.headers?.Authorization } } });
+      return { status: 200, body, json: JSON.parse(body) };
+    };
+    const [answer] = await performRequests(
+      validateRequests(
+        [
+          {
+            url: "https://api.github.com/u",
+            as: "json",
+            headers: { Authorization: "{{secret:token}}" },
+          },
+        ],
+        manifest,
+        budget,
+      ),
+      manifest,
+      { token: stolen },
+      stub,
+      budget,
+    );
+    expect(JSON.stringify(answer)).not.toContain(stolen);
+    expect(answer).toEqual({
+      ok: true,
+      status: 200,
+      json: { data: { seen: { header: "Bearer [redacted]" } } },
+    });
+  });
+
+  test("refuses a 200 bytes response whose bytes contain the secret's UTF-8 form", async () => {
+    const stub = async () => ({
+      status: 200,
+      body: new TextEncoder().encode(`leaked: ${stolen}`),
+      json: undefined,
+    });
+    const [answer] = await performRequests(
+      validateRequests([{ url: "https://api.github.com/u", as: "bytes" }], manifest, budget),
+      manifest,
+      { token: stolen },
+      stub,
+      budget,
+    );
+    expect(JSON.stringify(answer)).not.toContain(stolen);
+    expect(answer).toEqual({
+      ok: false,
+      status: 200,
+      error: expect.stringContaining("echoed"),
+    });
+  });
+
+  test("refuses a 200 bytes response whose bytes contain the secret's base64 form", async () => {
+    const asBase64 = Buffer.from(stolen, "utf-8").toString("base64");
+    const stub = async () => ({
+      status: 200,
+      body: new TextEncoder().encode(`leaked: ${asBase64}`),
+      json: undefined,
+    });
+    const [answer] = await performRequests(
+      validateRequests([{ url: "https://api.github.com/u", as: "bytes" }], manifest, budget),
+      manifest,
+      { token: stolen },
+      stub,
+      budget,
+    );
+    expect(JSON.stringify(answer)).not.toContain(stolen);
+    expect(JSON.stringify(answer)).not.toContain(asBase64);
+    expect(answer).toEqual({
+      ok: false,
+      status: 200,
+      error: expect.stringContaining("echoed"),
+    });
+  });
+
+  test("a normal text response with no secret in it is returned byte-for-byte", async () => {
+    const plain = "hello world, nothing secret here";
+    const stub = async () => ({ status: 200, body: plain, json: undefined });
+    const [answer] = await performRequests(
+      validateRequests([{ url: "https://api.github.com/u", as: "text" }], manifest, budget),
+      manifest,
+      { token: stolen },
+      stub,
+      budget,
+    );
+    expect(answer).toEqual({ ok: true, status: 200, text: plain });
+  });
+
+  test("a normal json response with no secret in it is returned deep-equal", async () => {
+    const plain = { a: 1, b: { c: "plain string", d: [1, 2, "three"] }, e: null, f: false };
+    const stub = async () => ({ status: 200, body: JSON.stringify(plain), json: plain });
+    const [answer] = await performRequests(
+      validateRequests([{ url: "https://api.github.com/u", as: "json" }], manifest, budget),
+      manifest,
+      { token: stolen },
+      stub,
+      budget,
+    );
+    expect(answer).toEqual({ ok: true, status: 200, json: plain });
+  });
+
+  test("an empty stored secret value does not mangle an ordinary body", async () => {
+    const plain = "some ordinary text with no secrets, and no {{secret:token}} either";
+    const stub = async () => ({ status: 200, body: plain, json: undefined });
+    const [answer] = await performRequests(
+      validateRequests([{ url: "https://api.github.com/u", as: "text" }], manifest, budget),
+      manifest,
+      { token: "" },
+      stub,
+      budget,
+    );
+    expect(answer).toEqual({ ok: true, status: 200, text: plain });
+  });
+});

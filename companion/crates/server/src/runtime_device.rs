@@ -77,6 +77,63 @@ fn response_wait_timeout(message: &protocol::Message) -> Duration {
     request_timeout(message) + RESPONSE_WAIT_MARGIN
 }
 
+/// How long one asset round trip may take before it is worth its own line.
+///
+/// The chunk phase is where a transfer's round trips are, and a healthy chunk is
+/// milliseconds; a quarter of a second means the wire stalled, and eight of those
+/// in a 33-chunk push is a transfer that will breach [`REQUEST_TIMEOUT`]
+/// somewhere. The threshold is what keeps a healthy push silent instead of
+/// writing 33 lines every fifteen minutes.
+const SLOW_ASSET_REQUEST: Duration = Duration::from_millis(250);
+
+/// One asset transfer in flight, so its commit can report the whole push at once.
+///
+/// This exists because a failed push names the message it died on and nothing
+/// about how long the wire took to say so -- and a late reply and a lost one are
+/// indistinguishable without that number. It already cost this project one wrong
+/// diagnosis: `ASSET_RELEASE_TIMEOUT` above was raised to 20 s only after
+/// somebody noticed the device reporting `crc_errors`, `malformed_frames` and
+/// `dropped_responses` all at zero while `AssetRelease` timed out. The same
+/// signature reappeared on 2026-09-24, for chunks rather than the release, on a
+/// board that reaches this server over a WAN round trip through Cloudflare; see
+/// that date in `docs/hardware/board-notes.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AssetTransfer {
+    started: std::time::Instant,
+    chunks: u32,
+    bytes: u64,
+    slowest_chunk: Duration,
+}
+
+impl AssetTransfer {
+    fn opened() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            chunks: 0,
+            bytes: 0,
+            slowest_chunk: Duration::ZERO,
+        }
+    }
+
+    /// Folds one delivered chunk in. `slowest_chunk` is the point of the whole
+    /// structure: a transfer's mean round trip says nothing useful, because one
+    /// stalled chunk past the request budget is what fails the push.
+    fn record_chunk(&mut self, bytes: usize, elapsed: Duration) {
+        self.chunks = self.chunks.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(bytes as u64);
+        self.slowest_chunk = self.slowest_chunk.max(elapsed);
+    }
+}
+
+/// Times one asset round trip, reporting it when it stalls or fails.
+fn timed<T>(
+    request: impl FnOnce() -> Result<T, DeviceError>,
+) -> (Result<T, DeviceError>, Duration) {
+    let started = std::time::Instant::now();
+    let result = request();
+    (result, started.elapsed())
+}
+
 /// Bounds every WebSocket send, including requests, keepalives, and close
 /// frames. A peer that stops reading would otherwise park the socket actor and
 /// prevent both response deadlines and idle checks from making progress.
@@ -311,6 +368,10 @@ pub(crate) struct WebSocketRuntimeDevice {
     latest_data_revision: u32,
     latest_config_revision: u32,
     capabilities: u64,
+    /// Accounting for the asset push currently open, if any. Diagnostic only:
+    /// nothing reads it to make a decision, so losing it costs a log line and
+    /// never a transfer.
+    asset_transfer: Option<AssetTransfer>,
 }
 
 /// The async half retained by the upgraded socket task.
@@ -350,6 +411,7 @@ impl WebSocketRuntimeDevice {
                 latest_data_revision: 0,
                 latest_config_revision: 0,
                 capabilities: 0,
+                asset_transfer: None,
             },
             connector,
         )
@@ -648,32 +710,124 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
     /// state from `already_present` on every pass rather than trusting a stale
     /// replay log.
     fn send_asset_begin(&mut self, begin: AssetBegin) -> Result<Ack, DeviceError> {
-        let response = self.connected_request(Message::AssetBegin(begin))?;
-        match response {
-            Message::Ack(ack)
-                if ack.acknowledged_type == protocol::TYPE_ASSET_BEGIN
-                    && ack.revision.is_none()
-                    && ack.already_present.is_some() =>
-            {
-                Ok(ack)
+        let total_length = begin.total_length;
+        let (result, elapsed) = timed(|| {
+            let response = self.connected_request(Message::AssetBegin(begin))?;
+            match response {
+                Message::Ack(ack)
+                    if ack.acknowledged_type == protocol::TYPE_ASSET_BEGIN
+                        && ack.revision.is_none()
+                        && ack.already_present.is_some() =>
+                {
+                    Ok(ack)
+                }
+                _ => Err(DeviceError::UnexpectedMessage),
             }
-            _ => Err(DeviceError::UnexpectedMessage),
+        });
+        // A fresh `AssetBegin` aborts whatever transfer was open on the device, so
+        // it is also what resets the accounting here -- including for a transfer
+        // that died mid-chunk and never reached its commit.
+        self.asset_transfer = match &result {
+            Ok(ack) if ack.already_present == Some(true) => None,
+            Ok(_) => Some(AssetTransfer::opened()),
+            Err(error) => {
+                tracing::warn!(target: "server::runtime_device",
+                    device_id = %self.device_id, total_length,
+                    elapsed_ms = elapsed.as_millis(), %error,
+                    "an asset transfer could not be opened");
+                None
+            }
+        };
+        if result.is_ok() && elapsed >= SLOW_ASSET_REQUEST {
+            tracing::info!(target: "server::runtime_device",
+                device_id = %self.device_id, total_length, elapsed_ms = elapsed.as_millis(),
+                "opening an asset transfer stalled");
         }
+        result
     }
 
     fn send_asset_chunk(&mut self, chunk: AssetChunk) -> Result<(), DeviceError> {
-        let response = self.connected_request(Message::AssetChunk(chunk))?;
-        require_ack(&response, protocol::TYPE_ASSET_CHUNK, None)
+        let offset = chunk.offset;
+        let bytes = chunk.data.len();
+        let (result, elapsed) = timed(|| {
+            self.connected_request(Message::AssetChunk(chunk))
+                .and_then(|response| require_ack(&response, protocol::TYPE_ASSET_CHUNK, None))
+        });
+        match (&result, self.asset_transfer.as_mut()) {
+            (Ok(()), Some(transfer)) => {
+                transfer.record_chunk(bytes, elapsed);
+                if elapsed >= SLOW_ASSET_REQUEST {
+                    tracing::info!(target: "server::runtime_device",
+                        device_id = %self.device_id, offset, bytes,
+                        chunk_number = transfer.chunks, elapsed_ms = elapsed.as_millis(),
+                        "an asset chunk stalled");
+                }
+            }
+            (Err(error), transfer) => {
+                let (chunks, since_begin_ms) = transfer.map_or((0, 0), |transfer| {
+                    (transfer.chunks, transfer.started.elapsed().as_millis())
+                });
+                tracing::warn!(target: "server::runtime_device",
+                    device_id = %self.device_id, offset, bytes, chunks_delivered = chunks,
+                    elapsed_ms = elapsed.as_millis(), since_begin_ms, %error,
+                    "an asset chunk failed; the transfer is abandoned");
+                self.asset_transfer = None;
+            }
+            (Ok(()), None) => {}
+        }
+        result
     }
 
     fn send_asset_commit(&mut self, commit: AssetCommit) -> Result<(), DeviceError> {
-        let response = self.connected_request(Message::AssetCommit(commit))?;
-        require_ack(&response, protocol::TYPE_ASSET_COMMIT, None)
+        let (result, elapsed) = timed(|| {
+            self.connected_request(Message::AssetCommit(commit))
+                .and_then(|response| require_ack(&response, protocol::TYPE_ASSET_COMMIT, None))
+        });
+        // One line per completed push. This is the measurement the board notes
+        // ask for: bytes, how many round trips carried them, and the worst single
+        // round trip, which is the one that decides whether the next push fails.
+        if let Some(transfer) = self.asset_transfer.take() {
+            let total_ms = transfer.started.elapsed().as_millis();
+            match &result {
+                Ok(()) => tracing::info!(target: "server::runtime_device",
+                    device_id = %self.device_id, chunks = transfer.chunks, bytes = transfer.bytes,
+                    slowest_chunk_ms = transfer.slowest_chunk.as_millis(),
+                    commit_ms = elapsed.as_millis(), total_ms,
+                    "an asset transfer completed"),
+                Err(error) => tracing::warn!(target: "server::runtime_device",
+                    device_id = %self.device_id, chunks = transfer.chunks, bytes = transfer.bytes,
+                    slowest_chunk_ms = transfer.slowest_chunk.as_millis(),
+                    commit_ms = elapsed.as_millis(), total_ms, %error,
+                    "an asset transfer delivered every chunk and then failed to commit"),
+            }
+        }
+        result
     }
 
     fn send_asset_release(&mut self, release: AssetRelease) -> Result<(), DeviceError> {
-        let response = self.connected_request(Message::AssetRelease(release))?;
-        require_ack(&response, protocol::TYPE_ASSET_RELEASE, None)
+        let digests = release.digests.len();
+        let (result, elapsed) = timed(|| {
+            self.connected_request(Message::AssetRelease(release))
+                .and_then(|response| require_ack(&response, protocol::TYPE_ASSET_RELEASE, None))
+        });
+        // The release is the bulk-flash message with its own 20 s budget, so it
+        // is reported whenever it is slow at all rather than against the chunk
+        // threshold: a release creeping towards that budget is the early warning
+        // that raised it in the first place.
+        match &result {
+            Ok(()) if elapsed >= SLOW_ASSET_REQUEST => {
+                tracing::info!(target: "server::runtime_device",
+                    device_id = %self.device_id, digests, elapsed_ms = elapsed.as_millis(),
+                    budget_ms = ASSET_RELEASE_TIMEOUT.as_millis(),
+                    "an asset release was slow");
+            }
+            Err(error) => tracing::warn!(target: "server::runtime_device",
+                device_id = %self.device_id, digests, elapsed_ms = elapsed.as_millis(),
+                budget_ms = ASSET_RELEASE_TIMEOUT.as_millis(), %error,
+                "an asset release failed"),
+            Ok(()) => {}
+        }
+        result
     }
 
     fn try_recv_event(&mut self) -> Option<ReceivedEvent> {
@@ -924,7 +1078,26 @@ mod tests {
         StatusResponse, TapAction, TimeSync, TriggerInterrupt,
     };
 
-    use super::{EventRouter, PendingRequest, SocketPeer};
+    use super::{AssetTransfer, EventRouter, PendingRequest, SocketPeer};
+
+    #[test]
+    fn a_transfer_reports_its_worst_round_trip_not_its_last() {
+        // The whole point of the accounting: a push of many fast chunks and one
+        // stalled chunk is a push about to fail, and a mean or a last-value would
+        // hide it. The 33-chunk Hacker News frame is the case this was written for.
+        let mut transfer = AssetTransfer::opened();
+        transfer.record_chunk(1920, Duration::from_millis(12));
+        transfer.record_chunk(1920, Duration::from_millis(1_400));
+        transfer.record_chunk(600, Duration::from_millis(9));
+
+        assert_eq!(transfer.chunks, 3);
+        assert_eq!(transfer.bytes, 1920 + 1920 + 600);
+        assert_eq!(
+            transfer.slowest_chunk,
+            Duration::from_millis(1_400),
+            "the stalled chunk is the one that decides whether the push survives"
+        );
+    }
 
     fn event_router(
         capacity: usize,

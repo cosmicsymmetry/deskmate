@@ -226,6 +226,7 @@ fn contract_fixtures() -> ContractFixtures {
                 command_queue_full: 2,
                 subscriber_snapshots_overwritten: 6,
                 interrupt_dismissals_ignored: 7,
+                taps_dropped: 8,
             },
         },
     };

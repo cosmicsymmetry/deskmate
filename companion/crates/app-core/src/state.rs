@@ -53,6 +53,17 @@ pub struct RuntimeDiagnostics {
     /// distinguishes a tap the host deliberately declined from an event that
     /// never arrived.
     pub interrupt_dismissals_ignored: u64,
+    /// Taps the host received for a card it routed nowhere: the card id resolves
+    /// to no card in the current config, or it names a picture and no card-tap
+    /// sink is installed.
+    ///
+    /// Here for the same reason as the counter above, and learned the same way.
+    /// A tap that reaches the host and goes nowhere looks exactly like a tap
+    /// whose event never left the panel. On 2026-09-24 that was the question
+    /// asked of `dev-0005` and it could not be answered: the counter existed and
+    /// was being incremented, but it stopped at this crate's boundary instead of
+    /// travelling in the snapshot with every other counter here.
+    pub taps_dropped: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

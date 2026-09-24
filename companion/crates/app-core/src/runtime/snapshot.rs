@@ -27,6 +27,7 @@ impl RuntimeDiagnosticCounters {
                 .subscriber_snapshots_overwritten
                 .load(Ordering::Relaxed),
             interrupt_dismissals_ignored: self.interrupt_dismissals_ignored.load(Ordering::Relaxed),
+            taps_dropped: self.taps_dropped.load(Ordering::Relaxed),
         }
     }
 }

@@ -59,6 +59,16 @@ fn a_tap_naming_a_card_that_does_not_exist_is_counted_and_dropped() {
 
     assert!(sink.taken().is_empty());
     assert_eq!(runtime.taps_dropped(), 1);
+    // The accessor is in-process only, so it cannot answer the question a real
+    // board raises: was this tap declined by the host, or did its event never
+    // arrive? That needs the counter in the snapshot the admin API and the
+    // companion read. On 2026-09-24 it was asked of `dev-0005` and could not be
+    // answered, because the snapshot carries every other counter but this one.
+    assert_eq!(
+        runtime.snapshot().unwrap().diagnostics.taps_dropped,
+        1,
+        "a dropped tap must be visible in the snapshot, not only through the accessor"
+    );
     runtime.shutdown().unwrap();
 }
 

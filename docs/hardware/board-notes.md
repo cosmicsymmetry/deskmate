@@ -5362,3 +5362,136 @@ Observed:
   *RSS* face pointed at the Hacker News feed, not the `hackernews` face, so it does not take
   taps. Exercising the paging on hardware needs a `hackernews` picture card added to the
   loop, which is the owner's to add.
+
+## 2026-09-24 -- the first tap on the glass: it works once, then the link falls over
+
+The owner tapped the weather card on `dev-0005` (270 degrees, firmware `v2.1.0-proto2`).
+**This is the first tap ever observed on hardware, and it found a defect.** Reported from the
+desk: nothing happened for a few seconds, so they tapped several more times; the panel fell
+back to the standalone clock, then showed the tomorrow view, then went back to the clock,
+went back and forth, and then **the device rebooted**.
+
+Server-side timeline, from `deskmate-server`'s journal and `face-state.json` (UTC):
+
+| time | event |
+|---|---|
+| 13:02:28 | `device link established dev-0005`, firmware check `v2.1.0-proto2` |
+| 13:08:07.273 | `face-state.json` written `{"view":"days","tappedAt":"...13:08:07.273Z"}` -- a tap-driven render was accepted |
+| 13:08:32.253 | WARN `the frame is stored but the device was not notified` ... `runtime command response timed out` |
+| 13:08:32.978 | the same warning again, 0.725 s later |
+| 13:08:50.375 | WARN `device link refused: owner already live` |
+| 13:08:52.290 | the same refusal again |
+| 13:08:52.943 | `device link closed` -- the stale session finally released |
+| 13:08:55.618 | `device link established` (the rebooted device) |
+| 13:08:57.302 | firmware check, `v2.1.0-proto2` |
+
+Two measurements reframe that timeline, and both were taken off the board:
+
+- **A weather render costs 0.66 s** end to end on the VM -- `bun` start, the Open-Meteo
+  fetch and the resvg raster included, measured three times at 0.66 / 0.68 / 0.64 s for a
+  23,801-byte envelope. So the seconds the owner waited are **not** the face, and two renders
+  finishing 0.725 s apart needs no hidden concurrency: the refresher loop is sequential and
+  simply ran twice.
+- **`ImageSourceUpdated` carries the 25-second `SYNCHRONIZING_COMMAND_TIMEOUT`**, not the
+  short budget. Both warnings are therefore a *full budget* expiring: the notifications were
+  submitted at about 13:08:07.25 and 13:08:07.98 and timed out 25 s later. The device stopped
+  answering the moment the first tap-driven push began.
+
+What that makes true, and what it does not:
+
+- **A tap does reach the face and does change what is drawn.** The state file flipping to
+  `"days"` proves the whole seam -- touch, firmware, wire, runtime, sink, coalescer, the
+  faces subprocess, the state store. That much of C1 phase 1 is real.
+- **The tap is NOT what broke the push.** That was the first reading and it was wrong; this
+  correction is the most important line in the entry. The same unit's journal across the
+  whole day shows the identical failure with **no taps involved**: the Hacker News source
+  (`image-8e361aa...`, the biggest frame at about 61 KB / 33 chunks) went un-notified at
+  13:28:09, 15:28:16 and 15:43:17, and the token source failed at 15:57:54 with
+  `device: AssetCommit ... failed: device request timed out`. Per-day counts of
+  push-timeouts / link-closes / `owner already live`, remembering that the board is normally
+  off so a zero may only mean it was unplugged: 09-20 `0/1/0`, 09-21 `2/4/2`, 09-22 `0/0/0`,
+  09-23 `1/3/1`, 09-24 `6/8/5`. **09-21 predates the tap feature**, so the mechanism is older
+  than Track C1. A tap is merely the first time anyone stands at the desk waiting for a push,
+  which is why the tap got the blame.
+- **A second tap's frame still cannot be delivered while the first push is in flight.** That
+  part is a real weakness of the tap design: `notify_image_source_changed` is fire-and-forget
+  (`spawn_blocking`) and `ImageSourceUpdated` carries the 25 s `SYNCHRONIZING_COMMAND_TIMEOUT`,
+  so a second notification queues behind the first at the runtime worker. Robustness defect,
+  not the cause of anything observed here.
+- **A rebooted device is locked out of its own link for about 4.5 s.** Its first two
+  reconnect attempts were refused `owner already live` because the server still held the
+  previous session's lease; the lease was released at 13:08:52.943 and the link came back at
+  13:08:55.618. Not tap-specific, and it recurred at 15:03 and 16:26 the same day.
+- **Why the device rebooted is NOT observed and must not be claimed.** The server cannot see
+  it, the shipping console is UART0-only, and attaching USB serial reboots the board, so that
+  boot's crash is gone.
+
+What the device's own counters say, read from the admin snapshot afterwards (`/v1/devices/dev-0005`):
+
+- `crc_errors: 0`, `malformed_frames: 0`, `dropped_events: 0`, `dropped_responses: 0`,
+  `overflow_frames: 0`, `rx_dropped_bytes: 0`, `valid_frames: 143` -- **nothing is corrupting
+  or overflowing.** Whatever fails, fails as a stall, not as bad bytes.
+- `free_heap: 8358839` -- about 8 MB free. **Heap exhaustion is not indicated**, which is the
+  first hypothesis this entry originally reached for.
+- `host_reconnects: 9`, and the runtime's last state is `error: device request timed out`.
+- The host-side `command_queue_full: 0`, so nothing backed up in the command channel.
+
+**The strongest remaining hypothesis, and it is still only that:** asset transfers to this
+board stall on the network path. `dev-0005` reaches the server at
+`wss://deskmate.rodi.one/v1/device/link` -- Wi-Fi, router, the public internet, Cloudflare,
+cloudflared, Caddy -- **even though the board and the VM share a LAN**. The largest asset
+fails most often, which is what a per-chunk stall predicts and what neither a heap nor a
+protocol fault predicts. `CLAUDE.md` already flagged that "whether the tunnel carries the
+Hacker News face's 33 chunks is not known"; it often does not. Confirming this needs
+per-chunk reply latency, which is a server-side instrumentation change and needs no board
+and no flash.
+
+Also found while reading this path, unrelated to the incident: **`taps_dropped` never reaches
+the admin snapshot.** It has a tested accessor (`RuntimeHandle::taps_dropped`), so it is not
+write-only, but `RuntimeDiagnosticCounters::snapshot()` does not copy it into the public
+`RuntimeDiagnostics` the way it copies `interrupt_dismissals_ignored`. The consequence is that
+nothing outside the process can read it -- not `/v1/devices/{id}`, not the companion -- which
+is half of the "a declined tap and an event that never arrived look identical" problem its
+sibling counter's doc comment describes.
+
+### What changed in response, and what deliberately did not
+
+Shipped the same day, all server-side, no wire and no firmware:
+
+- **Per-transfer asset instrumentation** (`runtime_device.rs`). Every completed push now logs
+  one line -- `chunks`, `bytes`, `slowest_chunk_ms`, `commit_ms`, `total_ms` -- and a chunk
+  slower than 250 ms gets its own. A failed chunk reports how many chunks had already landed
+  and how long the transfer had been open. `slowest_chunk` rather than a mean is the whole
+  point: one chunk past the 2 s `REQUEST_TIMEOUT` fails the push, and a mean of 33 hides it.
+  The accumulation lives in the server, not in `app-core`, because `app-core` has no `tracing`
+  dependency and should not gain one.
+- **`taps_dropped` now travels in `RuntimeDiagnostics`**, so `/v1/devices/{id}` and the
+  companion can read it. Needed the browser contract fixture regenerated.
+
+**Deliberately NOT changed, with the numbers that decided it:**
+
+- **The `owner already live` refusal stays.** `PING_INTERVAL` is 3 s, `IDLE_TIMEOUT` is 30 s
+  (`DEVICE_NETWORK_LINK_TIMEOUT` 45 s minus a 15 s margin), and the device retries about every
+  2 s, so an unclean reboot costs one or two refusals and the link is back in about 5 s -- as
+  observed, 13:08:50 first refusal to 13:08:55 established. Making a new authenticated link
+  evict the old session would shave those 5 s off, at the cost of letting a flapping network
+  thrash sessions, and it would be treating the symptom of a failure whose cause is still
+  unmeasured. `runtime_device.rs` already has a test
+  (`the_server_releases_a_dead_link_before_the_device_redials`) pinning the ordering that
+  handles the *idle* case; the reboot case is simply faster than a ping.
+- **The tap-push interlock is not built.** The refresher coalesces taps only while parked in
+  its `select!`, so a tap arriving during a render starts another render as soon as the first
+  finishes, and its `ImageSourceUpdated` queues behind a notification that may sit for the
+  full 25 s. That wastes a render and an Open-Meteo fetch per tap, and it is worth fixing. It
+  is **not** built here for a specific reason: with no device linked, `notify_image_source_changed`
+  returns instantly, so there is no way to write a failing test first. A slow delivery needs a
+  live link with a runtime, and nothing in the server's unit tests can build one -- only
+  `device_link.rs` calls `set_runtime`, and `FaceTestServer` has no device. The seam this needs
+  is a way to install the fake faces command on a served app, which is what
+  `tests/hostile_device.rs` and `tests/device_link.rs` already have the socket half of. Until
+  that exists, shipping an untested change to the push path alongside the diagnosis of a push
+  failure is the wrong trade.
+
+Still owed, unchanged by this session: the same test at the other mounting, a tap-to-redraw
+latency measured on a build whose push path is trusted, and Hacker News paging (the live
+"Hacker News" card is an RSS face and takes no taps).

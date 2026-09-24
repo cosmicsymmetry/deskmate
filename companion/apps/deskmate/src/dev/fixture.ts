@@ -145,6 +145,7 @@ export function mockSnapshot(config: AppConfig): AppSnapshot {
       command_queue_full: 0,
       subscriber_snapshots_overwritten: 2,
       interrupt_dismissals_ignored: 0,
+      taps_dropped: 0,
     },
   };
 }

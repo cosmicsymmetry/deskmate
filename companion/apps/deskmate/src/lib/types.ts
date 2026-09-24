@@ -332,6 +332,7 @@ export interface RuntimeDiagnostics {
   command_queue_full: number;
   subscriber_snapshots_overwritten: number;
   interrupt_dismissals_ignored: number;
+  taps_dropped: number;
 }
 
 export type PomodoroAction = "start" | "pause" | "toggle" | "reset";

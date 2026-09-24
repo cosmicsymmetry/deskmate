@@ -114,9 +114,11 @@ describe("cardToSvg", () => {
   });
 
   test("refuses an img src inside a layout card that is not an embedded data: URI", async () => {
-    // Not just a policy nicety: satori resolves a non-"data:" src with its own raw
-    // fetch(), which would reach the network unguarded by kit/http.ts's SSRF checks.
-    // The message is asserted specifically (not just CardError) so this test cannot
+    // satori does refuse a private/loopback/link-local http(s) host itself -- but it
+    // resolves the hostname twice (once to check, once to fetch), the DNS-rebinding
+    // gap kit/http.ts closes by pinning the validated address (see card.ts for why
+    // we don't rely on satori's own check). The message is asserted specifically (not
+    // just CardError) so this test cannot
     // be satisfied by satori itself failing to fetch the URL and that failure getting
     // wrapped afterward -- it has to be refused before satori ever sees it.
     await expect(

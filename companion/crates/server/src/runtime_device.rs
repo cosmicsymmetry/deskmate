@@ -1099,6 +1099,77 @@ mod tests {
         );
     }
 
+    /// A device whose peer has been dropped fails every request at once, which is
+    /// what makes the failure half of the transfer accounting reachable without a
+    /// socket. The happy path needs a peer that answers and is covered only by the
+    /// accumulator test above -- see the 2026-09-24 board note.
+    fn detached() -> super::WebSocketRuntimeDevice {
+        let (device, connector) = super::WebSocketRuntimeDevice::channel("dev-1".into());
+        drop(connector.attach());
+        device
+    }
+
+    fn asset_begin() -> protocol::AssetBegin {
+        protocol::AssetBegin {
+            digest: [7; protocol::ASSET_DIGEST_LEN],
+            kind: protocol::AssetKind::Image,
+            total_length: 32_000,
+            volatile: false,
+            encoding: protocol::ASSET_ENCODING_RAW,
+            decoded_length: None,
+        }
+    }
+
+    #[test]
+    fn a_transfer_that_cannot_be_opened_leaves_no_accounting_behind() {
+        let mut device = detached();
+
+        assert!(device.send_asset_begin(asset_begin()).is_err());
+        assert!(
+            device.asset_transfer.is_none(),
+            "an unopened transfer must not leave accounting for the next push to inherit"
+        );
+    }
+
+    #[test]
+    fn a_failed_chunk_abandons_the_transfer_rather_than_leaving_it_open() {
+        let mut device = detached();
+        device.asset_transfer = Some(AssetTransfer::opened());
+
+        assert!(
+            device
+                .send_asset_chunk(protocol::AssetChunk {
+                    digest: [7; protocol::ASSET_DIGEST_LEN],
+                    offset: 0,
+                    data: vec![0; 1920],
+                })
+                .is_err()
+        );
+        assert!(
+            device.asset_transfer.is_none(),
+            "a dead transfer's chunk count would otherwise be reported against whichever \
+             push commits next, which is worse than reporting nothing"
+        );
+    }
+
+    #[test]
+    fn a_commit_closes_the_transfer_whether_or_not_it_succeeded() {
+        let mut device = detached();
+        device.asset_transfer = Some(AssetTransfer::opened());
+
+        assert!(
+            device
+                .send_asset_commit(protocol::AssetCommit {
+                    digest: [7; protocol::ASSET_DIGEST_LEN],
+                })
+                .is_err()
+        );
+        assert!(
+            device.asset_transfer.is_none(),
+            "the commit is the end of a transfer even when it fails"
+        );
+    }
+
     fn event_router(
         capacity: usize,
         replay: Arc<Mutex<ReplayState>>,

@@ -18,16 +18,21 @@
 import { isIP } from "node:net";
 import { ConfigurationError } from "../face";
 import type { HttpRequest, RequestFn } from "../kit/http";
+import { type Ink, textInk, textWidth } from "../kit/raster";
 import type { PluginManifest } from "./manifest";
 
 export interface Budget {
   requests: number;
   bytes: number;
+  /** A measure request's own cap, independent of `requests`: it performs no I/O, so
+   * it does not compete with the network request count or the byte budget. The
+   * spec's figure is 64 measurements per render. */
   measurements: number;
 }
 
 export type Answer =
   | { ok: true; status: number; json?: unknown; text?: string; base64?: string }
+  | { ok: true; measurements: { width: number; ink: Ink }[] }
   | { ok: false; status?: number; error: string };
 
 /** A plugin's own declaration of one request. Validated, never trusted as-is. */
@@ -37,6 +42,93 @@ export interface PluginRequest {
   headers?: Record<string, string>;
   body?: string;
   as: "json" | "text" | "bytes";
+}
+
+/** One run a plugin wants measured, in the renderer's own units and font weights. */
+export interface MeasureItem {
+  text: string;
+  size: number;
+  weight: number;
+}
+
+/**
+ * A plugin's declaration that it wants text measured rather than a network request
+ * performed. This is the third request shape alongside `PluginRequest`: a plugin
+ * that draws its own SVG by hand needs the same widths the renderer will use, and
+ * asks for them the same way it asks for anything else -- by declaring, never by
+ * calling. It performs no I/O and is answered entirely out of the font database
+ * already loaded for rendering (`../kit/raster`).
+ */
+export interface PluginMeasureRequest {
+  measure: MeasureItem[];
+}
+
+/** Everything `validateRequests` can return: a network request, or a measure batch. */
+export type ValidatedRequest = PluginRequest | PluginMeasureRequest;
+
+function isMeasureRequest(request: ValidatedRequest): request is PluginMeasureRequest {
+  return "measure" in request;
+}
+
+/** Shape check only, ahead of validating the array it should hold -- distinguishes a
+ * measure declaration from a network request in the raw, untrusted input. */
+function isMeasureRaw(raw: unknown): raw is { measure: unknown } {
+  return typeof raw === "object" && raw !== null && !Array.isArray(raw) && "measure" in raw;
+}
+
+/** The only two weights this package bundles (`Inter-Regular.ttf`, `Inter-SemiBold.ttf`
+ * -- see `../kit/raster`). A measure request for any other weight is refused rather
+ * than silently answered against whatever `resvg`'s own font matching would fall back
+ * to: the plugin's own hand-drawn SVG and this measurement must agree exactly, and an
+ * allowlist of the two real weights is the only way to guarantee that rather than hope
+ * a fallback stays stable. */
+const MEASURE_WEIGHTS = new Set([400, 600]);
+
+/**
+ * Upper bound on a measure request's `size`. Two independent reasons, either one
+ * enough on its own: the panel is 368 px tall, so nothing a face legitimately draws
+ * needs a font size anywhere near this; and `../kit/raster` sizes its measuring
+ * canvas as `height = size * 4`, so an unbounded size is a request for resvg to
+ * rasterize an arbitrarily large canvas -- a cheap way for a hostile plugin to spend
+ * a render's CPU and memory on one measurement.
+ */
+const MAX_MEASURE_SIZE = 256;
+
+function validateMeasureItem(raw: unknown, index: number, subIndex: number): MeasureItem {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ConfigurationError(`measure request ${index}[${subIndex}] is not an object`);
+  }
+  const source = raw as Record<string, unknown>;
+
+  const text = source.text;
+  if (typeof text !== "string") {
+    throw new ConfigurationError(`measure request ${index}[${subIndex}] text must be a string`);
+  }
+
+  const size = source.size;
+  if (typeof size !== "number" || !Number.isFinite(size) || size <= 0 || size > MAX_MEASURE_SIZE) {
+    throw new ConfigurationError(
+      `measure request ${index}[${subIndex}] size must be a number greater than 0 and at most ${MAX_MEASURE_SIZE}`,
+    );
+  }
+
+  const weight = source.weight;
+  if (typeof weight !== "number" || !MEASURE_WEIGHTS.has(weight)) {
+    throw new ConfigurationError(
+      `measure request ${index}[${subIndex}] weight must be 400 or 600, the only weights this package bundles`,
+    );
+  }
+
+  return { text, size, weight };
+}
+
+function validateMeasureRequest(raw: { measure: unknown }, index: number): PluginMeasureRequest {
+  if (!Array.isArray(raw.measure)) {
+    throw new ConfigurationError(`measure request ${index} measure must be an array`);
+  }
+  return {
+    measure: raw.measure.map((item, subIndex) => validateMeasureItem(item, index, subIndex)),
+  };
 }
 
 const PLACEHOLDER = /\{\{secret:([a-z0-9_]+)\}\}/gi;
@@ -287,21 +379,42 @@ function validateOne(raw: unknown, index: number): PluginRequest {
  * budget: the shape of each request, the scheme, the request count, and -- the check
  * that matters -- that every host was declared. Throws `ConfigurationError` on the
  * first violation; the plugin never gets to perform a request this did not approve.
+ *
+ * A measure request (`{ measure: [...] }`) is not a network request: it is excluded
+ * from the `budget.requests` count entirely and checked instead against
+ * `budget.measurements`, summed across every measure declaration in this call -- a
+ * plugin cannot dodge the cap by spreading measurements across several small
+ * declarations instead of one large one.
  */
 export function validateRequests(
   raw: unknown,
   manifest: PluginManifest,
   budget: Budget,
-): PluginRequest[] {
+): ValidatedRequest[] {
   if (!Array.isArray(raw)) {
     throw new ConfigurationError("requests must be an array");
   }
-  if (raw.length > budget.requests) {
+
+  const requestCount = raw.filter((item) => !isMeasureRaw(item)).length;
+  if (requestCount > budget.requests) {
     throw new ConfigurationError(
-      `a plugin may issue at most ${budget.requests} requests per refresh, not ${raw.length}`,
+      `a plugin may issue at most ${budget.requests} requests per refresh, not ${requestCount}`,
     );
   }
+
+  const totalMeasurements = raw
+    .filter(isMeasureRaw)
+    .reduce((sum, item) => sum + (Array.isArray(item.measure) ? item.measure.length : 0), 0);
+  if (totalMeasurements > budget.measurements) {
+    throw new ConfigurationError(
+      `a plugin may request at most ${budget.measurements} measurements per refresh, not ${totalMeasurements}`,
+    );
+  }
+
   return raw.map((item, index) => {
+    if (isMeasureRaw(item)) {
+      return validateMeasureRequest(item, index);
+    }
     const validated = validateOne(item, index);
     checkDeclaredHost(new URL(validated.url), manifest);
     return validated;
@@ -344,9 +457,13 @@ function toAnswer(
  * any single request into an `Answer` rather than an exception -- the plugin decides
  * what a failed request means. Only a violation of the contract itself (the byte
  * budget being spent) short-circuits a later request without performing it.
+ *
+ * A measure request is answered first, ahead of that check: it performs no I/O, so it
+ * never calls `request` and never touches `bytesLeft` -- it is answered even after the
+ * byte budget for this refresh is spent, because it did not spend any of it.
  */
 export async function performRequests(
-  requests: PluginRequest[],
+  requests: ValidatedRequest[],
   manifest: PluginManifest,
   secrets: Record<string, string>,
   request: RequestFn,
@@ -355,6 +472,16 @@ export async function performRequests(
   const answers: Answer[] = [];
   let bytesLeft = budget.bytes;
   for (const declared of requests) {
+    if (isMeasureRequest(declared)) {
+      answers.push({
+        ok: true,
+        measurements: declared.measure.map((item) => ({
+          width: textWidth(item.text, item.size, item.weight),
+          ink: textInk(item.text, item.size, item.weight),
+        })),
+      });
+      continue;
+    }
     if (bytesLeft <= 0) {
       answers.push({
         ok: false,

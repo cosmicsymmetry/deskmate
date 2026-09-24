@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { ConfigurationError } from "../../src/face";
 import { performRequests, validateRequests } from "../../src/plugins/requests";
 import { parseManifest } from "../../src/plugins/manifest";
+import { textInk, textWidth } from "../../src/kit/raster";
 
 const manifest = parseManifest(
   {
@@ -578,6 +579,249 @@ describe("performRequests: a 200 response that echoes the secret back is scrubbe
       ok: true,
       status: 200,
       json: { data: { seen: { "[redacted]": true } } },
+    });
+  });
+});
+
+describe("validateRequests / performRequests: measure requests", () => {
+  // A `RequestFn` that fails the test if it is ever called: a measure request must
+  // perform no I/O at all, not merely "usually" skip the network.
+  const noNetwork = async () => {
+    throw new Error("no network for a measure");
+  };
+
+  test("answers a measure request with the renderer's own widths", async () => {
+    const requests = validateRequests(
+      [{ measure: [{ text: "Hello", size: 31, weight: 600 }] }],
+      manifest,
+      budget,
+    );
+    const [answer] = await performRequests(requests, manifest, {}, noNetwork, budget);
+    expect(answer).toEqual({
+      ok: true,
+      measurements: [{ width: textWidth("Hello", 31, 600), ink: expect.any(Object) }],
+    });
+  });
+
+  test("the ink matches the renderer's own textInk for the same run", async () => {
+    const requests = validateRequests(
+      [{ measure: [{ text: "$12.34", size: 22, weight: 400 }] }],
+      manifest,
+      budget,
+    );
+    const [answer] = await performRequests(requests, manifest, {}, noNetwork, budget);
+    expect(answer).toEqual({
+      ok: true,
+      measurements: [{ width: textWidth("$12.34", 22, 400), ink: textInk("$12.34", 22, 400) }],
+    });
+  });
+
+  test("answers several measurements in one request, in the order asked", async () => {
+    const requests = validateRequests(
+      [
+        {
+          measure: [
+            { text: "one", size: 10, weight: 400 },
+            { text: "two", size: 20, weight: 600 },
+            { text: "three", size: 30, weight: 400 },
+          ],
+        },
+      ],
+      manifest,
+      budget,
+    );
+    const [answer] = await performRequests(requests, manifest, {}, noNetwork, budget);
+    expect(answer).toEqual({
+      ok: true,
+      measurements: [
+        { width: textWidth("one", 10, 400), ink: textInk("one", 10, 400) },
+        { width: textWidth("two", 20, 600), ink: textInk("two", 20, 600) },
+        { width: textWidth("three", 30, 400), ink: textInk("three", 30, 400) },
+      ],
+    });
+  });
+
+  test("an empty measure array is accepted and answers an empty measurements array", async () => {
+    const requests = validateRequests([{ measure: [] }], manifest, budget);
+    const [answer] = await performRequests(requests, manifest, {}, noNetwork, budget);
+    expect(answer).toEqual({ ok: true, measurements: [] });
+  });
+
+  test("an empty string measures as zero width, not a configuration error", async () => {
+    const requests = validateRequests(
+      [{ measure: [{ text: "", size: 20, weight: 400 }] }],
+      manifest,
+      budget,
+    );
+    const [answer] = await performRequests(requests, manifest, {}, noNetwork, budget);
+    expect(answer).toEqual({ ok: true, measurements: [{ width: 0, ink: expect.any(Object) }] });
+  });
+
+  test("a run with no coverage in the bundled fonts still answers, not throws", async () => {
+    // The bundled Inter faces cover Latin text; an emoji is outside that coverage.
+    // The renderer measures whatever it can rather than refusing -- there is no
+    // owner action to take over a plugin's own dynamic text content.
+    const requests = validateRequests(
+      [{ measure: [{ text: "🎉", size: 20, weight: 400 }] }],
+      manifest,
+      budget,
+    );
+    const [answer] = await performRequests(requests, manifest, {}, noNetwork, budget);
+    expect(answer.ok).toBe(true);
+    if (answer.ok && "measurements" in answer) {
+      expect(answer.measurements).toHaveLength(1);
+      expect(typeof answer.measurements[0]?.width).toBe("number");
+    }
+  });
+
+  test("refuses a non-string text as a configuration error", () => {
+    expect(() =>
+      validateRequests([{ measure: [{ text: 5, size: 20, weight: 400 }] }], manifest, budget),
+    ).toThrow(ConfigurationError);
+  });
+
+  test("refuses a negative size as a configuration error", () => {
+    expect(() =>
+      validateRequests([{ measure: [{ text: "x", size: -1, weight: 400 }] }], manifest, budget),
+    ).toThrow(ConfigurationError);
+  });
+
+  test("refuses a zero size as a configuration error", () => {
+    expect(() =>
+      validateRequests([{ measure: [{ text: "x", size: 0, weight: 400 }] }], manifest, budget),
+    ).toThrow(ConfigurationError);
+  });
+
+  test("refuses a non-finite size as a configuration error", () => {
+    expect(() =>
+      validateRequests(
+        [{ measure: [{ text: "x", size: Number.POSITIVE_INFINITY, weight: 400 }] }],
+        manifest,
+        budget,
+      ),
+    ).toThrow(ConfigurationError);
+    expect(() =>
+      validateRequests(
+        [{ measure: [{ text: "x", size: Number.NaN, weight: 400 }] }],
+        manifest,
+        budget,
+      ),
+    ).toThrow(ConfigurationError);
+  });
+
+  test("refuses an enormous size as a configuration error", () => {
+    expect(() =>
+      validateRequests(
+        [{ measure: [{ text: "x", size: 1_000_000, weight: 400 }] }],
+        manifest,
+        budget,
+      ),
+    ).toThrow(ConfigurationError);
+  });
+
+  test("refuses a weight the bundled fonts do not have", () => {
+    expect(() =>
+      validateRequests([{ measure: [{ text: "x", size: 20, weight: 500 }] }], manifest, budget),
+    ).toThrow(ConfigurationError);
+    expect(() =>
+      validateRequests([{ measure: [{ text: "x", size: 20, weight: 700 }] }], manifest, budget),
+    ).toThrow(ConfigurationError);
+  });
+
+  test("refuses a non-numeric weight as a configuration error", () => {
+    expect(() =>
+      validateRequests(
+        // biome-ignore lint/suspicious/noExplicitAny: exercising a hostile, wrongly-typed input
+        [{ measure: [{ text: "x", size: 20, weight: "bold" as any }] }],
+        manifest,
+        budget,
+      ),
+    ).toThrow(ConfigurationError);
+  });
+
+  test("refuses more measurements than the budget allows, in a single request", () => {
+    const measure = Array.from({ length: 65 }, () => ({ text: "x", size: 17, weight: 400 }));
+    expect(() => validateRequests([{ measure }], manifest, budget)).toThrow(/64/);
+  });
+
+  test("refuses more measurements than the budget allows, spread across requests", () => {
+    const first = Array.from({ length: 40 }, () => ({ text: "x", size: 17, weight: 400 }));
+    const second = Array.from({ length: 30 }, () => ({ text: "y", size: 17, weight: 400 }));
+    expect(() =>
+      validateRequests([{ measure: first }, { measure: second }], manifest, budget),
+    ).toThrow(/64/);
+  });
+
+  test("exactly the budget's worth of measurements is accepted", () => {
+    const measure = Array.from({ length: 64 }, () => ({ text: "x", size: 17, weight: 400 }));
+    expect(validateRequests([{ measure }], manifest, budget)).toHaveLength(1);
+  });
+
+  test("a measure request does not consume the request budget", () => {
+    const tight = { requests: 1, bytes: budget.bytes, measurements: 64 };
+    const requests = validateRequests(
+      [
+        { url: "https://api.github.com/u", as: "json" },
+        { measure: [{ text: "a", size: 10, weight: 400 }] },
+        { measure: [{ text: "b", size: 10, weight: 400 }] },
+      ],
+      manifest,
+      tight,
+    );
+    expect(requests).toHaveLength(3);
+  });
+
+  test("a request array that exceeds the request budget still refuses, measure entries aside", () => {
+    const tight = { requests: 1, bytes: budget.bytes, measurements: 64 };
+    const many = [
+      { url: "https://api.github.com/u", as: "json" as const },
+      { url: "https://api.github.com/v", as: "json" as const },
+      { measure: [{ text: "a", size: 10, weight: 400 }] },
+    ];
+    expect(() => validateRequests(many, manifest, tight)).toThrow(/at most 1/);
+  });
+
+  test("a measure item alongside a network request answers at the same positions", async () => {
+    const seen: unknown[] = [];
+    const stub = async (input: unknown) => {
+      seen.push(input);
+      return { status: 200, body: "{}", json: {} };
+    };
+    const requests = validateRequests(
+      [
+        { measure: [{ text: "a", size: 10, weight: 400 }] },
+        { url: "https://api.github.com/u", as: "json" },
+      ],
+      manifest,
+      budget,
+    );
+    const answers = await performRequests(requests, manifest, {}, stub, budget);
+    expect(answers[0]).toEqual({
+      ok: true,
+      measurements: [{ width: textWidth("a", 10, 400), ink: expect.any(Object) }],
+    });
+    expect(answers[1]).toEqual({ ok: true, status: 200, json: {} });
+    expect(seen).toHaveLength(1);
+  });
+
+  test("a measure request is answered even once the byte budget is spent", async () => {
+    const big = "x".repeat(2 * 1024 * 1024);
+    const stub = async () => ({ status: 200, body: big, json: undefined });
+    const requests = validateRequests(
+      [
+        { url: "https://api.github.com/u", as: "text" },
+        { url: "https://api.github.com/v", as: "text" },
+        { url: "https://api.github.com/w", as: "text" },
+        { measure: [{ text: "still measured", size: 10, weight: 400 }] },
+      ],
+      manifest,
+      budget,
+    );
+    const answers = await performRequests(requests, manifest, {}, stub, budget);
+    expect(answers[2]).toEqual({ ok: false, error: expect.stringContaining("budget") });
+    expect(answers[3]).toEqual({
+      ok: true,
+      measurements: [{ width: textWidth("still measured", 10, 400), ink: expect.any(Object) }],
     });
   });
 });

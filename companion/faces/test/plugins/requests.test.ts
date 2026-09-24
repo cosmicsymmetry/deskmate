@@ -667,11 +667,10 @@ describe("validateRequests / performRequests: measure requests", () => {
       budget,
     );
     const [answer] = await performRequests(requests, manifest, {}, noNetwork, budget);
-    expect(answer.ok).toBe(true);
-    if (answer.ok && "measurements" in answer) {
-      expect(answer.measurements).toHaveLength(1);
-      expect(typeof answer.measurements[0]?.width).toBe("number");
-    }
+    expect(answer).toEqual({
+      ok: true,
+      measurements: [{ width: expect.any(Number), ink: expect.any(Object) }],
+    });
   });
 
   test("refuses a non-string text as a configuration error", () => {

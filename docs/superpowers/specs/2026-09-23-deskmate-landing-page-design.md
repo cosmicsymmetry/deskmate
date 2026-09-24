@@ -74,9 +74,20 @@ Three rules the implementation may not trade away:
    and a horizontal drag (advances the loop), because that is exactly what the hardware
    accepts. Both have keyboard equivalents.
 
-Section-to-face mapping is `IntersectionObserver`. The ring uses CSS
-`animation-timeline: scroll()` where supported, with a `requestAnimationFrame` fallback
-where not.
+Section-to-face mapping is `IntersectionObserver`.
+
+**The ring is driven by one `requestAnimationFrame` updater, on every browser.** An
+earlier draft of this spec called for CSS `animation-timeline: scroll()` where supported
+with a JavaScript fallback where not, and that was implemented and then removed on
+2026-09-24. The reason is the ring's actual requirement: it closes at the **waitlist**,
+not at the bottom of the document, because the FAQ and footer deliberately sit outside
+the loop. CSS `scroll()` timelines are anchored to a scroll container, and the loop is
+not one — the document scrolls, not a region inside it — so the CSS path could only ever
+measure the whole page. Keeping both would have meant two implementations disagreeing
+about where 100% is, browser by browser. The cost of the single JavaScript path is that
+the ring updates on a rAF-coalesced scroll handler rather than on the compositor, which
+is acceptable for an `aria-hidden` decoration and is not acceptable for anything that
+carries meaning.
 
 **The loop holds at most eight cards (`PRODUCT.md`, "Objects"). So does this page.**
 
@@ -88,7 +99,7 @@ consequence, never exclaiming, never blaming the reader.
 
 | # | Section | Panel shows | The claim |
 |---|---|---|---|
-| 01 | Hero | Clock | *Tap it. It answers.* A small emissive panel that clips to your monitor. Email field here as well as at the end. |
+| 01 | Hero | Focus timer, paused | *Tap it. It answers.* A small emissive panel that clips to your monitor. Email field here as well as at the end. |
 | 02 | Focus timer | 25:00 paused → the visitor taps and it counts down | The timer moves the instant your finger lands; the panel does not wait for the server, and the host reconciles afterwards. |
 | 03 | The loop | Faces cycling; drag to advance | Your cards, in the order you set, each with its own dwell. |
 | 04 | Server-drawn faces | Real weather, Hacker News, RSS and token frames | Drawn on the server, pushed to the panel as a finished picture. |
@@ -156,12 +167,17 @@ in `companion/faces/` and need no server and no exporter at all.
 `SimError::AlreadyClaimed`), so the exporter renders its frames sequentially in a single
 run rather than in parallel.
 
-**Unmeasured, and the plan measures it before committing to this approach:** the encoded
-size of a 448×368 mostly-black emissive frame as WebP, and therefore the pack's total
-weight. The expectation is comfortably under 1 MB with below-the-fold frames lazy
-loaded. If it is not, the fallbacks in order are a lower frame rate for the ring-only
-portion, a shorter countdown window, or a video element for the countdown with the
-tappable states kept as frames.
+**Measured 2026-09-24: 65 files, 328 KiB total** (520 KB on disk), encoded as lossless
+WebP. Individual frames run 3.5 KB (the clock) to 10.4 KB (the Hacker News face), and
+the 61 countdown frames cluster tightly at 4.8-5.4 KB each. That is comfortably inside
+the 1 MB budget, so the approach proceeds as designed with below-the-fold frames lazy
+loaded — none of the fallbacks were needed. They are recorded here in case a future pack
+grows: a lower frame rate for the ring-only portion, a shorter countdown window, or a
+video element for the countdown with the tappable states kept as frames.
+
+A whole minute of a device face, at the cadence the device itself ticks, costs about a
+third of what a single hero photograph usually does. That is what a flat emissive UI on
+black compresses to, and it is the reason the interactive hero was affordable at all.
 
 ### What the frames do and do not prove
 

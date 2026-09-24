@@ -63,7 +63,7 @@ can write a plugin and either self-host it or submit it to run on ours.
 
 | Track | Status | Branch | Waiting on |
 |---|---|---|---|
-| A | Accounts + claiming built and reviewed (plan tasks 2-12, 13.1-13.3); PR open. Needs no schema/wire lock | `feat/track-a-accounts` | Owner: the Web Serial spike at the board, and the deploy (live runs C1's build) |
+| A | Accounts + claiming built and reviewed; PR #5 open, CI green. Needs no schema/wire lock. Deploys after C1 (owner, 2026-09-25); the live owner account is re.aleksandrov1@gmail.com | `feat/track-a-accounts` | C1's merge (PR #4), then a rebase that migrates C1's `face-state.json` per account; the Web Serial spike at the board |
 | B | Not started | -- | -- |
 | C1 | Not started | -- | -- |
 | C2 | Not started | -- | C1 |

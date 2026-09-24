@@ -11,8 +11,10 @@
 > tab group -- and found that an unset `RUST_LOG` hid the setup code (fixed, `f7ce7c1`);
 > step 3 migrated a copy of the live config (5 devices, 4 picture sources, the loop intact).
 > **Open:** Task 1 (Web Serial spike, needs the owner at the board); Task 13 steps 4-7.
-> **Deploy is blocked on the owner**: the live server runs Track C1's branch build, and
-> deploying this branch would replace it.
+> **Deploy waits for Track C1 to merge** (owner, 2026-09-25): the live server runs C1's
+> branch build. After C1 lands, rebase onto it and make the migration also move C1's
+> `face-state.json` (per-source face state) into the owner's account folder, since its
+> sources are per account now. Live `DESKMATE_OWNER_EMAIL` is re.aleksandrov1@gmail.com.
 
 **Goal:** Turn the single-owner server into a multi-account one (email-link and Google sign-in, one folder per account, a first-run setup code) and let a signed-in owner put a panel on their Wi-Fi and claim it from the web page over Web Serial.
 

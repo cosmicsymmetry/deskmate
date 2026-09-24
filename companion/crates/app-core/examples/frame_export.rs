@@ -18,7 +18,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use app_core::{
-    AppConfig, CardAlert, CardSettings, DisplayTemplate, RefreshPolicy, WidgetTapAction,
+    AppConfig, CardAlert, CardField, CardFieldValue, CardSettings, DisplayTemplate, RefreshPolicy,
+    WidgetTapAction,
 };
 use chrono::Utc;
 use lvgl_sim::scene::{SceneRenderRequest, SceneTimer};
@@ -28,6 +29,33 @@ use lvgl_sim::{SimOrientation, Simulator};
 /// cadence the device itself ticks a pushed timer at.
 const WINDOW_SECONDS: u32 = 60;
 const DURATION_SECONDS: u32 = 25 * 60;
+
+/// The countdown subtracts `second * 1000` from the total, so the window must fit
+/// inside the duration. Asserted at compile time rather than left to underflow.
+const _: () = assert!(WINDOW_SECONDS <= DURATION_SECONDS);
+
+fn text(key: &str, value: &str) -> CardField {
+    CardField {
+        key: key.into(),
+        value: CardFieldValue::Text {
+            value: value.into(),
+        },
+    }
+}
+
+fn integer(key: &str, value: i64) -> CardField {
+    CardField {
+        key: key.into(),
+        value: CardFieldValue::Integer { value },
+    }
+}
+
+fn boolean(key: &str, value: bool) -> CardField {
+    CardField {
+        key: key.into(),
+        value: CardFieldValue::Boolean { value },
+    }
+}
 
 /// `AppConfig::default()` already carries a single clock card with id `clock`.
 /// The focus card is added here so the pack has a timer face to render.
@@ -46,14 +74,21 @@ fn demo_config() -> AppConfig {
     config
 }
 
+/// The scene builders read a card's face from its published FIELDS, not from its
+/// configuration: `build_progress_ring_scene` gates the countdown on
+/// `duration_seconds >= 1` and bakes the literal "00:00" into the scene when that
+/// is false (`crates/app-core/src/scene_build.rs:711,766`). Passing an empty slice
+/// therefore yields a face that never counts, while the ring's unconditional
+/// `timer.permille` binding keeps moving -- which looks like it works and is not.
 fn render(
     sim: &mut Simulator,
     config: &AppConfig,
     card_id: &str,
+    fields: &[CardField],
     timer: Option<SceneTimer>,
 ) -> Vec<u8> {
     let now = Utc::now();
-    let scene = app_core::preview_card_scene(config, card_id, &[])
+    let scene = app_core::preview_card_scene(config, card_id, fields)
         .unwrap_or_else(|reason| panic!("scene for {card_id:?} did not build: {reason}"));
     let utc_offset_minutes = app_core::utc_offset_minutes(&config.preferences.timezone, now)
         .unwrap_or_else(|reason| panic!("timezone did not resolve: {reason}"));
@@ -79,11 +114,20 @@ fn main() {
     let config = demo_config();
     let mut sim = Simulator::new().expect("simulator");
 
+    // Fields, not configuration, are what the scene builders read. `AppConfig::default()`
+    // declares `show_seconds: true`, so the exported clock says so too.
+    let clock_fields = [boolean("show_seconds", true)];
     fs::write(
         out.join("clock.png"),
-        render(&mut sim, &config, "clock", None),
+        render(&mut sim, &config, "clock", &clock_fields, None),
     )
     .expect("write clock frame");
+
+    // `duration_seconds` must be >= 1 or the ring scene bakes a literal "00:00".
+    let focus_fields = [
+        text("label", "Focus"),
+        integer("duration_seconds", i64::from(DURATION_SECONDS)),
+    ];
 
     let total_ms = DURATION_SECONDS * 1_000;
     let paused = SceneTimer {
@@ -93,7 +137,7 @@ fn main() {
     };
     fs::write(
         out.join("focus-paused.png"),
-        render(&mut sim, &config, "focus", Some(paused)),
+        render(&mut sim, &config, "focus", &focus_fields, Some(paused)),
     )
     .expect("write paused frame");
 
@@ -103,7 +147,7 @@ fn main() {
             remaining_ms: total_ms - second * 1_000,
             running: true,
         };
-        let png = render(&mut sim, &config, "focus", Some(timer));
+        let png = render(&mut sim, &config, "focus", &focus_fields, Some(timer));
         fs::write(out.join(format!("focus-{second:03}.png")), png).expect("write frame");
     }
 

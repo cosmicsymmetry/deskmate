@@ -109,6 +109,31 @@ function parseUrl(address: string): URL {
 export type DialInit = { method?: string; headers?: Record<string, string>; body?: string };
 
 /**
+ * Header names the guard sets itself and a caller must never be able to take back, matched
+ * case-insensitively. `Host` is the one that matters: address pinning validates the IP and
+ * TLS SNI is computed from `url.hostname`, so a caller-supplied `Host` cannot redirect the
+ * socket or defeat certificate checking -- but it CAN reach a validated, pinned public IP
+ * while claiming to be an arbitrary internal hostname, which is exactly the primitive a
+ * Host-routed internal service is vulnerable to. Caller headers with one of these names
+ * (in any casing) are dropped before the guard's own headers are added, not merged with
+ * them.
+ */
+const RESERVED_HEADERS = new Set(["host"]);
+
+function callerHeaders(headers: Record<string, string> | undefined): Record<string, string> {
+  if (headers === undefined) {
+    return {};
+  }
+  const allowed: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    if (!RESERVED_HEADERS.has(name.toLowerCase())) {
+      allowed[name] = value;
+    }
+  }
+  return allowed;
+}
+
+/**
  * One request to `address`, speaking for `url`'s host. The URL handed to `fetch`
  * carries the IP literal, so nothing resolves the name again; the name travels in
  * `Host` and as the TLS server name, which is what the certificate is checked against.
@@ -128,10 +153,12 @@ export function dial(
     redirect: "manual",
     signal,
     headers: {
+      ...callerHeaders(init?.headers),
+      // The guard's own headers are added last, and `Host` was already stripped out of
+      // whatever the caller sent -- so nothing above this line can win.
       Host: url.host,
       "User-Agent": USER_AGENT,
       Accept: "*/*",
-      ...init?.headers,
     },
     // An IP literal has no server name to present; a name always does.
     ...(url.protocol === "https:" && named ? { tls: { serverName: url.hostname } } : {}),
@@ -273,13 +300,27 @@ export async function replyFrom(response: Response, as: HttpRequest["as"]): Prom
 export function createRequest(resolve: Resolve = systemResolve, dialFn: DialFn = dial): RequestFn {
   return async ({ url, method = "GET", headers = {}, body, as }) => {
     const target = parseUrl(url);
-    const address = await pinnedAddress(target, resolve);
-    const response = await dialFn(target, address, AbortSignal.timeout(TIMEOUT_MS), {
-      method,
-      headers,
-      body,
-    });
-    return replyFrom(response, as);
+    try {
+      const address = await pinnedAddress(target, resolve);
+      const response = await dialFn(target, address, AbortSignal.timeout(TIMEOUT_MS), {
+        method,
+        headers,
+        body,
+      });
+      return await replyFrom(response, as);
+    } catch (error) {
+      if (error instanceof ConfigurationError || error instanceof TransientError) {
+        throw error;
+      }
+      if (
+        error instanceof Error &&
+        (error.name === "TimeoutError" || error.name === "AbortError")
+      ) {
+        throw new TransientError(`${target.host} timed out`);
+      }
+      // The message, never the URL: a query string can carry an API key.
+      throw new TransientError(`${target.host} could not be fetched`);
+    }
   };
 }
 

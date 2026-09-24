@@ -102,6 +102,45 @@ describe("the pin", () => {
   });
 });
 
+describe("dial refuses to let a caller take back its Host header", () => {
+  test("a caller-supplied Host, in any casing, does not reach the server; ordinary headers still do", async () => {
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: (request) =>
+        Response.json({
+          host: request.headers.get("host"),
+          auth: request.headers.get("authorization"),
+          lang: request.headers.get("accept-language"),
+        }),
+    });
+    try {
+      const url = new URL(`http://spoof.invalid:${server.port}/`);
+      const response = await dial(url, "127.0.0.1", AbortSignal.timeout(5_000), {
+        headers: {
+          Host: "evil.example",
+          HOST: "also-evil.example",
+          host: "still-evil.example",
+          Authorization: "Bearer t",
+          "Accept-Language": "en",
+        },
+      });
+      const seen = (await response.json()) as {
+        host: string | null;
+        auth: string | null;
+        lang: string | null;
+      };
+      // The guard's own Host wins over every casing of a caller-supplied one.
+      expect(seen.host).toBe(`spoof.invalid:${server.port}`);
+      // Ordinary headers are not collateral damage from the filter.
+      expect(seen.auth).toBe("Bearer t");
+      expect(seen.lang).toBe("en");
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
 describe("createRequest", () => {
   let server: ReturnType<typeof Bun.serve>;
   const seen: { method: string; auth: string | null; body: string }[] = [];
@@ -272,5 +311,21 @@ describe("createRequest end to end, with an injected transport", () => {
     );
     expect(failure).toBeInstanceOf(ConfigurationError);
     expect(calls).toHaveLength(0);
+  });
+
+  test("a deadline surfaces as TransientError, not a raw DOM exception", async () => {
+    // The real deadline is `AbortSignal.timeout(TIMEOUT_MS)`, 15s -- too slow to wait
+    // out in a test. The injected transport instead throws what a real `fetch` throws
+    // when that signal fires, so this proves `createRequest`'s own catch, not the clock.
+    const timesOut: DialFn = async () => {
+      throw new DOMException("The operation timed out.", "TimeoutError");
+    };
+    const req = createRequest(async () => [PUBLIC], timesOut);
+    const failure = await req({ url: "https://api.example/data", as: "text" }).catch(
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(TransientError);
+    expect(failure).not.toBeInstanceOf(DOMException);
+    expect((failure as Error).message).toContain("api.example");
   });
 });

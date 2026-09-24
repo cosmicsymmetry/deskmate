@@ -77,6 +77,38 @@ describe("the sandbox", () => {
     expect(() => runInSandbox(`export function render(){ return 1; }`, "plan", {})).toThrow(/plan/);
   });
 
+  test("refuses a return value it cannot represent as data, instead of a raw parse error escaping", () => {
+    expect(() =>
+      runInSandbox(`export function render(){ return function(){}; }`, "render", {}),
+    ).toThrow(SandboxError);
+  });
+
+  test("reports a plugin's own throw null as a SandboxError, not a raw TypeError", () => {
+    expect(() => runInSandbox(`export function render(){ throw null; }`, "render", {})).toThrow(
+      SandboxError,
+    );
+  });
+
+  test("reports a plugin's own throw undefined as a SandboxError, not a raw TypeError", () => {
+    expect(() =>
+      runInSandbox(`export function render(){ throw undefined; }`, "render", {}),
+    ).toThrow(SandboxError);
+  });
+
+  test("does not corrupt a plugin's own string content when stripping its export", () => {
+    const source = `export function render(){ return { html: \`<div>export const foo = 1;</div>\` }; }`;
+    expect(runInSandbox<{ html: string }>(source, "render", {})).toEqual({
+      html: "<div>export const foo = 1;</div>",
+    });
+  });
+
+  test("counts the source cap in bytes, not UTF-16 code units", () => {
+    const multiByte = "€".repeat(400_000); // 3 bytes each in UTF-8, 1 UTF-16 unit each
+    expect(() =>
+      runInSandbox(`export function render(){ return "${multiByte}"; }`, "render", {}),
+    ).toThrow(/too large/);
+  });
+
   test("carries a plugin's own configuration flag across the boundary", () => {
     const source = `export function render(){ const e = new Error("no city called Xyz"); e.configuration = true; throw e; }`;
     const failure = (() => {

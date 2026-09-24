@@ -475,6 +475,20 @@ picking the other box moved 19 of 32 images), and an SVG's image reference is re
 **from our disk** by default in `usvg-0.45.1` (`src/parser/image.rs:85-100`), so the SVG
 output path must accept `data:` references only.
 
+## Two things the build found that the refresher must carry
+
+- **The taxonomy has no third state, and a plugin can sit in the gap.** A rendering
+  failure caused by the plugin's own bad CSS or an undecodable image is deterministic,
+  but the host cannot tell it from an internal bug, so it is retried rather than blamed
+  on the owner — every 60 seconds, forever, with nothing in the window. Deliberate: the
+  alternative tells the owner to fix a setting that cannot fix it. The layer that
+  schedules refreshes owes a repeated-failure escalation: after N consecutive failures,
+  say the plugin is broken.
+- **The response-byte budget can overrun by about 2x.** A request that dies mid-body
+  charges nothing, because the fetch cannot report what it read, and charging the full
+  cap on every failure would let four DNS failures exhaust a render's 4 MB. Bounded by
+  the 8-request cap: at worst 8 MB is read against a 4 MB budget.
+
 ## Not verified
 
 - The layout engine's behaviour at the caps, and its CSS subset's edges.

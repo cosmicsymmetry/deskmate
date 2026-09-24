@@ -4,6 +4,7 @@ import {
   createFetchText,
   createRequest,
   dial,
+  type DialFn,
   isPrivateAddress,
   pinnedAddress,
   replyFrom,
@@ -182,5 +183,94 @@ describe("createRequest", () => {
     expect(local({ url: "file:///etc/passwd", as: "text" })).rejects.toBeInstanceOf(
       ConfigurationError,
     );
+  });
+});
+
+describe("createRequest end to end, with an injected transport", () => {
+  // The resolver answers with a PUBLIC address, so `pinnedAddress` genuinely runs and
+  // passes -- these tests exercise `createRequest` itself, not a bypass of it. Only the
+  // transport is faked, the same way `Resolve` is already faked above; the production
+  // default for both arguments is the real thing.
+  type RecordedCall = {
+    url: string;
+    address: string;
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+  };
+
+  function recordingDial(response: Response): { dialFn: DialFn; calls: RecordedCall[] } {
+    const calls: RecordedCall[] = [];
+    const dialFn: DialFn = async (url, address, _signal, init) => {
+      calls.push({
+        url: url.toString(),
+        address,
+        method: init?.method,
+        headers: init?.headers,
+        body: init?.body,
+      });
+      return response;
+    };
+    return { dialFn, calls };
+  }
+
+  test("decodes json, text and bytes from the injected response", async () => {
+    const json = createRequest(async () => [PUBLIC], recordingDial(Response.json({ n: 7 })).dialFn);
+    expect((await json({ url: "https://api.example/data", as: "json" })).json).toEqual({ n: 7 });
+
+    const text = createRequest(async () => [PUBLIC], recordingDial(new Response("text")).dialFn);
+    expect((await text({ url: "https://api.example/data", as: "text" })).body).toBe("text");
+
+    const bytes = createRequest(
+      async () => [PUBLIC],
+      recordingDial(new Response(new Uint8Array([137, 80, 78, 71]))).dialFn,
+    );
+    const body = (await bytes({ url: "https://api.example/data", as: "bytes" })).body;
+    expect(body).toBeInstanceOf(Uint8Array);
+    expect(Array.from(body as Uint8Array)).toEqual([137, 80, 78, 71]);
+  });
+
+  test("the method, headers and body reach the transport unchanged", async () => {
+    const { dialFn, calls } = recordingDial(new Response("ok"));
+    const withTransport = createRequest(async () => [PUBLIC], dialFn);
+    await withTransport({
+      url: "https://api.example/data",
+      method: "POST",
+      headers: { Authorization: "Bearer t" },
+      body: '{"q":1}',
+      as: "text",
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({
+      url: "https://api.example/data",
+      address: PUBLIC,
+      method: "POST",
+      headers: { Authorization: "Bearer t" },
+      body: '{"q":1}',
+    });
+  });
+
+  test("a non-ok status comes back as {status: 404} and does not throw", async () => {
+    const { dialFn } = recordingDial(new Response("gone", { status: 404 }));
+    const withTransport = createRequest(async () => [PUBLIC], dialFn);
+    expect((await withTransport({ url: "https://api.example/data", as: "text" })).status).toBe(404);
+  });
+
+  test("a body over the 1 MB cap is refused as TransientError", async () => {
+    const { dialFn } = recordingDial(new Response("x".repeat(1024 * 1024 + 1)));
+    const withTransport = createRequest(async () => [PUBLIC], dialFn);
+    expect(withTransport({ url: "https://api.example/data", as: "text" })).rejects.toBeInstanceOf(
+      TransientError,
+    );
+  });
+
+  test("the guard refuses a private address before the transport is ever called", async () => {
+    const { dialFn, calls } = recordingDial(new Response("should not be reached"));
+    const inward = createRequest(async () => ["169.254.169.254"], dialFn);
+    const failure = await inward({ url: "https://metadata.example/", as: "text" }).catch(
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(ConfigurationError);
+    expect(calls).toHaveLength(0);
   });
 });

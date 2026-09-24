@@ -105,6 +105,9 @@ function parseUrl(address: string): URL {
   }
 }
 
+/** The extra request shape `dial` accepts on top of the address it is told to hit. */
+export type DialInit = { method?: string; headers?: Record<string, string>; body?: string };
+
 /**
  * One request to `address`, speaking for `url`'s host. The URL handed to `fetch`
  * carries the IP literal, so nothing resolves the name again; the name travels in
@@ -114,7 +117,7 @@ export function dial(
   url: URL,
   address: string,
   signal: AbortSignal,
-  init?: { method?: string; headers?: Record<string, string>; body?: string },
+  init?: DialInit,
 ): Promise<Response> {
   const target = new URL(url);
   target.hostname = isIP(address) === 6 ? `[${address}]` : address;
@@ -134,6 +137,19 @@ export function dial(
     ...(url.protocol === "https:" && named ? { tls: { serverName: url.hostname } } : {}),
   } as RequestInit);
 }
+
+/**
+ * `dial`'s shape, injectable the same way `Resolve` already is: `createRequest` takes one
+ * as an optional second argument, defaulting to the real `dial`, so a test can prove the
+ * guard runs (or is bypassed by a private address) before the transport is ever reached --
+ * without a production flag that could be set outside a test.
+ */
+export type DialFn = (
+  url: URL,
+  address: string,
+  signal: AbortSignal,
+  init?: DialInit,
+) => Promise<Response>;
 
 /** For tests: a face takes its fetcher as a parameter, and `fetchText` is the real one. */
 export type FetchText = (url: string) => Promise<string>;
@@ -250,12 +266,15 @@ export async function replyFrom(response: Response, as: HttpRequest["as"]): Prom
  * `Host`/TLS-name split and the body cap are all `pinnedAddress`/`dial`/`readCapped`,
  * unchanged. Unlike `fetchText` this does not follow redirects and does not throw on a
  * non-ok status -- a plugin's 404 or redirect is the plugin's business to interpret.
+ *
+ * `dialFn` defaults to the real `dial`; only a test passes anything else, which is what
+ * makes it safe to inject -- there is no flag to misconfigure in production.
  */
-export function createRequest(resolve: Resolve = systemResolve): RequestFn {
+export function createRequest(resolve: Resolve = systemResolve, dialFn: DialFn = dial): RequestFn {
   return async ({ url, method = "GET", headers = {}, body, as }) => {
     const target = parseUrl(url);
     const address = await pinnedAddress(target, resolve);
-    const response = await dial(target, address, AbortSignal.timeout(TIMEOUT_MS), {
+    const response = await dialFn(target, address, AbortSignal.timeout(TIMEOUT_MS), {
       method,
       headers,
       body,

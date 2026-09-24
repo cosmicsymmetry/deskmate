@@ -762,7 +762,16 @@ export const request: RequestFn = createRequest();
 ```
 
 `dial` gains an optional fourth parameter `{ method, headers, body }`, defaulting to
-today's behaviour so `fetchText` is untouched. Redirect handling, address pinning and the
+today's behaviour so `fetchText` is untouched. **The guard's own headers win the merge**:
+a caller must not be able to set `Host` in any casing, because the guard sets it
+deliberately as part of dialling a pinned IP by name, and a plugin that can send an
+arbitrary `Host` to a validated public address has a live primitive against anything that
+routes internally by `Host` once past the IP and SNI checks. Reserve those names
+explicitly rather than relying on spread order, so the rule is visible.
+
+`createRequest` wraps its failures the way `createFetchText` does — `ConfigurationError`
+for what the owner must fix, `TransientError` for everything else — so a deadline
+surfaces as this package's vocabulary rather than a native `TimeoutError` DOMException. Redirect handling, address pinning and the
 `Host`/TLS-name rules are the existing ones and must not be rewritten. Factor the
 body-reading cap into `readCapped` if it is currently inline in `createFetchText`, and
 have both callers use it.

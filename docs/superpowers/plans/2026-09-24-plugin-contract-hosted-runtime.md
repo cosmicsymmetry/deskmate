@@ -164,6 +164,7 @@ Expected: FAIL — the module does not exist.
 
 ```ts
 // companion/faces/src/plugins/manifest.ts
+import { isIP } from "node:net";
 import type { FieldSpec } from "../face";
 
 export class ManifestError extends Error {
@@ -171,6 +172,15 @@ export class ManifestError extends Error {
 }
 
 const HOSTNAME = /^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/;
+
+/**
+ * A name, never an address. `HOSTNAME` alone accepts a dotted quad, because digits
+ * are legal label characters -- and an accepted "169.254.169.254" becomes an
+ * allowlisted destination in `requests.ts`, which matches on the hostname only.
+ */
+function isName(host: string): boolean {
+  return HOSTNAME.test(host) && isIP(host) === 0 && !host.startsWith("[");
+}
 
 function text(source: Record<string, unknown>, key: string): string {
   const value = source[key];
@@ -188,7 +198,7 @@ export function parseManifest(raw: unknown, folder: string): PluginManifest {
   if (id !== folder) throw new ManifestError(`id ${JSON.stringify(id)} does not match its folder ${JSON.stringify(folder)}`);
   const hosts = Array.isArray(source.hosts) ? source.hosts : [];
   for (const host of hosts) {
-    if (typeof host !== "string" || !HOSTNAME.test(host)) {
+    if (typeof host !== "string" || !isName(host)) {
       throw new ManifestError(`${JSON.stringify(host)} is not a bare hostname, such as "api.github.com"`);
     }
   }
@@ -883,7 +893,9 @@ Rules the rest of the implementation must hold, each already covered by a test a
 
 1. A URL is parsed; anything but `http:`/`https:` is a `ConfigurationError`.
 2. Its hostname must appear in `manifest.hosts`, compared lowercased, exactly — no
-   suffix matching, no wildcards.
+   suffix matching, no wildcards. **An IP-literal host is refused here too**, even though
+   Task 1 already refuses one in a manifest: this check is what stands between a plugin
+   and the metadata address, and it must not depend on another file having been careful.
 3. `{{secret:<key>}}` in a header value or query parameter is replaced **only** when the
    request's host equals that secret's `host`; `send_as: "bearer"` produces
    `Bearer <value>`. Any unmatched placeholder is left as the literal text.

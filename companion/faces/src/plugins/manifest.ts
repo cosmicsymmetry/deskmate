@@ -99,17 +99,33 @@ export function parseManifest(raw: unknown, folder: string): PluginManifest {
     throw new ManifestError(
       `id ${JSON.stringify(id)} does not match its folder ${JSON.stringify(folder)}`,
     );
-  const hosts = Array.isArray(source.hosts) ? source.hosts : [];
+  if (!Array.isArray(source.hosts)) throw new ManifestError("hosts must be an array");
+  const hosts = source.hosts as unknown[];
   for (const host of hosts) {
-    if (typeof host !== "string" || !HOSTNAME.test(host)) {
+    if (typeof host !== "string") {
+      throw new ManifestError(`each host must be a string, not ${typeof host}`);
+    }
+    if (isIP(host) !== 0) {
+      throw new ManifestError(`${JSON.stringify(host)} is an IP literal, not a bare hostname`);
+    }
+    if (host.startsWith("[") && host.endsWith("]")) {
+      throw new ManifestError(
+        `${JSON.stringify(host)} is a bracketed IPv6 address, not a bare hostname`,
+      );
+    }
+    if (!HOSTNAME.test(host)) {
       throw new ManifestError(
         `${JSON.stringify(host)} is not a bare hostname, such as "api.github.com"`,
       );
     }
   }
-  const secrets = (Array.isArray(source.secrets) ? source.secrets : []) as SecretSpec[];
+  if (!Array.isArray(source.secrets)) throw new ManifestError("secrets must be an array");
+  const secrets: SecretSpec[] = [];
+  for (const secret of source.secrets as unknown[]) {
+    secrets.push(validateSecret(secret));
+  }
   for (const secret of secrets) {
-    if (!hosts.includes(secret.host)) {
+    if (!(hosts as string[]).includes(secret.host)) {
       throw new ManifestError(
         `secret ${JSON.stringify(secret.key)} names ${secret.host}, which the manifest has not declared`,
       );
@@ -117,13 +133,14 @@ export function parseManifest(raw: unknown, folder: string): PluginManifest {
   }
   if (secrets.length > 0) {
     const allowed = new Set(secrets.map((secret) => secret.host));
-    const extra = hosts.filter((host: string) => !allowed.has(host));
+    const extra = (hosts as string[]).filter((host: string) => !allowed.has(host));
     if (extra.length > 0) {
       throw new ManifestError(
         `a plugin using a secret may declare only the hosts its secrets belong to; remove ${extra.join(", ")}`,
       );
     }
   }
+  if (!Array.isArray(source.fields)) throw new ManifestError("fields must be an array");
   const refreshSeconds = source.refreshSeconds;
   if (
     refreshSeconds !== undefined &&
@@ -140,7 +157,7 @@ export function parseManifest(raw: unknown, folder: string): PluginManifest {
     author: text(source, "author"),
     hosts: hosts as string[],
     secrets,
-    fields: (Array.isArray(source.fields) ? source.fields : []) as FieldSpec[],
+    fields: source.fields as unknown[] as FieldSpec[],
     ...(refreshSeconds === undefined ? {} : { refreshSeconds }),
     ...(typeof source.tap === "string" ? { tap: source.tap } : {}),
   };

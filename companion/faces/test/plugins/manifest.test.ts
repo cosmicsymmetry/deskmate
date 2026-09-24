@@ -35,11 +35,26 @@ describe("parseManifest", () => {
   });
 
   test("refuses a host that is not a bare hostname", () => {
-    for (const host of ["https://api.github.com", "api.github.com/x", "*", "10.0.0.1", ""]) {
-      expect(() => parseManifest({ ...valid, hosts: [host] }, "github-stats")).toThrow(
+    for (const host of ["https://api.github.com", "api.github.com/x", "*", ""]) {
+      expect(() => parseManifest({ ...valid, hosts: [host], secrets: [] }, "github-stats")).toThrow(
         ManifestError,
       );
     }
+  });
+
+  test("refuses IP literals explicitly", () => {
+    const cases = ["10.0.0.1", "192.168.1.50", "169.254.169.254"];
+    for (const host of cases) {
+      expect(() => parseManifest({ ...valid, hosts: [host], secrets: [] }, "github-stats")).toThrow(
+        /IP literal/,
+      );
+    }
+  });
+
+  test("refuses bracketed IPv6 addresses", () => {
+    expect(() =>
+      parseManifest({ ...valid, hosts: ["[::1]"], secrets: [] }, "github-stats"),
+    ).toThrow(/bracketed IPv6/);
   });
 
   test("refuses a secret whose host is not declared", () => {
@@ -57,6 +72,71 @@ describe("parseManifest", () => {
     expect(parseManifest(valid, "github-stats").refreshSeconds).toBeUndefined();
     expect(() => parseManifest({ ...valid, refreshSeconds: "900" }, "github-stats")).toThrow(
       ManifestError,
+    );
+  });
+
+  test("refuses malformed secret entries (TypeError → ManifestError)", () => {
+    expect(() => parseManifest({ ...valid, secrets: [null] }, "github-stats")).toThrow(
+      ManifestError,
+    );
+    expect(() => parseManifest({ ...valid, secrets: [{}] }, "github-stats")).toThrow(ManifestError);
+  });
+
+  test("refuses invalid SecretSpec fields", () => {
+    // Invalid send_as
+    expect(() =>
+      parseManifest(
+        {
+          ...valid,
+          secrets: [{ ...valid.secrets[0], send_as: "weird" }],
+        },
+        "github-stats",
+      ),
+    ).toThrow(/send_as/);
+
+    // Invalid kind
+    expect(() =>
+      parseManifest(
+        {
+          ...valid,
+          secrets: [{ ...valid.secrets[0], kind: "oauth_token" }],
+        },
+        "github-stats",
+      ),
+    ).toThrow(/kind/);
+
+    // Missing key
+    expect(() =>
+      parseManifest(
+        {
+          ...valid,
+          secrets: [{ ...valid.secrets[0], key: undefined }],
+        },
+        "github-stats",
+      ),
+    ).toThrow(/key/);
+
+    // Missing label
+    expect(() =>
+      parseManifest(
+        {
+          ...valid,
+          secrets: [{ ...valid.secrets[0], label: undefined }],
+        },
+        "github-stats",
+      ),
+    ).toThrow(/label/);
+  });
+
+  test("refuses non-array hosts, secrets, or fields", () => {
+    expect(() => parseManifest({ ...valid, hosts: "api.github.com" }, "github-stats")).toThrow(
+      /hosts must be an array/,
+    );
+    expect(() => parseManifest({ ...valid, secrets: "a-secret" }, "github-stats")).toThrow(
+      /secrets must be an array/,
+    );
+    expect(() => parseManifest({ ...valid, fields: "a-field" }, "github-stats")).toThrow(
+      /fields must be an array/,
     );
   });
 });

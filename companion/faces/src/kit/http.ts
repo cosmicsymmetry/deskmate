@@ -109,28 +109,53 @@ function parseUrl(address: string): URL {
 export type DialInit = { method?: string; headers?: Record<string, string>; body?: string };
 
 /**
- * Header names the guard sets itself and a caller must never be able to take back, matched
- * case-insensitively. `Host` is the one that matters: address pinning validates the IP and
- * TLS SNI is computed from `url.hostname`, so a caller-supplied `Host` cannot redirect the
- * socket or defeat certificate checking -- but it CAN reach a validated, pinned public IP
- * while claiming to be an arbitrary internal hostname, which is exactly the primitive a
- * Host-routed internal service is vulnerable to. Caller headers with one of these names
- * (in any casing) are dropped before the guard's own headers are added, not merged with
- * them.
+ * `Host` is reserved outright, matched case-insensitively: address pinning validates the
+ * IP and TLS SNI is computed from `url.hostname`, so a caller-supplied `Host` cannot
+ * redirect the socket or defeat certificate checking -- but it CAN reach a validated,
+ * pinned public IP while claiming to be an arbitrary internal hostname, which is exactly
+ * the primitive a Host-routed internal service is vulnerable to. A caller-supplied `Host`
+ * is dropped before anything else, in every casing, no exceptions.
  */
-const RESERVED_HEADERS = new Set(["host"]);
+const RESERVED_HEADER = "host";
 
-function callerHeaders(headers: Record<string, string> | undefined): Record<string, string> {
-  if (headers === undefined) {
-    return {};
-  }
-  const allowed: Record<string, string> = {};
-  for (const [name, value] of Object.entries(headers)) {
-    if (!RESERVED_HEADERS.has(name.toLowerCase())) {
-      allowed[name] = value;
+/**
+ * `User-Agent` and `Accept` are DEFAULTS, not reservations: a plugin may need its own
+ * `User-Agent` (this package's own default exists only because an HTTP client's blank
+ * one gets a 403 from a Cloudflare-fronted API before it reads the path -- a plugin that
+ * clears it is making its own mistake to make), and its own `Accept`. A caller-supplied
+ * value must REPLACE the default, never join it: naive case-sensitive merging lets
+ * `user-agent` and `User-Agent` survive as two distinct object keys, which the outbound
+ * `Headers` then comma-joins into `"caller-value, deskmate-faces/1"`, silently corrupting
+ * both. Matched case-insensitively, exactly like `Host`, so the replacement happens
+ * however the caller capitalised it.
+ */
+const DEFAULTED_HEADERS = new Set(["user-agent", "accept"]);
+
+/**
+ * Splits caller headers into what reaches the wire untouched (`passthrough`, e.g.
+ * `Authorization`) and what the guard resolves itself: `Host` is simply gone: an
+ * override the caller can never supply. `overrides` carries a caller's `User-Agent`/
+ * `Accept`, keyed by lowercase name, so the merge below can ask "did the caller set
+ * this?" once instead of re-scanning the original casing.
+ */
+function splitHeaders(headers: Record<string, string> | undefined): {
+  passthrough: Record<string, string>;
+  overrides: Map<string, string>;
+} {
+  const passthrough: Record<string, string> = {};
+  const overrides = new Map<string, string>();
+  for (const [name, value] of Object.entries(headers ?? {})) {
+    const lower = name.toLowerCase();
+    if (lower === RESERVED_HEADER) {
+      continue;
     }
+    if (DEFAULTED_HEADERS.has(lower)) {
+      overrides.set(lower, value);
+      continue;
+    }
+    passthrough[name] = value;
   }
-  return allowed;
+  return { passthrough, overrides };
 }
 
 /**
@@ -147,18 +172,21 @@ export function dial(
   const target = new URL(url);
   target.hostname = isIP(address) === 6 ? `[${address}]` : address;
   const named = isIP(url.hostname.replace(/^\[|\]$/g, "")) === 0;
+  const { passthrough, overrides } = splitHeaders(init?.headers);
   return fetch(target, {
     method: init?.method,
     body: init?.body,
     redirect: "manual",
     signal,
     headers: {
-      ...callerHeaders(init?.headers),
-      // The guard's own headers are added last, and `Host` was already stripped out of
-      // whatever the caller sent -- so nothing above this line can win.
+      ...passthrough,
+      // `Host` is the guard's absolutely -- no caller value ever reaches this key.
+      // `User-Agent`/`Accept` use the caller's replacement when they sent one, and
+      // the package default otherwise; either way there is exactly one of each key
+      // here, so nothing downstream can comma-join a default onto a caller's value.
       Host: url.host,
-      "User-Agent": USER_AGENT,
-      Accept: "*/*",
+      "User-Agent": overrides.get("user-agent") ?? USER_AGENT,
+      Accept: overrides.get("accept") ?? "*/*",
     },
     // An IP literal has no server name to present; a name always does.
     ...(url.protocol === "https:" && named ? { tls: { serverName: url.hostname } } : {}),

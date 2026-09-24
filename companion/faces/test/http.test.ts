@@ -8,6 +8,7 @@ import {
   isPrivateAddress,
   pinnedAddress,
   replyFrom,
+  USER_AGENT,
 } from "../src/kit/http";
 
 const PUBLIC = "93.184.215.14";
@@ -138,6 +139,76 @@ describe("dial refuses to let a caller take back its Host header", () => {
     } finally {
       server.stop(true);
     }
+  });
+});
+
+describe("dial's User-Agent and Accept defaults replace, and never join, a caller's", () => {
+  let server: ReturnType<typeof Bun.serve>;
+  beforeAll(() => {
+    server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: (request) =>
+        Response.json({
+          ua: request.headers.get("user-agent"),
+          accept: request.headers.get("accept"),
+          host: request.headers.get("host"),
+          auth: request.headers.get("authorization"),
+          lang: request.headers.get("accept-language"),
+          custom: request.headers.get("x-plugin-token"),
+        }),
+    });
+  });
+  afterAll(() => server.stop(true));
+
+  type Seen = {
+    ua: string | null;
+    accept: string | null;
+    host: string | null;
+    auth: string | null;
+    lang: string | null;
+    custom: string | null;
+  };
+
+  const seenFrom = async (headers: Record<string, string>): Promise<Seen> => {
+    const url = new URL(`http://ua.invalid:${server.port}/`);
+    const response = await dial(url, "127.0.0.1", AbortSignal.timeout(5_000), { headers });
+    return (await response.json()) as Seen;
+  };
+
+  test("a caller's User-Agent, in any casing, replaces the default instead of joining it", async () => {
+    for (const key of ["user-agent", "User-Agent", "USER-AGENT"]) {
+      const seen = await seenFrom({ [key]: "plugin-ua/1" });
+      expect(seen.ua).toBe("plugin-ua/1");
+    }
+  });
+
+  test("a caller's Accept, in any casing, replaces the default instead of joining it", async () => {
+    for (const key of ["accept", "Accept", "ACCEPT"]) {
+      const seen = await seenFrom({ [key]: "application/vnd.example+json" });
+      expect(seen.accept).toBe("application/vnd.example+json");
+    }
+  });
+
+  test("a caller that sends neither still gets the package's defaults", async () => {
+    const seen = await seenFrom({});
+    expect(seen.ua).toBe(USER_AGENT);
+    expect(seen.accept).toBe("*/*");
+  });
+
+  test("Host is still stripped in any casing, and ordinary headers still pass through verbatim", async () => {
+    const seen = await seenFrom({
+      Host: "evil.example",
+      HOST: "also-evil.example",
+      host: "still-evil.example",
+      Authorization: "Bearer t",
+      "Accept-Language": "en",
+      "X-Plugin-Token": "abc123",
+    });
+    expect(seen.host).toBe(`ua.invalid:${server.port}`);
+    expect(seen.auth).toBe("Bearer t");
+    expect(seen.lang).toBe("en");
+    expect(seen.custom).toBe("abc123");
   });
 });
 

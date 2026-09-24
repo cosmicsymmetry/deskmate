@@ -101,13 +101,21 @@ export async function cardToSvg(card: unknown): Promise<string> {
     throw new CardError("this plugin returned no card");
   const { layout, svg, png } = card as { layout?: unknown; svg?: unknown; png?: unknown };
   if (typeof svg === "string") {
-    if (svg.length > MAX_SVG_BYTES)
+    // .length counts UTF-16 code units, not bytes -- a card built from multi-byte
+    // text (any non-Latin script, or emoji) can be well under the cap in .length
+    // while over it in the bytes an attacker actually gets to spend. Count bytes.
+    const svgBytes = Buffer.byteLength(svg, "utf8");
+    if (svgBytes > MAX_SVG_BYTES)
       throw new CardError(`an SVG card may not exceed ${MAX_SVG_BYTES / 1024} KB`);
     refuseExternalReferences(svg);
     return svg;
   }
   if (typeof png === "string") {
-    if (png.length * 0.75 > MAX_PNG_BYTES)
+    // Exact decoded size, not the usual base64-length * 0.75 estimate: Buffer's own
+    // byteLength(..., "base64") accounts for padding precisely, and the input here
+    // is untrusted, so "safe estimate" is not a property worth trusting either way.
+    const pngBytes = Buffer.byteLength(png, "base64");
+    if (pngBytes > MAX_PNG_BYTES)
       throw new CardError(`a PNG card may not exceed ${MAX_PNG_BYTES / 1024} KB`);
     return (
       `<svg xmlns="http://www.w3.org/2000/svg" width="${CANVAS_WIDTH}" height="${CANVAS_HEIGHT}">` +

@@ -69,6 +69,15 @@ describe("cardToSvg", () => {
     ).rejects.toThrow(/512/);
   });
 
+  test("refuses an SVG over the size cap in bytes even when under it in UTF-16 length", async () => {
+    // "字" is one UTF-16 code unit but three UTF-8 bytes: 200,000 of them is ~200 KB
+    // by .length (under the 512 KB cap) but ~586 KB by actual byte size (over it).
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg">${"字".repeat(200_000)}</svg>`;
+    expect(svg.length).toBeLessThan(512 * 1024);
+    expect(Buffer.byteLength(svg, "utf8")).toBeGreaterThan(512 * 1024);
+    await expect(cardToSvg({ svg })).rejects.toThrow(/512/);
+  });
+
   test("wraps a PNG card as a full-canvas image", async () => {
     const png = Buffer.from(
       pngFromSvg('<svg xmlns="http://www.w3.org/2000/svg" width="448" height="368"></svg>'),

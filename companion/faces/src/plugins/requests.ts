@@ -17,7 +17,7 @@
 
 import { isIP } from "node:net";
 import { ConfigurationError } from "../face";
-import type { HttpRequest, RequestFn } from "../kit/http";
+import { type HttpRequest, type RequestFn, ResponseTooLargeError } from "../kit/http";
 import { type Ink, textInk, textWidth } from "../kit/raster";
 import type { PluginManifest } from "./manifest";
 
@@ -138,8 +138,14 @@ const PLACEHOLDER = /\{\{secret:([a-z0-9_]+)\}\}/gi;
  * (and eventually wrap) its `lastIndex` across unrelated calls. */
 const HAS_PLACEHOLDER = /\{\{secret:[a-z0-9_]+\}\}/i;
 
-/** Where a placeholder was written: a header value, or a query-parameter value. */
-type Position = "header" | "query";
+/**
+ * Where a placeholder was written: a header value (carrying that header's name), or a
+ * query-parameter value (carrying that parameter's name). The name travels with the
+ * position because `SecretSpec.header`/`.param` PIN the credential to one: a manifest
+ * is what a reviewer reads, and `"header": "X-Api-Key"` has to mean the host puts it
+ * there and nowhere else.
+ */
+type Position = { kind: "header" | "query"; name: string };
 
 /**
  * The one place the substitution rule lives, for both a header value and a query
@@ -162,7 +168,19 @@ function resolveSecret(
   const spec = manifest.secrets.find((secret) => secret.key === key);
   if (spec === undefined || spec.host.toLowerCase() !== host) return undefined;
   const belongsInQuery = spec.send_as === "query";
-  if (position === "query" ? !belongsInQuery : belongsInQuery) return undefined;
+  if (position.kind === "query" ? !belongsInQuery : belongsInQuery) return undefined;
+  // The declared name, when the manifest declared one. A header name is
+  // case-insensitive on the wire, so it is compared that way; a query parameter name
+  // is not, so it is compared exactly. A manifest that names neither leaves the choice
+  // to the plugin, exactly as before -- `manifest.ts` keeps both fields optional, and
+  // refuses one that names a position its `send_as` does not use.
+  const declared = belongsInQuery ? spec.param : spec.header;
+  if (declared !== undefined) {
+    const matches = belongsInQuery
+      ? declared === position.name
+      : declared.toLowerCase() === position.name.toLowerCase();
+    if (!matches) return undefined;
+  }
   const stored = secrets[key];
   if (stored === undefined) return undefined;
   return spec.send_as === "bearer" ? `Bearer ${stored}` : stored;
@@ -180,7 +198,8 @@ function applySecrets(
   for (const [name, value] of Object.entries(headers)) {
     out[name] = value.replace(
       PLACEHOLDER,
-      (literal, key: string) => resolveSecret(key, host, "header", manifest, secrets) ?? literal,
+      (literal, key: string) =>
+        resolveSecret(key, host, { kind: "header", name }, manifest, secrets) ?? literal,
     );
   }
   return out;
@@ -209,7 +228,8 @@ function applySecretsToQuery(
       value.replace(
         PLACEHOLDER,
         (literal, secretKey: string) =>
-          resolveSecret(secretKey, host, "query", manifest, secrets) ?? literal,
+          resolveSecret(secretKey, host, { kind: "query", name: key }, manifest, secrets) ??
+          literal,
       ),
     );
   }
@@ -451,6 +471,22 @@ function toAnswer(
   return { ok: true, status: reply.status, text: redactSecrets(reply.body, secrets) };
 }
 
+/** What one call spent, beside what it answered. */
+export interface PerformedRequests {
+  answers: Answer[];
+  /**
+   * Response bytes this call actually consumed -- the measurement, not a re-derivation
+   * from the answers. The two disagree, which is why this is returned rather than
+   * recomputed by the caller: a redacted body answers far shorter than it arrived, a
+   * `bytes` answer refused for echoing a credential answers with no payload at all
+   * though up to the ingest cap crossed the wire, and a response refused for
+   * exceeding that cap answers as a failure though it was read to the cap first.
+   * Charging the answer instead of the wire let a plugin buy an unbounded number of
+   * megabyte responses out of a 4 MB render budget.
+   */
+  bytesSpent: number;
+}
+
 /**
  * Performs every already-validated request: substitutes secrets (never handing the
  * plugin one back, win or lose), calls the guarded `request`, and turns a failure of
@@ -468,7 +504,7 @@ export async function performRequests(
   secrets: Record<string, string>,
   request: RequestFn,
   budget: Budget,
-): Promise<Answer[]> {
+): Promise<PerformedRequests> {
   const answers: Answer[] = [];
   let bytesLeft = budget.bytes;
   for (const declared of requests) {
@@ -504,9 +540,18 @@ export async function performRequests(
       bytesLeft -= byteSize(reply.body);
       answers.push(toAnswer(reply, secrets));
     } catch (error) {
+      // A refusal for exceeding the ingest cap read up to that cap before cancelling,
+      // and those bytes crossed the wire: charge them. Every other failure -- a name
+      // that did not resolve, a refused address, a timeout before the first chunk --
+      // reports nothing it read, and is charged nothing. That is the remaining gap:
+      // a transport that dies mid-body spends bytes this cannot see, because the
+      // `RequestFn` contract has no way to report them.
+      if (error instanceof ResponseTooLargeError) {
+        bytesLeft -= error.bytesRead;
+      }
       const message = error instanceof Error ? error.message : String(error);
       answers.push({ ok: false, error: redactSecrets(message, secrets) });
     }
   }
-  return answers;
+  return { answers, bytesSpent: budget.bytes - bytesLeft };
 }

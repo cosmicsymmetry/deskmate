@@ -82,7 +82,36 @@ describe("cardToSvg", () => {
     const png = Buffer.from(
       pngFromSvg('<svg xmlns="http://www.w3.org/2000/svg" width="448" height="368"></svg>'),
     ).toString("base64");
-    expect(await cardToSvg({ png })).toContain("data:image/png;base64,");
+    const svg = await cardToSvg({ png });
+    expect(svg).toContain("data:image/png;base64,");
+    // Exactly one reference, and it is the embedded frame -- nothing else got in.
+    expect([...svg.matchAll(/href\s*=/gi)]).toHaveLength(1);
+  });
+
+  test("refuses a PNG card that is not base64, so it cannot smuggle markup into the frame", async () => {
+    // The top-level {png} shape is concatenated into an SVG document. Buffer's
+    // byteLength(..., "base64") is a length estimate that validates nothing, so
+    // without an alphabet check this payload closes our own <image> element and
+    // opens one pointing at a path -- which usvg resolves BY READING OUR DISK, the
+    // exact reference the {svg} branch's refuseExternalReferences exists to refuse.
+    const payload = 'AAAA"/><image href="/etc/passwd" x="0"/><x y="';
+    await expect(cardToSvg({ png: payload })).rejects.toThrow(CardError);
+    await expect(cardToSvg({ png: payload })).rejects.toThrow(/base64/);
+  });
+
+  test("refuses a PNG card with base64 whitespace or an out-of-alphabet character", async () => {
+    await expect(cardToSvg({ png: "iVBO Rw0K" })).rejects.toThrow(/base64/);
+    await expect(cardToSvg({ png: "iVBORw0K<!-" })).rejects.toThrow(/base64/);
+    // Valid alphabet, but not a whole number of base64 quanta.
+    await expect(cardToSvg({ png: "iVBORw0" })).rejects.toThrow(/base64/);
+  });
+
+  test("a real base64 PNG card still renders", async () => {
+    const png =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const svg = await cardToSvg({ png });
+    expect(svg).toContain(`href="data:image/png;base64,${png}"`);
+    expect(svg).toContain('width="448"');
   });
 
   const img = (decodedBytes: number) => {

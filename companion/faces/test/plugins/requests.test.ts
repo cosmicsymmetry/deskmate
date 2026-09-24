@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { ConfigurationError } from "../../src/face";
+import { INGEST_CAP_BYTES } from "../../src/kit/limits";
+import { ResponseTooLargeError } from "../../src/kit/http";
 import { performRequests, validateRequests } from "../../src/plugins/requests";
 import { parseManifest } from "../../src/plugins/manifest";
 import { textInk, textWidth } from "../../src/kit/raster";
@@ -107,7 +109,7 @@ describe("performRequests", () => {
       seen.push(input);
       return { status: 200, body: "{}", json: {} };
     };
-    const answers = await performRequests(
+    const { answers } = await performRequests(
       validateRequests(
         [
           {
@@ -168,7 +170,9 @@ describe("performRequests", () => {
     const stub = async () => {
       throw new Error("connection reset");
     };
-    const [answer] = await performRequests(
+    const {
+      answers: [answer],
+    } = await performRequests(
       validateRequests([{ url: "https://api.github.com/u", as: "json" }], manifest, budget),
       manifest,
       {},
@@ -186,7 +190,7 @@ describe("performRequests", () => {
       manifest,
       budget,
     );
-    const answers = await performRequests(requests, manifest, {}, stub, budget);
+    const { answers } = await performRequests(requests, manifest, {}, stub, budget);
     expect(answers[2]).toEqual({ ok: false, error: expect.stringContaining("budget") });
   });
 
@@ -194,7 +198,9 @@ describe("performRequests", () => {
     const stub = async (input: { headers?: Record<string, string> }) => {
       throw new Error(`upstream rejected Authorization: ${input.headers?.Authorization}`);
     };
-    const [answer] = await performRequests(
+    const {
+      answers: [answer],
+    } = await performRequests(
       validateRequests(
         [
           {
@@ -408,7 +414,9 @@ describe("performRequests: a 200 response that echoes the secret back is scrubbe
       body: `echo: ${input.headers?.Authorization}`,
       json: undefined,
     });
-    const [answer] = await performRequests(
+    const {
+      answers: [answer],
+    } = await performRequests(
       validateRequests(
         [
           {
@@ -434,7 +442,9 @@ describe("performRequests: a 200 response that echoes the secret back is scrubbe
       const body = JSON.stringify({ data: { seen: { header: input.headers?.Authorization } } });
       return { status: 200, body, json: JSON.parse(body) };
     };
-    const [answer] = await performRequests(
+    const {
+      answers: [answer],
+    } = await performRequests(
       validateRequests(
         [
           {
@@ -465,7 +475,9 @@ describe("performRequests: a 200 response that echoes the secret back is scrubbe
       body: new TextEncoder().encode(`leaked: ${stolen}`),
       json: undefined,
     });
-    const [answer] = await performRequests(
+    const {
+      answers: [answer],
+    } = await performRequests(
       validateRequests([{ url: "https://api.github.com/u", as: "bytes" }], manifest, budget),
       manifest,
       { token: stolen },
@@ -487,7 +499,9 @@ describe("performRequests: a 200 response that echoes the secret back is scrubbe
       body: new TextEncoder().encode(`leaked: ${asBase64}`),
       json: undefined,
     });
-    const [answer] = await performRequests(
+    const {
+      answers: [answer],
+    } = await performRequests(
       validateRequests([{ url: "https://api.github.com/u", as: "bytes" }], manifest, budget),
       manifest,
       { token: stolen },
@@ -506,7 +520,9 @@ describe("performRequests: a 200 response that echoes the secret back is scrubbe
   test("a normal text response with no secret in it is returned byte-for-byte", async () => {
     const plain = "hello world, nothing secret here";
     const stub = async () => ({ status: 200, body: plain, json: undefined });
-    const [answer] = await performRequests(
+    const {
+      answers: [answer],
+    } = await performRequests(
       validateRequests([{ url: "https://api.github.com/u", as: "text" }], manifest, budget),
       manifest,
       { token: stolen },
@@ -519,7 +535,9 @@ describe("performRequests: a 200 response that echoes the secret back is scrubbe
   test("a normal json response with no secret in it is returned deep-equal", async () => {
     const plain = { a: 1, b: { c: "plain string", d: [1, 2, "three"] }, e: null, f: false };
     const stub = async () => ({ status: 200, body: JSON.stringify(plain), json: plain });
-    const [answer] = await performRequests(
+    const {
+      answers: [answer],
+    } = await performRequests(
       validateRequests([{ url: "https://api.github.com/u", as: "json" }], manifest, budget),
       manifest,
       { token: stolen },
@@ -532,7 +550,9 @@ describe("performRequests: a 200 response that echoes the secret back is scrubbe
   test("an empty stored secret value does not mangle an ordinary body", async () => {
     const plain = "some ordinary text with no secrets, and no {{secret:token}} either";
     const stub = async () => ({ status: 200, body: plain, json: undefined });
-    const [answer] = await performRequests(
+    const {
+      answers: [answer],
+    } = await performRequests(
       validateRequests([{ url: "https://api.github.com/u", as: "text" }], manifest, budget),
       manifest,
       { token: "" },
@@ -547,7 +567,9 @@ describe("performRequests: a 200 response that echoes the secret back is scrubbe
       const body = JSON.stringify({ [stolen]: "some value", other: "fine" });
       return { status: 200, body, json: JSON.parse(body) };
     };
-    const [answer] = await performRequests(
+    const {
+      answers: [answer],
+    } = await performRequests(
       validateRequests([{ url: "https://api.github.com/u", as: "json" }], manifest, budget),
       manifest,
       { token: stolen },
@@ -567,7 +589,9 @@ describe("performRequests: a 200 response that echoes the secret back is scrubbe
       const body = JSON.stringify({ data: { seen: { [stolen]: true } } });
       return { status: 200, body, json: JSON.parse(body) };
     };
-    const [answer] = await performRequests(
+    const {
+      answers: [answer],
+    } = await performRequests(
       validateRequests([{ url: "https://api.github.com/u", as: "json" }], manifest, budget),
       manifest,
       { token: stolen },
@@ -596,7 +620,9 @@ describe("validateRequests / performRequests: measure requests", () => {
       manifest,
       budget,
     );
-    const [answer] = await performRequests(requests, manifest, {}, noNetwork, budget);
+    const {
+      answers: [answer],
+    } = await performRequests(requests, manifest, {}, noNetwork, budget);
     expect(answer).toEqual({
       ok: true,
       measurements: [{ width: textWidth("Hello", 31, 600), ink: expect.any(Object) }],
@@ -609,7 +635,9 @@ describe("validateRequests / performRequests: measure requests", () => {
       manifest,
       budget,
     );
-    const [answer] = await performRequests(requests, manifest, {}, noNetwork, budget);
+    const {
+      answers: [answer],
+    } = await performRequests(requests, manifest, {}, noNetwork, budget);
     expect(answer).toEqual({
       ok: true,
       measurements: [{ width: textWidth("$12.34", 22, 400), ink: textInk("$12.34", 22, 400) }],
@@ -630,7 +658,9 @@ describe("validateRequests / performRequests: measure requests", () => {
       manifest,
       budget,
     );
-    const [answer] = await performRequests(requests, manifest, {}, noNetwork, budget);
+    const {
+      answers: [answer],
+    } = await performRequests(requests, manifest, {}, noNetwork, budget);
     expect(answer).toEqual({
       ok: true,
       measurements: [
@@ -643,7 +673,9 @@ describe("validateRequests / performRequests: measure requests", () => {
 
   test("an empty measure array is accepted and answers an empty measurements array", async () => {
     const requests = validateRequests([{ measure: [] }], manifest, budget);
-    const [answer] = await performRequests(requests, manifest, {}, noNetwork, budget);
+    const {
+      answers: [answer],
+    } = await performRequests(requests, manifest, {}, noNetwork, budget);
     expect(answer).toEqual({ ok: true, measurements: [] });
   });
 
@@ -653,7 +685,9 @@ describe("validateRequests / performRequests: measure requests", () => {
       manifest,
       budget,
     );
-    const [answer] = await performRequests(requests, manifest, {}, noNetwork, budget);
+    const {
+      answers: [answer],
+    } = await performRequests(requests, manifest, {}, noNetwork, budget);
     expect(answer).toEqual({ ok: true, measurements: [{ width: 0, ink: expect.any(Object) }] });
   });
 
@@ -666,7 +700,9 @@ describe("validateRequests / performRequests: measure requests", () => {
       manifest,
       budget,
     );
-    const [answer] = await performRequests(requests, manifest, {}, noNetwork, budget);
+    const {
+      answers: [answer],
+    } = await performRequests(requests, manifest, {}, noNetwork, budget);
     expect(answer).toEqual({
       ok: true,
       measurements: [{ width: expect.any(Number), ink: expect.any(Object) }],
@@ -794,7 +830,7 @@ describe("validateRequests / performRequests: measure requests", () => {
       manifest,
       budget,
     );
-    const answers = await performRequests(requests, manifest, {}, stub, budget);
+    const { answers } = await performRequests(requests, manifest, {}, stub, budget);
     expect(answers[0]).toEqual({
       ok: true,
       measurements: [{ width: textWidth("a", 10, 400), ink: expect.any(Object) }],
@@ -816,11 +852,186 @@ describe("validateRequests / performRequests: measure requests", () => {
       manifest,
       budget,
     );
-    const answers = await performRequests(requests, manifest, {}, stub, budget);
+    const { answers } = await performRequests(requests, manifest, {}, stub, budget);
     expect(answers[2]).toEqual({ ok: false, error: expect.stringContaining("budget") });
     expect(answers[3]).toEqual({
       ok: true,
       measurements: [{ width: textWidth("still measured", 10, 400), ink: expect.any(Object) }],
     });
+  });
+});
+
+describe("a manifest that names a header or param pins the credential there", () => {
+  const pinned = parseManifest(
+    {
+      api: 1,
+      id: "p",
+      version: "1.0.0",
+      label: "P",
+      description: "d",
+      author: "a",
+      hosts: ["header.example", "query.example"],
+      secrets: [
+        {
+          key: "h",
+          label: "H",
+          kind: "api_key",
+          host: "header.example",
+          send_as: "header",
+          header: "X-Api-Key",
+        },
+        {
+          key: "q",
+          label: "Q",
+          kind: "api_key",
+          host: "query.example",
+          send_as: "query",
+          param: "apikey",
+        },
+      ],
+      fields: [],
+    },
+    "p",
+  );
+  const secrets = { h: "SECRET_H", q: "SECRET_Q" };
+  let seen: { url: string; headers?: Record<string, string> }[] = [];
+  const stub = async (input: { url: string; headers?: Record<string, string> }) => {
+    seen.push(input);
+    return { status: 200, body: "", json: undefined };
+  };
+
+  test("the declared header substitutes", async () => {
+    seen = [];
+    await performRequests(
+      validateRequests(
+        [{ url: "https://header.example/x", as: "text", headers: { "X-Api-Key": "{{secret:h}}" } }],
+        pinned,
+        budget,
+      ),
+      pinned,
+      secrets,
+      stub,
+      budget,
+    );
+    expect(seen[0]?.headers?.["X-Api-Key"]).toBe("SECRET_H");
+  });
+
+  test("the same header in a different case still substitutes", async () => {
+    seen = [];
+    await performRequests(
+      validateRequests(
+        [{ url: "https://header.example/x", as: "text", headers: { "x-api-KEY": "{{secret:h}}" } }],
+        pinned,
+        budget,
+      ),
+      pinned,
+      secrets,
+      stub,
+      budget,
+    );
+    expect(seen[0]?.headers?.["x-api-KEY"]).toBe("SECRET_H");
+  });
+
+  test("a placeholder in a header the manifest did not name stays literal", async () => {
+    seen = [];
+    await performRequests(
+      validateRequests(
+        [
+          {
+            url: "https://header.example/x",
+            as: "text",
+            headers: { Authorization: "{{secret:h}}" },
+          },
+        ],
+        pinned,
+        budget,
+      ),
+      pinned,
+      secrets,
+      stub,
+      budget,
+    );
+    expect(seen[0]?.headers?.Authorization).toBe("{{secret:h}}");
+    expect(JSON.stringify(seen)).not.toContain("SECRET_H");
+  });
+
+  test("a placeholder in a query parameter the manifest did not name stays literal", async () => {
+    seen = [];
+    await performRequests(
+      validateRequests(
+        [{ url: "https://query.example/x?other={{secret:q}}&apikey={{secret:q}}", as: "text" }],
+        pinned,
+        budget,
+      ),
+      pinned,
+      secrets,
+      stub,
+      budget,
+    );
+    const url = new URL(seen[0]?.url ?? "");
+    expect(url.searchParams.get("apikey")).toBe("SECRET_Q");
+    expect(url.searchParams.get("other")).toBe("{{secret:q}}");
+  });
+});
+
+describe("performRequests reports the bytes it actually spent", () => {
+  test("a text answer charges what crossed the wire, not what survived redaction", async () => {
+    const stolen = "ghp_SECRETVALUE";
+    const body = stolen.repeat(1000);
+    const stub = async () => ({ status: 200, body, json: undefined });
+    const { answers, bytesSpent } = await performRequests(
+      validateRequests([{ url: "https://api.github.com/u", as: "text" }], manifest, budget),
+      manifest,
+      { token: stolen },
+      stub,
+      budget,
+    );
+    expect(answers[0]).toEqual({ ok: true, status: 200, text: "[redacted]".repeat(1000) });
+    expect(bytesSpent).toBe(Buffer.byteLength(body, "utf-8"));
+  });
+
+  test("a bytes answer refused for echoing a credential still charges what it consumed", async () => {
+    const stolen = "ghp_SECRETVALUE";
+    const body = Buffer.concat([Buffer.alloc(64_000, 7), Buffer.from(stolen, "utf-8")]);
+    const stub = async () => ({ status: 200, body: new Uint8Array(body), json: undefined });
+    const { answers, bytesSpent } = await performRequests(
+      validateRequests([{ url: "https://api.github.com/u", as: "bytes" }], manifest, budget),
+      manifest,
+      { token: stolen },
+      stub,
+      budget,
+    );
+    expect(answers[0]).toEqual({
+      ok: false,
+      status: 200,
+      error: "the response echoed a stored credential and was refused",
+    });
+    expect(bytesSpent).toBe(body.length);
+  });
+
+  test("a response refused for exceeding the ingest cap charges what it read", async () => {
+    const stub = async () => {
+      throw new ResponseTooLargeError(INGEST_CAP_BYTES + 1);
+    };
+    const { answers, bytesSpent } = await performRequests(
+      validateRequests([{ url: "https://api.github.com/u", as: "text" }], manifest, budget),
+      manifest,
+      {},
+      stub,
+      budget,
+    );
+    expect(answers[0]?.ok).toBe(false);
+    expect(bytesSpent).toBe(INGEST_CAP_BYTES + 1);
+  });
+
+  test("a measure request spends nothing", async () => {
+    const { bytesSpent } = await performRequests(
+      validateRequests([{ measure: [{ text: "a", size: 10, weight: 400 }] }], manifest, budget),
+      manifest,
+      {},
+      async () => ({ status: 200, body: "", json: undefined }),
+      budget,
+    );
+    expect(bytesSpent).toBe(0);
   });
 });

@@ -75,6 +75,16 @@ function validateSecret(secret: unknown): SecretSpec {
   if (param !== undefined && typeof param !== "string") {
     throw new ManifestError("secret param must be a string");
   }
+  // `header` and `param` PIN the credential: `requests.ts` substitutes only into the
+  // one they name. A manifest that names the position its `send_as` does not use is
+  // refused rather than silently ignored -- a reviewer reads these fields and has to
+  // be able to believe them.
+  if (header !== undefined && send_as === "query") {
+    throw new ManifestError('a secret sent as "query" names a param, not a header');
+  }
+  if (param !== undefined && send_as !== "query") {
+    throw new ManifestError(`a secret sent as "${send_as}" names a header, not a param`);
+  }
   return {
     key: key.trim(),
     label: label.trim(),

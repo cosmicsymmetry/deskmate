@@ -11,9 +11,21 @@ import {
 export class SandboxError extends Error {
   override name = "SandboxError";
   /**
-   * True when the plugin's own thrown error carried a truthy `configuration`
-   * property -- the owner must change a setting, and the caller must never
-   * retry this the way it retries an ordinary failure.
+   * True when this failure is DETERMINISTIC: retrying it in sixty seconds produces
+   * exactly the same refusal, so the owner has to be told rather than the render
+   * quietly repeated forever. Two kinds of failure set it:
+   *
+   *   - the plugin's own thrown error carried a truthy `configuration` property; and
+   *   - THE HOST refused to run this plugin at all -- its source is over the cap, it
+   *     does not parse, it exports no `plan`/`render`, or what it returned cannot be
+   *     represented as data. None of those can come good on a retry, and none of them
+   *     reaches the panel: the device has three states for a picture card and "this
+   *     plugin does not parse" is not one of them, so a transient classification here
+   *     means a 60-second retry loop and nothing in the window.
+   *
+   * It stays FALSE for a genuine engine limit -- the deadline fired, the memory cap
+   * fired -- and for an ordinary `throw new Error(...)`: a slow API or a bad response
+   * is worth trying again, and the owner did nothing the render can name.
    */
   configuration: boolean;
 
@@ -123,6 +135,7 @@ function readSandboxedResult<T>(
     // script template ever changes, this must fail loudly, not silently.
     throw new SandboxError(
       `this plugin's ${fn}() returned a value that could not be represented as data (unexpected type ${type})`,
+      true,
     );
   }
   const json = context.getString(value);
@@ -131,6 +144,7 @@ function readSandboxedResult<T>(
   } catch (error) {
     throw new SandboxError(
       `this plugin's ${fn}() returned a value that could not be represented as data: ${error instanceof Error ? error.message : String(error)}`,
+      true,
     );
   }
 }
@@ -144,8 +158,10 @@ export function runInSandbox<T>(
   const { memoryBytes, deadlineMs, sourceBytes } = { ...SANDBOX_LIMITS, ...limits };
   const sourceLength = Buffer.byteLength(source, "utf8");
   if (sourceLength > sourceBytes) {
+    // Deterministic: the same bytes are the same bytes next minute.
     throw new SandboxError(
       `this plugin's source is too large: ${sourceLength} bytes, the limit is ${sourceBytes}`,
+      true,
     );
   }
   if (quickjs === undefined) {
@@ -174,10 +190,31 @@ if (typeof ${fn} !== "function") { const __deskmate_sandbox_missing_export__ = n
 const ${RESULT_PROBE} = ${fn}(${JSON.stringify(input)});
 const ${TYPE_PROBE} = typeof ${RESULT_PROBE};
 if (${TYPE_PROBE} === "function" || ${TYPE_PROBE} === "symbol" || ${TYPE_PROBE} === "bigint") {
-  throw new Error("this plugin's ${fn}() returned a " + ${TYPE_PROBE} + ", which cannot be represented as data");
+  const __deskmate_sandbox_bad_return__ = new Error("this plugin's ${fn}() returned a " + ${TYPE_PROBE} + ", which cannot be represented as data");
+  __deskmate_sandbox_bad_return__.configuration = true;
+  throw __deskmate_sandbox_bad_return__;
 }
 ${STRINGIFY_PROBE}(${RESULT_PROBE});`;
-    const evaluated = context.evalCode(script);
+    // Compiled first, and run only if it compiles. A `SyntaxError` is the one failure
+    // that must be told apart from an identically-named one a plugin can raise at
+    // RUNTIME (`JSON.parse` of a truncated response throws `SyntaxError` too, and that
+    // is worth retrying), and the error object alone cannot tell them apart -- both
+    // dump as `{name: "SyntaxError", ...}`. A compile-only pass answers it exactly:
+    // anything that fails here failed to parse, full stop. This is the path a
+    // minifier's single-line `export function plan(){} export function render(){}`
+    // takes -- `EXPORT_STRIP` is anchored to the start of a line, so the second
+    // `export` survives and QuickJS refuses the keyword.
+    const compiled = context.evalCode(script, "plugin.js", { compileOnly: true });
+    if (compiled.error) {
+      const dumped = context.dump(compiled.error);
+      compiled.error.dispose();
+      throw new SandboxError(
+        `this plugin's source could not be parsed: ${normalizeThrown(dumped).message}`,
+        true,
+      );
+    }
+    compiled.value.dispose();
+    const evaluated = context.evalCode(script, "plugin.js");
     if (evaluated.error) {
       const dumped = context.dump(evaluated.error);
       evaluated.error.dispose();

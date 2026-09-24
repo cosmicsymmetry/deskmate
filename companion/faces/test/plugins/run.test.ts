@@ -69,7 +69,11 @@ describe("runPlugin", () => {
   });
 
   test("a plugin that exceeds its deadline is transient", async () => {
-    const source = `export function plan(){ return []; } export function render(){ while(true){} }`;
+    // One export per line, deliberately: with both on one line the second `export`
+    // survives EXPORT_STRIP and the plugin never parses, so this test passed for
+    // years without the deadline ever firing.
+    const source = `export function plan(){ return []; }
+      export function render(){ while(true){} }`;
     await expect(runPlugin({ ...base, source })).rejects.toThrow(TransientError);
   });
 
@@ -92,6 +96,19 @@ describe("runPlugin", () => {
     const result = await runPlugin({ ...base, source: fat });
     expect(result.state).toBeUndefined();
     expect(result.log.join(" ")).toContain("16 KB");
+  });
+
+  test("a log line is sanitized, not merely capped, before it reaches our stderr", async () => {
+    const source = `export function plan(){ return []; }
+      export function render(){ return { ...${card}, log: ["\\u001b[31mred\\u001b[0m\\nsecond line\\u0007", "plain"] }; }`;
+    const result = await runPlugin({ ...base, source });
+    expect(result.log).toHaveLength(2);
+    const first = result.log[0] ?? "";
+    expect(first).not.toContain("\u001b");
+    expect(first).not.toContain("\n");
+    expect(first).not.toContain("\u0007");
+    expect(first).toContain("red");
+    expect(first).toContain("second line");
   });
 
   test("a tap reaches the plugin as an event", async () => {
@@ -200,6 +217,114 @@ describe("runPlugin", () => {
     const result = await runPlugin({ ...base, source, request });
     expect(calls).toBe(8);
     expect(result.svg).toContain("8");
+  });
+
+  // A host-detected refusal that can never succeed on a retry must reach the owner as a
+  // ConfigurationError: the panel has no way to say "this plugin does not parse", so a
+  // TransientError here means a 60-second retry loop forever and nothing in the window.
+  describe("a deterministic host-side refusal is a configuration error", () => {
+    test("a syntax error in the plugin source", async () => {
+      const source = `export function plan(){ return []; }
+        export function render(){ const x = ; }`;
+      await expect(runPlugin({ ...base, source })).rejects.toThrow(ConfigurationError);
+    });
+
+    test("two exports on one line, which the export strip cannot reach", async () => {
+      // EXPORT_STRIP is anchored to the start of a line, so a minifier's single-line
+      // output leaves the second `export` in place and QuickJS refuses the keyword.
+      const source = `export function plan(){ return []; } export function render(){ return ${card}; }`;
+      await expect(runPlugin({ ...base, source })).rejects.toThrow(ConfigurationError);
+    });
+
+    test("a source over the 1 MB cap", async () => {
+      const source = `export function plan(){ return []; }
+        export function render(){ return ${card}; }
+        // ${"x".repeat(1024 * 1024)}`;
+      await expect(runPlugin({ ...base, source })).rejects.toThrow(ConfigurationError);
+      await expect(runPlugin({ ...base, source })).rejects.toThrow(/too large/);
+    });
+
+    test("a card over one of our own caps", async () => {
+      const source = `export function plan(){ return []; }
+        export function render(){ return { svg: '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"></svg>' }; }`;
+      await expect(runPlugin({ ...base, source })).rejects.toThrow(ConfigurationError);
+    });
+  });
+
+  describe("an engine limit and our own wrapped exception stay transient", () => {
+    test("the memory cap stops the plugin", async () => {
+      const source = `export function plan(){ return []; }
+        export function render(){ const a = []; for(;;){ a.push("x".repeat(65536)); } }`;
+      await expect(runPlugin({ ...base, source })).rejects.toThrow(TransientError);
+    });
+
+    test("a foreign satori failure is ours, not a setting the owner can change", async () => {
+      // An undecodable image is a raw error out of satori: we wrapped somebody else's
+      // exception rather than firing one of our own explicit checks.
+      const source = `export function plan(){ return []; }
+        export function render(){ return { layout: { type: "div", style: { display: "flex", width: 448, height: 368 }, children: { type: "img", style: { width: 10, height: 10 }, src: "data:image/png;base64,QUJDRA==" } } }; }`;
+      await expect(runPlugin({ ...base, source })).rejects.toThrow(TransientError);
+    });
+  });
+
+  test("the byte budget spans rounds and charges the wire, not the answer", async () => {
+    // Both answers are REFUSED for echoing a stored credential, so neither carries a
+    // payload -- and re-deriving the spend from the finished answers charged them 0,
+    // which bought a plugin an unbounded number of megabyte responses out of a 4 MB
+    // render budget. What crossed the wire was 6 MB, so round two must find the
+    // budget spent and never reach the network.
+    const credential = "ghp_SECRETVALUE";
+    const withSecret = parseManifest(
+      {
+        api: 1,
+        id: "p",
+        version: "1.0.0",
+        label: "P",
+        description: "d",
+        author: "a",
+        hosts: ["api.example.com"],
+        secrets: [
+          {
+            key: "token",
+            label: "T",
+            kind: "api_key",
+            host: "api.example.com",
+            send_as: "bearer",
+          },
+        ],
+        fields: [],
+      },
+      "p",
+    );
+    const body = Buffer.concat([
+      Buffer.alloc(3 * 1024 * 1024, 7),
+      Buffer.from(credential, "utf-8"),
+    ]);
+    const source = `
+      export function plan(c){
+        const n = (c.answers || []).length;
+        if (n === 0) return [
+          { url: "https://api.example.com/a", as: "bytes" },
+          { url: "https://api.example.com/b", as: "bytes" },
+        ];
+        if (n === 2) return [{ url: "https://api.example.com/c", as: "bytes" }];
+        return [];
+      }
+      export function render(c){ return ${card.replace('"ok"', "String(c.answers.length)")}; }`;
+    let calls = 0;
+    const request = async () => {
+      calls += 1;
+      return { status: 200, body: new Uint8Array(body) };
+    };
+    const result = await runPlugin({
+      ...base,
+      manifest: withSecret,
+      secrets: { token: credential },
+      source,
+      request,
+    });
+    expect(calls).toBe(2);
+    expect(result.svg).toContain("3");
   });
 
   test("the measurement budget spans rounds: 40 then 40 more is refused", async () => {

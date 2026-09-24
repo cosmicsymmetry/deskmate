@@ -17,6 +17,24 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { ConfigurationError, TransientError } from "../face";
+import { INGEST_CAP_BYTES } from "./limits";
+
+/**
+ * A response refused for exceeding the ingest cap, carrying how many bytes were read
+ * before the read was cancelled. Those bytes crossed the wire and a caller metering a
+ * byte budget has to charge for them -- without this, a request that pulls a megabyte
+ * and is then refused looks exactly as cheap as one that failed to resolve. Transient,
+ * exactly as the untyped refusal it replaces was.
+ */
+export class ResponseTooLargeError extends TransientError {
+  override name = "ResponseTooLargeError";
+  readonly bytesRead: number;
+
+  constructor(bytesRead: number) {
+    super("the response is too large");
+    this.bytesRead = bytesRead;
+  }
+}
 
 /**
  * `fetch` sends no useful User-Agent by default, and a Cloudflare-fronted API answers
@@ -24,7 +42,8 @@ import { ConfigurationError, TransientError } from "../face";
  */
 export const USER_AGENT = "deskmate-faces/1";
 
-const MAX_BODY_BYTES = 1_048_576;
+// The ingest cap, shared with the card and budget caps -- see `./limits`.
+const MAX_BODY_BYTES = INGEST_CAP_BYTES;
 const TIMEOUT_MS = 15_000;
 const MAX_REDIRECTS = 4;
 
@@ -266,7 +285,7 @@ async function readCapped(response: Response, max: number): Promise<Uint8Array> 
     total += value.length;
     if (total > max) {
       await reader.cancel();
-      throw new TransientError("the response is too large");
+      throw new ResponseTooLargeError(total);
     }
     chunks.push(value);
   }

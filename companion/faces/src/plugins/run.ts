@@ -9,6 +9,7 @@
 
 import { ConfigurationError, type Settings, TransientError } from "../face";
 import type { RequestFn } from "../kit/http";
+import { INGEST_CAP_BYTES } from "../kit/limits";
 import { CardError, cardToSvg } from "./card";
 import { FORMAT_SOURCE, type NowContext, buildNow } from "./context";
 import type { PluginManifest } from "./manifest";
@@ -77,7 +78,10 @@ export interface RunPluginResult {
  * not reset each time `plan` runs again. */
 const MAX_ROUNDS = 3;
 const MAX_REQUESTS = 8;
-const MAX_BYTES = 4 * 1024 * 1024;
+// Four times the ingest cap, and deliberately tighter than 8 requests x that cap --
+// the spec's own "N MB total, tighter than count x per-item" pattern. Expressed in
+// terms of the shared constant so a change to the ingest cap moves all three together.
+const MAX_BYTES = 4 * INGEST_CAP_BYTES;
 const MAX_MEASUREMENTS = 64;
 
 /** Same table: state returned beside a card is capped at 16 KB encoded. */
@@ -93,27 +97,21 @@ function isMeasure(request: ValidatedRequest): request is PluginMeasureRequest {
   return "measure" in request;
 }
 
-/** How many response bytes one answer actually spent, for the cross-round budget.
- * A measure answer performed no I/O and spent none of it. */
-function answerBytes(answer: Answer): number {
-  if ("measurements" in answer) return 0;
-  if (!answer.ok) return 0;
-  if (answer.base64 !== undefined) return Buffer.byteLength(answer.base64, "base64");
-  if (answer.json !== undefined) return Buffer.byteLength(JSON.stringify(answer.json), "utf8");
-  if (answer.text !== undefined) return Buffer.byteLength(answer.text, "utf8");
-  return 0;
-}
-
 /**
- * The error taxonomy this task exists to build. `SandboxError` covers three distinct
- * situations under one type -- the deadline fired, the memory cap fired, or the
- * plugin's own `throw` -- and the only signal that survives to tell them apart is
- * `configuration`, set true only when the plugin's own thrown error carried a truthy
- * `configuration` property. Everything else a sandboxed call can fail with (a timeout,
- * an allocation stop, an ordinary `throw new Error(...)`) is worth retrying: the owner
+ * The error taxonomy this task exists to build. `SandboxError` covers several distinct
+ * situations under one type -- the deadline fired, the memory cap fired, the host
+ * refused to run the plugin at all, or the plugin's own `throw` -- and the one signal
+ * that survives to tell them apart is `configuration`, which means DETERMINISTIC: the
+ * same refusal next minute, so the owner must be told rather than the render quietly
+ * repeated forever. Everything else a sandboxed call can fail with (a timeout, an
+ * allocation stop, an ordinary `throw new Error(...)`) is worth retrying: the owner
  * did not do anything the render can name and ask them to fix.
  */
 function classifySandboxError(error: SandboxError): ConfigurationError | TransientError {
+  // `SandboxError.configuration` now means "deterministic", set by the plugin's own
+  // thrown object AND by every host-side refusal that cannot come good on a retry
+  // (see that class's comment). Everything else -- the deadline, the memory cap, an
+  // ordinary throw -- stays transient.
   return error.configuration
     ? new ConfigurationError(error.message)
     : new TransientError(error.message);
@@ -128,12 +126,31 @@ function invokeSandbox<T>(source: string, fn: "plan" | "render", context: unknow
   }
 }
 
+/**
+ * An ANSI escape sequence: CSI (`ESC [ ... final`), OSC (`ESC ] ... BEL`/`ST`) and the
+ * short two-character forms. A plugin's log line reaches OUR stderr, and a terminal
+ * reading it acts on these -- colour is the harmless end of a range that runs through
+ * cursor movement to overwriting lines already printed. Stripped whole, so no orphaned
+ * introducer is left behind for the control-character pass below to half-remove.
+ */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters is the point
+const ANSI = /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)?|[@-Z\\-_])/g;
+/** C0 (including newline and tab), DEL, and C1. */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters is the point
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/g;
+
+/**
+ * A plugin's log line, "capped AND sanitized" as the spec puts it. Capping alone was
+ * not enough: the line is written to our stderr, where a newline forges a second log
+ * entry and an escape sequence drives the reader's terminal. Sanitized first, then
+ * capped, so truncation cannot leave a half-sequence behind.
+ */
 function capLog(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
   return raw
     .filter((line): line is string => typeof line === "string")
     .slice(0, LOG_MAX_LINES)
-    .map((line) => line.slice(0, LOG_MAX_CHARS));
+    .map((line) => line.replace(ANSI, "").replace(CONTROL, " ").trim().slice(0, LOG_MAX_CHARS));
 }
 
 /**
@@ -201,13 +218,16 @@ export async function runPlugin(input: RunPluginInput): Promise<RunPluginResult>
       requestFn,
       budget,
     );
-    answers.push(...performed);
+    answers.push(...performed.answers);
 
     remainingRequests -= validated.filter((request) => !isMeasure(request)).length;
     remainingMeasurements -= validated
       .filter(isMeasure)
       .reduce((sum, request) => sum + request.measure.length, 0);
-    remainingBytes -= performed.reduce((sum, answer) => sum + answerBytes(answer), 0);
+    // The spend `performRequests` MEASURED, never a re-derivation from the answers:
+    // an answer is redacted, refused or absent, and each of those understates what
+    // crossed the wire -- see `PerformedRequests.bytesSpent`.
+    remainingBytes -= performed.bytesSpent;
   }
 
   const renderContext: RenderContext = {
@@ -228,7 +248,15 @@ export async function runPlugin(input: RunPluginInput): Promise<RunPluginResult>
     // returned no card" is a CardError, not this function's problem to pre-empt.
     svg = await cardToSvg(rendered);
   } catch (error) {
-    if (error instanceof CardError) throw new ConfigurationError(error.message);
+    // `CardError.configuration` tells one of this file's own explicit cap/shape checks
+    // (the plugin author's to fix) from a foreign satori exception we merely wrapped
+    // (possibly ours). Mapping every CardError to ConfigurationError told the owner to
+    // change a setting that could not help, and left the card waiting for an edit.
+    if (error instanceof CardError) {
+      throw error.configuration
+        ? new ConfigurationError(error.message)
+        : new TransientError(error.message);
+    }
     throw error;
   }
 

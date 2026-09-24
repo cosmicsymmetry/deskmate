@@ -13,7 +13,8 @@
   "dependencies": {
     "@resvg/resvg-js": "2.6.2",
     "fast-xml-parser": "5",
-    "quickjs-emscripten": "^0.32.0"
+    "quickjs-emscripten": "^0.32.0",
+    "satori": "^0.33.5"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.7",

@@ -96,19 +96,40 @@ export async function pinnedAddress(url: URL, resolve: Resolve = systemResolve):
   return addresses.find((address) => isIP(address) === 4) ?? addresses[0] ?? host;
 }
 
+/** A request URL that fails to parse is always the owner's mistake, never transient. */
+function parseUrl(address: string): URL {
+  try {
+    return new URL(address);
+  } catch {
+    throw new ConfigurationError(`${address} is not a URL`);
+  }
+}
+
 /**
  * One request to `address`, speaking for `url`'s host. The URL handed to `fetch`
  * carries the IP literal, so nothing resolves the name again; the name travels in
  * `Host` and as the TLS server name, which is what the certificate is checked against.
  */
-export function dial(url: URL, address: string, signal: AbortSignal): Promise<Response> {
+export function dial(
+  url: URL,
+  address: string,
+  signal: AbortSignal,
+  init?: { method?: string; headers?: Record<string, string>; body?: string },
+): Promise<Response> {
   const target = new URL(url);
   target.hostname = isIP(address) === 6 ? `[${address}]` : address;
   const named = isIP(url.hostname.replace(/^\[|\]$/g, "")) === 0;
   return fetch(target, {
+    method: init?.method,
+    body: init?.body,
     redirect: "manual",
     signal,
-    headers: { Host: url.host, "User-Agent": USER_AGENT, Accept: "*/*" },
+    headers: {
+      Host: url.host,
+      "User-Agent": USER_AGENT,
+      Accept: "*/*",
+      ...init?.headers,
+    },
     // An IP literal has no server name to present; a name always does.
     ...(url.protocol === "https:" && named ? { tls: { serverName: url.hostname } } : {}),
   } as RequestInit);
@@ -119,12 +140,7 @@ export type FetchText = (url: string) => Promise<string>;
 
 export function createFetchText(resolve: Resolve = systemResolve): FetchText {
   return async (address) => {
-    let url: URL;
-    try {
-      url = new URL(address);
-    } catch {
-      throw new ConfigurationError(`${address} is not a URL`);
-    }
+    let url: URL = parseUrl(address);
     const deadline = AbortSignal.timeout(TIMEOUT_MS);
     try {
       for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
@@ -163,10 +179,11 @@ export function createFetchText(resolve: Resolve = systemResolve): FetchText {
 
 export const fetchText: FetchText = createFetchText();
 
-async function cappedText(response: Response): Promise<string> {
+/** The response body, read up to `max` bytes; over that, the owner never sees the rest. */
+async function readCapped(response: Response, max: number): Promise<Uint8Array> {
   const reader = response.body?.getReader();
   if (reader === undefined) {
-    return "";
+    return new Uint8Array(0);
   }
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -176,11 +193,75 @@ async function cappedText(response: Response): Promise<string> {
       break;
     }
     total += value.length;
-    if (total > MAX_BODY_BYTES) {
+    if (total > max) {
       await reader.cancel();
       throw new TransientError("the response is too large");
     }
     chunks.push(value);
   }
-  return new TextDecoder("utf-8").decode(Buffer.concat(chunks));
+  return Buffer.concat(chunks);
 }
+
+async function cappedText(response: Response): Promise<string> {
+  return new TextDecoder("utf-8").decode(await readCapped(response, MAX_BODY_BYTES));
+}
+
+export interface HttpReply {
+  status: number;
+  body: string | Uint8Array;
+  json?: unknown;
+}
+
+export interface HttpRequest {
+  url: string;
+  method?: "GET" | "POST";
+  headers?: Record<string, string>;
+  body?: string;
+  as: "json" | "text" | "bytes";
+}
+
+export type RequestFn = (input: HttpRequest) => Promise<HttpReply>;
+
+/**
+ * `dial`'s response, decoded the way `as` asked. Exported alongside `dial` for tests: a
+ * request that must actually complete against a real server cannot be driven through
+ * `createRequest` itself, because that would mean pinning a loopback address, which the
+ * guard exists to refuse -- exactly like this file's existing `dial`-level tests, which
+ * hit a real local server without going through `pinnedAddress`.
+ */
+export async function replyFrom(response: Response, as: HttpRequest["as"]): Promise<HttpReply> {
+  const bytes = await readCapped(response, MAX_BODY_BYTES);
+  if (as === "bytes") {
+    return { status: response.status, body: bytes };
+  }
+  const text = new TextDecoder("utf-8").decode(bytes);
+  if (as === "text") {
+    return { status: response.status, body: text };
+  }
+  try {
+    return { status: response.status, body: text, json: JSON.parse(text) };
+  } catch {
+    return { status: response.status, body: text };
+  }
+}
+
+/**
+ * A single request behind the same guard as `fetchText`: address pinning, the
+ * `Host`/TLS-name split and the body cap are all `pinnedAddress`/`dial`/`readCapped`,
+ * unchanged. Unlike `fetchText` this does not follow redirects and does not throw on a
+ * non-ok status -- a plugin's 404 or redirect is the plugin's business to interpret.
+ */
+export function createRequest(resolve: Resolve = systemResolve): RequestFn {
+  return async ({ url, method = "GET", headers = {}, body, as }) => {
+    const target = parseUrl(url);
+    const address = await pinnedAddress(target, resolve);
+    const response = await dial(target, address, AbortSignal.timeout(TIMEOUT_MS), {
+      method,
+      headers,
+      body,
+    });
+    return replyFrom(response, as);
+  };
+}
+
+export const request: RequestFn = createRequest();

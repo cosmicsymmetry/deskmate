@@ -1,6 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { ConfigurationError, TransientError } from "../src/face";
-import { createFetchText, dial, isPrivateAddress, pinnedAddress } from "../src/kit/http";
+import {
+  createFetchText,
+  createRequest,
+  dial,
+  isPrivateAddress,
+  pinnedAddress,
+  replyFrom,
+} from "../src/kit/http";
 
 const PUBLIC = "93.184.215.14";
 
@@ -91,5 +98,89 @@ describe("the pin", () => {
 
   test("something that is not a URL is the owner's to fix", async () => {
     expect(createFetchText()("not a url")).rejects.toBeInstanceOf(ConfigurationError);
+  });
+});
+
+describe("createRequest", () => {
+  let server: ReturnType<typeof Bun.serve>;
+  const seen: { method: string; auth: string | null; body: string }[] = [];
+  beforeAll(() => {
+    server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: async (request) => {
+        const url = new URL(request.url);
+        seen.push({
+          method: request.method,
+          auth: request.headers.get("authorization"),
+          body: await request.text(),
+        });
+        if (url.pathname === "/json") return Response.json({ n: 7 });
+        if (url.pathname === "/png") return new Response(new Uint8Array([137, 80, 78, 71]));
+        if (url.pathname === "/big") return new Response("x".repeat(1024 * 1024 + 1));
+        if (url.pathname === "/missing") return new Response("gone", { status: 404 });
+        return new Response("text");
+      },
+    });
+  });
+  afterAll(() => server.stop(true));
+
+  const at = (path: string) => `http://local.invalid:${server.port}${path}`;
+
+  // `createRequest` itself pins its address through `pinnedAddress`, which refuses
+  // loopback -- the same reason this file's `dial`-level tests above hit the real local
+  // server directly instead of through `createFetchText`. These four tests exercise the
+  // exact same `dial` + `replyFrom` pair `createRequest` calls internally, dialling the
+  // pinned loopback address by hand; the two tests below that only need to observe a
+  // *refusal* go through `createRequest` itself, because no real connection is ever made.
+  const wire = async (
+    path: string,
+    input: { method?: "GET" | "POST"; headers?: Record<string, string>; body?: string },
+    as: "json" | "text" | "bytes",
+  ) => {
+    const response = await dial(new URL(at(path)), "127.0.0.1", AbortSignal.timeout(5_000), input);
+    return replyFrom(response, as);
+  };
+
+  test("returns decoded JSON, text and bytes as asked", async () => {
+    expect((await wire("/json", {}, "json")).json).toEqual({ n: 7 });
+    expect((await wire("/text", {}, "text")).body).toBe("text");
+    const bytes = (await wire("/png", {}, "bytes")).body;
+    expect(bytes).toBeInstanceOf(Uint8Array);
+    expect(Array.from(bytes as Uint8Array)).toEqual([137, 80, 78, 71]);
+  });
+
+  test("sends the method, body and headers it was given", async () => {
+    seen.length = 0;
+    await wire(
+      "/text",
+      { method: "POST", body: '{"q":1}', headers: { Authorization: "Bearer t" } },
+      "text",
+    );
+    expect(seen[0]).toEqual({ method: "POST", auth: "Bearer t", body: '{"q":1}' });
+  });
+
+  test("returns a non-ok status instead of throwing, because a 404 is the plugin's business", async () => {
+    expect((await wire("/missing", {}, "text")).status).toBe(404);
+  });
+
+  test("refuses a body over the 1 MB cap", async () => {
+    expect(wire("/big", {}, "text")).rejects.toBeInstanceOf(TransientError);
+  });
+
+  test("refuses a private address, and names the host the owner typed", async () => {
+    const inward = createRequest(async () => ["169.254.169.254"]);
+    const failure = await inward({ url: "https://metadata.example/", as: "text" }).catch(
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(ConfigurationError);
+    expect((failure as Error).message).toContain("metadata.example");
+  });
+
+  test("refuses a scheme that is not http(s)", async () => {
+    const local = createRequest(async () => ["127.0.0.1"]);
+    expect(local({ url: "file:///etc/passwd", as: "text" })).rejects.toBeInstanceOf(
+      ConfigurationError,
+    );
   });
 });

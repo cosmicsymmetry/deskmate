@@ -1038,6 +1038,13 @@ export class CardError extends Error {
 }
 
 const MAX_BOXES = 2_000;
+/**
+ * A box budget alone does not protect the host: 501 NESTED boxes -- far inside the
+ * 2,000 budget -- crash yoga's WebAssembly with an out-of-bounds access that
+ * permanently corrupts the shared module, so every later card in the process fails,
+ * including other plugins' valid ones. Measured: 500 renders, 501 crashes.
+ */
+const MAX_DEPTH = 400;
 const MAX_SVG_BYTES = 512 * 1024;
 const MAX_PNG_BYTES = 1024 * 1024;
 
@@ -1076,8 +1083,10 @@ function toElement(node: unknown, counter: { boxes: number }): unknown {
 
 /** Every reference an SVG card may carry: embedded data only. */
 function refuseExternalReferences(svg: string): void {
-  for (const match of svg.matchAll(/(?:xlink:)?href\s*=\s*"([^"]*)"/g)) {
-    const value = (match[1] ?? "").trim();
+  // Both quote styles, and case-insensitive: SVG permits href='...' and HREF="...",
+  // and a check that sees only double quotes is a file-read guard with a hole in it.
+  for (const match of svg.matchAll(/(?:xlink:)?href\s*=\s*("([^"]*)"|'([^']*)')/gi)) {
+    const value = (match[2] ?? match[3] ?? "").trim();
     if (!value.startsWith("data:") && !value.startsWith("#")) {
       // usvg resolves a path href FROM OUR DISK by default (usvg-0.45.1
       // src/parser/image.rs:85-100), so this is a file-read surface, not a nicety.
@@ -1090,7 +1099,7 @@ export async function cardToSvg(card: unknown): Promise<string> {
   if (typeof card !== "object" || card === null) throw new CardError("this plugin returned no card");
   const { layout, svg, png } = card as { layout?: unknown; svg?: unknown; png?: unknown };
   if (typeof svg === "string") {
-    if (svg.length > MAX_SVG_BYTES) throw new CardError(`an SVG card may not exceed ${MAX_SVG_BYTES / 1024} KB`);
+    if (Buffer.byteLength(svg, "utf8") > MAX_SVG_BYTES) throw new CardError(`an SVG card may not exceed ${MAX_SVG_BYTES / 1024} KB`);
     refuseExternalReferences(svg);
     return svg;
   }
@@ -1100,7 +1109,7 @@ export async function cardToSvg(card: unknown): Promise<string> {
       `<image x="0" y="0" width="${CANVAS_WIDTH}" height="${CANVAS_HEIGHT}" preserveAspectRatio="xMidYMid meet" href="data:image/png;base64,${png}"/></svg>`;
   }
   if (layout === undefined) throw new CardError("a card must be a layout, an svg or a png");
-  const element = toElement(layout, { boxes: 0 });
+  const element = toElement(layout, { boxes: 0, depth: 0 });
   return satori(element as never, { width: CANVAS_WIDTH, height: CANVAS_HEIGHT, fonts: await loadFonts() });
 }
 ```

@@ -62,7 +62,7 @@ firmware boundary (`docs/superpowers/specs/2026-09-23-deskmate-tap-to-face-desig
 |---|---|---|---|
 | A | Not started | -- | -- |
 | B | Not started | -- | -- |
-| C1 | Phase 1 built and deployed; a tap on the board is the last check | `track-c1-tap-to-face` | The owner's finger on `dev-0005` |
+| C1 | Phase 1 **works on hardware**: a tap redrew the weather card on `dev-0005` 2026-09-24. Held up by a **pre-existing** asset-push instability that predates this track and is now instrumented | `track-c1-tap-to-face` | One clean tap-to-redraw measurement |
 | C2 | Not started | -- | C1 |
 | D | Not started | -- | -- |
 | E | Not started | -- | -- |

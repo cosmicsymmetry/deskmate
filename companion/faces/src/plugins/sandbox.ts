@@ -170,7 +170,7 @@ export function runInSandbox<T>(
     // function's comment for why `context.dump()` must never be used here instead.
     const script = `const ${STRINGIFY_PROBE} = JSON.stringify;
 ${source.replace(EXPORT_STRIP, "")}
-if (typeof ${fn} !== "function") { throw new Error("this plugin exports no ${fn}()"); }
+if (typeof ${fn} !== "function") { const __deskmate_sandbox_missing_export__ = new Error("this plugin exports no ${fn}()"); __deskmate_sandbox_missing_export__.configuration = true; throw __deskmate_sandbox_missing_export__; }
 const ${RESULT_PROBE} = ${fn}(${JSON.stringify(input)});
 const ${TYPE_PROBE} = typeof ${RESULT_PROBE};
 if (${TYPE_PROBE} === "function" || ${TYPE_PROBE} === "symbol" || ${TYPE_PROBE} === "bigint") {

@@ -159,4 +159,57 @@ describe("runPlugin", () => {
     expect(result.state).toBeUndefined();
     expect(result.log.join(" ")).toContain("16 KB");
   });
+
+  test("a plugin missing render() is a configuration error naming the missing function", async () => {
+    const source = `export function plan(){ return []; }`;
+    await expect(runPlugin({ ...base, source })).rejects.toThrow(ConfigurationError);
+    await expect(runPlugin({ ...base, source })).rejects.toThrow(/exports no render\(\)/);
+  });
+
+  test("a plugin missing plan() is a configuration error naming the missing function", async () => {
+    const source = `export function render(){ return ${card}; }`;
+    await expect(runPlugin({ ...base, source })).rejects.toThrow(ConfigurationError);
+    await expect(runPlugin({ ...base, source })).rejects.toThrow(/exports no plan\(\)/);
+  });
+
+  test("the request budget spans rounds: 5 then 5 more is refused", async () => {
+    const five = JSON.stringify(
+      Array.from({ length: 5 }, () => ({ url: "https://api.example.com/r", as: "text" })),
+    );
+    const source = `export function plan(){ return ${five}; }
+      export function render(){ return ${card}; }`;
+    const request = async () => ({ status: 200, body: "x" });
+    await expect(runPlugin({ ...base, source, request })).rejects.toThrow(
+      /at most 3 requests per refresh, not 5/,
+    );
+  });
+
+  test("the request budget spans rounds: 4 then 4 succeeds, spending the render's full 8", async () => {
+    const source = `
+      export function plan(c){
+        const n = (c.answers || []).length;
+        const batch = Array.from({ length: 4 }, () => ({ url: "https://api.example.com/r", as: "text" }));
+        return n < 8 ? batch : [];
+      }
+      export function render(c){ return ${card.replace('"ok"', "String(c.answers.length)")}; }`;
+    let calls = 0;
+    const request = async () => {
+      calls += 1;
+      return { status: 200, body: "x" };
+    };
+    const result = await runPlugin({ ...base, source, request });
+    expect(calls).toBe(8);
+    expect(result.svg).toContain("8");
+  });
+
+  test("the measurement budget spans rounds: 40 then 40 more is refused", async () => {
+    const forty = JSON.stringify(
+      Array.from({ length: 40 }, () => ({ text: "a", size: 10, weight: 400 })),
+    );
+    const source = `export function plan(){ return [{ measure: ${forty} }]; }
+      export function render(){ return ${card}; }`;
+    await expect(runPlugin({ ...base, source })).rejects.toThrow(
+      /at most 24 measurements per refresh, not 40/,
+    );
+  });
 });

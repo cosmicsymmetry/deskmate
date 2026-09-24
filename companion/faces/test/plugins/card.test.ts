@@ -84,4 +84,91 @@ describe("cardToSvg", () => {
     ).toString("base64");
     expect(await cardToSvg({ png })).toContain("data:image/png;base64,");
   });
+
+  const img = (decodedBytes: number) => {
+    const payload = "A".repeat(Math.ceil(decodedBytes / 3) * 4);
+    return {
+      type: "img",
+      style: { width: 10, height: 10 },
+      src: `data:image/png;base64,${payload}`,
+    };
+  };
+
+  test("refuses an image inside a layout card over the PNG shape's own size cap", async () => {
+    // MAX_SVG_BYTES/MAX_PNG_BYTES only guard the two top-level shapes -- an oversized
+    // img.src inside {layout} would otherwise defeat both.
+    await expect(cardToSvg(box(img(2 * 1024 * 1024)))).rejects.toThrow(/1024/);
+  });
+
+  test("refuses more than 4 images in one layout card", async () => {
+    const five = [img(1024), img(1024), img(1024), img(1024), img(1024)];
+    await expect(cardToSvg(box(five))).rejects.toThrow(/images/);
+  });
+
+  test("refuses images in one layout card whose combined size exceeds the total cap", async () => {
+    // Each is under the per-image cap (900 KB < 1024 KB) and there are only 4 of them
+    // (not more than MAX_IMAGES), so only the total cap (3 MB) can be what trips here.
+    const each = 900 * 1024;
+    const four = [img(each), img(each), img(each), img(each)];
+    await expect(cardToSvg(box(four))).rejects.toThrow(/total/);
+  });
+
+  test("refuses an img src inside a layout card that is not an embedded data: URI", async () => {
+    // Not just a policy nicety: satori resolves a non-"data:" src with its own raw
+    // fetch(), which would reach the network unguarded by kit/http.ts's SSRF checks.
+    // The message is asserted specifically (not just CardError) so this test cannot
+    // be satisfied by satori itself failing to fetch the URL and that failure getting
+    // wrapped afterward -- it has to be refused before satori ever sees it.
+    await expect(
+      cardToSvg(box({ type: "img", style: {}, src: "http://example.com/a.png" })),
+    ).rejects.toThrow(/embedded data: URI/);
+    await expect(cardToSvg(box({ type: "img", style: {}, src: "/etc/hosts.png" }))).rejects.toThrow(
+      /embedded data: URI/,
+    );
+  });
+
+  test("wraps a hostile style value's raw satori failure as CardError", async () => {
+    await expect(
+      cardToSvg(box({ type: "div", style: { color: () => "red" }, children: "x" })),
+    ).rejects.toThrow(CardError);
+  });
+
+  test("wraps an unparseable style value's raw satori failure as CardError, without echoing it back whole", async () => {
+    const huge = "x".repeat(5_000_000);
+    let caught: unknown;
+    try {
+      await cardToSvg(box({ type: "div", style: { background: huge }, children: "x" }));
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(CardError);
+    expect((caught as Error).message.length).toBeLessThan(1_000);
+  });
+
+  test("wraps an invalid base64 img src's raw satori failure as CardError", async () => {
+    await expect(
+      cardToSvg(
+        box({ type: "img", style: {}, src: "data:image/png;base64,!!!not-base64-at-all!!!" }),
+      ),
+    ).rejects.toThrow(CardError);
+  });
+
+  test("refuses an SVG card whose declared size is not the panel's", async () => {
+    await expect(
+      cardToSvg({ svg: '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"></svg>' }),
+    ).rejects.toThrow(/448x368/);
+    await expect(
+      cardToSvg({
+        svg: '<svg xmlns="http://www.w3.org/2000/svg" width="448" height="200"></svg>',
+      }),
+    ).rejects.toThrow(/448x368/);
+  });
+
+  test("prefers svg over layout when a card sets both", async () => {
+    const svg = await cardToSvg({
+      layout: { type: "div", style: { display: "flex" } },
+      svg: '<svg xmlns="http://www.w3.org/2000/svg" width="448" height="368"><!--won--></svg>',
+    });
+    expect(svg).toContain("<!--won-->");
+  });
 });

@@ -106,6 +106,58 @@ export interface WeatherFace {
 export interface WeatherState {
   view: "now" | "days";
   tappedAt: string | null;
+  /**
+   * The forecast the last fetch returned, so a tap can redraw without going back
+   * to the network.
+   *
+   * Both views are the same reading said about a different moment, so a tap that
+   * only switches between them has no reason to fetch. Measured at about 1 KB of
+   * JSON against the 16 KB the server allows per source.
+   */
+  forecast?: WeatherFace;
+  /** When `forecast` was fetched. Absent or stale means fetch again. */
+  fetchedAt?: string;
+}
+
+/**
+ * How long a cached forecast may answer a tap.
+ *
+ * Shorter than the card's own refresh, so a tap never shows a reading the
+ * schedule would already have replaced.
+ */
+const FORECAST_CACHE_MS = 10 * 60 * 1_000;
+
+function cachedForecast(state: WeatherState, now: Date): WeatherFace | undefined {
+  if (state.forecast === undefined || state.fetchedAt === undefined) {
+    return undefined;
+  }
+  const at = Date.parse(state.fetchedAt);
+  if (!Number.isFinite(at) || now.getTime() - at > FORECAST_CACHE_MS) {
+    return undefined;
+  }
+  return state.forecast;
+}
+
+/**
+ * A tap redraws from the forecast already in hand when there is one, so the
+ * answer costs a draw instead of a draw plus an Open-Meteo round trip.
+ */
+export async function renderWeatherRequest(
+  settings: Settings,
+  now: Date,
+  context: RenderContext = {},
+  get: FetchText = fetchText,
+): Promise<RenderResult> {
+  const previous = weatherState(context.state);
+  const cached = context.event === undefined ? undefined : cachedForecast(previous, now);
+  const face = cached ?? (await fetchWeather(settings, get));
+  const fetchedAt = cached === undefined ? now.toISOString() : previous.fetchedAt;
+  const result = renderWeatherResult(face, now, context);
+  const drawn = typeof result === "string" ? { svg: result } : result;
+  return {
+    svg: drawn.svg,
+    state: { ...(drawn.state as WeatherState), forecast: face, fetchedAt },
+  };
 }
 
 interface Palette {
@@ -582,10 +634,26 @@ function weatherState(value: unknown): WeatherState {
   if (typeof value !== "object" || value === null) {
     return { view: "now", tappedAt: null };
   }
-  const candidate = value as { view?: unknown; tappedAt?: unknown };
+  const candidate = value as {
+    view?: unknown;
+    tappedAt?: unknown;
+    forecast?: unknown;
+    fetchedAt?: unknown;
+  };
+  // The cached forecast is only carried forward when it still looks like one.
+  // State is read back from a file the server wrote, so a shape that drifted
+  // between deploys must fall back to fetching rather than draw from rubble.
+  const forecast = candidate.forecast as WeatherFace | undefined;
+  const usable =
+    typeof forecast === "object" &&
+    forecast !== null &&
+    Array.isArray(forecast.hourly) &&
+    Array.isArray(forecast.daily);
   return {
     view: candidate.view === "days" ? "days" : "now",
     tappedAt: typeof candidate.tappedAt === "string" ? candidate.tappedAt : null,
+    ...(usable ? { forecast } : {}),
+    ...(typeof candidate.fetchedAt === "string" ? { fetchedAt: candidate.fetchedAt } : {}),
   };
 }
 
@@ -978,6 +1046,6 @@ export const weather: FaceDefinition = {
     },
   ],
   async render(settings, now, context) {
-    return renderWeatherResult(await fetchWeather(settings, fetchText), now, context);
+    return renderWeatherRequest(settings, now, context);
   },
 };

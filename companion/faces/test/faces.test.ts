@@ -23,6 +23,7 @@ import {
   fetchWeather,
   parseForecast,
   renderWeather,
+  renderWeatherRequest,
   renderWeatherResult,
   weather,
 } from "../src/faces/weather";
@@ -471,6 +472,39 @@ describe("weather", () => {
     // strip carries after it.
     expect(get.asked[1]).toContain("forecast_days=6");
     expect(get.asked[1]).not.toContain("temperature_unit");
+  });
+
+  test("a tap redraws from the forecast already in hand", async () => {
+    // Both views say the same reading about a different moment, so switching
+    // between them has no reason to visit Open-Meteo. The round trip it saves is
+    // the largest remaining term in a tap once flash is out of the way.
+    const get = fake({ "geocoding-api": GEOCODING, "/v1/forecast": forecast({}) });
+    const settings = { location: "Dubai", units: "metric" };
+    const NOW = new Date("2026-09-27T09:00:00Z");
+
+    const first = await renderWeatherRequest(settings, NOW, {}, get);
+    const asked = get.asked.length;
+    const firstState = typeof first === "string" ? undefined : first.state;
+
+    const tapped = await renderWeatherRequest(
+      settings,
+      new Date(NOW.getTime() + 30_000),
+      { state: firstState, event: { taps: 1, point: null } },
+      get,
+    );
+    expect(get.asked.length).toBe(asked);
+    expect(typeof tapped === "string" ? "" : tapped.svg).not.toBe(
+      typeof first === "string" ? "" : first.svg,
+    );
+
+    // A cache older than the card's own refresh is not reused.
+    await renderWeatherRequest(
+      settings,
+      new Date(NOW.getTime() + 20 * 60_000),
+      { state: firstState, event: { taps: 1, point: null } },
+      get,
+    );
+    expect(get.asked.length).toBeGreaterThan(asked);
   });
 
   test("imperial asks the API for fahrenheit rather than converting", async () => {

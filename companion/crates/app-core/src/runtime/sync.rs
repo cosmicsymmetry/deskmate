@@ -48,7 +48,7 @@ pub(super) fn synchronize_full(
     });
     match asset_result {
         Some((digests, Ok(_))) => {
-            state.confirmed_durable_assets = digests.into_iter().collect();
+            state.confirmed_resident_assets = digests.into_iter().collect();
             clear_asset_sync_refusals(state);
         }
         Some((_, Err(error))) => record_asset_sync_refusals(state, &error.to_string()),

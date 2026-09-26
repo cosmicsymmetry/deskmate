@@ -22,8 +22,8 @@ use crate::RuntimeDevice;
 use device::DeviceError;
 use protocol::{
     ASSET_DIGEST_LEN, ASSET_ENCODING_RAW, ASSET_ENCODING_RLE565, AssetBegin, AssetChunk,
-    AssetCommit, AssetKind, AssetRelease, CAPABILITY_DURABLE_ASSET_ENCODING, MAX_ASSET_CHUNK_BYTES,
-    MAX_ASSET_DIGESTS, encode_rle565,
+    AssetCommit, AssetKind, AssetRelease, CAPABILITY_DURABLE_ASSET_ENCODING,
+    CAPABILITY_VOLATILE_ASSETS, MAX_ASSET_CHUNK_BYTES, MAX_ASSET_DIGESTS, encode_rle565,
 };
 
 /// One asset resolved to bytes and ready to stream: the digest both sides
@@ -60,6 +60,19 @@ pub(crate) enum AssetSyncError {
     },
     #[error("required scene asset {digest:02x?} is not available from this host")]
     MissingRequiredAsset { digest: [u8; ASSET_DIGEST_LEN] },
+    /// `docs/protocol/v2.md`: when `volatile` is true, `kind` must be `Image`.
+    /// Refused here rather than on the wire so a caller's mistake never costs a
+    /// device round trip and an `ErrorCode`.
+    #[error("volatile asset {digest:02x?} must be an image, got {kind:?}")]
+    VolatileKind {
+        digest: [u8; ASSET_DIGEST_LEN],
+        kind: AssetKind,
+    },
+    /// The device did not negotiate capability bit 9. Every deployed decoder
+    /// refuses `AssetBegin { volatile: true }` without it, so this is caught
+    /// here for the same reason.
+    #[error("the device does not accept volatile assets")]
+    VolatileUnsupported,
     #[error("AssetBegin for {digest:02x?} failed: {source}")]
     Begin {
         digest: [u8; ASSET_DIGEST_LEN],
@@ -127,9 +140,52 @@ impl AssetSync {
         })
     }
 
+    /// Uploads one raster to the device's **volatile** PSRAM tier, leaving the
+    /// durable inventory and the keep-set alone.
+    ///
+    /// This is the interactive path. A durable transfer costs an `AssetCommit`
+    /// that writes flash (~1.5 s measured on `dev-0005`) and leaves a dead
+    /// record whose reclamation compacts the blob region (~9.4 s measured),
+    /// during which the panel shows its clock. A volatile transfer costs a
+    /// `memcpy` into PSRAM and no partition endurance at all.
+    ///
+    /// The digest addresses **decoded** bytes, so it is identical in both
+    /// tiers: the same frame can be pushed here now and written durably later
+    /// without the scene that references it changing. `protocol_asset_resolver`
+    /// checks PSRAM before flash, so the durable copy silently becomes the
+    /// fallback once the volatile one is evicted.
+    pub(crate) fn transfer_volatile(
+        device: &mut dyn RuntimeDevice,
+        asset: &DesiredAsset,
+        capabilities: u64,
+    ) -> Result<(), AssetSyncError> {
+        if capabilities & CAPABILITY_VOLATILE_ASSETS == 0 {
+            return Err(AssetSyncError::VolatileUnsupported);
+        }
+        if asset.kind != AssetKind::Image {
+            return Err(AssetSyncError::VolatileKind {
+                digest: asset.digest,
+                kind: asset.kind,
+            });
+        }
+        // The volatile tier decodes RLE565 itself and always has -- capability
+        // bit 10 gates the encoding on the DURABLE tier only, so this one is
+        // free to compress regardless of what the device negotiated.
+        let selected = Self::select_image_encoding(asset, true)?;
+        Self::transfer_one(
+            device,
+            asset,
+            true,
+            &selected.wire,
+            selected.encoding,
+            selected.decoded_length,
+        )
+    }
+
     fn transfer_one(
         device: &mut dyn RuntimeDevice,
         asset: &DesiredAsset,
+        volatile: bool,
         wire_bytes: &[u8],
         encoding: u8,
         decoded_length: Option<u32>,
@@ -145,7 +201,7 @@ impl AssetSync {
                 digest: asset.digest,
                 kind: asset.kind,
                 total_length,
-                volatile: false,
+                volatile,
                 encoding,
                 decoded_length,
             })
@@ -221,6 +277,7 @@ impl AssetSync {
             Self::transfer_one(
                 device,
                 asset,
+                false,
                 &selected.wire,
                 selected.encoding,
                 selected.decoded_length,
@@ -442,6 +499,86 @@ mod tests {
         fn diagnostics(&self) -> SessionDiagnostics {
             SessionDiagnostics::default()
         }
+    }
+
+    #[test]
+    fn a_volatile_transfer_spends_no_flash_and_no_inventory() {
+        // The whole point of the tier. A durable pass writes the record and then
+        // sends the AssetRelease whose compaction was measured at 9.4 s on
+        // dev-0005, with the panel showing its clock throughout. The interactive
+        // path must do neither: no release means nothing is reclaimed and nothing
+        // is moved.
+        let mut device = FakeDevice::new();
+        let digest = [0x5a; ASSET_DIGEST_LEN];
+
+        AssetSync::transfer_volatile(
+            &mut device,
+            &raster_frame(digest, false),
+            CAPABILITY_VOLATILE_ASSETS,
+        )
+        .expect("a volatile transfer");
+
+        assert_eq!(
+            device.last_release(),
+            None,
+            "a volatile transfer must not send AssetRelease: that is what compacts the blob region"
+        );
+        assert!(device.chunks_sent_for(&digest) > 0, "the frame was sent");
+        let begin = device.begins().last().expect("one AssetBegin");
+        assert!(
+            begin.volatile,
+            "the frame must be addressed to the PSRAM tier, not written to flash"
+        );
+    }
+
+    #[test]
+    fn a_volatile_transfer_compresses_whatever_the_durable_tier_negotiated() {
+        // Capability bit 10 gates RLE565 on the DURABLE tier only; the volatile
+        // tier has always decoded it. Sending raw here would triple the chunk
+        // count, and the chunk phase is round-trip-bound -- 17 acks at ~76 ms,
+        // so every avoided chunk is real interactive latency.
+        let mut device = FakeDevice::new();
+        let digest = [0x5b; ASSET_DIGEST_LEN];
+
+        AssetSync::transfer_volatile(
+            &mut device,
+            &raster_frame(digest, false),
+            CAPABILITY_VOLATILE_ASSETS,
+        )
+        .expect("a volatile transfer");
+
+        let begin = device.begins().last().expect("one AssetBegin");
+        assert_eq!(begin.encoding, ASSET_ENCODING_RLE565);
+        assert_eq!(
+            begin.decoded_length,
+            Some(protocol::VOLATILE_IMAGE_DECODED_LENGTH)
+        );
+    }
+
+    #[test]
+    fn a_volatile_transfer_is_refused_without_the_capability_or_the_kind() {
+        // Both are wire contract rules (`docs/protocol/v2.md`). Refusing here
+        // keeps a caller's mistake off the wire, where it would cost a round trip
+        // and come back as an ErrorCode.
+        let mut device = FakeDevice::new();
+        let digest = [0x5c; ASSET_DIGEST_LEN];
+
+        assert!(matches!(
+            AssetSync::transfer_volatile(&mut device, &raster_frame(digest, false), 0),
+            Err(AssetSyncError::VolatileUnsupported)
+        ));
+        assert!(matches!(
+            AssetSync::transfer_volatile(
+                &mut device,
+                &asset_blob(digest, 16),
+                CAPABILITY_VOLATILE_ASSETS
+            ),
+            Err(AssetSyncError::VolatileKind { .. })
+        ));
+        assert!(
+            device.begins().is_empty(),
+            "neither refusal may reach the device"
+        );
     }
 
     #[test]

@@ -402,9 +402,19 @@ struct WorkerState {
     /// WebSocket runtime legitimately drives devices that report that tier.
     ownership_refused: bool,
     next_scene_revision: u32,
-    /// Digests observed through AssetBegin(already-present) or a successful
-    /// commit on this device runtime. Durable bytes may survive reconnects.
-    confirmed_durable_assets: BTreeSet<[u8; protocol::ASSET_DIGEST_LEN]>,
+    /// Digests the device is known to hold **in either tier**, observed through
+    /// `AssetBegin(already-present)` or a successful commit on this runtime. A
+    /// scene may only name a digest in here: one naming bytes the device lacks
+    /// draws nothing.
+    ///
+    /// Was `confirmed_durable_assets` until the interactive path started using
+    /// the volatile tier. A frame in PSRAM is exactly as resolvable as one in
+    /// flash -- `protocol_asset_resolver` checks PSRAM first -- so gating the
+    /// scene on durability made the picture wait for the flash write that the
+    /// volatile tier exists to avoid. Durable bytes survive a reconnect and
+    /// volatile ones do not, which is why this is rebuilt from the keep-set on
+    /// every reconcile rather than accumulated.
+    confirmed_resident_assets: BTreeSet<[u8; protocol::ASSET_DIGEST_LEN]>,
     next_connect: Instant,
     last_published: Option<AppSnapshot>,
 }
@@ -454,7 +464,7 @@ impl WorkerState {
             needs_full_sync: true,
             ownership_refused: false,
             next_scene_revision: 0,
-            confirmed_durable_assets: BTreeSet::new(),
+            confirmed_resident_assets: BTreeSet::new(),
             next_connect: now,
             last_published: None,
         };
@@ -908,6 +918,51 @@ fn apply_image_source_update(
         return Ok(());
     }
 
+    // The interactive path: the frame that just changed is the one on the glass.
+    //
+    // A durable pass would cost an `AssetCommit` that writes flash and then an
+    // `AssetRelease` whose compaction moves every record after the one it just
+    // orphaned. Measured on `dev-0005` on 2026-09-26: 1.54 s and 9.36 s, and the
+    // panel shows its clock for the whole of the second one -- 9.5 of the 13.3
+    // seconds between a tap and its new picture. The volatile tier is a `memcpy`
+    // into PSRAM with neither cost, which is what it was built for
+    // (`volatile_asset_store.c`, capability bit 9).
+    //
+    // The durable copy is not written here and does not need to be: the digest
+    // addresses decoded bytes, so it is the same in both tiers, and the next
+    // ordinary reconcile -- any other source's refresh, or a reconnect -- carries
+    // this frame to flash under the digest the scene already names. The device
+    // resolves PSRAM before flash, so that arrival is invisible.
+    //
+    // KNOWN GAP, bounded and accepted: the tier holds one committed frame, so
+    // tapping a *second* picture card before that reconcile evicts this one, and
+    // its card is blank until its durable copy lands (at most one refresh
+    // interval). Only one face takes taps today. Raising
+    // `VOLATILE_ASSET_SLOT_COUNT` closes it and needs a wire-contract amendment.
+    if let Some(card_id) = visible_picture_card_id.as_ref()
+        && state.device.capability_bits() & protocol::CAPABILITY_VOLATILE_ASSETS != 0
+        && let Some(frame) = desired.iter().find(|asset| asset.digest == digest)
+    {
+        return match AssetSync::transfer_volatile(device, frame, state.device.capability_bits()) {
+            Ok(()) => {
+                // The device holds it now, in PSRAM. Without this the scene gate
+                // would refuse to name the digest and the picture would wait for
+                // the durable write -- which is the wait this whole path removes.
+                state.confirmed_resident_assets.insert(digest);
+                clear_asset_sync_refusals(state);
+                state.active_scene_dirty = true;
+                push_active_scene(state, device, reconnect_interval);
+                Ok(())
+            }
+            Err(error) => {
+                let message = error.to_string();
+                state.active_scene_dirty = false;
+                handle_automatic_asset_error(state, card_id.clone(), error, reconnect_interval);
+                Err(RuntimeError::Device { message })
+            }
+        };
+    }
+
     // This is deliberately the entire host-owned set. AssetRelease is a
     // device-wide KEEP-SET, so reconciling only this source would delete every
     // other picture digest omitted from the partial list.
@@ -922,7 +977,7 @@ fn apply_image_source_update(
             return Err(RuntimeError::Device { message });
         }
     };
-    state.confirmed_durable_assets = keep_set.into_iter().collect();
+    state.confirmed_resident_assets = keep_set.into_iter().collect();
     clear_asset_sync_refusals(state);
 
     // Rebuilding an unrelated visible face would turn every background image

@@ -230,7 +230,7 @@ pub(super) fn native_requirements(
     let requirements = render_negotiation::analyze_scene(scene);
     let profile = render_negotiation::DeviceRenderProfile {
         capabilities: state.device.capability_bits(),
-        confirmed_assets: state.confirmed_durable_assets.clone(),
+        confirmed_assets: state.confirmed_resident_assets.clone(),
         installable_assets: if requirements.asset_digests.is_empty() {
             BTreeSet::new()
         } else {
@@ -395,7 +395,7 @@ pub(super) fn ensure_durable_assets_for_scene(
 ) -> Result<(), AssetSyncError> {
     if required
         .iter()
-        .all(|digest| state.confirmed_durable_assets.contains(digest))
+        .all(|digest| state.confirmed_resident_assets.contains(digest))
     {
         return Ok(());
     }
@@ -405,13 +405,13 @@ pub(super) fn ensure_durable_assets_for_scene(
         .map(ImageSourceHost::desired_assets)
         .unwrap_or_default();
     if let Some(digest) = required.iter().find(|digest| {
-        !state.confirmed_durable_assets.contains(*digest)
+        !state.confirmed_resident_assets.contains(*digest)
             && !desired.iter().any(|asset| asset.digest == **digest)
     }) {
         return Err(AssetSyncError::MissingRequiredAsset { digest: *digest });
     }
     let keep_set = AssetSync::reconcile(device, &desired, state.device.capability_bits())?;
-    state.confirmed_durable_assets = keep_set.into_iter().collect();
+    state.confirmed_resident_assets = keep_set.into_iter().collect();
     Ok(())
 }
 
@@ -449,9 +449,14 @@ pub(super) fn handle_automatic_asset_error(
         | AssetSyncError::Release { source } => {
             handle_automatic_scene_error(state, card_id, source, reconnect_interval);
         }
+        // Host-side refusals: the device was never asked, and asking again with
+        // the same inputs would fail identically. These are refusals to record,
+        // not transport failures to retry.
         AssetSyncError::TooManyDesiredAssets { .. }
         | AssetSyncError::AssetTooLarge { .. }
-        | AssetSyncError::MissingRequiredAsset { .. } => {
+        | AssetSyncError::MissingRequiredAsset { .. }
+        | AssetSyncError::VolatileKind { .. }
+        | AssetSyncError::VolatileUnsupported => {
             record_scene_refusal(state, card_id, error.to_string());
         }
     }

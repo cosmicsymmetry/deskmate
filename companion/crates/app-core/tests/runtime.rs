@@ -42,6 +42,9 @@ enum Operation {
     },
     PushScene(PushScene),
     AssetBegin([u8; protocol::ASSET_DIGEST_LEN]),
+    /// `AssetBegin { volatile: true }` -- the PSRAM tier, which writes no
+    /// flash and leaves the durable inventory (and so the keep-set) alone.
+    VolatileAssetBegin([u8; protocol::ASSET_DIGEST_LEN]),
     AssetChunk([u8; protocol::ASSET_DIGEST_LEN], u32),
     AssetCommit([u8; protocol::ASSET_DIGEST_LEN]),
     AssetRelease(Vec<[u8; protocol::ASSET_DIGEST_LEN]>),
@@ -564,7 +567,11 @@ impl RuntimeDevice for MockDevice {
 
     fn send_asset_begin(&mut self, begin: AssetBegin) -> Result<Ack, DeviceError> {
         self.with_connected(|state| {
-            state.operations.push(Operation::AssetBegin(begin.digest));
+            state.operations.push(if begin.volatile {
+                Operation::VolatileAssetBegin(begin.digest)
+            } else {
+                Operation::AssetBegin(begin.digest)
+            });
             Ack {
                 acknowledged_type: protocol::TYPE_ASSET_BEGIN,
                 revision: None,
@@ -1085,6 +1092,7 @@ fn run_image_source_update_case(
             matches!(
                 operation,
                 Operation::AssetBegin(_)
+                    | Operation::VolatileAssetBegin(_)
                     | Operation::AssetChunk(_, _)
                     | Operation::AssetCommit(_)
                     | Operation::AssetRelease(_)

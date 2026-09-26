@@ -5561,3 +5561,42 @@ The headroom number may already be on the wire and ignored. `encode_status_paylo
 `asset_store_free_bytes` and `asset_count` in **key 31** of every `StatusResponse`. Nothing in
 `companion/crates/` mentions any of the three, and `docs/protocol/v2.md` does not describe
 key 31. Decoding it would be purely additive on the host -- the device is already sending it.
+
+### Why it is 13 s, in one sentence: the frames live in flash and PSRAM is empty
+
+Where a picture actually lives, end to end:
+
+| stage | where | cost |
+|---|---|---|
+| rendered PNG -> canonical frame | server disk, `/var/lib/deskmate/configs/image-frames` | -- |
+| on the wire | RLE565, 1,920-byte chunks, **one ack per chunk** | 17 chunks ~= 1.29 s |
+| on the device | **durable flash blob region** | commit ~1.54 s, compaction ~9.4 s |
+| displayed | `asset_flash_map()` -- memory-mapped, no PSRAM copy | free |
+
+**The firmware has a PSRAM tier for exactly this and the host never asks for it.**
+`AssetBegin`'s `volatile` key is hardcoded `false` at `asset_sync.rs:148`, with a test at
+:555 pinning it. Meanwhile `dev-0005` advertises capability bit 9 `volatile-assets`,
+`firmware/main/core/volatile_asset_store.c` is fully implemented, `protocol_task.c` routes
+`begin->volatile_tier` through it, and `protocol_asset_resolver()` checks **volatile PSRAM
+before flash** with the comment "so an atomic replacement can be rendered without ever
+spending partition endurance". That is this exact workload, described by the firmware author,
+and unused.
+
+Numbers that decide the design:
+
+- **PSRAM: 8 MB octal at 80 MHz, `esp_get_free_heap_size()` reports 8,358,839 free.** A
+  decoded volatile frame is exactly 329,740 B, so a frame costs 4% of what is free.
+- **The v2 contract caps the volatile tier at two slots** -- "the displayed frame and one
+  incoming atomic replacement" (`docs/protocol/v2.md:378`). Four picture cards do not fit.
+  Raising it is a contract amendment plus a firmware image, so it needs the owner.
+- **Compaction cost is proportional to bytes moved, not to the release itself.**
+  `asset_store_plan_compaction` emits moves only for records after a dead one, so a keep-set
+  where nothing died is cheap. The 9.4 s was real work: the old weather frame died mid-region
+  and everything after it shifted down. With four faces refreshing every fifteen minutes this
+  runs about four times per fifteen minutes, forever, on a flash partition.
+- **The chunk phase is round-trip-bound, not bandwidth-bound.** 76 ms per 1,920-byte chunk on
+  the weather frame, 88 ms on Hacker News, and the slowest single chunk was 84 ms -- the
+  spread is tiny, which is the signature of latency rather than congestion. 32 KB is nothing;
+  **17 sequential acks over a WAN round trip is everything.** The board dials
+  `wss://deskmate.rodi.one` -- out to Cloudflare and back -- while the VM sits on the same
+  LAN at 192.168.8.20.

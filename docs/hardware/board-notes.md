@@ -5500,3 +5500,64 @@ Shipped the same day, all server-side, no wire and no firmware:
 Still owed, unchanged by this session: the same test at the other mounting, a tap-to-redraw
 latency measured on a build whose push path is trusted, and Hacker News paging (the live
 "Hacker News" card is an RSS face and takes no taps).
+
+## 2026-09-26 -- a tap, filmed and correlated: it works, and the wire is not the problem
+
+The owner filmed a single tap on the weather card (30 s, 720x1280, `dev-0005` at 270 degrees)
+and the new instrumentation caught the same event server-side. This is the first
+tap-to-redraw ever measured. **Nothing failed**: no link drop, no timeout, no reboot. It was
+simply slow -- **13.3 seconds from finger to new picture**.
+
+Video time was anchored to the panel's own clock: the minute flips to 15:12 between video
+t=15.6 s and t=15.7 s, so **t=0 = 15:11:44.35 UTC**, +/- 0.1 s. (The panel reads UTC because
+`preferences.timezone` is `UTC` in the live config -- correct behaviour, not a fault; the
+value is seeded on first run and never rewritten.)
+
+| video t | UTC | event | source |
+|---|---|---|---|
+| 5.0-5.5 | 15:11:49.4-49.9 | finger on the glass | video |
+| 7.25 | 15:11:51.604 | `face-state.json` -> `view: days`; frame rendered and accepted | state file |
+| ~8.0 | ~15:11:52.4 | asset transfer opens | derived from `total_ms` |
+| 9.0-9.5 | 15:11:53.4-53.9 | **panel drops to the clock face** | video |
+| 10.88 | 15:11:55.226 | transfer completed: 17 chunks, 32,224 B, slowest chunk **84 ms**, commit **1,540 ms**, total 2,826 ms | journal |
+| 18.8 | 15:12:03.15 | **new picture drawn** (tomorrow, 23 degrees, Overcast) | video |
+| 20.38 | 15:12:04.726 | `AssetRelease` acked: **9,359 ms** | journal |
+
+### Where the 13.3 seconds actually goes
+
+| phase | cost | share |
+|---|---|---|
+| tap event + face render (0.66 s of it is the face) | 1.75 s | 13% |
+| chunk phase on the wire (17 chunks, ~76 ms each) | ~1.29 s | **10%** |
+| `AssetCommit` (device writes the asset to flash) | 1.54 s | 12% |
+| `AssetRelease` (device compacts the flash blob region) | ~7.9 s visible | **59%** |
+
+**The network is under 10% of it.** The Cloudflare-tunnel hypothesis from 2026-09-24 is
+refuted by its own instrument: the 33-chunk Hacker News frame in the same session delivered
+all 62,752 bytes in 4,477 ms with a worst chunk of 569 ms, and typical chunks run 83-234 ms.
+Whatever is wrong with this board's pushes, **it is not the wire**, and the earlier entry's
+"strongest remaining hypothesis" should be read as closed.
+
+### The clock face is not a lost link
+
+The panel shows the standalone clock from 15:11:53.6 to 15:12:03.15 -- **9.55 s**, which
+tracks the 9.36 s release almost exactly (offset by ~1.7 s, the release's own round trip).
+This is what the owner described on 2026-09-24 as the device "switching into autonomous
+mode", and it is not a disconnection at all: **the panel falls back to the clock for the
+duration of the device's flash work on every asset change.** It looked like a dropped link
+because it lasts ten seconds.
+
+### The lever, and a field nobody reads
+
+`asset_sync.rs`'s `reconcile` sends `AssetRelease` **unconditionally at the end of every
+pass**, including passes where `already_present` short-circuited every transfer. Each one
+costs 9-10 s of device-side compaction. For a tap the release is doing real work -- the old
+weather digest really is being dropped -- so this is not simply a redundant call to delete;
+taking it out of the interactive path means deferring the garbage collection, not skipping
+it, and that needs a policy and a headroom number.
+
+The headroom number may already be on the wire and ignored. `encode_status_payload` in
+`firmware/main/core/protocol_message.c:2086` puts `asset_store_used_bytes`,
+`asset_store_free_bytes` and `asset_count` in **key 31** of every `StatusResponse`. Nothing in
+`companion/crates/` mentions any of the three, and `docs/protocol/v2.md` does not describe
+key 31. Decoding it would be purely additive on the host -- the device is already sending it.

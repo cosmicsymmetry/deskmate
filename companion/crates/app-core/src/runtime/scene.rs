@@ -410,7 +410,9 @@ pub(super) fn ensure_durable_assets_for_scene(
     }) {
         return Err(AssetSyncError::MissingRequiredAsset { digest: *digest });
     }
-    let keep_set = AssetSync::reconcile(device, &desired, state.device.capability_bits())?;
+    let release = claim_asset_release(state, Instant::now());
+    let keep_set =
+        AssetSync::reconcile_releasing(device, &desired, state.device.capability_bits(), release)?;
     state.confirmed_resident_assets = keep_set.into_iter().collect();
     Ok(())
 }

@@ -1077,9 +1077,13 @@ fn run_image_source_update_case(
             })
         });
     } else {
+        // The frame becoming resident is the observable end of an off-screen
+        // update. It used to be the AssetRelease that followed it, but releases
+        // are now rate-limited -- reclaiming compacts flash and costs the panel
+        // seconds of its own clock, so it no longer rides along with every frame.
         wait_for(Duration::from_secs(1), || {
             control.operations()[before..].iter().any(|operation| {
-                matches!(operation, Operation::AssetRelease(digests) if digests == &vec![existing_digest, picture_digest])
+                matches!(operation, Operation::AssetCommit(digest) if digest == &picture_digest)
             })
         });
         thread::sleep(Duration::from_millis(30));
@@ -1110,8 +1114,11 @@ fn assert_image_update_asset_prefix(
     existing_digest: [u8; protocol::ASSET_DIGEST_LEN],
     picture_digest: [u8; protocol::ASSET_DIGEST_LEN],
 ) {
+    // Both frames are re-sent and committed; no AssetRelease follows, because
+    // reclaiming is rate-limited now and the initial sync already spent this
+    // window's release.
     assert_eq!(
-        &operations[..7],
+        &operations[..6],
         &[
             Operation::AssetBegin(existing_digest),
             Operation::AssetChunk(existing_digest, 0),
@@ -1119,7 +1126,12 @@ fn assert_image_update_asset_prefix(
             Operation::AssetBegin(picture_digest),
             Operation::AssetChunk(picture_digest, 0),
             Operation::AssetCommit(picture_digest),
-            Operation::AssetRelease(vec![existing_digest, picture_digest]),
         ]
+    );
+    assert!(
+        !operations
+            .iter()
+            .any(|operation| matches!(operation, Operation::AssetRelease(_))),
+        "reclaiming compacts flash and must not ride along with an ordinary frame: {operations:?}"
     );
 }

@@ -415,9 +415,21 @@ struct WorkerState {
     /// volatile ones do not, which is why this is rebuilt from the keep-set on
     /// every reconcile rather than accumulated.
     confirmed_resident_assets: BTreeSet<[u8; protocol::ASSET_DIGEST_LEN]>,
+    /// When this runtime last asked the device to reclaim replaced assets.
+    /// `None` until the first pass, which always releases.
+    last_asset_release: Option<Instant>,
     next_connect: Instant,
     last_published: Option<AppSnapshot>,
 }
+
+/// How rarely the device is asked to reclaim replaced assets.
+///
+/// Reclaiming compacts the flash blob region and costs seconds during which the
+/// panel shows its clock, so it must not ride along with every frame. See
+/// [`AssetSync::reconcile_releasing`] for why deferring it is safe: the
+/// partition is 6 MB, a frame is roughly 35 KB, and the four faces replace 16 an
+/// hour. Half an hour of deferral is about eight dead records out of ~170 slots.
+const ASSET_RELEASE_INTERVAL: Duration = Duration::from_mins(30);
 
 impl WorkerState {
     /// A hostless worker for tests that do not exercise picture delivery.
@@ -465,6 +477,7 @@ impl WorkerState {
             ownership_refused: false,
             next_scene_revision: 0,
             confirmed_resident_assets: BTreeSet::new(),
+            last_asset_release: None,
             next_connect: now,
             last_published: None,
         };
@@ -853,6 +866,22 @@ fn process_command(
     false
 }
 
+/// Whether this reconcile should close with an `AssetRelease`, and remembers
+/// the answer when it is yes.
+///
+/// Reclaiming is housekeeping: nothing waits on it, and it costs the panel
+/// seconds of its own clock. Rate-limiting it is what takes flash compaction out
+/// of the path between a tap and its picture.
+fn claim_asset_release(state: &mut WorkerState, now: Instant) -> bool {
+    let due = state
+        .last_asset_release
+        .is_none_or(|last| now.saturating_duration_since(last) >= ASSET_RELEASE_INTERVAL);
+    if due {
+        state.last_asset_release = Some(now);
+    }
+    due
+}
+
 fn apply_image_source_update(
     state: &mut WorkerState,
     device: &mut dyn RuntimeDevice,
@@ -966,7 +995,13 @@ fn apply_image_source_update(
     // This is deliberately the entire host-owned set. AssetRelease is a
     // device-wide KEEP-SET, so reconciling only this source would delete every
     // other picture digest omitted from the partial list.
-    let keep_set = match AssetSync::reconcile(device, &desired, state.device.capability_bits()) {
+    let release = claim_asset_release(state, Instant::now());
+    let keep_set = match AssetSync::reconcile_releasing(
+        device,
+        &desired,
+        state.device.capability_bits(),
+        release,
+    ) {
         Ok(keep_set) => keep_set,
         Err(error) => {
             let message = error.to_string();

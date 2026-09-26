@@ -9,12 +9,13 @@ import {
   type Story,
   storyFromItem,
 } from "../src/faces/hackernews";
-import { fetchRss, parseFeed, renderRss } from "../src/faces/rss";
+import { fetchRss, parseFeed, renderRss, renderRssRequest } from "../src/faces/rss";
 import {
   fetchToken,
   parseCandles,
   parseMarkets,
   renderToken,
+  renderTokenRequest,
   splitPrice,
 } from "../src/faces/token";
 import {
@@ -99,6 +100,63 @@ describe("token", () => {
     }
     return face;
   };
+
+  test("a tap moves between the line and the candles, and reverts when left alone", async () => {
+    const CANDLES = JSON.stringify([
+      [1, 108.06, 108.2, 107.95, 108.03],
+      [2, 108.01, 108.24, 107.93, 108.11],
+    ]);
+    const get = fake({ "/coins/markets": MARKETS, "/market_chart": CHART, "/ohlc": CANDLES });
+    const settings = { coin_id: "SOL", currency: "usd", chart: "line" };
+    const NOW = new Date("2026-09-27T09:00:00Z");
+
+    const first = await renderTokenRequest(settings, NOW, {}, get);
+    expect(first.state?.chart).toBe("line");
+
+    const tapped = await renderTokenRequest(
+      settings,
+      NOW,
+      { state: first.state, event: { taps: 1, point: null } },
+      get,
+    );
+    expect(tapped.state?.chart).toBe("candles");
+    expect(tapped.svg).not.toBe(first.svg);
+
+    // A scheduled refresh soon after keeps what the finger chose...
+    const soon = await renderTokenRequest(
+      settings,
+      new Date(NOW.getTime() + 60_000),
+      {
+        state: tapped.state,
+      },
+      get,
+    );
+    expect(soon.state?.chart).toBe("candles");
+
+    // ...and a later one hands the card back to its own setting.
+    const later = await renderTokenRequest(
+      settings,
+      new Date(NOW.getTime() + 20 * 60_000),
+      {
+        state: tapped.state,
+      },
+      get,
+    );
+    expect(later.state?.chart).toBe("line");
+  });
+
+  test("a card configured for no chart has nothing to tap to", async () => {
+    // "none" never requests the series, so offering a switch would draw an empty
+    // chart. The state is cleared so a stale override cannot reappear later.
+    const get = fake({ "/coins/markets": MARKETS });
+    const result = await renderTokenRequest(
+      { coin_id: "SOL", currency: "usd", chart: "none" },
+      new Date("2026-09-27T09:00:00Z"),
+      { event: { taps: 1, point: null } },
+      get,
+    );
+    expect(result.state).toBeNull();
+  });
 
   test("a quote and its chart are read into one face", async () => {
     const get = fake({ "/coins/markets": MARKETS, "/market_chart": CHART });
@@ -295,15 +353,56 @@ describe("rss", () => {
     <entry><title type="html">v1.4 &lt;em&gt;out&lt;/em&gt;</title><updated>2026-09-12T11:00:00Z</updated></entry>
   </feed>`;
 
-  test("RSS 2.0 parses, entities and CDATA included, capped at what the face shows", () => {
+  test("RSS 2.0 parses, entities and CDATA included, keeping more than one page", () => {
+    // The parse keeps four pages so a tap has somewhere to go; a page of four is
+    // what the face draws at once. It used to cap here at the page size, which
+    // left nothing to turn to.
     const entries = parseFeed(RSS, NOW);
     expect(entries.map((entry) => entry.title)).toEqual([
       "First & foremost",
       "Second story",
       "Third",
       "Fourth",
+      "Fifth",
     ]);
-    expect(entries.map((entry) => entry.age)).toEqual(["14m", "", "", ""]);
+    expect(entries.map((entry) => entry.age)).toEqual(["14m", "", "", "", ""]);
+  });
+
+  test("a tap turns the page without going back to the feed", async () => {
+    // The whole point of storing entries: answering a tap must cost a draw and
+    // nothing else. A face that refetched would put a network round trip between
+    // the owner's finger and the new picture.
+    let fetches = 0;
+    const get = fake({ "example.com": RSS });
+    const counting = async (url: string) => {
+      fetches += 1;
+      return get(url);
+    };
+    const settings = { url: "https://example.com/feed.xml", title: "News" };
+
+    const first = await renderRssRequest(settings, NOW, {}, counting);
+    expect(fetches).toBe(1);
+    expect(first.state.page).toBe(0);
+
+    const second = await renderRssRequest(
+      settings,
+      NOW,
+      { state: first.state, event: { taps: 1, point: null } },
+      counting,
+    );
+    expect(fetches).toBe(1);
+    expect(second.state.page).toBe(1);
+    expect(second.svg).not.toBe(first.svg);
+
+    // Five entries is two pages, so a second tap wraps rather than stopping.
+    const third = await renderRssRequest(
+      settings,
+      NOW,
+      { state: second.state, event: { taps: 1, point: null } },
+      counting,
+    );
+    expect(fetches).toBe(1);
+    expect(third.state.page).toBe(0);
   });
 
   test("Atom parses, with an html title reduced to its text", () => {

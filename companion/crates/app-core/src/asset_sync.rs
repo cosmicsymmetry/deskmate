@@ -248,6 +248,33 @@ impl AssetSync {
         desired: &[DesiredAsset],
         capabilities: u64,
     ) -> Result<Vec<[u8; ASSET_DIGEST_LEN]>, AssetSyncError> {
+        Self::reconcile_releasing(device, desired, capabilities, true)
+    }
+
+    /// Reconciles, optionally withholding the closing `AssetRelease`.
+    ///
+    /// The release is what reclaims a replaced frame, and reclaiming compacts
+    /// the flash blob region: `asset_store_plan_compaction` moves every record
+    /// that sits after a dead one, which measured **9.36 s** on `dev-0005`
+    /// (2026-09-26) with the panel showing its clock throughout. Sending it on
+    /// every pass therefore pays that cost four times every fifteen minutes,
+    /// forever, to reclaim space nothing is waiting for.
+    ///
+    /// Withholding it is safe because the message is a KEEP-set: a device that
+    /// receives no release simply keeps what it has. The only cost is dead
+    /// records, and the assets partition is **6 MB** against frames of roughly
+    /// 35 KB -- about 170 of them -- while the four faces produce 16 an hour.
+    /// Half an hour of deferral is some eight dead records. There is no version
+    /// of this cadence that fills the partition before the next release.
+    ///
+    /// `false` never loses anything permanently: the next pass that does send
+    /// one carries the complete keep-set and reclaims everything at once.
+    pub(crate) fn reconcile_releasing(
+        device: &mut dyn RuntimeDevice,
+        desired: &[DesiredAsset],
+        capabilities: u64,
+        release: bool,
+    ) -> Result<Vec<[u8; ASSET_DIGEST_LEN]>, AssetSyncError> {
         // `MAX_ASSET_DIGESTS` (32) comfortably covers the config's own
         // `MAX_ASSETS` (16) today, but that headroom is a property of two
         // constants that could drift independently. Assert it here rather
@@ -290,11 +317,13 @@ impl AssetSync {
                 keep_set.push(digest);
             }
         }
-        device
-            .send_asset_release(AssetRelease {
-                digests: keep_set.clone(),
-            })
-            .map_err(|source| AssetSyncError::Release { source })?;
+        if release {
+            device
+                .send_asset_release(AssetRelease {
+                    digests: keep_set.clone(),
+                })
+                .map_err(|source| AssetSyncError::Release { source })?;
+        }
 
         Ok(keep_set)
     }
@@ -499,6 +528,27 @@ mod tests {
         fn diagnostics(&self) -> SessionDiagnostics {
             SessionDiagnostics::default()
         }
+    }
+
+    #[test]
+    fn a_withheld_release_still_installs_the_frame_and_reports_the_keep_set() {
+        // Withholding is housekeeping deferred, not work skipped: the bytes still
+        // land, and the caller still learns the complete keep-set so its resident
+        // bookkeeping stays accurate for the pass that does release.
+        let mut device = FakeDevice::new();
+        let digest = [0x6a; ASSET_DIGEST_LEN];
+        let desired = vec![asset_blob(digest, 16)];
+
+        let keep_set = AssetSync::reconcile_releasing(&mut device, &desired, 0, false)
+            .expect("a deferred reconcile");
+
+        assert_eq!(keep_set, vec![digest], "the keep-set is still computed");
+        assert!(device.chunks_sent_for(&digest) > 0, "the bytes still land");
+        assert_eq!(
+            device.last_release(),
+            None,
+            "no release means no compaction, which is the entire point"
+        );
     }
 
     #[test]

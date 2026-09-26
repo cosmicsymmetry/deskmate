@@ -175,7 +175,7 @@ fn an_image_source_update_for_a_card_that_is_not_on_screen_pushes_no_scene() {
     let operations = run_image_source_update_case(false, existing_digest, picture_digest);
     assert_eq!(
         operations.len(),
-        7,
+        6,
         "unexpected update transcript: {operations:?}"
     );
     assert_image_update_asset_prefix(&operations, existing_digest, picture_digest);

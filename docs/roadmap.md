@@ -62,7 +62,7 @@ firmware boundary (`docs/superpowers/specs/2026-09-23-deskmate-tap-to-face-desig
 |---|---|---|---|
 | A | Not started | -- | -- |
 | B | Not started | -- | -- |
-| C1 | Phase 1 **works on hardware**: a tap redrew the weather card on `dev-0005` 2026-09-24. Held up by a **pre-existing** asset-push instability that predates this track and is now instrumented | `track-c1-tap-to-face` | One clean tap-to-redraw measurement |
+| C1 | Phase 1 works on hardware. The 13.3 s tap was measured, diagnosed (flash, not the wire) and cut: frames go to PSRAM and reclaiming is rate-limited. All four faces answer a tap | `track-c1-tap-to-face` | A tap-to-redraw measurement on the new build |
 | C2 | Not started | -- | C1 |
 | D | Not started | -- | -- |
 | E | Not started | -- | -- |

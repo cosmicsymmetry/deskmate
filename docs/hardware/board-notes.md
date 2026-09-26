@@ -5600,3 +5600,43 @@ Numbers that decide the design:
   **17 sequential acks over a WAN round trip is everything.** The board dials
   `wss://deskmate.rodi.one` -- out to Cloudflare and back -- while the VM sits on the same
   LAN at 192.168.8.20.
+
+## 2026-09-26 evening -- what the morning's test is testing
+
+Deployed: the interactive frame goes to PSRAM, reclaiming is rate-limited, and
+every server-rendered face answers a tap. Nothing here has been seen on the board.
+
+**The expected budget**, from the 2026-09-26 measurements minus what was removed:
+
+| phase | before | now | why |
+|---|---|---|---|
+| tap event + render | 1.75 s | 1.75 s | unchanged; rss and token still fetch on a tap, weather still refetches |
+| chunks on the wire | 1.29 s | 1.29 s | unchanged; still 17 sequential acks over the tunnel |
+| `AssetCommit` (flash write) | 1.54 s | **0** | the frame goes to the volatile PSRAM tier |
+| `AssetRelease` (compaction) | 9.36 s | **0** | rate-limited to once per 30 min, and never in front of the picture |
+| **tap -> pixels** | **13.3 s** | **~3 s expected** | |
+
+**What each card should do when tapped:**
+
+| card | face | tap |
+|---|---|---|
+| Clock | device-local | nothing; it is not a picture |
+| Claude limits | external producer | nothing, and this cannot change from the faces package -- a producer posts a PNG and declares no views |
+| Weather | `weather` | now <-> tomorrow plus four days; a second tap returns |
+| Hacker News | `rss` | the next four headlines, wrapping after four pages |
+| Token price | `token` | line <-> candles |
+
+Verified off-board against the **live** feeds, not fixtures: each of the three
+returns a different PNG for a tap, and weather's second tap returns to its first.
+
+**What to watch for, because none of it is observed yet:**
+
+- The tap-to-redraw time. If it is still ten seconds, the volatile path did not
+  take and the journal will say so: a durable push logs `an asset transfer
+  completed` with a `commit_ms`, a volatile one logs nothing at all.
+- A card going blank. The volatile tier holds **one** committed frame, so tapping
+  a second picture card before the next reconcile evicts the first. Tapping
+  weather and then the token card inside the same refresh window is the way to
+  provoke it.
+- `an asset release was slow` should now appear at most twice an hour, not after
+  every frame.

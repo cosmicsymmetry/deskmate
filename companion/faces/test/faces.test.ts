@@ -1,20 +1,51 @@
 import { describe, expect, test } from "bun:test";
-import { ConfigurationError, TransientError } from "../src/face";
-import { fetchHackerNews, renderHackerNews, storyFromItem } from "../src/faces/hackernews";
-import { fetchRss, parseFeed, renderRss } from "../src/faces/rss";
+import { readFileSync } from "node:fs";
+import { ConfigurationError, type RenderResult, TransientError } from "../src/face";
+import {
+  fetchHackerNews,
+  hackernews,
+  renderHackerNews,
+  renderHackerNewsRequest,
+  type Story,
+  storyFromItem,
+} from "../src/faces/hackernews";
+import { fetchRss, parseFeed, renderRss, renderRssRequest } from "../src/faces/rss";
 import {
   fetchToken,
   parseCandles,
   parseMarkets,
   renderToken,
+  renderTokenRequest,
   splitPrice,
 } from "../src/faces/token";
-import { conditionFromWmo, fetchWeather, parseForecast } from "../src/faces/weather";
+import {
+  conditionFromWmo,
+  fetchWeather,
+  parseForecast,
+  renderWeather,
+  renderWeatherRequest,
+  renderWeatherResult,
+  weather,
+} from "../src/faces/weather";
 import type { FetchText } from "../src/kit/http";
 import { pngFromSvg, textInk } from "../src/kit/raster";
 import { BAD, GOOD } from "../src/kit/theme";
 
 const NOW = new Date("2026-09-12T14:00:00Z");
+
+interface CapturedHackerNewsItem {
+  id: number;
+  title: string;
+  score: number;
+  descendants: number;
+  url: string;
+  time: number;
+  type: string;
+}
+
+const CAPTURED_HACKER_NEWS = (await Bun.file(
+  new URL("./hn-front-page.captured.json", import.meta.url),
+).json()) as CapturedHackerNewsItem[];
 
 /** A fetcher that answers from a table and records what it was asked for. */
 function fake(routes: Record<string, string | Error>): FetchText & { asked: string[] } {
@@ -32,6 +63,16 @@ function fake(routes: Record<string, string | Error>): FetchText & { asked: stri
 }
 
 const rendersToAFrame = (svg: string): boolean => pngFromSvg(svg).length > 1_000;
+
+const visibleSvgText = (svg: string): string =>
+  [...svg.matchAll(/<text\b[^>]*>([^<]*)<\/text>/g)]
+    .map((match) => match[1] ?? "")
+    .join(" ")
+    .replaceAll("&apos;", "'")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&gt;", ">")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&amp;", "&");
 
 describe("token", () => {
   const MARKETS = JSON.stringify([
@@ -60,6 +101,63 @@ describe("token", () => {
     }
     return face;
   };
+
+  test("a tap moves between the line and the candles, and reverts when left alone", async () => {
+    const CANDLES = JSON.stringify([
+      [1, 108.06, 108.2, 107.95, 108.03],
+      [2, 108.01, 108.24, 107.93, 108.11],
+    ]);
+    const get = fake({ "/coins/markets": MARKETS, "/market_chart": CHART, "/ohlc": CANDLES });
+    const settings = { coin_id: "SOL", currency: "usd", chart: "line" };
+    const NOW = new Date("2026-09-27T09:00:00Z");
+
+    const first = await renderTokenRequest(settings, NOW, {}, get);
+    expect(first.state?.chart).toBe("line");
+
+    const tapped = await renderTokenRequest(
+      settings,
+      NOW,
+      { state: first.state, event: { taps: 1, point: null } },
+      get,
+    );
+    expect(tapped.state?.chart).toBe("candles");
+    expect(tapped.svg).not.toBe(first.svg);
+
+    // A scheduled refresh soon after keeps what the finger chose...
+    const soon = await renderTokenRequest(
+      settings,
+      new Date(NOW.getTime() + 60_000),
+      {
+        state: tapped.state,
+      },
+      get,
+    );
+    expect(soon.state?.chart).toBe("candles");
+
+    // ...and a later one hands the card back to its own setting.
+    const later = await renderTokenRequest(
+      settings,
+      new Date(NOW.getTime() + 20 * 60_000),
+      {
+        state: tapped.state,
+      },
+      get,
+    );
+    expect(later.state?.chart).toBe("line");
+  });
+
+  test("a card configured for no chart has nothing to tap to", async () => {
+    // "none" never requests the series, so offering a switch would draw an empty
+    // chart. The state is cleared so a stale override cannot reappear later.
+    const get = fake({ "/coins/markets": MARKETS });
+    const result = await renderTokenRequest(
+      { coin_id: "SOL", currency: "usd", chart: "none" },
+      new Date("2026-09-27T09:00:00Z"),
+      { event: { taps: 1, point: null } },
+      get,
+    );
+    expect(result.state).toBeNull();
+  });
 
   test("a quote and its chart are read into one face", async () => {
     const get = fake({ "/coins/markets": MARKETS, "/market_chart": CHART });
@@ -256,15 +354,56 @@ describe("rss", () => {
     <entry><title type="html">v1.4 &lt;em&gt;out&lt;/em&gt;</title><updated>2026-09-12T11:00:00Z</updated></entry>
   </feed>`;
 
-  test("RSS 2.0 parses, entities and CDATA included, capped at what the face shows", () => {
+  test("RSS 2.0 parses, entities and CDATA included, keeping more than one page", () => {
+    // The parse keeps four pages so a tap has somewhere to go; a page of four is
+    // what the face draws at once. It used to cap here at the page size, which
+    // left nothing to turn to.
     const entries = parseFeed(RSS, NOW);
     expect(entries.map((entry) => entry.title)).toEqual([
       "First & foremost",
       "Second story",
       "Third",
       "Fourth",
+      "Fifth",
     ]);
-    expect(entries.map((entry) => entry.age)).toEqual(["14m", "", "", ""]);
+    expect(entries.map((entry) => entry.age)).toEqual(["14m", "", "", "", ""]);
+  });
+
+  test("a tap turns the page without going back to the feed", async () => {
+    // The whole point of storing entries: answering a tap must cost a draw and
+    // nothing else. A face that refetched would put a network round trip between
+    // the owner's finger and the new picture.
+    let fetches = 0;
+    const get = fake({ "example.com": RSS });
+    const counting = async (url: string) => {
+      fetches += 1;
+      return get(url);
+    };
+    const settings = { url: "https://example.com/feed.xml", title: "News" };
+
+    const first = await renderRssRequest(settings, NOW, {}, counting);
+    expect(fetches).toBe(1);
+    expect(first.state.page).toBe(0);
+
+    const second = await renderRssRequest(
+      settings,
+      NOW,
+      { state: first.state, event: { taps: 1, point: null } },
+      counting,
+    );
+    expect(fetches).toBe(1);
+    expect(second.state.page).toBe(1);
+    expect(second.svg).not.toBe(first.svg);
+
+    // Five entries is two pages, so a second tap wraps rather than stopping.
+    const third = await renderRssRequest(
+      settings,
+      NOW,
+      { state: second.state, event: { taps: 1, point: null } },
+      counting,
+    );
+    expect(fetches).toBe(1);
+    expect(third.state.page).toBe(0);
   });
 
   test("Atom parses, with an html title reduced to its text", () => {
@@ -308,7 +447,12 @@ describe("weather", () => {
         is_day: 1,
         ...current,
       },
-      daily: { temperature_2m_max: [38.4], temperature_2m_min: [27.2] },
+      daily: {
+        time: ["2026-09-12", "2026-09-13", "2026-09-14", "2026-09-15", "2026-09-16"],
+        weather_code: [1, 2, 61, 3, 0],
+        temperature_2m_max: [38.4, 37.2, 34.8, 35.1, 36.6],
+        temperature_2m_min: [27.2, 28.1, 25.6, 24.9, 25.2],
+      },
       hourly: hourly ?? {
         time: ["2026-09-12T13:00", "2026-09-12T14:00", "2026-09-12T15:00", "2026-09-12T16:00"],
         temperature_2m: [33, 34.4, 35.5, null],
@@ -323,7 +467,44 @@ describe("weather", () => {
     expect(face.place).toBe("Dubai, United Arab Emirates");
     expect(get.asked[1]).toContain("latitude=25.07&longitude=55.17");
     expect(get.asked[1]).toContain("timezone=auto");
+    expect(get.asked[1]).toContain("daily=weather_code%2Ctemperature_2m_max%2Ctemperature_2m_min");
+    // Six: today, tomorrow for the flipped view's hero, and the four days its
+    // strip carries after it.
+    expect(get.asked[1]).toContain("forecast_days=6");
     expect(get.asked[1]).not.toContain("temperature_unit");
+  });
+
+  test("a tap redraws from the forecast already in hand", async () => {
+    // Both views say the same reading about a different moment, so switching
+    // between them has no reason to visit Open-Meteo. The round trip it saves is
+    // the largest remaining term in a tap once flash is out of the way.
+    const get = fake({ "geocoding-api": GEOCODING, "/v1/forecast": forecast({}) });
+    const settings = { location: "Dubai", units: "metric" };
+    const NOW = new Date("2026-09-27T09:00:00Z");
+
+    const first = await renderWeatherRequest(settings, NOW, {}, get);
+    const asked = get.asked.length;
+    const firstState = typeof first === "string" ? undefined : first.state;
+
+    const tapped = await renderWeatherRequest(
+      settings,
+      new Date(NOW.getTime() + 30_000),
+      { state: firstState, event: { taps: 1, point: null } },
+      get,
+    );
+    expect(get.asked.length).toBe(asked);
+    expect(typeof tapped === "string" ? "" : tapped.svg).not.toBe(
+      typeof first === "string" ? "" : first.svg,
+    );
+
+    // A cache older than the card's own refresh is not reused.
+    await renderWeatherRequest(
+      settings,
+      new Date(NOW.getTime() + 20 * 60_000),
+      { state: firstState, event: { taps: 1, point: null } },
+      get,
+    );
+    expect(get.asked.length).toBeGreaterThan(asked);
   });
 
   test("imperial asks the API for fahrenheit rather than converting", async () => {
@@ -348,6 +529,47 @@ describe("weather", () => {
     expect([face.temperature, face.high, face.low]).toEqual([34, 38, 27]);
   });
 
+  test("the coming days are parsed with weekdays from the forecast's own dates", () => {
+    expect(parseForecast(forecast({}), "Dubai").daily).toEqual([
+      {
+        date: "2026-09-12",
+        label: "SAT",
+        high: 38,
+        low: 27,
+        condition: "clear-day",
+        // WMO code 1 is "mainly clear": the glyph and the words come from two
+        // existing mappings that have always disagreed here, and this pins what
+        // they actually do rather than changing the approved view.
+        summary: "Partly cloudy",
+      },
+      {
+        date: "2026-09-13",
+        label: "SUN",
+        high: 37,
+        low: 28,
+        condition: "partly-cloudy-day",
+        summary: "Partly cloudy",
+      },
+      { date: "2026-09-14", label: "MON", high: 35, low: 26, condition: "rain", summary: "Rain" },
+      {
+        date: "2026-09-15",
+        label: "TUE",
+        high: 35,
+        low: 25,
+        condition: "cloudy",
+        summary: "Overcast",
+      },
+      {
+        date: "2026-09-16",
+        label: "WED",
+        high: 37,
+        low: 25,
+        condition: "clear-day",
+        summary: "Clear",
+      },
+    ]);
+  });
+
   test("halves round away from zero in both directions", () => {
     expect(parseForecast(forecast({ temperature_2m: 18.5 }), "x").temperature).toBe(19);
     expect(parseForecast(forecast({ temperature_2m: -18.5 }), "x").temperature).toBe(-19);
@@ -369,9 +591,156 @@ describe("weather", () => {
     expect(conditionFromWmo(99, false)).toBe("thunderstorm");
     expect(conditionFromWmo(12345, true)).toBe("cloudy");
   });
+
+  const approvedNow = {
+    place: "Dubai",
+    temperature: 34,
+    summary: "Mostly clear",
+    condition: "clear-day" as const,
+    high: 38,
+    low: 27,
+    hourly: [
+      { label: "14", temperature: 34, condition: "clear-day" as const },
+      { label: "15", temperature: 35, condition: "clear-day" as const },
+      { label: "16", temperature: 34, condition: "partly-cloudy-day" as const },
+      { label: "17", temperature: 32, condition: "partly-cloudy-day" as const },
+      { label: "18", temperature: 30, condition: "cloudy" as const },
+      { label: "19", temperature: 29, condition: "clear-night" as const },
+    ],
+    daily: [
+      {
+        date: "2026-09-12",
+        label: "SAT",
+        high: 38,
+        low: 27,
+        condition: "clear-day" as const,
+        summary: "Clear",
+      },
+      {
+        date: "2026-09-13",
+        label: "SUN",
+        high: 37,
+        low: 28,
+        condition: "partly-cloudy-day" as const,
+        summary: "Partly cloudy",
+      },
+      {
+        date: "2026-09-14",
+        label: "MON",
+        high: 35,
+        low: 26,
+        condition: "rain" as const,
+        summary: "Rain",
+      },
+      {
+        date: "2026-09-15",
+        label: "TUE",
+        high: 35,
+        low: 25,
+        condition: "cloudy" as const,
+        summary: "Overcast",
+      },
+      {
+        date: "2026-09-16",
+        label: "WED",
+        high: 37,
+        low: 25,
+        condition: "clear-day" as const,
+        summary: "Clear",
+      },
+    ],
+  };
+  const svgOf = (result: RenderResult): string =>
+    typeof result === "string" ? result : result.svg;
+  const viewOf = (result: RenderResult): unknown =>
+    typeof result === "string" || typeof result.state !== "object" || result.state === null
+      ? undefined
+      : (result.state as { view?: unknown }).view;
+  const minutesBefore = (instant: Date, minutes: number): string =>
+    new Date(instant.getTime() - minutes * 60_000).toISOString();
+
+  test("a tap flips to the coming days and another flips back", () => {
+    expect(weather.tap).toBe("Tap the panel for the coming days.");
+    const days = renderWeatherResult(approvedNow, NOW, {
+      state: { view: "now", tappedAt: null },
+      event: { taps: 1, point: null },
+    });
+    expect(viewOf(days)).toBe("days");
+    expect(typeof days === "string" ? undefined : days.state).toEqual({
+      view: "days",
+      tappedAt: NOW.toISOString(),
+    });
+    const back = renderWeatherResult(approvedNow, NOW, {
+      state: { view: "days", tappedAt: NOW.toISOString() },
+      event: { taps: 1, point: null },
+    });
+    expect(viewOf(back)).toBe("now");
+  });
+
+  test("an even number of coalesced taps lands where it started", () => {
+    for (const view of ["now", "days"] as const) {
+      const result = renderWeatherResult(approvedNow, NOW, {
+        state: { view, tappedAt: null },
+        event: { taps: 2, point: null },
+      });
+      expect(viewOf(result)).toBe(view);
+    }
+  });
+
+  test("a scheduled refresh more than ten minutes after a tap returns to now", () => {
+    const result = renderWeatherResult(approvedNow, NOW, {
+      state: { view: "days", tappedAt: minutesBefore(NOW, 11) },
+    });
+    expect(viewOf(result)).toBe("now");
+  });
+
+  test("a scheduled refresh exactly ten minutes after a tap keeps the days view", () => {
+    const result = renderWeatherResult(approvedNow, NOW, {
+      state: { view: "days", tappedAt: minutesBefore(NOW, 10) },
+    });
+    expect(viewOf(result)).toBe("days");
+  });
+
+  test("the current-conditions view is byte-identical to the approved design", () => {
+    const result = renderWeatherResult(approvedNow, NOW, {
+      state: { view: "now", tappedAt: null },
+    });
+    expect(svgOf(result)).toBe(
+      readFileSync(`${import.meta.dir}/golden/weather--clear-day.svg`, "utf8"),
+    );
+    expect(svgOf(result)).toBe(renderWeather(approvedNow));
+  });
 });
 
 describe("hacker news", () => {
+  const CAPTURED_AT = new Date("2026-09-23T05:00:00Z");
+  const FIXTURE_FRONT_PAGE = CAPTURED_HACKER_NEWS;
+
+  const capturedStories = (count = 20): Story[] =>
+    FIXTURE_FRONT_PAGE.slice(0, count).flatMap((item, index) => {
+      const story = storyFromItem(item, index + 1, CAPTURED_AT);
+      return story === undefined ? [] : [story];
+    });
+
+  const capturedFrontPage = (): FetchText & { asked: string[] } =>
+    fake({
+      "topstories.json": JSON.stringify(FIXTURE_FRONT_PAGE.map(({ id }) => id)),
+      ...Object.fromEntries(
+        FIXTURE_FRONT_PAGE.map((item) => [`item/${item.id}.json`, JSON.stringify(item)]),
+      ),
+    });
+
+  const capturedTitle = (index: number): string => {
+    const item = FIXTURE_FRONT_PAGE[index];
+    if (item === undefined) {
+      throw new Error(`captured Hacker News fixture has no story at index ${index}`);
+    }
+    return item.title;
+  };
+
+  const minutesBefore = (date: Date, minutes: number): string =>
+    new Date(date.getTime() - minutes * 60_000).toISOString();
+
   const item = (id: number, extra: object = {}): string =>
     JSON.stringify({
       id,
@@ -395,7 +764,7 @@ describe("hacker news", () => {
       "item/6.json": item(6),
     });
     const face = await fetchHackerNews({}, NOW, get);
-    expect(face.stories.map((story) => story.rank)).toEqual([1, 2, 3, 4]);
+    expect(face.stories.map((story) => story.rank)).toEqual([1, 2, 3, 4, 5, 6]);
     expect(face.stories[0]).toEqual({
       rank: 1,
       title: "Story 1",
@@ -404,7 +773,7 @@ describe("hacker news", () => {
       domain: "example1.com",
       age: "3h",
     });
-    expect(get.asked.some((url) => url.includes("item/7.json"))).toBe(false);
+    expect(get.asked.some((url) => url.includes("item/8.json"))).toBe(true);
   });
 
   test("a dead, deleted or unreadable story is skipped and the ranks stay contiguous", async () => {
@@ -478,5 +847,108 @@ describe("hacker news", () => {
     for (const match of svg.matchAll(/<text x="[\d.-]+" y="([\d.-]+)"/g)) {
       expect(Number(match[1])).toBeLessThanOrEqual(368 - 24);
     }
+  });
+
+  test("a tap moves to the next page without fetching", async () => {
+    const get = fake({});
+    const result = await renderHackerNewsRequest(
+      {},
+      CAPTURED_AT,
+      {
+        state: { stories: capturedStories(), page: 0, tappedAt: null },
+        event: { taps: 1, point: null },
+      },
+      get,
+    );
+    expect(get.asked).toEqual([]);
+    expect(hackernews.tap).toBe("Tap the panel for the next stories.");
+    expect(result.state.page).toBe(1);
+    expect(visibleSvgText(result.svg)).toContain(capturedTitle(4));
+    expect(result.svg).toContain(">2 / 5<");
+  });
+
+  test("three coalesced taps move three pages", async () => {
+    const result = await renderHackerNewsRequest(
+      {},
+      CAPTURED_AT,
+      {
+        state: { stories: capturedStories(), page: 0, tappedAt: null },
+        event: { taps: 3, point: null },
+      },
+      fake({}),
+    );
+    expect(result.state.page).toBe(3);
+    expect(visibleSvgText(result.svg)).toContain(capturedTitle(12));
+  });
+
+  test("paging wraps at the end", async () => {
+    const result = await renderHackerNewsRequest(
+      {},
+      CAPTURED_AT,
+      {
+        state: { stories: capturedStories(), page: 4, tappedAt: null },
+        event: { taps: 1, point: null },
+      },
+      fake({}),
+    );
+    expect(result.state.page).toBe(0);
+    expect(visibleSvgText(result.svg)).toContain(capturedTitle(0));
+    expect(visibleSvgText(result.svg)).toContain(capturedTitle(1));
+    expect(visibleSvgText(result.svg)).toContain(capturedTitle(2));
+  });
+
+  test("a scheduled refresh within ten minutes of a tap keeps the page", async () => {
+    const get = capturedFrontPage();
+    const result = await renderHackerNewsRequest(
+      {},
+      CAPTURED_AT,
+      { state: { stories: capturedStories(), page: 2, tappedAt: minutesBefore(CAPTURED_AT, 9) } },
+      get,
+    );
+    expect(result.state.page).toBe(2);
+    expect(result.state.stories).toHaveLength(20);
+    expect(Buffer.byteLength(JSON.stringify(result.state))).toBeLessThanOrEqual(16 * 1024);
+    expect(get.asked).toHaveLength(23);
+    expect(visibleSvgText(result.svg)).toContain(capturedTitle(8));
+  });
+
+  test("a scheduled refresh more than ten minutes after a tap returns to the front", async () => {
+    const result = await renderHackerNewsRequest(
+      {},
+      CAPTURED_AT,
+      { state: { stories: capturedStories(), page: 2, tappedAt: minutesBefore(CAPTURED_AT, 11) } },
+      capturedFrontPage(),
+    );
+    expect(result.state.page).toBe(0);
+    expect(result.state.tappedAt).toBeNull();
+    expect(visibleSvgText(result.svg)).toContain(capturedTitle(0));
+  });
+
+  test("a tap on a face with no state fetches, as a first render does", async () => {
+    const get = capturedFrontPage();
+    const result = await renderHackerNewsRequest(
+      {},
+      CAPTURED_AT,
+      { state: undefined, event: { taps: 1, point: null } },
+      get,
+    );
+    expect(get.asked).toHaveLength(23);
+    expect(result.state.page).toBe(0);
+    expect(visibleSvgText(result.svg)).toContain(capturedTitle(0));
+  });
+
+  test("a page with fewer than four stories still draws", async () => {
+    const result = await renderHackerNewsRequest(
+      {},
+      CAPTURED_AT,
+      {
+        state: { stories: capturedStories(17), page: 3, tappedAt: null },
+        event: { taps: 1, point: null },
+      },
+      fake({}),
+    );
+    expect(result.state.page).toBe(4);
+    expect(visibleSvgText(result.svg)).toContain(capturedTitle(16));
+    expect(result.svg).toContain(">5 / 5<");
   });
 });

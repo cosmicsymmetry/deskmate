@@ -40,9 +40,9 @@ pub use scene_build::{
 };
 pub use state::{
     AppSnapshot, CardDataSnapshot, CardError, CardErrorKind, CardField, CardFieldValue,
-    ConnectionState, DeviceCapability, DeviceCounters, DeviceOtaState, DeviceSnapshot, DeviceTier,
-    DeviceWifiState, PersistenceState, PomodoroSnapshot, PomodoroState, RuntimeDiagnostics,
-    RuntimeState,
+    ConnectionState, DeviceAssetStore, DeviceCapability, DeviceCounters, DeviceOtaState,
+    DeviceSnapshot, DeviceTier, DeviceWifiState, PersistenceState, PomodoroSnapshot, PomodoroState,
+    RuntimeDiagnostics, RuntimeState,
 };
 pub use store::{
     ConfigOrigin, ConfigStore, LoadOutcome, MAX_CONFIG_FILE_BYTES,

@@ -175,7 +175,7 @@ fn an_image_source_update_for_a_card_that_is_not_on_screen_pushes_no_scene() {
     let operations = run_image_source_update_case(false, existing_digest, picture_digest);
     assert_eq!(
         operations.len(),
-        7,
+        6,
         "unexpected update transcript: {operations:?}"
     );
     assert_image_update_asset_prefix(&operations, existing_digest, picture_digest);
@@ -188,21 +188,54 @@ fn an_image_source_update_for_a_card_that_is_not_on_screen_pushes_no_scene() {
 }
 
 #[test]
-fn an_image_source_update_for_the_visible_card_pushes_a_scene_after_the_bytes() {
+fn an_image_source_update_for_the_visible_card_reaches_the_glass_before_any_flash_work() {
+    // The interactive contract, and the reason the volatile tier exists: the
+    // frame on the glass is drawn from PSRAM first. Durable housekeeping may
+    // follow and may cost flash, but it may not stand in front of the picture.
+    // Measured on `dev-0005` 2026-09-26, the durable-first order cost 13.3 s
+    // from tap to pixels, 9.4 s of it compaction with the clock on screen.
     let existing_digest = [0x52; protocol::ASSET_DIGEST_LEN];
     let picture_digest = [0x53; protocol::ASSET_DIGEST_LEN];
     let operations = run_image_source_update_case(true, existing_digest, picture_digest);
-    assert_eq!(
-        operations.len(),
-        8,
-        "unexpected update transcript: {operations:?}"
-    );
-    assert_image_update_asset_prefix(&operations, existing_digest, picture_digest);
+
+    let volatile_at = operations
+        .iter()
+        .position(|operation| {
+            matches!(operation, Operation::VolatileAssetBegin(digest) if digest == &picture_digest)
+        })
+        .unwrap_or_else(|| {
+            panic!("the visible card's frame was not sent to PSRAM: {operations:?}")
+        });
+    let scene_at = operations
+        .iter()
+        .position(|operation| {
+            matches!(operation, Operation::PushScene(push) if push.scene.nodes.iter().any(
+                |node| matches!(node, SceneNode::Image(image) if image.digest == picture_digest)
+            ))
+        })
+        .unwrap_or_else(|| panic!("the new frame never reached a scene: {operations:?}"));
     assert!(
-        matches!(&operations[7], Operation::PushScene(push) if push.scene.nodes.iter().any(
-            |node| matches!(node, SceneNode::Image(image) if image.digest == picture_digest)
-        ))
+        volatile_at < scene_at,
+        "the scene must name a digest the device already holds: {operations:?}"
     );
+
+    let durable_at = operations.iter().position(
+        |operation| matches!(operation, Operation::AssetBegin(digest) if digest == &picture_digest),
+    );
+    let release_at = operations
+        .iter()
+        .position(|operation| matches!(operation, Operation::AssetRelease(_)));
+    for (label, flash_at) in [
+        ("the durable write", durable_at),
+        ("the release", release_at),
+    ] {
+        if let Some(flash_at) = flash_at {
+            assert!(
+                scene_at < flash_at,
+                "{label} ran before the picture was on screen: {operations:?}"
+            );
+        }
+    }
 }
 
 #[test]

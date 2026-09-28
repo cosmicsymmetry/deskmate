@@ -27,6 +27,7 @@
 import {
   ConfigurationError,
   type FaceDefinition,
+  type RenderContext,
   type Settings,
   text,
   TransientError,
@@ -64,6 +65,9 @@ import {
 // direction and the percentage arrive decided.
 // ---------------------------------------------------------------------------
 
+/** How the price history is drawn, or that it is not drawn at all. */
+export type ChartStyle = "line" | "candles" | "none";
+
 export interface TokenFace {
   /** The ticker, e.g. "SOL". */
   symbol: string;
@@ -82,7 +86,7 @@ export interface TokenFace {
   series: number[];
   /** Oldest to newest. Drawn instead of the line when `chart` is "candles". */
   candles: Candle[];
-  chart: "line" | "candles" | "none";
+  chart: ChartStyle;
   /** CoinGecko's id for the coin the ticker resolved to: what the history requests need. */
   coinId: string;
 }
@@ -794,9 +798,99 @@ function compactPrice(price: number): string {
   return splitPrice(price).join("");
 }
 
+/**
+ * What a tap remembers: which chart the owner asked for by touching the glass,
+ * rather than by editing the card.
+ *
+ * Only the choice is stored, never the series. The points are the bulk of a
+ * token face and would crowd the 16 KB the server allows per source, so a tap
+ * pays its fetch again. That still skips the two costs that actually hurt --
+ * the flash write and the compaction behind it.
+ */
+export interface TokenState {
+  chart: ChartStyle;
+  tappedAt: string | null;
+}
+
+/** The chart returns to the card's own setting after this long untouched. */
+const TEMPORARY_CHART_MS = 10 * 60 * 1_000;
+
+/**
+ * The styles a tap moves between.
+ *
+ * `none` is deliberately not in the cycle: a face configured for no chart never
+ * requests the series, so there would be nothing to draw on arrival.
+ */
+const TAPPABLE_CHARTS = ["line", "candles"] as const;
+
+function storedState(value: unknown): TokenState | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const candidate = value as { chart?: unknown; tappedAt?: unknown };
+  const chart = TAPPABLE_CHARTS.find((style) => style === candidate.chart);
+  if (chart === undefined) {
+    return undefined;
+  }
+  return {
+    chart,
+    tappedAt: typeof candidate.tappedAt === "string" ? candidate.tappedAt : null,
+  };
+}
+
+function nextChart(current: ChartStyle, taps: number): ChartStyle {
+  const index = TAPPABLE_CHARTS.indexOf(current as (typeof TAPPABLE_CHARTS)[number]);
+  const from = index === -1 ? 0 : index;
+  const next = (from + taps) % TAPPABLE_CHARTS.length;
+  return TAPPABLE_CHARTS[(next + TAPPABLE_CHARTS.length) % TAPPABLE_CHARTS.length] as ChartStyle;
+}
+
+function recentTap(tappedAt: string | null, now: Date): boolean {
+  if (tappedAt === null) {
+    return false;
+  }
+  const at = Date.parse(tappedAt);
+  return Number.isFinite(at) && now.getTime() - at <= TEMPORARY_CHART_MS;
+}
+
+export async function renderTokenRequest(
+  settings: Settings,
+  now: Date,
+  context: RenderContext = {},
+  get: FetchText = fetchText,
+): Promise<{ svg: string; state: TokenState | null }> {
+  // The style has to be settled BEFORE fetching, not after: a line reads
+  // `market_chart` and candles read `ohlc`, never both, so overriding the face
+  // afterwards would draw one style from the other's data.
+  const chosen = text(settings, "chart");
+  const configured: ChartStyle = chosen === "candles" || chosen === "none" ? chosen : "line";
+  // A card set to "none" requests no series at all, so there is nothing for a
+  // tap to switch to. Returning null state keeps a stale override from
+  // reappearing if the owner later turns a chart back on.
+  if (configured === "none") {
+    return { svg: renderToken(await fetchToken(settings, get)), state: null };
+  }
+
+  const previous = storedState(context.state);
+  let state: TokenState;
+  if (context.event !== undefined) {
+    state = {
+      chart: nextChart(previous?.chart ?? configured, context.event.taps),
+      tappedAt: now.toISOString(),
+    };
+  } else if (previous !== undefined && recentTap(previous.tappedAt, now)) {
+    state = previous;
+  } else {
+    state = { chart: configured, tappedAt: null };
+  }
+  const face = await fetchToken({ ...settings, chart: state.chart }, get);
+  return { svg: renderToken(face), state };
+}
+
 export const token: FaceDefinition = {
   kind: "token",
   label: "Token price",
+  tap: "Tap the panel to switch between the line and the candles.",
   fields: [
     // The key is `coin_id` because that is what spec files already hold. It takes a ticker.
     { type: "text", key: "coin_id", label: "Ticker", placeholder: "SOL" },
@@ -813,7 +907,7 @@ export const token: FaceDefinition = {
       ],
     },
   ],
-  async render(settings) {
-    return renderToken(await fetchToken(settings, fetchText));
+  async render(settings, now, context) {
+    return renderTokenRequest(settings, now, context);
   },
 };

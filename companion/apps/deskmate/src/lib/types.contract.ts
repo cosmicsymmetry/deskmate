@@ -127,6 +127,11 @@ export const apiContractFixtures = {
         "ui_queue_high_water": 11,
         "host_dropped_events": 12,
         "detected_event_gaps": 13
+      },
+      "asset_store": {
+        "used_bytes": 141312,
+        "free_bytes": 6149120,
+        "asset_count": 4
       }
     },
     "pomodoros": [
@@ -180,7 +185,8 @@ export const apiContractFixtures = {
       "commands_processed": 1,
       "command_queue_full": 2,
       "subscriber_snapshots_overwritten": 6,
-      "interrupt_dismissals_ignored": 7
+      "interrupt_dismissals_ignored": 7,
+      "taps_dropped": 8
     },
     "has_saved_config": true,
     "host_protocol_version": 2
@@ -791,6 +797,7 @@ export const apiContractFixtures = {
     {
       "kind": "headlines",
       "label": "Headlines",
+      "tap": "Tap the panel for the next stories.",
       "fields": [
         {
           "type": "enum",

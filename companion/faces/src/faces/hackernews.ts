@@ -20,10 +20,25 @@
 // only if every title in it fits whole. A long headline therefore costs index rows
 // before it costs a word, and a short one is set as large as a hero numeral.
 
-import { type FaceDefinition, type Settings, text, TransientError } from "../face";
+import {
+  type FaceDefinition,
+  type RenderContext,
+  type Settings,
+  text,
+  TransientError,
+} from "../face";
 import { relativeAge } from "../kit/age";
 import { type FetchText, fetchText } from "../kit/http";
-import { Canvas, fit, fixed, normalizeWhitespace, textWidth, wrap } from "../kit/svg";
+import {
+  Canvas,
+  fit,
+  fitTracked,
+  fixed,
+  normalizeWhitespace,
+  textWidth,
+  trackedWidth,
+  wrap,
+} from "../kit/svg";
 import {
   baselineFromCapTop,
   baselineFromCenter,
@@ -41,8 +56,10 @@ import {
   RADIUS_MODULE,
   SIZE_BODY,
   SIZE_CAPTION,
+  SIZE_EYEBROW,
   SIZE_SUBHEAD,
   SURFACE,
+  TRACKING_EYEBROW,
   WEIGHT_REGULAR,
   WEIGHT_SEMIBOLD,
 } from "../kit/theme";
@@ -65,6 +82,14 @@ export interface Story {
 
 export interface HackerNewsFace {
   stories: Story[];
+  /** Zero-based position and total, omitted by legacy/static render callers. */
+  page?: { index: number; count: number };
+}
+
+export interface HackerNewsState {
+  stories: Story[];
+  page: number;
+  tappedAt: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -83,7 +108,9 @@ const LISTS: Record<string, string> = {
 /** One lead plus three index rows is the most the face ever shows. */
 const MAX_STORIES = 4;
 /** A couple of spares, because a ranked id can be dead or deleted. */
-const FETCHED = MAX_STORIES + 2;
+const FETCHED = MAX_STORIES * 5 + 2;
+const STORED_STORIES = MAX_STORIES * 5;
+const TEMPORARY_VIEW_MS = 10 * 60 * 1000;
 
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
 
@@ -166,7 +193,7 @@ export async function fetchHackerNews(
   const stories: Story[] = [];
   for (const item of items) {
     const story = storyFromItem(item, stories.length + 1, now);
-    if (story !== undefined && stories.length < MAX_STORIES) {
+    if (story !== undefined && stories.length < STORED_STORIES) {
       stories.push(story);
     }
   }
@@ -211,6 +238,12 @@ const ROW_LEADING = 26;
 const ROW_PAD = 12;
 const ROW_PAD_MAX = 17;
 const RANK_COLUMN = 26;
+/**
+ * The gap between a rank numeral and its title. Chosen to match the rhythm the
+ * fixed 26px column already gave a single digit (26 - 11.3 for a "9"), and kept
+ * just under it so every one-digit page stays byte-identical to its golden.
+ */
+const RANK_GUTTER = 14;
 const POINTS_SIZE = SIZE_CAPTION;
 const POINTS_GUTTER = 14;
 const ARROW_SMALL = 9;
@@ -292,6 +325,25 @@ interface Plan {
   rows: Row[];
   heroHeight: number;
   rowPad: number;
+  rankColumn: number;
+}
+
+/**
+ * How much room the index gives its rank numerals.
+ *
+ * Paging made ranks reach two digits for the first time -- the front page is 1..4,
+ * page three is 9..12 -- and a fixed 26px column left "10" all but touching the
+ * title beside it. The column is therefore measured, and a page of single digits
+ * keeps exactly the width it always had.
+ */
+function rankColumn(stories: Story[]): number {
+  if (stories.length === 0) {
+    return RANK_COLUMN;
+  }
+  const widest = Math.max(
+    ...stories.map((story) => textWidth(String(story.rank), ROW_SIZE, WEIGHT_SEMIBOLD)),
+  );
+  return Math.max(RANK_COLUMN, widest + RANK_GUTTER);
 }
 
 function pointsColumn(stories: Story[]): number {
@@ -310,10 +362,11 @@ function plan(lead: Story, rest: Story[]): Plan {
 
   for (let rowCount = Math.min(MAX_ROWS, rest.length); rowCount >= 0; rowCount -= 1) {
     const shown = rest.slice(0, rowCount);
+    const shownRankColumn = rankColumn(shown);
     const titleWidth =
       CONTENT_WIDTH -
       2 * STRIP_PAD_X -
-      RANK_COLUMN -
+      shownRankColumn -
       (rowCount > 0 ? pointsColumn(shown) : 0) -
       POINTS_GUTTER;
     const natural = shown.map((story) =>
@@ -356,6 +409,7 @@ function plan(lead: Story, rest: Story[]): Plan {
           rows,
           heroHeight: HEIGHT - (rowCount === 0 ? 0 : stripHeight(rows, rowPad) + MODULE_GAP),
           rowPad,
+          rankColumn: shownRankColumn,
         };
       }
       break; // The largest size that fits this row count; smaller ones only score lower.
@@ -374,6 +428,7 @@ function plan(lead: Story, rest: Story[]): Plan {
     rows: [],
     heroHeight: HEIGHT,
     rowPad: ROW_PAD,
+    rankColumn: RANK_COLUMN,
   };
 }
 
@@ -402,7 +457,12 @@ function bubble(canvas: Canvas, x: number, base: number, height: number, fill: s
   return width;
 }
 
-function sourceRow(canvas: Canvas, source: string, age: string): void {
+function sourceRow(
+  canvas: Canvas,
+  source: string,
+  age: string,
+  page?: HackerNewsFace["page"],
+): void {
   const x = MARGIN + HERO_PAD_X;
   const right = MARGIN + CONTENT_WIDTH - HERO_PAD_X;
   const chipTop = TOP + HERO_PAD_TOP;
@@ -431,18 +491,41 @@ function sourceRow(canvas: Canvas, source: string, age: string): void {
     });
   }
   const sourceX = x + CHIP + 10;
+  let sourceRight = right - ageWidth;
+  if (page !== undefined) {
+    const pageText = fitTracked(
+      `${page.index + 1} / ${page.count}`,
+      SIZE_EYEBROW,
+      WEIGHT_SEMIBOLD,
+      TRACKING_EYEBROW,
+      10 * GRID,
+    );
+    const pageWidth = trackedWidth(pageText, SIZE_EYEBROW, WEIGHT_SEMIBOLD, TRACKING_EYEBROW);
+    const pageRight = right - ageWidth;
+    canvas.text({
+      x: pageRight,
+      baseline: baselineFromCenter(center, SIZE_EYEBROW),
+      content: pageText,
+      size: SIZE_EYEBROW,
+      fill: HERO_INK_3,
+      weight: WEIGHT_SEMIBOLD,
+      anchor: "end",
+      tracking: TRACKING_EYEBROW,
+    });
+    sourceRight = pageRight - pageWidth - 2 * GRID;
+  }
   canvas.text({
     x: sourceX,
     baseline: baselineFromCenter(center, SIZE_CAPTION),
-    content: fit(source, SIZE_CAPTION, WEIGHT_REGULAR, right - ageWidth - sourceX),
+    content: fit(source, SIZE_CAPTION, WEIGHT_REGULAR, sourceRight - sourceX),
     size: SIZE_CAPTION,
     fill: HERO_INK_2,
   });
 }
 
-function drawHero(canvas: Canvas, lead: Story, layout: Plan): void {
+function drawHero(canvas: Canvas, lead: Story, layout: Plan, page?: HackerNewsFace["page"]): void {
   canvas.roundedRect(MARGIN, TOP, CONTENT_WIDTH, layout.heroHeight, RADIUS_MODULE, HERO_GROUND);
-  sourceRow(canvas, lead.domain === "" ? "Hacker News" : lead.domain, lead.age);
+  sourceRow(canvas, lead.domain === "" ? "Hacker News" : lead.domain, lead.age, page);
 
   // The two numerals that make this Hacker News. The word beside neither is needed:
   // the arrow and the bubble say which is which, so colour is not carrying it alone.
@@ -514,7 +597,7 @@ function drawIndex(canvas: Canvas, layout: Plan): void {
     });
     row.lines.forEach((line, lineIndex) => {
       canvas.text({
-        x: x + RANK_COLUMN,
+        x: x + layout.rankColumn,
         baseline: baseline + lineIndex * ROW_LEADING,
         content: line,
         size: ROW_SIZE,
@@ -569,14 +652,103 @@ export function renderHackerNews(face: HackerNewsFace): string {
     return canvas.finish();
   }
   const layout = plan(lead, rest);
-  drawHero(canvas, lead, layout);
+  drawHero(canvas, lead, layout, face.page);
   drawIndex(canvas, layout);
   return canvas.finish();
+}
+
+function isStoredStory(value: unknown): value is Story {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const story = value as Record<string, unknown>;
+  return (
+    Number.isInteger(story.rank) &&
+    typeof story.title === "string" &&
+    typeof story.points === "number" &&
+    Number.isFinite(story.points) &&
+    typeof story.comments === "number" &&
+    Number.isFinite(story.comments) &&
+    typeof story.domain === "string" &&
+    typeof story.age === "string"
+  );
+}
+
+function storedState(value: unknown): HackerNewsState | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const state = value as Record<string, unknown>;
+  if (
+    !Array.isArray(state.stories) ||
+    !state.stories.every(isStoredStory) ||
+    !Number.isInteger(state.page) ||
+    (state.tappedAt !== null && typeof state.tappedAt !== "string")
+  ) {
+    return undefined;
+  }
+  return {
+    stories: state.stories.slice(0, STORED_STORIES),
+    page: Math.max(0, state.page as number),
+    tappedAt: state.tappedAt as string | null,
+  };
+}
+
+const pageCount = (stories: Story[]): number =>
+  Math.max(1, Math.ceil(stories.length / MAX_STORIES));
+
+function normalizedPage(page: number, stories: Story[]): number {
+  return page % pageCount(stories);
+}
+
+function recentTap(tappedAt: string | null, now: Date): boolean {
+  if (tappedAt === null) {
+    return false;
+  }
+  const instant = Date.parse(tappedAt);
+  return Number.isFinite(instant) && now.getTime() - instant <= TEMPORARY_VIEW_MS;
+}
+
+function drawState(state: HackerNewsState): string {
+  const count = pageCount(state.stories);
+  const page = normalizedPage(state.page, state.stories);
+  return renderHackerNews({
+    stories: state.stories.slice(page * MAX_STORIES, (page + 1) * MAX_STORIES),
+    page: { index: page, count },
+  });
+}
+
+export async function renderHackerNewsRequest(
+  settings: Settings,
+  now: Date,
+  context: RenderContext = {},
+  get: FetchText = fetchText,
+): Promise<{ svg: string; state: HackerNewsState }> {
+  const previous = storedState(context.state);
+  if (context.event !== undefined && previous !== undefined && previous.stories.length > 0) {
+    const state: HackerNewsState = {
+      stories: previous.stories,
+      page: normalizedPage(previous.page + context.event.taps, previous.stories),
+      tappedAt: now.toISOString(),
+    };
+    return { svg: drawState(state), state };
+  }
+
+  const fresh = await fetchHackerNews(settings, now, get);
+  const keepPage =
+    context.event === undefined && previous !== undefined && recentTap(previous.tappedAt, now);
+  const state: HackerNewsState = {
+    stories: fresh.stories,
+    page: keepPage ? normalizedPage(previous.page, fresh.stories) : 0,
+    tappedAt: keepPage ? previous.tappedAt : context.event === undefined ? null : now.toISOString(),
+  };
+  return { svg: drawState(state), state };
 }
 
 export const hackernews: FaceDefinition = {
   kind: "hackernews",
   label: "Hacker News",
+  tap: "Tap the panel for the next stories.",
   fields: [
     {
       type: "enum",
@@ -592,7 +764,7 @@ export const hackernews: FaceDefinition = {
       ],
     },
   ],
-  async render(settings, now) {
-    return renderHackerNews(await fetchHackerNews(settings, now, fetchText));
+  render(settings, now, context) {
+    return renderHackerNewsRequest(settings, now, context);
   },
 };

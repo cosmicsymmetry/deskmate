@@ -217,6 +217,11 @@ pub(super) fn update_device_status(
         .last_network_error
         .clone_from(&status.last_network_error);
     state.device.ota_state = Some(status.ota_state.into());
+    state.device.asset_store = status.asset_store.map(|stats| crate::DeviceAssetStore {
+        used_bytes: stats.used_bytes,
+        free_bytes: stats.free_bytes,
+        asset_count: stats.asset_count,
+    });
     state.device.counters = DeviceCounters {
         host_reconnects: diagnostics.reconnects,
         valid_frames: status.valid_frames,

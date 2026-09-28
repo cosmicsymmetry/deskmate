@@ -79,6 +79,9 @@ const CREATABLE_FACES: FaceDescriptor[] = [
   {
     kind: "hackernews",
     label: "Hacker News",
+    // The mock declares this only because the shipped face does: a harness that
+    // offers what the product lacks exercises a product nobody can reach.
+    tap: "Tap the panel for the next stories.",
     fields: [
       {
         key: "list",

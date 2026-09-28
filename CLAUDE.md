@@ -12,8 +12,8 @@ Read these before changing code:
 
 1. `docs/superpowers/specs/2026-08-03-deskmate-design.md` - approved product and
    architecture contract.
-2. `docs/superpowers/plans/2026-08-03-deskmate-roadmap.md` - milestone order and current
-   milestone.
+2. `docs/roadmap.md` - the tracks, their order, how they run in parallel, and the board
+   with the schema/wire lock.
 3. The current milestone plan linked from the roadmap - executable checklist and
    acceptance criteria.
 4. `docs/hardware/board-notes.md` - verified board facts, component versions, and
@@ -141,14 +141,11 @@ default. This section states only what is true now.
     so a host-wide gate breaks the device link outright. That is why the removed block
     gated only `/`, `/assets/*`, `/v1/app/*` and `/v1/manage/*`. Cookie and Basic do not
     contend, so the two gates can coexist -- they just are not both wanted.
-- **Milestones**: V1, V2 and V3 are exited and tagged (`v1` at `7abd496`, `v2` at
-  `fdf85ba`, `v3` at the commit that records its exit). **V3 (server host) exited on the
-  owner's direction 2026-09-22**: sub-projects 1-4 merged to `main` (`fb15060`,
-  2026-09-13), schema- and wire-neutral. Its last two items -- the reference Google
-  Calendar producer and the end-to-end gate on the panel -- were **dropped, not done**:
-  there is no Calendar producer in `tools/picture-producers/`, and no V3 exit gate was
-  observed on hardware. No milestone is current; V4's brainstorm has not started. Tags
-  require explicit owner authorization.
+- **Milestones**: the old M0-M4/V1-V4 roadmap was deleted on 2026-09-22 and nothing in
+  it is owed; its tags (`m0`, `m1`, `v1`, `v2`, `v3`) remain as history. The new
+  roadmap (`docs/roadmap.md`, brainstormed with the owner) is organised as parallel
+  tracks, not milestones; its board says what each track is doing. Tags require explicit
+  owner authorization.
 - **The legacy subtraction** (spec
   `docs/superpowers/specs/2026-09-11-deskmate-legacy-subtraction-design.md`): all three
   waves are complete and merged, Wave C on explicit owner direction 2026-09-12.

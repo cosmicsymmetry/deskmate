@@ -408,6 +408,12 @@ describe("configuration draft helpers", () => {
       throw new Error("addCard did not append the pomodoro card");
     }
     expect(tapActionDescription(clock)).toBe("Tapping this card does nothing.");
+    // A face that answers taps speaks for itself; a blank sentence is not a face.
+    expect(tapActionDescription(clock, "Tap the panel for the coming days.")).toBe(
+      "Tap the panel for the coming days.",
+    );
+    expect(tapActionDescription(clock, null)).toBe("Tapping this card does nothing.");
+    expect(tapActionDescription(clock, "   ")).toBe("Tapping this card does nothing.");
     expect(tapActionDescription(pomodoro)).toBe("Tapping this card starts or pauses its timer.");
   });
 

@@ -48,7 +48,12 @@ pub(super) fn synchronize_full(
     });
     match asset_result {
         Some((digests, Ok(_))) => {
-            state.confirmed_durable_assets = digests.into_iter().collect();
+            state.confirmed_resident_assets = digests.into_iter().collect();
+            // A reconnect reconciles from scratch and always releases: it is
+            // rare, the device may have been away for days, and this is the one
+            // moment nobody is watching a tap land. Restart the cadence from
+            // here so the next pass does not immediately compact again.
+            state.last_asset_release = Some(Instant::now());
             clear_asset_sync_refusals(state);
         }
         Some((_, Err(error))) => record_asset_sync_refusals(state, &error.to_string()),

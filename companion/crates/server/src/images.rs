@@ -1,6 +1,7 @@
 //! Producer-facing picture ingest and admin image-source lifecycle routes.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::rejection::JsonRejection;
@@ -13,9 +14,9 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use crate::{ImageNotificationOrigin, ServerState};
-// These operator routes accept either the browser's session cookie or the raw
-// admin bearer used by scripts. Both carriers represent the same privilege.
+use crate::{AccountSpace, ImageNotificationOrigin, ServerState};
+// These account routes accept the browser's session cookie. The admin bearer
+// is deliberately not a browser session.
 //
 // The producer push route below is deliberately NOT covered by this: it
 // authenticates a per-source producer credential, which is a different and much
@@ -23,7 +24,7 @@ use crate::{ImageNotificationOrigin, ServerState};
 use crate::auth::bearer_token;
 use crate::image_ingest::{ImageIngestError, canonical_frame_from_png};
 use crate::image_sources::{AcceptOutcome, ImageSourceError};
-use crate::oauth::session::OperatorAuthenticated;
+use crate::web_auth::AccountSession;
 
 const MAX_IMAGE_BODY_BYTES: usize = 1024 * 1024;
 const MAX_FACE_SETTINGS_BODY_BYTES: usize = 16 * 1024;
@@ -180,30 +181,32 @@ struct UpdateFaceRequest {
 
 async fn list_sources(
     State(state): State<ServerState>,
-    _operator: OperatorAuthenticated,
-) -> Json<Vec<ImageSourceDescriptor>> {
-    let sources = state
-        .image_sources()
+    session: AccountSession,
+) -> Result<Json<Vec<ImageSourceDescriptor>>, ImageRouteError> {
+    let space = account_space(&state, &session).await?;
+    let sources = space
+        .image_sources
         .summaries(chrono::Utc::now())
         .into_iter()
         .map(|source| ImageSourceDescriptor {
-            face: crate::data_cards::descriptor_for_source(&state, &source.id),
-            face_status: crate::data_cards::status_for_source(&state, &source.id),
+            face: crate::data_cards::descriptor_for_source(&state, &space, &source.id),
+            face_status: crate::data_cards::status_for_source(&state, &space, &source.id),
             id: source.id,
             name: source.name,
         })
         .collect();
-    Json(sources)
+    Ok(Json(sources))
 }
 
 async fn update_face(
     State(state): State<ServerState>,
-    _operator: OperatorAuthenticated,
+    session: AccountSession,
     Path(source_id): Path<String>,
     payload: Result<Json<UpdateFaceRequest>, JsonRejection>,
 ) -> Result<Json<crate::data_cards::FaceDescriptor>, ImageRouteError> {
-    let source_exists = state
-        .image_sources()
+    let space = account_space(&state, &session).await?;
+    let source_exists = space
+        .image_sources
         .summaries(chrono::Utc::now())
         .iter()
         .any(|source| source.id == source_id);
@@ -216,8 +219,15 @@ async fn update_face(
     })?;
     let runtime = tokio::runtime::Handle::current();
     let update_state = state.clone();
+    let update_space = Arc::clone(&space);
     let updated = tokio::task::spawn_blocking(move || {
-        crate::data_cards::update_face_fields(&update_state, &runtime, &source_id, &request.fields)
+        crate::data_cards::update_face_fields(
+            &update_state,
+            &update_space,
+            &runtime,
+            &source_id,
+            &request.fields,
+        )
     })
     .await
     .map_err(|_| ImageRouteError::WorkerFailed)?
@@ -231,14 +241,14 @@ async fn update_face(
 /// window without the app knowing what weather is.
 async fn list_creatable_faces(
     State(state): State<ServerState>,
-    _operator: OperatorAuthenticated,
+    _session: AccountSession,
 ) -> Json<Vec<crate::data_cards::FaceDescriptor>> {
     Json(crate::data_cards::creatable_faces(&state))
 }
 
 async fn mint_source(
     State(state): State<ServerState>,
-    _operator: OperatorAuthenticated,
+    session: AccountSession,
     payload: Result<Json<MintSourceRequest>, JsonRejection>,
 ) -> Result<Json<MintSourceResponse>, ImageRouteError> {
     let Json(request) = payload.map_err(|rejection| ImageRouteError::InvalidJson {
@@ -246,30 +256,49 @@ async fn mint_source(
         message: rejection.body_text(),
     })?;
     let face_kind = request.face_kind.clone();
+    let space = account_space(&state, &session).await?;
+    let maximum = state
+        .entitlements()
+        .max_image_sources(&space.account_id)
+        .min(app_core::config::MAX_IMAGE_SOURCES);
+    // Only a plan stricter than the store speaks for itself; at the store's own
+    // ceiling the store answers, so self-hosting keeps its existing contract.
+    if maximum < app_core::config::MAX_IMAGE_SOURCES
+        && space.image_sources.summaries(chrono::Utc::now()).len() >= maximum
+    {
+        return Err(ImageRouteError::EntitlementCapacity { maximum });
+    }
     let mint_state = state.clone();
-    let minted =
-        tokio::task::spawn_blocking(move || mint_state.image_sources().mint(&request.name))
-            .await
-            .map_err(|_| ImageRouteError::WorkerFailed)?
-            .map_err(|error| map_mint_error(&error))?;
+    let mint_space = Arc::clone(&space);
+    let minted = tokio::task::spawn_blocking(move || {
+        let _ = mint_state;
+        mint_space.image_sources.mint(&request.name)
+    })
+    .await
+    .map_err(|_| ImageRouteError::WorkerFailed)?
+    .map_err(|error| map_mint_error(&error))?;
 
     // A server-drawn face is attached in the same request. If attaching fails the
     // source is revoked rather than left behind: a half-made source shows up in
     // the add menu as something the owner never asked for and cannot explain.
     if let Some(kind) = face_kind {
         let face_state = state.clone();
+        let face_space = Arc::clone(&space);
         let source_id = minted.id.clone();
         let attached = tokio::task::spawn_blocking(move || {
-            crate::data_cards::create_face(&face_state, &source_id, &kind)
+            crate::data_cards::create_face(&face_state, &face_space, &source_id, &kind)
         })
         .await
         .map_err(|_| ImageRouteError::WorkerFailed)?;
         if let Err(error) = attached {
             let revoke_state = state.clone();
+            let revoke_space = Arc::clone(&space);
             let orphan = minted.id.clone();
-            let _ =
-                tokio::task::spawn_blocking(move || revoke_state.image_sources().revoke(&orphan))
-                    .await;
+            let _ = tokio::task::spawn_blocking(move || {
+                let _ = revoke_state;
+                revoke_space.image_sources.revoke(&orphan)
+            })
+            .await;
             return Err(map_face_update_error(&error));
         }
     }
@@ -282,10 +311,11 @@ async fn mint_source(
 
 async fn revoke_source(
     State(state): State<ServerState>,
-    _operator: OperatorAuthenticated,
+    session: AccountSession,
     Path(source_id): Path<String>,
 ) -> Result<StatusCode, ImageRouteError> {
-    revoke_image_source(state, source_id)
+    let space = account_space(&state, &session).await?;
+    revoke_image_source(state, space, source_id)
         .await
         .map_err(|error| match error {
             RevokeImageSourceError::WorkerFailed => ImageRouteError::WorkerFailed,
@@ -307,21 +337,25 @@ pub(crate) enum RevokeImageSourceError {
 
 pub(crate) async fn revoke_image_source(
     state: ServerState,
+    space: Arc<AccountSpace>,
     source_id: String,
 ) -> Result<(), RevokeImageSourceError> {
-    let revoking = state.clone();
+    let revoking = Arc::clone(&space);
     let id = source_id.clone();
-    tokio::task::spawn_blocking(move || revoking.image_sources().revoke(&id))
+    tokio::task::spawn_blocking(move || revoking.image_sources.revoke(&id))
         .await
         .map_err(|_| RevokeImageSourceError::WorkerFailed)?
         .map_err(RevokeImageSourceError::Source)?;
 
     // Keep face removal in its own awaited phase. If the request is cancelled
     // while source persistence is pending, this write must never begin.
-    tokio::task::spawn_blocking(move || crate::data_cards::remove_face(&state, &source_id))
-        .await
-        .map_err(|_| RevokeImageSourceError::WorkerFailed)?
-        .map_err(RevokeImageSourceError::Face)
+    tokio::task::spawn_blocking(move || {
+        let _ = state;
+        crate::data_cards::remove_face(&space, &source_id)
+    })
+    .await
+    .map_err(|_| RevokeImageSourceError::WorkerFailed)?
+    .map_err(RevokeImageSourceError::Face)
 }
 
 async fn push_image(
@@ -330,17 +364,18 @@ async fn push_image(
     ProducerBearer(header_token): ProducerBearer,
     PngBody(body): PngBody,
 ) -> Result<StatusCode, ImageRouteError> {
-    let source_id = authenticate_producer(&state, &path_token, header_token.as_deref())?;
+    let (space, source_id) =
+        authenticate_producer(&state, &path_token, header_token.as_deref()).await?;
     let frame = tokio::task::spawn_blocking(move || canonical_frame_from_png(&body))
         .await
         .map_err(|_| ImageRouteError::WorkerFailed)?
         .map_err(map_ingest_error)?;
 
-    let accept_state = state.clone();
+    let accept_space = Arc::clone(&space);
     let accepted_source_id = source_id.clone();
     let outcome = tokio::task::spawn_blocking(move || {
-        accept_state
-            .image_sources()
+        accept_space
+            .image_sources
             .accept(&accepted_source_id, frame, chrono::Utc::now())
     })
     .await
@@ -363,6 +398,7 @@ async fn push_image(
         // device's own snapshot, which is where a device-delivery problem
         // belongs, and the next full synchronize reconciles the frame anyway.
         state.notify_image_source_changed(
+            &space.account_id,
             source_id,
             digest,
             ImageNotificationOrigin::ExternalProducerPush,
@@ -373,15 +409,28 @@ async fn push_image(
 }
 
 /// Selects one carrier and performs the sole token-digest verification.
-fn authenticate_producer(
+async fn authenticate_producer(
     state: &ServerState,
     path_token: &str,
     header_token: Option<&str>,
-) -> Result<String, ImageRouteError> {
-    state
-        .image_sources()
-        .authenticate(header_token.unwrap_or(path_token))
+) -> Result<(Arc<AccountSpace>, String), ImageRouteError> {
+    let token = header_token.unwrap_or(path_token).to_owned();
+    let lookup = state.clone();
+    tokio::task::spawn_blocking(move || lookup.authenticate_image_producer(&token))
+        .await
+        .map_err(|_| ImageRouteError::WorkerFailed)?
         .ok_or(ImageRouteError::ProducerUnauthorized)
+}
+
+async fn account_space(
+    state: &ServerState,
+    session: &AccountSession,
+) -> Result<Arc<AccountSpace>, ImageRouteError> {
+    let lookup = state.clone();
+    let account_id = session.account.id.clone();
+    tokio::task::spawn_blocking(move || lookup.account_space(&account_id))
+        .await
+        .map_err(|_| ImageRouteError::WorkerFailed)
 }
 
 fn map_ingest_error(error: ImageIngestError) -> ImageRouteError {
@@ -445,6 +494,7 @@ enum ImageRouteError {
     InvalidImage(String),
     RateLimited,
     Capacity,
+    EntitlementCapacity { maximum: usize },
     FaceNotConfigurable,
     InvalidFaceFields(String),
     Internal,
@@ -528,6 +578,17 @@ impl IntoResponse for ImageRouteError {
                 }),
             )
                 .into_response(),
+            // The same status and body kind as the store's own ceiling: a caller
+            // sees one capacity contract whether the plan or the store said no.
+            Self::EntitlementCapacity { maximum } => (
+                StatusCode::CONFLICT,
+                Json(ErrorBody::Capacity {
+                    message: &format!(
+                        "This account can have at most {maximum} picture sources."
+                    ),
+                }),
+            )
+                .into_response(),
             Self::FaceNotConfigurable => (
                 StatusCode::CONFLICT,
                 Json(ErrorBody::FaceNotConfigurable {
@@ -564,6 +625,10 @@ mod tests {
             FirmwareCatalog::in_memory(),
             root.path().to_path_buf(),
         );
+        state
+            .identity()
+            .create_account("owner@example.com", true, true, chrono::Utc::now())
+            .expect("owner account");
         (root, state)
     }
 
@@ -572,8 +637,9 @@ mod tests {
         name: &str,
         kind: &str,
     ) -> crate::image_sources::MintedSource {
-        let source = state.image_sources().mint(name).expect("mint source");
-        crate::data_cards::create_face(state, &source.id, kind).expect("create face");
+        let space = state.account_space(&state.instance_owner().expect("instance owner").id);
+        let source = space.image_sources.mint(name).expect("mint source");
+        crate::data_cards::create_face(state, &space, &source.id, kind).expect("create face");
         source
     }
 
@@ -597,6 +663,7 @@ mod tests {
     #[tokio::test]
     async fn helper_revokes_the_source_removes_only_its_face_and_cancels_its_task() {
         let (_root, state) = state();
+        let space = state.account_space(&state.instance_owner().unwrap().id);
         let removed = mint_face(&state, "Weather", "weather");
         let retained = mint_face(&state, "News", "rss");
         let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
@@ -604,21 +671,19 @@ mod tests {
             let _notify = NotifyOnDrop(Some(dropped_tx));
             future::pending::<()>().await;
         });
-        state
-            .inner
+        space
             .data_cards
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert_task_for_test(removed.id.clone(), task);
 
-        revoke_image_source(state.clone(), removed.id.clone())
+        revoke_image_source(state.clone(), Arc::clone(&space), removed.id.clone())
             .await
             .expect("revoke source and face");
 
-        assert_eq!(state.image_sources().authenticate(&removed.token), None);
+        assert_eq!(space.image_sources.authenticate(&removed.token), None);
         {
-            let data_cards = state
-                .inner
+            let data_cards = space
                 .data_cards
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -636,46 +701,48 @@ mod tests {
 
     #[tokio::test]
     async fn source_persistence_failure_skips_face_removal() {
-        let (root, state) = state();
+        let (_root, state) = state();
+        let space = state.account_space(&state.instance_owner().unwrap().id);
         let source = mint_face(&state, "Weather", "weather");
-        let spec_path = root.path().join("data-cards.json");
+        let spec_path = space.root.join("data-cards.json");
         let before = std::fs::read(&spec_path).expect("face specs");
         replace_file_with_directory(
-            &root
-                .path()
+            &space
+                .root
                 .join(crate::image_sources::IMAGE_SOURCE_STORE_FILE),
         );
 
-        let error = revoke_image_source(state.clone(), source.id.clone())
+        let error = revoke_image_source(state.clone(), Arc::clone(&space), source.id.clone())
             .await
             .expect_err("source persistence must fail");
 
         assert!(matches!(error, RevokeImageSourceError::Source(_)));
         assert_eq!(
-            state.image_sources().authenticate(&source.token),
+            space.image_sources.authenticate(&source.token),
             Some(source.id.clone())
         );
         assert_eq!(std::fs::read(&spec_path).expect("unchanged specs"), before);
-        assert!(crate::data_cards::descriptor_for_source(&state, &source.id).is_some());
+        assert!(crate::data_cards::descriptor_for_source(&state, &space, &source.id).is_some());
     }
 
     #[tokio::test]
     async fn face_persistence_failure_leaves_the_source_revoked_and_face_state_unchanged() {
-        let (root, state) = state();
+        let (_root, state) = state();
+        let space = state.account_space(&state.instance_owner().unwrap().id);
         let source = mint_face(&state, "Weather", "weather");
-        let spec_path = root.path().join("data-cards.json");
+        let spec_path = space.root.join("data-cards.json");
         let backup = replace_file_with_directory(&spec_path);
         let before = std::fs::read(&backup).expect("preserved specs");
 
-        let error = revoke_image_source(state.clone(), source.id.clone())
+        let error = revoke_image_source(state.clone(), Arc::clone(&space), source.id.clone())
             .await
             .expect_err("face persistence must fail");
 
         assert!(matches!(error, RevokeImageSourceError::Face(_)));
-        assert_eq!(state.image_sources().authenticate(&source.token), None);
+        assert_eq!(space.image_sources.authenticate(&source.token), None);
         assert_eq!(std::fs::read(&backup).expect("unchanged backup"), before);
         assert!(spec_path.is_dir(), "the failing target was not replaced");
-        assert!(crate::data_cards::descriptor_for_source(&state, &source.id).is_some());
+        assert!(crate::data_cards::descriptor_for_source(&state, &space, &source.id).is_some());
     }
 
     #[test]
@@ -688,6 +755,7 @@ mod tests {
             .expect("test runtime");
         runtime.block_on(async {
             let (_root, state) = state();
+            let space = state.account_space(&state.instance_owner().unwrap().id);
             let source = mint_face(&state, "Weather", "weather");
             let (started_tx, started_rx) = tokio::sync::oneshot::channel();
             let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -697,7 +765,8 @@ mod tests {
             });
             started_rx.await.expect("blocking worker started");
 
-            let operation = revoke_image_source(state.clone(), source.id.clone());
+            let operation =
+                revoke_image_source(state.clone(), Arc::clone(&space), source.id.clone());
             assert!(
                 operation.now_or_never().is_none(),
                 "source revocation was not pending at its first await"
@@ -705,7 +774,7 @@ mod tests {
             release_tx.send(()).expect("release worker");
             blocker.await.expect("blocking worker exits");
             tokio::time::timeout(std::time::Duration::from_secs(1), async {
-                while state.image_sources().authenticate(&source.token).is_some() {
+                while space.image_sources.authenticate(&source.token).is_some() {
                     tokio::task::yield_now().await;
                 }
             })
@@ -713,7 +782,7 @@ mod tests {
             .expect("detached source revocation completed");
 
             assert!(
-                crate::data_cards::descriptor_for_source(&state, &source.id).is_some(),
+                crate::data_cards::descriptor_for_source(&state, &space, &source.id).is_some(),
                 "the face phase began after its parent operation was cancelled"
             );
         });

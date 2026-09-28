@@ -632,13 +632,15 @@ export const apiContractFixtures = {
       "id": "unconfigured-display",
       "connected": false,
       "has_saved_config": false,
-      "configured_at": null
+      "configured_at": null,
+      "state": "pending"
     },
     {
       "id": "configured-display",
       "connected": true,
       "has_saved_config": true,
-      "configured_at": 1700000000
+      "configured_at": 1700000000,
+      "state": "active"
     }
   ],
   "mint_source_responses": [

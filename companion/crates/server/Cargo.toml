@@ -22,10 +22,8 @@ tokio-util = { version = "0.7", features = ["io"] }
 tower = { version = "0.5", features = ["limit", "load-shed", "timeout", "util"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 rand = "0.9"
+rusqlite = { version = "0.39", features = ["bundled"] }
 sha2 = "0.10"
-# HMAC-SHA256 for signing the short-lived operator session cookie, keyed by
-# DESKMATE_ADMIN_TOKEN. Pairs with the existing sha2 0.10; pinned exactly.
-hmac = "=0.12.1"
 # Header-first PNG decoding for the image-ingest route. `Pixmap::decode_png` would
 # need no new line here but decodes in one shot; `png::Decoder::read_header_info`
 # reads the IHDR alone, which is what lets a decompression bomb be rejected before
@@ -48,6 +46,7 @@ url = "2"
 tempfile = "3"
 chacha20poly1305 = "=0.10.1"
 zeroize = { version = "=1.9.0", features = ["derive"] }
+lettre = { version = "0.11.23", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "ring", "webpki-roots"] }
 
 [dev-dependencies]
 protocol = { path = "../protocol", features = ["test-support"] }

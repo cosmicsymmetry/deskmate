@@ -6,11 +6,13 @@ import * as mock from "../src/dev/backendClient";
 import type { ApiError } from "../src/lib/types";
 
 describe("API error primitives", () => {
-  test("both clients re-export the same constructor and session primitives", () => {
+  test("both clients re-export the same constructor and startup primitives", () => {
     expect(production.DeskmateApiError).toBe(shared.DeskmateApiError);
     expect(mock.DeskmateApiError).toBe(shared.DeskmateApiError);
     expect(production.isSessionMissing).toBe(shared.isSessionMissing);
     expect(mock.isSessionMissing).toBe(shared.isSessionMissing);
+    expect(production.isNoPanels).toBe(shared.isNoPanels);
+    expect(mock.isNoPanels).toBe(shared.isNoPanels);
     const details: ApiError = { category: "not-found", message: "Missing" };
     expect(production.toApiError(new mock.DeskmateApiError(details))).toBe(details);
     expect(mock.toApiError(new production.DeskmateApiError(details))).toBe(details);
@@ -33,7 +35,7 @@ describe("API error primitives", () => {
   });
 
   test("recognizes only the exact missing-session category and message", () => {
-    const message = "This browser is not signed in. Enter the admin token to continue.";
+    const message = "This browser is not signed in.";
     for (const client of [production, mock]) {
       expect(client.SESSION_REQUIRED_MESSAGE).toBe(message);
       expect(client.isSessionMissing({ category: "runtime-unavailable", message })).toBe(true);
@@ -41,6 +43,16 @@ describe("API error primitives", () => {
       expect(
         client.isSessionMissing({ category: "runtime-unavailable", message: `${message} ` }),
       ).toBe(false);
+    }
+  });
+
+  test("recognizes only the exact no-panels category and message", () => {
+    const message = "No panels are set up for this account.";
+    for (const client of [production, mock]) {
+      expect(client.NO_PANELS_MESSAGE).toBe(message);
+      expect(client.isNoPanels({ category: "not-found", message })).toBe(true);
+      expect(client.isNoPanels({ category: "runtime-unavailable", message })).toBe(false);
+      expect(client.isNoPanels({ category: "not-found", message: `${message} ` })).toBe(false);
     }
   });
 

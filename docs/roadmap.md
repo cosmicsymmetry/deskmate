@@ -9,16 +9,21 @@ gets its own brainstorm, spec and plan when it starts.
 Someone finds Deskmate through the landing page or a social post and buys a panel. It
 arrives flashed. They create an account, claim the panel, and build their loop from our
 cards and reviewed marketplace plugins. The free tier has limits; a paid plan lifts them.
-Some cards respond to a tap. Anyone can self-host the whole thing for free, and anyone
+Some cards respond to a tap. Anyone can self-host the open core for free, and anyone
 can write a plugin and either self-host it or submit it to run on ours.
 
 ## Decisions
 
 - **The device is ours.** A user gets a panel by buying an assembled, pre-flashed one
   from us. The firmware stays open source, but DIY is not the path the product sells.
-- **Hosted: free tier plus a paid plan. Self-hosted: always free.** One open-source
-  codebase runs both. Open-source, free, ready-made components are preferred wherever
-  they fit (accounts, auth, billing plumbing).
+- **Hosted: free tier plus a paid plan. Self-hosted: free, and open core** (amended
+  2026-09-23, Track A brainstorm; it said "always free" before). The public repo builds a
+  complete self-host server. Paid features live in a private crate that only our hosted
+  build compiles in, so there are no licence keys and nothing to enforce; a self-hoster
+  also brings their own keys (Google, SMTP, APIs) and has no reviewed plugin directory.
+  If self-hosters later want to pay, that code can move into a source-available `ee/`
+  directory with signed keys. Open-source, free, ready-made components are preferred
+  wherever they fit (accounts, auth, billing plumbing), and nothing may cost money to run.
 - **Plugins on our infrastructure are reviewed first.** Anyone can submit; unreviewed
   plugins can still run on their author's own server and push pictures in.
 - **Interaction is staged.** First a tap goes to the plugin and it redraws; later, cards
@@ -64,7 +69,7 @@ the batch merges.
 
 | Track | Status | Branch | Waiting on |
 |---|---|---|---|
-| A | Not started | -- | -- |
+| A | **Accounts + claiming merged** (PR #5, 2026-09-28). Not deployed yet: on the owner's direction **C1's next deploy carries it** -- C1 merges main, and the first start of that build migrates the live config into re.aleksandrov1@gmail.com's account (`DESKMATE_PUBLIC_URL` and `DESKMATE_OWNER_EMAIL` are already in the live `server.env`). After it, sign-in is an email link from the server log. Next: plan limits and billing, and self-host packaging | -- | The Web Serial spike at the board (plan Task 1) |
 | B | Not started | -- | -- |
 | C1 | Phase 1 works on hardware. The frames-in-PSRAM spec's step 1 and step 4 are delivered and the flash is done: `dev-0005` took `v2.2.0-psram` by OTA on 2026-09-28, reports the 16-slot pool by name, and its frame commits went from 1.5-1.7 s of flash to 76-81 ms of PSRAM with `Busy` refusals gone. Tasks A-C (faces `views()`/`onTap`, server staging, host tier policy) remain and are now unblocked | `track-c1-frames-in-psram` | A tap on the glass and its redraw time; a server-rendered face at both mountings |
 | C2 | Not started | -- | C1 |

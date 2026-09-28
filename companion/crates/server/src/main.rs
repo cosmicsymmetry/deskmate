@@ -2,11 +2,11 @@
 //! serves the device and companion routes until it receives `SIGINT`/`SIGTERM`,
 //! following the deployment contract in `deploy/README.md`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use server::firmware::FirmwareCatalog;
-use server::{ServerState, app_with_web};
+use server::{ServerOptions, ServerState, app_with_web};
 
 // Loopback, not `0.0.0.0`: per `deploy/README.md` §4, a Cloudflare Tunnel is
 // the *only* sanctioned ingress. A default that binds every interface would
@@ -22,6 +22,12 @@ const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:8443";
 // reason.
 const DEFAULT_FIRMWARE_DIR: &str = "/var/lib/deskmate/firmware";
 const DEFAULT_CONFIG_DIR: &str = "/var/lib/deskmate/configs";
+
+const ENV_PUBLIC_URL: &str = "DESKMATE_PUBLIC_URL";
+const ENV_SMTP_URL: &str = "DESKMATE_SMTP_URL";
+const ENV_MAIL_FROM: &str = "DESKMATE_MAIL_FROM";
+const ENV_SIGNUPS: &str = "DESKMATE_SIGNUPS";
+const ENV_OWNER_EMAIL: &str = "DESKMATE_OWNER_EMAIL";
 
 const ENV_GOOGLE_CLIENT_ID: &str = "DESKMATE_GOOGLE_CLIENT_ID";
 const ENV_GOOGLE_CLIENT_SECRET: &str = "DESKMATE_GOOGLE_CLIENT_SECRET";
@@ -97,6 +103,24 @@ enum GoogleOAuthConfigError {
          it holds an OAuth client secret and must be 0600"
     )]
     SecretFilePermissive { mode: u32 },
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+enum ServerConfigError {
+    #[error("{variable} must be set -- see deploy/README.md")]
+    Missing { variable: &'static str },
+    #[error("{variable} must be valid Unicode")]
+    NotUnicode { variable: &'static str },
+    #[error("DESKMATE_PUBLIC_URL must be an absolute http(s) URL")]
+    InvalidPublicUrl,
+    #[error("DESKMATE_PUBLIC_URL may use http only for localhost or a loopback IP address")]
+    InsecurePublicUrl,
+    #[error("DESKMATE_SIGNUPS must be either 'open' or 'closed'")]
+    InvalidSignups,
+    #[error("DESKMATE_SMTP_URL and DESKMATE_MAIL_FROM must be set together")]
+    IncompleteSmtp,
+    #[error("DESKMATE_SMTP_URL or DESKMATE_MAIL_FROM is invalid")]
+    InvalidSmtp,
 }
 
 fn read_google_env(variable: &'static str) -> Result<Option<String>, GoogleOAuthConfigError> {
@@ -238,9 +262,50 @@ fn validate_google_url(value: &str, variable: &'static str) -> Result<(), Google
     Ok(())
 }
 
+fn configure_google(
+    state: &ServerState,
+    config_dir: &std::path::Path,
+    google_oauth: Option<server::oauth::GoogleOAuthConfig>,
+) {
+    let Some(oauth) = google_oauth else {
+        return;
+    };
+    let transport: Arc<dyn server::oauth::transport::OAuthTransport> =
+        Arc::new(server::oauth::transport::EgressTransport);
+    state.set_google_sign_in(oauth.clone(), Arc::clone(&transport));
+    let store = server::secrets::open_integration_store(config_dir).unwrap_or_else(|error| {
+        panic!(
+            "Google OAuth is configured but the integration secrets store could not open \
+             (fail-closed): {error}"
+        )
+    });
+    let token_manager = Arc::new(server::oauth::TokenManager::new(
+        Arc::new(store),
+        transport,
+        oauth,
+    ));
+    state.set_integrations(Arc::new(server::oauth::IntegrationRuntime::new(
+        token_manager,
+    )));
+    tracing::info!("Google sign-in and OAuth integration enabled");
+}
+
+/// An unset `RUST_LOG` used to mean ERROR only, which hid every device-link
+/// diagnostic and, since accounts, the first-run setup code and the sign-in
+/// links a server without SMTP prints: a self-hoster who never set `RUST_LOG`
+/// was locked out of their own server. Unset now means info.
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+}
+
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
+    init_tracing();
 
     let bind_address =
         std::env::var("DESKMATE_SERVER_BIND").unwrap_or_else(|_| DEFAULT_BIND_ADDRESS.to_string());
@@ -281,15 +346,25 @@ async fn main() {
             web_dir.display()
         );
     }
-    let data_card_spec_path = data_card_spec_path(&config_dir);
     let firmware_version = required_firmware_version(std::env::var("DESKMATE_FIRMWARE_VERSION"));
     let admin_token = std::env::var("DESKMATE_ADMIN_TOKEN")
         .expect("DESKMATE_ADMIN_TOKEN must be set -- see deploy/README.md");
     let google_oauth = google_oauth_config_from_env();
+    let server_options = server_options_from_env()
+        .unwrap_or_else(|error| panic!("invalid server configuration: {error}"));
+    let owner_email = read_optional_server_env(ENV_OWNER_EMAIL)
+        .unwrap_or_else(|error| panic!("invalid server configuration: {error}"));
+
+    if let Err(error) =
+        server::migrate::migrate_if_needed(&config_dir, owner_email.as_deref(), chrono::Utc::now())
+    {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
 
     // `config_dir` is cloned because the integration store below opens against
     // it after the state has taken ownership.
-    let state = ServerState::new(
+    let state = ServerState::new_with_options(
         admin_token,
         FirmwareCatalog::new(firmware_dir, firmware_version).unwrap_or_else(|error| {
             panic!(
@@ -298,24 +373,10 @@ async fn main() {
             )
         }),
         config_dir.clone(),
+        server_options,
     );
 
-    if let Some(oauth) = google_oauth {
-        let store = server::secrets::open_integration_store(&config_dir).unwrap_or_else(|error| {
-            panic!(
-                "Google OAuth is configured but the integration secrets store could not open \
-                 (fail-closed): {error}"
-            )
-        });
-        let token_manager = Arc::new(server::oauth::TokenManager::new(
-            Arc::new(store),
-            Arc::new(server::oauth::transport::EgressTransport),
-            oauth,
-        ));
-        let runtime = Arc::new(server::oauth::IntegrationRuntime::new(token_manager));
-        state.set_integrations(runtime);
-        tracing::info!("google oauth integration enabled");
-    }
+    configure_google(&state, &config_dir, google_oauth);
 
     // Server-rendered data cards, if this deployment has any. The specs are
     // read before the listener binds so a malformed file fails the start
@@ -330,8 +391,9 @@ async fn main() {
     } else {
         tracing::info!("no faces package configured (DESKMATE_FACES_DIR unset)");
     }
-    server::start_data_cards(&state, data_card_spec_path)
-        .unwrap_or_else(|error| panic!("DESKMATE_DATA_CARDS is unreadable: {error}"));
+    server::start_data_cards(&state)
+        .unwrap_or_else(|error| panic!("an account's data-cards.json is unreadable: {error}"));
+    let housekeeping = server::spawn_housekeeping(state.clone());
 
     let listener = tokio::net::TcpListener::bind(&bind_address)
         .await
@@ -350,13 +412,84 @@ async fn main() {
         tracing::info!("no web companion configured (DESKMATE_WEB_DIR unset)");
     }
 
-    axum::serve(listener, app_with_web(state, web_dir))
-        .with_graceful_shutdown(shutdown_signal(shutdown_state.clone()))
+    axum::serve(
+        listener,
+        app_with_web(state, web_dir).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(shutdown_state.clone()))
+    .await
+    .expect("server exited with an error");
+    housekeeping
         .await
-        .expect("server exited with an error");
+        .expect("claim housekeeping task panicked");
     tokio::task::spawn_blocking(move || shutdown_state.shutdown())
         .await
         .expect("device runtime shutdown worker panicked");
+}
+
+fn server_options_from_env() -> Result<ServerOptions, ServerConfigError> {
+    let public_url =
+        read_optional_server_env(ENV_PUBLIC_URL)?.ok_or(ServerConfigError::Missing {
+            variable: ENV_PUBLIC_URL,
+        })?;
+    server_options_from_values(
+        &public_url,
+        read_optional_server_env(ENV_SIGNUPS)?.as_deref(),
+        read_optional_server_env(ENV_SMTP_URL)?.as_deref(),
+        read_optional_server_env(ENV_MAIL_FROM)?.as_deref(),
+    )
+}
+
+fn read_optional_server_env(variable: &'static str) -> Result<Option<String>, ServerConfigError> {
+    match std::env::var(variable) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(ServerConfigError::NotUnicode { variable }),
+    }
+}
+
+fn server_options_from_values(
+    public_url: &str,
+    signups: Option<&str>,
+    smtp_url: Option<&str>,
+    mail_from: Option<&str>,
+) -> Result<ServerOptions, ServerConfigError> {
+    let public_url =
+        url::Url::parse(public_url).map_err(|_| ServerConfigError::InvalidPublicUrl)?;
+    if !matches!(public_url.scheme(), "http" | "https") {
+        return Err(ServerConfigError::InvalidPublicUrl);
+    }
+    if public_url.scheme() == "http" && !is_loopback_url(&public_url) {
+        return Err(ServerConfigError::InsecurePublicUrl);
+    }
+    let signups_default = match signups {
+        Some("open") => true,
+        Some("closed") | None => false,
+        Some(_) => return Err(ServerConfigError::InvalidSignups),
+    };
+    let mailer: Arc<dyn server::mailer::Mailer> = match (smtp_url, mail_from) {
+        (None, None) => Arc::new(server::mailer::LogMailer),
+        (Some(smtp_url), Some(mail_from)) => Arc::new(
+            server::mailer::SmtpMailer::from_url(smtp_url, mail_from)
+                .map_err(|_| ServerConfigError::InvalidSmtp)?,
+        ),
+        _ => return Err(ServerConfigError::IncompleteSmtp),
+    };
+    Ok(ServerOptions {
+        public_url,
+        signups_default,
+        mailer,
+        ..ServerOptions::default()
+    })
+}
+
+fn is_loopback_url(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }
 }
 
 fn required_firmware_version(value: Result<String, std::env::VarError>) -> String {
@@ -364,16 +497,6 @@ fn required_firmware_version(value: Result<String, std::env::VarError>) -> Strin
         "DESKMATE_FIRMWARE_VERSION must be set to the published image's exact \
          firmware/version.txt value -- see deploy/README.md",
     )
-}
-
-/// Where the server-rendered card specs live.
-///
-/// `DESKMATE_DATA_CARDS` overrides it; the default sits beside the rest of the
-/// server's state in the config directory, so a deployment that backs that up
-/// backs up its cards too.
-fn data_card_spec_path(config_dir: &Path) -> PathBuf {
-    std::env::var("DESKMATE_DATA_CARDS")
-        .map_or_else(|_| config_dir.join("data-cards.json"), PathBuf::from)
 }
 
 /// How to run the faces package, if this deployment has one.
@@ -437,6 +560,15 @@ async fn shutdown_signal(state: ServerState) {
 
 #[cfg(test)]
 mod tests {
+    fn server_options(
+        public_url: &str,
+        signups: Option<&str>,
+        smtp_url: Option<&str>,
+        mail_from: Option<&str>,
+    ) -> Result<server::ServerOptions, super::ServerConfigError> {
+        super::server_options_from_values(public_url, signups, smtp_url, mail_from)
+    }
+
     fn complete_google_env() -> super::GoogleOAuthEnv {
         super::GoogleOAuthEnv {
             client_id: Some("client-id.apps.googleusercontent.com".to_string()),
@@ -453,6 +585,89 @@ mod tests {
         let config = super::google_oauth_config_from_values(super::GoogleOAuthEnv::default())
             .expect("absent config is valid");
         assert!(config.is_none());
+    }
+
+    #[test]
+    fn public_url_requires_https_except_on_loopback() {
+        for accepted in [
+            "https://deskmate.example",
+            "http://localhost:8443",
+            "http://127.0.0.1:8443",
+            "http://[::1]:8443",
+        ] {
+            assert!(
+                server_options(accepted, None, None, None).is_ok(),
+                "{accepted}"
+            );
+        }
+        for refused in [
+            "http://deskmate.example",
+            "ftp://deskmate.example",
+            "not a URL",
+        ] {
+            assert!(
+                server_options(refused, None, None, None).is_err(),
+                "{refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn signups_accept_only_open_or_closed_and_default_closed() {
+        assert!(
+            !server_options("https://deskmate.example", None, None, None)
+                .unwrap()
+                .signups_default
+        );
+        assert!(
+            server_options("https://deskmate.example", Some("open"), None, None)
+                .unwrap()
+                .signups_default
+        );
+        assert!(matches!(
+            server_options("https://deskmate.example", Some("yes"), None, None),
+            Err(super::ServerConfigError::InvalidSignups)
+        ));
+    }
+
+    #[test]
+    fn smtp_url_and_sender_are_required_together() {
+        assert!(matches!(
+            server_options(
+                "https://deskmate.example",
+                None,
+                Some("smtps://smtp.example.com"),
+                None,
+            ),
+            Err(super::ServerConfigError::IncompleteSmtp)
+        ));
+        assert!(matches!(
+            server_options(
+                "https://deskmate.example",
+                None,
+                None,
+                Some("Deskmate <mail@example.com>"),
+            ),
+            Err(super::ServerConfigError::IncompleteSmtp)
+        ));
+        assert!(
+            server_options(
+                "https://deskmate.example",
+                None,
+                Some("smtps://smtp.example.com"),
+                Some("Deskmate <mail@example.com>"),
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            server_options(
+                "https://deskmate.example",
+                None,
+                Some("not-an-smtp-url"),
+                Some("Deskmate <mail@example.com>"),
+            ),
+            Err(super::ServerConfigError::InvalidSmtp)
+        ));
     }
 
     #[test]

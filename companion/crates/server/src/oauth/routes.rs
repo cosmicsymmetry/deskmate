@@ -1,4 +1,4 @@
-//! OAuth consent, callback, revoke, and operator-login routes. Handlers stay
+//! OAuth consent, callback, revoke, and producer-token routes. Handlers stay
 //! thin; the `state`/PKCE stash and auth-URL construction live on
 //! `IntegrationRuntime` so they are unit-testable.
 
@@ -8,22 +8,21 @@ use std::sync::{Arc, Mutex};
 use axum::Json;
 use axum::Router;
 use axum::extract::{FromRequestParts, Path, Query, State};
+use axum::http::StatusCode;
 use axum::http::request::Parts;
-use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use super::session::{OperatorAuthenticated, SessionSigner, set_cookie_header};
 use super::token::{TokenError, TokenManager};
 use crate::ServerState;
 use crate::auth::bearer_token;
 use crate::registry::constant_time_eq;
+use crate::web_auth::{InstanceOwner, session_digest_key};
 
 const PENDING_TTL: Duration = Duration::seconds(600);
-pub(crate) const SESSION_TTL: Duration = Duration::hours(12);
 const DEFAULT_INTEGRATION_ID: &str = "google-primary";
 /// Longest `integration_id` accepted from a caller. The id is a map key in three
 /// long-lived maps (`pending`, the token cache, and health), and only `revoke`
@@ -38,7 +37,7 @@ const MAX_PENDING_AUTHS: usize = 32;
 struct PendingAuth {
     integration_id: String,
     code_verifier: String,
-    sid: String,
+    session_digest: String,
 }
 
 struct StashedAuth {
@@ -65,11 +64,15 @@ impl IntegrationRuntime {
         &self.token_manager
     }
 
-    /// Generates `state` + PKCE, stashes them bound to `sid`, and returns the
+    /// Generates `state` + PKCE, stashes them bound to a session digest, and returns the
     /// Google authorization URL to redirect the operator to.
     /// Returns `None` when too many consent flows are already pending, so the
     /// stash cannot be grown without bound by repeated calls.
-    pub(crate) fn start_consent(&self, sid: &str, integration_id: &str) -> Option<String> {
+    pub(crate) fn start_consent(
+        &self,
+        session_digest: &str,
+        integration_id: &str,
+    ) -> Option<String> {
         let state = super::pkce::generate_state();
         let pkce = super::pkce::generate_pkce();
         let now = Utc::now();
@@ -88,7 +91,7 @@ impl IntegrationRuntime {
                 pending: PendingAuth {
                     integration_id: integration_id.to_string(),
                     code_verifier: pkce.verifier,
-                    sid: sid.to_string(),
+                    session_digest: session_digest.to_string(),
                 },
                 created_at: now,
             },
@@ -191,7 +194,7 @@ fn vend_error_to_route(error: &TokenError) -> RouteError {
 
 /// A producer credential, resolved to the integration it may vend for.
 ///
-/// Separate from [`OperatorAuthenticated`] on purpose: an admin token must not
+/// Separate from [`InstanceOwner`] on purpose: an account session must not
 /// work here, or it would end up living in a producer's environment.
 struct ProducerAuthenticated(String);
 
@@ -227,7 +230,7 @@ struct VendedToken {
 /// Mints (or rotates) the producer credential for one integration.
 async fn mint_producer(
     State(state): State<ServerState>,
-    _operator: OperatorAuthenticated,
+    _owner: InstanceOwner,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<MintedCredentialResponse>), RouteError> {
     let minted = mint_producer_action(&state, &id).await?;
@@ -259,7 +262,7 @@ pub(crate) async fn mint_producer_action(
 /// Revokes an integration's producer credential without touching the grant.
 async fn revoke_producer(
     State(state): State<ServerState>,
-    _operator: OperatorAuthenticated,
+    _owner: InstanceOwner,
     Path(id): Path<String>,
 ) -> Result<StatusCode, RouteError> {
     validate_integration_id(&id)?;
@@ -298,7 +301,6 @@ async fn vend_token(
 
 pub(crate) fn routes() -> Router<ServerState> {
     Router::new()
-        .route("/v1/session/login", post(login))
         .route("/v1/integrations/google", post(start_google))
         .route("/v1/integrations/google/callback", get(google_callback))
         .route("/v1/integrations/{id}/revoke", post(revoke_integration))
@@ -307,32 +309,6 @@ pub(crate) fn routes() -> Router<ServerState> {
             post(mint_producer).delete(revoke_producer),
         )
         .route("/v1/integrations/{id}/token", post(vend_token))
-}
-
-/// Exchanges the admin bearer token for a short-lived session cookie.
-async fn login(State(state): State<ServerState>, parts: Parts) -> Response {
-    match bearer_token(&parts) {
-        Some(token) if state.verify_admin_token(token) => {}
-        _ => return StatusCode::UNAUTHORIZED.into_response(),
-    }
-
-    if state.integrations().is_none() {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "OAuth integrations are not configured on this server",
-        )
-            .into_response();
-    }
-    let sid = SessionSigner::new_sid();
-    let cookie = state.sessions().mint(&sid, Utc::now(), SESSION_TTL);
-    let Ok(header_value) = HeaderValue::from_str(&set_cookie_header(&cookie, SESSION_TTL)) else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
-    let mut response = StatusCode::NO_CONTENT.into_response();
-    response
-        .headers_mut()
-        .insert(header::SET_COOKIE, header_value);
-    response
 }
 
 /// Bounds the one caller-supplied string that becomes a long-lived map key.
@@ -364,7 +340,7 @@ struct StartQuery {
 /// Starts consent: builds the Google authorization URL and redirects the operator.
 async fn start_google(
     State(state): State<ServerState>,
-    operator: OperatorAuthenticated,
+    owner: InstanceOwner,
     Query(query): Query<StartQuery>,
 ) -> Result<Redirect, RouteError> {
     let runtime = state.integrations().ok_or(RouteError::NotConfigured)?;
@@ -373,7 +349,10 @@ async fn start_google(
         .unwrap_or_else(|| DEFAULT_INTEGRATION_ID.to_string());
     validate_integration_id(&integration_id)?;
     let url = runtime
-        .start_consent(&operator.sid, &integration_id)
+        .start_consent(
+            &session_digest_key(&owner.0.session_plaintext),
+            &integration_id,
+        )
         .ok_or_else(|| {
             RouteError::BadRequest(format!(
                 "too many consent flows already pending (limit {MAX_PENDING_AUTHS}); \
@@ -394,7 +373,7 @@ struct CallbackQuery {
 /// then exchanges the code. Redirects to the management page on success.
 async fn google_callback(
     State(state): State<ServerState>,
-    operator: OperatorAuthenticated,
+    owner: InstanceOwner,
     Query(query): Query<CallbackQuery>,
 ) -> Result<Redirect, RouteError> {
     let runtime = state.integrations().ok_or(RouteError::NotConfigured)?;
@@ -404,7 +383,8 @@ async fn google_callback(
     let pending = runtime
         .take_pending(&state_value, Utc::now())
         .ok_or_else(|| RouteError::BadRequest("unknown or expired state".to_string()))?;
-    if !constant_time_eq(pending.sid.as_bytes(), operator.sid.as_bytes()) {
+    let session_digest = session_digest_key(&owner.0.session_plaintext);
+    if !constant_time_eq(pending.session_digest.as_bytes(), session_digest.as_bytes()) {
         return Err(RouteError::Unauthorized);
     }
     if let Some(error) = query.error {
@@ -427,7 +407,7 @@ async fn google_callback(
 /// Revokes an integration and clears its stored secret.
 async fn revoke_integration(
     State(state): State<ServerState>,
-    _operator: OperatorAuthenticated,
+    _owner: InstanceOwner,
     Path(id): Path<String>,
 ) -> Result<StatusCode, RouteError> {
     revoke_integration_action(&state, &id).await?;
@@ -665,7 +645,7 @@ mod tests {
             .take_pending(&state, Utc::now())
             .expect("first take must succeed");
         assert_eq!(first.integration_id, "google-primary");
-        assert_eq!(first.sid, "sid-1");
+        assert_eq!(first.session_digest, "sid-1");
         assert!(
             runtime.take_pending(&state, Utc::now()).is_none(),
             "state must be single-use"

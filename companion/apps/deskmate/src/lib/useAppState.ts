@@ -6,8 +6,6 @@ import {
   getNetworkSettings,
   listenToAppState,
   saveConfig as saveConfigRequest,
-  signIn as signInRequest,
-  signInAndSelectDevice,
   toApiError,
 } from "./backend";
 import type {
@@ -107,8 +105,6 @@ export interface AppStateValue {
   networkSettings: NetworkSettings;
   ownershipTier: DeviceTier | null;
   saveConfig: (config: AppConfig) => Promise<ConfigApplyResult>;
-  signIn: (adminToken: string) => Promise<void>;
-  signInAndSelectDevice: (deviceId: string, adminToken: string) => Promise<void>;
 }
 
 export function useAppState(): AppStateValue {
@@ -121,8 +117,6 @@ export function useAppState(): AppStateValue {
     device_id: "",
     tier: null,
   });
-  const [subscriptionGeneration, setSubscriptionGeneration] = useState(0);
-  const subscriptionGenerationRef = useRef(0);
   const lastCardDataRef = useRef<string | null>(null);
   const networkSettingsRef = useRef(networkSettings);
 
@@ -149,42 +143,20 @@ export function useAppState(): AppStateValue {
     try {
       acceptSnapshot(await getAppSnapshot());
       // Network settings are refetched with the snapshot, not only on mount.
-      // The first fetch happens before this browser has a session, so it comes
-      // back with no device id; without this the Settings sheet kept showing an
-      // empty Device ID for the whole session after signing in.
+      // A panel can be removed or claimed in another tab, and saving must use
+      // the account's current panel rather than stale mount-time state.
       acceptNetworkSettings(await getNetworkSettings());
     } catch (next) {
       acceptError(toApiError(next));
     }
   }, [acceptError, acceptNetworkSettings, acceptSnapshot]);
 
-  const restartSubscription = useCallback(() => {
-    subscriptionGenerationRef.current += 1;
-    setSubscriptionGeneration(subscriptionGenerationRef.current);
-  }, []);
-  const signIn = useCallback(
-    async (adminToken: string) => {
-      await signInRequest(adminToken);
-      restartSubscription();
-    },
-    [restartSubscription],
-  );
-
-  const selectDevice = useCallback(
-    async (deviceId: string, adminToken: string) => {
-      const settings = await signInAndSelectDevice(deviceId, adminToken);
-      acceptNetworkSettings(settings);
-      restartSubscription();
-    },
-    [acceptNetworkSettings, restartSubscription],
-  );
-
   const saveConfig = useCallback(async (config: AppConfig) => {
     const settings = networkSettingsRef.current;
     if (!settings.device_id) {
       throw new DeskmateApiError({
         category: "invalid-payload",
-        message: "Select a device in Settings before saving.",
+        message: "Set up a panel before saving.",
       });
     }
     return saveConfigRequest(config);
@@ -195,20 +167,12 @@ export function useAppState(): AppStateValue {
       startAppStateSubscription({
         fetchSnapshot: getAppSnapshot,
         listen: listenToAppState,
-        onSnapshot: (next) => {
-          if (subscriptionGeneration === subscriptionGenerationRef.current) {
-            acceptSnapshot(next);
-          }
-        },
-        onError: (next) => {
-          if (subscriptionGeneration === subscriptionGenerationRef.current) {
-            acceptError(next);
-          }
-        },
+        onSnapshot: acceptSnapshot,
+        onError: acceptError,
         focusTarget: window,
         visibilityTarget: document,
       }),
-    [acceptError, acceptSnapshot, subscriptionGeneration],
+    [acceptError, acceptSnapshot],
   );
 
   useEffect(() => {
@@ -241,7 +205,5 @@ export function useAppState(): AppStateValue {
     networkSettings,
     ownershipTier,
     saveConfig,
-    signIn,
-    signInAndSelectDevice: selectDevice,
   };
 }

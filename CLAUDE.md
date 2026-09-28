@@ -60,10 +60,11 @@ default. This section states only what is true now.
   (`docs/images/server-rendered-cards.md`). They were Rust until 2026-09-20
   (`crates/server/src/faces/`, `crates/providers`); the owner moved them for maintenance.
   These are **not new card kinds**: each is an image source the server pushes to itself,
-  named by an ordinary picture card, configured in `data-cards.json` under
-  `DESKMATE_CONFIG_DIR` (or `DESKMATE_DATA_CARDS`). Schema stays v10 and the wire is
-  untouched. The split: `crates/server/src/data_cards.rs` owns the specs, the browser's
-  settings contract, validation and the refresh schedule, and **names no face kind**; the
+  named by an ordinary picture card, configured in each account's `data-cards.json`
+  under `DESKMATE_CONFIG_DIR/accounts/<account_id>/`; `DESKMATE_DATA_CARDS` is gone
+  because one global override cannot name per-account files. Schema stays v10 and the
+  wire is untouched. The split: `crates/server/src/data_cards.rs` owns the specs, the
+  browser's settings contract, validation and the refresh schedule, and **names no face kind**; the
   package owns what a face fetches and how it is drawn. The seam is two verbs
   (`data_cards/faces_package.rs` <-> `faces/src/main.ts`): `describe` prints the catalog
   the add menu is built from, `render` turns `{kind, settings}` on stdin into a PNG on
@@ -100,17 +101,24 @@ default. This section states only what is true now.
 - **THE COMPANION IS A WEB APP, and there is no desktop app.** Every surface for a
   networked device is served by the server it configures, at
   `https://deskmate.rodi.one/`. The browser API is `crates/server/src/app_api/`, gated by
-  the operator session cookie the page trades the admin token for. Nothing in the tree is
-  scaffolding for a desktop app: if one is wanted it is written from scratch, and it
+  account sessions created through an email link, Google sign-in or the first-run setup
+  code; the admin token is for CLI operations and account recovery only. Nothing in the
+  tree is scaffolding for a desktop app: if one is wanted it is written from scratch, and it
   talks to the server like the page does. The React source lives under `apps/deskmate/src/`: `src/lib/backend.ts` is a one-line barrel over `./backendClient`, and
   `vite.config.ts` aliases that single specifier to `src/dev/backendClient.ts` under
   `VITE_DESKMATE_MOCK=1` -- so there is exactly one seam and three implementations of it
   (HTTP, mock, and whatever comes next). Design:
   `docs/superpowers/specs/2026-09-18-deskmate-web-companion-design.md`.
-  - **Gone with it, deliberately**: provisioning, factory reset, the local-ownership
-    switch, autostart, and the whole local tier. They are cable operations, a browser has
-    no cable, and `crates/deskmate-cli` performs all of them. They were deleted rather
-    than stubbed -- a control that always fails is worse than an absent one.
+  - **Gone with it, deliberately**: factory reset, the local-ownership switch,
+    autostart, and the whole local tier. `crates/deskmate-cli` performs them over the
+    cable. They were deleted rather than stubbed -- a control that always fails is worse
+    than an absent one.
+  - **Provisioning came back, over Web Serial** (Track A, 2026-09-23): "Add a panel"
+    writes `NetworkConfig` to a USB-connected panel from Chrome/Edge
+    (`apps/deskmate/src/lib/serial/`), after `POST /v1/app/devices/claim` mints the
+    identity. The Wi-Fi password goes only over the cable, never to the server. The
+    codec is tested byte-for-byte against `protocol/fixtures/v2/`, the firmware's own
+    fixtures -- keep it that way rather than hand-writing frames.
   - **The SPA is served from a directory, never embedded.** `DESKMATE_WEB_DIR` points at
     a built `dist/`, read per request, so a UI change is `bun run build` plus an rsync
     with no Rust build and no restart. That is the whole point; do not "simplify" it into
@@ -128,14 +136,14 @@ default. This section states only what is true now.
   Mac's), and only then installs into `/var/lib/deskmate/faces`. The VM needs
   `/usr/local/bin/bun`; the script says how if it is missing.
   - **No edge auth, on the owner's decision (2026-09-18).** The app is its own gate:
-    `/v1/app/*` and `/v1/manage/*` need the operator session cookie traded for
-    `DESKMATE_ADMIN_TOKEN`, `/v1/device/*` and `/v1/images/*` need their own bearers, and
-    `/v1/firmware/*` is unauthenticated by design. A Caddy `basic_auth` gate stood in
+    `/v1/app/*` needs an account session, `/v1/manage/*` and `/v1/integrations/*` need the
+    instance owner's account session, `/v1/device/*` and `/v1/images/*` need their own
+    bearers, and `/v1/firmware/*` is unauthenticated by design. A Caddy `basic_auth` gate stood in
     front of the browser paths for a few hours and was removed as a second password for
     the same person. Publicly fetchable as a result: the JS bundle and the login form.
-    That is fine against a 256-bit random admin token and the constant-time comparison,
-    and **would stop being fine the moment that token became human-chosen** -- adding a
-    login rate limit is the prerequisite for any such change, because the server has none.
+    The auth surface rate-limits sign-in emails by address and client IP, and link,
+    setup-code and Google-callback failures by client IP. There are no passwords; the
+    256-bit admin token remains a constant-time-compared CLI and recovery secret.
   - **If an edge gate is ever restored it MUST be scoped by path.** The board and the
     picture producers send their own `Authorization` header, which `basic_auth` consumes,
     so a host-wide gate breaks the device link outright. That is why the removed block

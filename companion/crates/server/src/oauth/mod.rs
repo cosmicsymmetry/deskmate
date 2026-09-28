@@ -2,9 +2,8 @@
 //! Google wired as the first identity; no `app-core`, config, or firmware
 //! surface is touched.
 
-mod pkce;
+pub(crate) mod pkce;
 pub(crate) mod routes;
-pub mod session;
 mod token;
 pub mod transport;
 

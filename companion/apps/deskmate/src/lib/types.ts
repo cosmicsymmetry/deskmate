@@ -294,6 +294,7 @@ export interface DeviceRow {
   connected: boolean;
   has_saved_config: boolean;
   configured_at: number | null;
+  state: "pending" | "active";
 }
 
 /**

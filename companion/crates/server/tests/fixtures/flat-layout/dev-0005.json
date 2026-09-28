@@ -1,0 +1,25 @@
+{
+  "schema_version": 10,
+  "preferences": {
+    "timezone": "UTC",
+    "autostart": false,
+    "paused": false,
+    "orientation": "landscape"
+  },
+  "cards": [
+    {
+      "kind": "pomodoro",
+      "id": "pomodoro",
+      "label": "Focus",
+      "duration_seconds": 30,
+      "template": { "kind": "progress-ring" },
+      "tap_action": { "kind": "start-pause" },
+      "refresh": { "kind": "device-local" },
+      "alert": { "kind": "none" },
+      "dwell_seconds": null
+    }
+  ],
+  "assets": [],
+  "advance": { "kind": "manual" },
+  "updater": { "channel": "stable", "checks": "notify" }
+}

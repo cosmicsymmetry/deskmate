@@ -62,7 +62,7 @@ firmware boundary (`docs/superpowers/specs/2026-09-23-deskmate-tap-to-face-desig
 |---|---|---|---|
 | A | Not started | -- | -- |
 | B | Not started | -- | -- |
-| C1 | Phase 1 works on hardware. The 13.3 s tap was measured, diagnosed (flash, not the wire) and cut: frames go to PSRAM and reclaiming is rate-limited. All four faces answer a tap | `track-c1-tap-to-face` | A tap-to-redraw measurement on the new build |
+| C1 | Phase 1 works on hardware. The 13.3 s tap was measured, diagnosed (flash, not the wire) and cut: frames go to PSRAM and reclaiming is rate-limited. All four faces answer a tap. The frames-in-PSRAM spec is written and its step 1 (the host reads the device's asset-store stats) has shipped; steps 2-4 are one owner-authorized batch ending in a flash, batched with C2 | `track-c1-tap-to-face` | A tap-to-redraw measurement on the new build; the owner's authorization for the 16-slot pool's flash |
 | C2 | Not started | -- | C1 |
 | D | Not started | -- | -- |
 | E | Not started | -- | -- |

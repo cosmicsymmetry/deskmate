@@ -8,6 +8,13 @@ This crosses the **wire contract** and **firmware**, two of the three expensive
 boundaries. It does not touch `CURRENT_SCHEMA_VERSION`. It needs the owner's explicit
 authorization and one flash session, batched with C2.
 
+> **AMENDED 2026-09-28 during implementation.** Step 1 shipped (`784ff52`). Two claims below
+> did not survive contact with the code, and both are corrected in place where they appear:
+> key 31 is a **flash** number and not the PSRAM pre-flight figure this spec takes it for
+> (see *Risks*), and steps 2–3 **cannot** be landed ahead of the firmware "behaving like
+> today" (see *Sequencing*) — they are one batch with step 4. The plan carries the full
+> reasoning: `docs/superpowers/plans/2026-09-28-frames-live-in-psram.md`.
+
 ## The finding
 
 The device has two asset tiers. The host has only ever used one of them, and it used the
@@ -192,9 +199,15 @@ durable store has been timed on the board.
 - **PSRAM fragmentation is unverified.** 5.03 MB fits arithmetically, but sixteen
   329,740-byte allocations in a heap that mbedTLS also draws from is a different question
   from "is there enough free". **Pre-flight: watch the heap low-water mark and the device's
-  own `asset_store_free_bytes` with the pool full.** That field is reported in key 31 of
-  every `StatusResponse` and the host does not decode it -- decoding it is additive and
-  should land before the firmware change.
+  own volatile occupancy with the pool full.**
+  **CORRECTED 2026-09-28: key 31 is not that number.** This spec took
+  `asset_store_free_bytes` for the PSRAM figure; `protocol_task.c:530-539` fills key 31 from
+  `asset_store_stats(asset_flash_store(), ..)` and `asset_store.c:547` derives its
+  `free_blob_bytes` from the **flash** blob region's high water. PSRAM occupancy is not on
+  the wire at all. Key 31 is decoded now (`784ff52`) because it answers a different question
+  this spec also asks -- whether the flash is still being written for frames -- and the
+  volatile pre-flight figure needs a **new** status key, which is part of the step 4 wire
+  change rather than something that can precede it.
 - **Any firmware change costs an on-board OTA re-verification**, per the statics trap. One
   mitigation is already true: `volatile_asset_store_t` lives inside `s_context`, which is
   `heap_caps_calloc(..., MALLOC_CAP_SPIRAM)`, so growing the slot array grows a PSRAM heap
@@ -205,6 +218,12 @@ durable store has been timed on the board.
 - **`Busy: volatile asset reserve failed` must be handled, not merely logged.** With a
   pool the host can exhaust it by declaring too many views; the budget rule above is what
   prevents that, and the refusal is the backstop.
+  **CORRECTED 2026-09-28: it is already handled, and no work is owed here.**
+  `runtime/scene.rs:174-179` treats `Rejected(Busy)` as neither a card error nor a transport
+  failure -- it marks the scene dirty, and the next render phase reconciles the frame
+  durably and pushes it. A refusal costs one render phase, not a picture. An inline durable
+  fallback was considered and rejected: it would move a 1.5 s commit onto the tap path to
+  save that phase.
 
 ## Testing
 
@@ -224,13 +243,22 @@ durable store has been timed on the board.
 ## Sequencing
 
 1. Decode `StatusResponse` key 31 (`asset_store_used_bytes`, `free_bytes`, `asset_count`).
-   Host-only, additive, no flash. Gives the pre-flight number.
+   Host-only, additive, no flash. **DONE 2026-09-28, `784ff52`.** It gives the flash-wear
+   number, not the PSRAM one -- see the correction under *Risks*.
 2. Faces contract: `views()` + pure `onTap`. Faces-only deploy, no Rust, no restart.
 3. Host: every frame volatile, keep-set spans both tiers, budget rule. Server deploy.
-   **Still limited to two slots until the firmware ships** -- so land it behind the budget
-   rule, which will stage one view per card and behave like today.
 4. Firmware: `VOLATILE_ASSET_SLOT_COUNT` 2 → 16, contract amendment, flash, OTA
    re-verification. **Batched with C2's tap coordinates: one image, one session.**
 
-Steps 1–3 need no authorization. Step 4 needs the owner's, and is the only step that makes
-the pool real.
+**CORRECTED 2026-09-28: steps 2–4 are one batch, and step 1 was the only one that could
+ship alone.** This section said step 3 could land first "behind the budget rule, which will
+stage one view per card and behave like today". It cannot, for a reason stated nowhere else
+in this spec: `VOLATILE_ASSET_SLOT_COUNT` is 2 and its own comment reads "one displayed
+frame plus one incoming replacement", so the deployed fleet holds **one** committed volatile
+frame -- and the budget rule bounds views per *card*, not cards, so with four picture cards
+it asks for four resident frames. The device's carousel then advances on its own to a card
+whose only copy was evicted, which is the blank card `docs/hardware/board-notes.md` already
+warns about from the other direction. Durable-for-non-visible is therefore not a legacy
+policy to remove early; at one resident slot it is correct, and only the 16-slot pool makes
+"every picture frame is volatile" true. Step 4 needs the owner's authorization, so the whole
+remaining batch does.

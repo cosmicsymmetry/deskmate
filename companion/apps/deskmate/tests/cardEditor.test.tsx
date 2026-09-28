@@ -488,3 +488,33 @@ test("the dwell field is shown when the loop is timed or the value must be repai
   const timed = renderDwell(cardListConfig([card]));
   expect(timed).toContain("Stays on the panel for");
 });
+
+test("a tappable face tells the owner what a tap does, and others say nothing", async () => {
+  // The panel has three states for a picture -- waiting, stale, drawn -- and none of
+  // them can say "this one answers a tap". The window is where that is learnable.
+  const tappable = await mountFaceSettings(
+    { ...opaqueFace, tap: "Tap the panel for the next stories." },
+    null,
+  );
+  try {
+    await waitFor(() =>
+      expect(tappable.container.textContent).toContain("Tap the panel for the next stories."),
+    );
+    // And it must REPLACE the gesture note's claim, not sit beside it: a picture
+    // card's document action is always `none`, so the editor used to say a tap did
+    // nothing while the panel paged the front page.
+    expect(tappable.container.textContent).not.toContain("Tapping this card does nothing.");
+  } finally {
+    await tappable.cleanup();
+  }
+
+  const quiet = await mountFaceSettings(opaqueFace, null);
+  try {
+    expect(quiet.container.textContent).not.toContain("Tap the panel");
+    await waitFor(() =>
+      expect(quiet.container.textContent).toContain("Tapping this card does nothing."),
+    );
+  } finally {
+    await quiet.cleanup();
+  }
+});

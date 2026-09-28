@@ -3,7 +3,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use app_core::runtime::ImageSourceFrame;
+use app_core::runtime::{CardTapSink, ImageSourceFrame};
 use app_core::{
     AlertHold, AppConfig, CardAlert, CardErrorKind, CardField, CardFieldValue, CardSettings,
     CarouselAdvance, ConnectionState, DesiredAsset, DeviceCapability, DeviceConnection,
@@ -42,6 +42,9 @@ enum Operation {
     },
     PushScene(PushScene),
     AssetBegin([u8; protocol::ASSET_DIGEST_LEN]),
+    /// `AssetBegin { volatile: true }` -- the PSRAM tier, which writes no
+    /// flash and leaves the durable inventory (and so the keep-set) alone.
+    VolatileAssetBegin([u8; protocol::ASSET_DIGEST_LEN]),
     AssetChunk([u8; protocol::ASSET_DIGEST_LEN], u32),
     AssetCommit([u8; protocol::ASSET_DIGEST_LEN]),
     AssetRelease(Vec<[u8; protocol::ASSET_DIGEST_LEN]>),
@@ -217,13 +220,7 @@ impl MockDeviceControl {
     }
 
     fn tap_pomodoro(&self, sequence: u64) {
-        self.push_event(DeviceEvent {
-            sequence,
-            kind: EventKind::Tap,
-            card_id: "pomodoro".into(),
-            action: EventAction::StartPause,
-            interrupt_token: None,
-        });
+        self.push_event(tap_event(sequence, "pomodoro"));
     }
 
     fn navigate_next(&self, sequence: u64, card_id: &str) {
@@ -308,6 +305,34 @@ impl MockDeviceControl {
             .iter()
             .filter(|operation| **operation == Operation::TimeSync)
             .count()
+    }
+}
+
+fn tap_event(sequence: u64, card_id: &str) -> DeviceEvent {
+    DeviceEvent {
+        sequence,
+        kind: EventKind::Tap,
+        card_id: card_id.into(),
+        action: EventAction::StartPause,
+        interrupt_token: None,
+    }
+}
+
+#[derive(Default)]
+struct RecordingTapSink(Mutex<Vec<(String, String)>>);
+
+impl RecordingTapSink {
+    fn taken(&self) -> Vec<(String, String)> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+}
+
+impl CardTapSink for RecordingTapSink {
+    fn tapped(&self, card_id: &str, source_id: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .push((card_id.to_owned(), source_id.to_owned()));
     }
 }
 
@@ -542,7 +567,11 @@ impl RuntimeDevice for MockDevice {
 
     fn send_asset_begin(&mut self, begin: AssetBegin) -> Result<Ack, DeviceError> {
         self.with_connected(|state| {
-            state.operations.push(Operation::AssetBegin(begin.digest));
+            state.operations.push(if begin.volatile {
+                Operation::VolatileAssetBegin(begin.digest)
+            } else {
+                Operation::AssetBegin(begin.digest)
+            });
             Ack {
                 acknowledged_type: protocol::TYPE_ASSET_BEGIN,
                 revision: None,
@@ -814,6 +843,32 @@ fn picture_config(picture_is_active: bool) -> AppConfig {
     config
 }
 
+fn config_with_picture(card_id: &str, source_id: &str) -> AppConfig {
+    AppConfig {
+        cards: vec![CardSettings::Picture {
+            id: card_id.into(),
+            title: card_id.into(),
+            source_id: source_id.into(),
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Manual,
+            alert: CardAlert::None,
+            dwell_seconds: None,
+        }],
+        image_sources: vec![app_core::config::ImageSource {
+            id: source_id.into(),
+            name: source_id.into(),
+        }],
+        ..AppConfig::default()
+    }
+}
+
+fn config_with_pomodoro(card_id: &str) -> AppConfig {
+    AppConfig {
+        cards: vec![pomodoro_card(card_id, CardAlert::None)],
+        ..AppConfig::default()
+    }
+}
+
 fn start_picture_runtime(
     config: AppConfig,
     control: &MockDeviceControl,
@@ -824,6 +879,21 @@ fn start_picture_runtime(
         Box::new(MockDevice::new(control.clone())),
         options(),
         host,
+    )
+    .unwrap()
+}
+
+fn start_runtime_with_tap_sink(
+    config: AppConfig,
+    control: &MockDeviceControl,
+    tap_sink: Arc<dyn CardTapSink>,
+) -> RuntimeHandle {
+    RuntimeHandle::start_with_ports(
+        config,
+        Box::new(MockDevice::new(control.clone())),
+        options(),
+        None,
+        Some(tap_sink),
     )
     .unwrap()
 }
@@ -1007,9 +1077,13 @@ fn run_image_source_update_case(
             })
         });
     } else {
+        // The frame becoming resident is the observable end of an off-screen
+        // update. It used to be the AssetRelease that followed it, but releases
+        // are now rate-limited -- reclaiming compacts flash and costs the panel
+        // seconds of its own clock, so it no longer rides along with every frame.
         wait_for(Duration::from_secs(1), || {
             control.operations()[before..].iter().any(|operation| {
-                matches!(operation, Operation::AssetRelease(digests) if digests == &vec![existing_digest, picture_digest])
+                matches!(operation, Operation::AssetCommit(digest) if digest == &picture_digest)
             })
         });
         thread::sleep(Duration::from_millis(30));
@@ -1022,6 +1096,7 @@ fn run_image_source_update_case(
             matches!(
                 operation,
                 Operation::AssetBegin(_)
+                    | Operation::VolatileAssetBegin(_)
                     | Operation::AssetChunk(_, _)
                     | Operation::AssetCommit(_)
                     | Operation::AssetRelease(_)
@@ -1039,8 +1114,11 @@ fn assert_image_update_asset_prefix(
     existing_digest: [u8; protocol::ASSET_DIGEST_LEN],
     picture_digest: [u8; protocol::ASSET_DIGEST_LEN],
 ) {
+    // Both frames are re-sent and committed; no AssetRelease follows, because
+    // reclaiming is rate-limited now and the initial sync already spent this
+    // window's release.
     assert_eq!(
-        &operations[..7],
+        &operations[..6],
         &[
             Operation::AssetBegin(existing_digest),
             Operation::AssetChunk(existing_digest, 0),
@@ -1048,7 +1126,12 @@ fn assert_image_update_asset_prefix(
             Operation::AssetBegin(picture_digest),
             Operation::AssetChunk(picture_digest, 0),
             Operation::AssetCommit(picture_digest),
-            Operation::AssetRelease(vec![existing_digest, picture_digest]),
         ]
+    );
+    assert!(
+        !operations
+            .iter()
+            .any(|operation| matches!(operation, Operation::AssetRelease(_))),
+        "reclaiming compacts flash and must not ride along with an ordinary frame: {operations:?}"
     );
 }

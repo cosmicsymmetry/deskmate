@@ -49,6 +49,12 @@ use timers::{
 const DEFAULT_RUNTIME_COMMAND_CAPACITY: usize = 16;
 const DEFAULT_MAX_SUBSCRIBERS: usize = 8;
 
+/// Receives taps on cards whose host-provided picture may need to change.
+pub trait CardTapSink: Send + Sync {
+    /// Called on the runtime worker thread. MUST NOT block.
+    fn tapped(&self, card_id: &str, source_id: &str);
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct RuntimeOptions {
     pub command_capacity: usize,
@@ -95,7 +101,7 @@ impl RuntimeHandle {
         device: Box<dyn RuntimeDevice>,
         options: RuntimeOptions,
     ) -> Result<Self, RuntimeError> {
-        Self::start_with_image_source_host(config, device, options, None)
+        Self::start_with_ports(config, device, options, None, None)
     }
 
     pub fn start_with_image_source_host(
@@ -103,6 +109,16 @@ impl RuntimeHandle {
         device: Box<dyn RuntimeDevice>,
         options: RuntimeOptions,
         image_source_host: Option<Box<dyn ImageSourceHost>>,
+    ) -> Result<Self, RuntimeError> {
+        Self::start_with_ports(config, device, options, image_source_host, None)
+    }
+
+    pub fn start_with_ports(
+        config: AppConfig,
+        device: Box<dyn RuntimeDevice>,
+        options: RuntimeOptions,
+        image_source_host: Option<Box<dyn ImageSourceHost>>,
+        tap_sink: Option<Arc<dyn CardTapSink>>,
     ) -> Result<Self, RuntimeError> {
         config
             .compile(1)
@@ -125,6 +141,7 @@ impl RuntimeHandle {
             config,
             device,
             image_source_host,
+            tap_sink,
         };
         let worker = thread::Builder::new()
             .name("deskmate-runtime".into())
@@ -162,6 +179,12 @@ impl RuntimeHandle {
 
     pub fn subscribe(&self) -> Result<RuntimeSubscription, RuntimeError> {
         self.publisher.subscribe()
+    }
+
+    /// Number of device taps dropped because their card was unknown or their
+    /// picture card had no host sink.
+    pub fn taps_dropped(&self) -> u64 {
+        self.diagnostics.taps_dropped.load(Ordering::Relaxed)
     }
 
     pub fn apply_config(&self, config: AppConfig) -> Result<(), RuntimeError> {
@@ -354,6 +377,7 @@ struct WorkerState {
     /// digest/staleness changes without retrying an unchanged terminal refusal.
     last_evaluated_picture_face: BTreeMap<String, ([u8; protocol::ASSET_DIGEST_LEN], bool)>,
     image_source_host: Option<Box<dyn ImageSourceHost>>,
+    tap_sink: Option<Arc<dyn CardTapSink>>,
     dirty_cards: BTreeSet<String>,
     /// Card ID -> the most recent typed refusal for that card. There is deliberately
     /// one editor-visible slot per card: if data and scene refusals happen before
@@ -378,12 +402,34 @@ struct WorkerState {
     /// WebSocket runtime legitimately drives devices that report that tier.
     ownership_refused: bool,
     next_scene_revision: u32,
-    /// Digests observed through AssetBegin(already-present) or a successful
-    /// commit on this device runtime. Durable bytes may survive reconnects.
-    confirmed_durable_assets: BTreeSet<[u8; protocol::ASSET_DIGEST_LEN]>,
+    /// Digests the device is known to hold **in either tier**, observed through
+    /// `AssetBegin(already-present)` or a successful commit on this runtime. A
+    /// scene may only name a digest in here: one naming bytes the device lacks
+    /// draws nothing.
+    ///
+    /// Was `confirmed_durable_assets` until the interactive path started using
+    /// the volatile tier. A frame in PSRAM is exactly as resolvable as one in
+    /// flash -- `protocol_asset_resolver` checks PSRAM first -- so gating the
+    /// scene on durability made the picture wait for the flash write that the
+    /// volatile tier exists to avoid. Durable bytes survive a reconnect and
+    /// volatile ones do not, which is why this is rebuilt from the keep-set on
+    /// every reconcile rather than accumulated.
+    confirmed_resident_assets: BTreeSet<[u8; protocol::ASSET_DIGEST_LEN]>,
+    /// When this runtime last asked the device to reclaim replaced assets.
+    /// `None` until the first pass, which always releases.
+    last_asset_release: Option<Instant>,
     next_connect: Instant,
     last_published: Option<AppSnapshot>,
 }
+
+/// How rarely the device is asked to reclaim replaced assets.
+///
+/// Reclaiming compacts the flash blob region and costs seconds during which the
+/// panel shows its clock, so it must not ride along with every frame. See
+/// [`AssetSync::reconcile_releasing`] for why deferring it is safe: the
+/// partition is 6 MB, a frame is roughly 35 KB, and the four faces replace 16 an
+/// hour. Half an hour of deferral is about eight dead records out of ~170 slots.
+const ASSET_RELEASE_INTERVAL: Duration = Duration::from_mins(30);
 
 impl WorkerState {
     /// A hostless worker for tests that do not exercise picture delivery.
@@ -392,11 +438,22 @@ impl WorkerState {
         Self::new_with_image_source_host(config, now, scheduler, None)
     }
 
+    #[cfg(test)]
     fn new_with_image_source_host(
         config: AppConfig,
         now: Instant,
         scheduler: &mut Scheduler,
         image_source_host: Option<Box<dyn ImageSourceHost>>,
+    ) -> Self {
+        Self::new_with_ports(config, now, scheduler, image_source_host, None)
+    }
+
+    fn new_with_ports(
+        config: AppConfig,
+        now: Instant,
+        scheduler: &mut Scheduler,
+        image_source_host: Option<Box<dyn ImageSourceHost>>,
+        tap_sink: Option<Arc<dyn CardTapSink>>,
     ) -> Self {
         let mut state = Self {
             config: config.clone(),
@@ -405,6 +462,7 @@ impl WorkerState {
             latest_fields: BTreeMap::new(),
             last_evaluated_picture_face: BTreeMap::new(),
             image_source_host,
+            tap_sink,
             dirty_cards: BTreeSet::new(),
             push_rejections: BTreeMap::new(),
             pomodoros: BTreeMap::new(),
@@ -418,7 +476,8 @@ impl WorkerState {
             needs_full_sync: true,
             ownership_refused: false,
             next_scene_revision: 0,
-            confirmed_durable_assets: BTreeSet::new(),
+            confirmed_resident_assets: BTreeSet::new(),
+            last_asset_release: None,
             next_connect: now,
             last_published: None,
         };
@@ -617,6 +676,13 @@ fn card_index(config: &AppConfig, card_id: &str) -> Option<usize> {
     config.cards.iter().position(|card| card.id() == card_id)
 }
 
+fn picture_source<'a>(config: &'a AppConfig, card_id: &str) -> Option<&'a str> {
+    config.cards.iter().find_map(|card| match card {
+        CardSettings::Picture { id, source_id, .. } if id == card_id => Some(source_id.as_str()),
+        _ => None,
+    })
+}
+
 /// The dwell for the card at `index`, resolved against the document's default.
 /// Returns `None` under `CarouselAdvance::Manual` or when fewer than two cards
 /// exist, keeping no-op rotation deadlines disarmed.
@@ -658,6 +724,7 @@ struct RuntimeWorkerInputs {
     config: AppConfig,
     device: Box<dyn RuntimeDevice>,
     image_source_host: Option<Box<dyn ImageSourceHost>>,
+    tap_sink: Option<Arc<dyn CardTapSink>>,
 }
 
 fn run_runtime(
@@ -671,6 +738,7 @@ fn run_runtime(
         config,
         mut device,
         image_source_host,
+        tap_sink,
     } = inputs;
     let now = Instant::now();
     let mut scheduler = Scheduler::new(
@@ -680,7 +748,7 @@ fn run_runtime(
         options.time_sync_interval,
     );
     let mut state =
-        WorkerState::new_with_image_source_host(config, now, &mut scheduler, image_source_host);
+        WorkerState::new_with_ports(config, now, &mut scheduler, image_source_host, tap_sink);
     state.publish_if_changed(publisher, diagnostics);
 
     let mut shutting_down = false;
@@ -798,6 +866,22 @@ fn process_command(
     false
 }
 
+/// Whether this reconcile should close with an `AssetRelease`, and remembers
+/// the answer when it is yes.
+///
+/// Reclaiming is housekeeping: nothing waits on it, and it costs the panel
+/// seconds of its own clock. Rate-limiting it is what takes flash compaction out
+/// of the path between a tap and its picture.
+fn claim_asset_release(state: &mut WorkerState, now: Instant) -> bool {
+    let due = state
+        .last_asset_release
+        .is_none_or(|last| now.saturating_duration_since(last) >= ASSET_RELEASE_INTERVAL);
+    if due {
+        state.last_asset_release = Some(now);
+    }
+    due
+}
+
 fn apply_image_source_update(
     state: &mut WorkerState,
     device: &mut dyn RuntimeDevice,
@@ -863,10 +947,61 @@ fn apply_image_source_update(
         return Ok(());
     }
 
+    // The interactive path: the frame that just changed is the one on the glass.
+    //
+    // A durable pass would cost an `AssetCommit` that writes flash and then an
+    // `AssetRelease` whose compaction moves every record after the one it just
+    // orphaned. Measured on `dev-0005` on 2026-09-26: 1.54 s and 9.36 s, and the
+    // panel shows its clock for the whole of the second one -- 9.5 of the 13.3
+    // seconds between a tap and its new picture. The volatile tier is a `memcpy`
+    // into PSRAM with neither cost, which is what it was built for
+    // (`volatile_asset_store.c`, capability bit 9).
+    //
+    // The durable copy is not written here and does not need to be: the digest
+    // addresses decoded bytes, so it is the same in both tiers, and the next
+    // ordinary reconcile -- any other source's refresh, or a reconnect -- carries
+    // this frame to flash under the digest the scene already names. The device
+    // resolves PSRAM before flash, so that arrival is invisible.
+    //
+    // KNOWN GAP, bounded and accepted: the tier holds one committed frame, so
+    // tapping a *second* picture card before that reconcile evicts this one, and
+    // its card is blank until its durable copy lands (at most one refresh
+    // interval). Only one face takes taps today. Raising
+    // `VOLATILE_ASSET_SLOT_COUNT` closes it and needs a wire-contract amendment.
+    if let Some(card_id) = visible_picture_card_id.as_ref()
+        && state.device.capability_bits() & protocol::CAPABILITY_VOLATILE_ASSETS != 0
+        && let Some(frame) = desired.iter().find(|asset| asset.digest == digest)
+    {
+        return match AssetSync::transfer_volatile(device, frame, state.device.capability_bits()) {
+            Ok(()) => {
+                // The device holds it now, in PSRAM. Without this the scene gate
+                // would refuse to name the digest and the picture would wait for
+                // the durable write -- which is the wait this whole path removes.
+                state.confirmed_resident_assets.insert(digest);
+                clear_asset_sync_refusals(state);
+                state.active_scene_dirty = true;
+                push_active_scene(state, device, reconnect_interval);
+                Ok(())
+            }
+            Err(error) => {
+                let message = error.to_string();
+                state.active_scene_dirty = false;
+                handle_automatic_asset_error(state, card_id.clone(), error, reconnect_interval);
+                Err(RuntimeError::Device { message })
+            }
+        };
+    }
+
     // This is deliberately the entire host-owned set. AssetRelease is a
     // device-wide KEEP-SET, so reconciling only this source would delete every
     // other picture digest omitted from the partial list.
-    let keep_set = match AssetSync::reconcile(device, &desired, state.device.capability_bits()) {
+    let release = claim_asset_release(state, Instant::now());
+    let keep_set = match AssetSync::reconcile_releasing(
+        device,
+        &desired,
+        state.device.capability_bits(),
+        release,
+    ) {
         Ok(keep_set) => keep_set,
         Err(error) => {
             let message = error.to_string();
@@ -877,7 +1012,7 @@ fn apply_image_source_update(
             return Err(RuntimeError::Device { message });
         }
     };
-    state.confirmed_durable_assets = keep_set.into_iter().collect();
+    state.confirmed_resident_assets = keep_set.into_iter().collect();
     clear_asset_sync_refusals(state);
 
     // Rebuilding an unrelated visible face would turn every background image
@@ -1050,25 +1185,37 @@ fn drain_device_events(
                     scheduler.set_rotation(current_dwell(&state.config, index), now);
                 }
             }
-            (EventKind::Tap, EventAction::StartPause) => {
-                let _ = control_pomodoro(
-                    state,
-                    scheduler,
-                    device,
-                    &received.event.card_id,
-                    PomodoroAction::Toggle,
-                    now,
-                );
-            }
-            (EventKind::Tap, EventAction::Reset) => {
-                let _ = control_pomodoro(
-                    state,
-                    scheduler,
-                    device,
-                    &received.event.card_id,
-                    PomodoroAction::Reset,
-                    now,
-                );
+            (EventKind::Tap, action @ (EventAction::StartPause | EventAction::Reset)) => {
+                // Every picture card is lowered to StartPause so the device reports taps at
+                // all (see config.rs's wire_config). What the tap MEANS is the host's
+                // business: a pomodoro's tap drives its timer, a picture's tap goes to
+                // whatever draws it. This file must not learn what that is.
+                if let Some(source_id) =
+                    picture_source(&state.config, &received.event.card_id).map(str::to_owned)
+                {
+                    match &state.tap_sink {
+                        Some(sink) => sink.tapped(&received.event.card_id, &source_id),
+                        None => {
+                            diagnostics.taps_dropped.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                } else if card_index(&state.config, &received.event.card_id).is_none() {
+                    diagnostics.taps_dropped.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    let pomodoro_action = match action {
+                        EventAction::StartPause => PomodoroAction::Toggle,
+                        EventAction::Reset => PomodoroAction::Reset,
+                        _ => unreachable!("the match arm only accepts pomodoro tap actions"),
+                    };
+                    let _ = control_pomodoro(
+                        state,
+                        scheduler,
+                        device,
+                        &received.event.card_id,
+                        pomodoro_action,
+                        now,
+                    );
+                }
             }
             (EventKind::InterruptDismissed, EventAction::DismissInterrupt) => {
                 let applied = received

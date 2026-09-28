@@ -43,6 +43,10 @@ pub fn sample_status_response() -> StatusResponse {
         ota_state: OtaState::Idle,
         last_network_error: None,
         last_ota_error: None,
+        // A device whose flash store never formatted omits key 31, which is the
+        // shape the golden frames in `tests/fixtures.rs` were captured in. The
+        // present shape has its own coverage in `message.rs`.
+        asset_store: None,
     }
 }
 

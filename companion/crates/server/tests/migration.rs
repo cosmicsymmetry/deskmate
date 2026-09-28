@@ -91,6 +91,7 @@ fn migrates_the_flat_layout_into_the_owner_account() {
             "image-frames/image-0123456789abcdef01234567.bin",
         ),
         ("data-cards.json", "data-cards.json"),
+        ("face-state.json", "face-state.json"),
         ("dev-0001.json", "devices/dev-0001.json"),
         ("dev-0005.json", "devices/dev-0005.json"),
     ] {

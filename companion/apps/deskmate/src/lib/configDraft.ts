@@ -533,10 +533,17 @@ export function issuesForField(cardIssues: ValidationIssue[], field: string): Va
 /// while an alert is showing dismisses it instead — and nothing else in the
 /// app states this, so the editor is where a person can find out what their
 /// tap will actually do before they rely on it.
-export function tapActionDescription(card: CardSettings): string {
+export function tapActionDescription(card: CardSettings, faceTap?: string | null): string {
   switch (card.tap_action.kind) {
     case "none":
-      return "Tapping this card does nothing.";
+      // A picture card's document action is always `none` -- the DEVICE does
+      // nothing by itself -- but the host now reports its taps, and a face that
+      // declares one answers with a new picture. Saying "does nothing" in front of
+      // a face that pages the front page would be the editor contradicting the
+      // panel, so the face's own sentence wins when it has one.
+      return faceTap !== undefined && faceTap !== null && faceTap.trim() !== ""
+        ? faceTap
+        : "Tapping this card does nothing.";
     case "start-pause":
       return "Tapping this card starts or pauses its timer.";
     case "reset":

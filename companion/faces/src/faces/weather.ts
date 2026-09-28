@@ -14,6 +14,8 @@
 import {
   ConfigurationError,
   type FaceDefinition,
+  type RenderContext,
+  type RenderResult,
   type Settings,
   text,
   TransientError,
@@ -38,6 +40,7 @@ import {
   CONTENT_WIDTH,
   GRID,
   GROUND,
+  HAIRLINE,
   HERO_STEPS,
   INK,
   INK_3,
@@ -76,6 +79,18 @@ export interface HourlyStep {
   condition: Condition;
 }
 
+export interface DailyStep {
+  /** Open-Meteo's local calendar date, kept intact rather than converted by the host. */
+  date: string;
+  /** A fixed English weekday derived from `date`, independent of the host's locale. */
+  label: string;
+  high: number;
+  low: number;
+  condition: Condition;
+  /** The same words the current conditions use, so a day can fill the hero. */
+  summary: string;
+}
+
 export interface WeatherFace {
   /** The geocoder's own display name, so the panel says what the forecast is for. */
   place: string;
@@ -85,6 +100,64 @@ export interface WeatherFace {
   high: number;
   low: number;
   hourly: HourlyStep[];
+  daily: DailyStep[];
+}
+
+export interface WeatherState {
+  view: "now" | "days";
+  tappedAt: string | null;
+  /**
+   * The forecast the last fetch returned, so a tap can redraw without going back
+   * to the network.
+   *
+   * Both views are the same reading said about a different moment, so a tap that
+   * only switches between them has no reason to fetch. Measured at about 1 KB of
+   * JSON against the 16 KB the server allows per source.
+   */
+  forecast?: WeatherFace;
+  /** When `forecast` was fetched. Absent or stale means fetch again. */
+  fetchedAt?: string;
+}
+
+/**
+ * How long a cached forecast may answer a tap.
+ *
+ * Shorter than the card's own refresh, so a tap never shows a reading the
+ * schedule would already have replaced.
+ */
+const FORECAST_CACHE_MS = 10 * 60 * 1_000;
+
+function cachedForecast(state: WeatherState, now: Date): WeatherFace | undefined {
+  if (state.forecast === undefined || state.fetchedAt === undefined) {
+    return undefined;
+  }
+  const at = Date.parse(state.fetchedAt);
+  if (!Number.isFinite(at) || now.getTime() - at > FORECAST_CACHE_MS) {
+    return undefined;
+  }
+  return state.forecast;
+}
+
+/**
+ * A tap redraws from the forecast already in hand when there is one, so the
+ * answer costs a draw instead of a draw plus an Open-Meteo round trip.
+ */
+export async function renderWeatherRequest(
+  settings: Settings,
+  now: Date,
+  context: RenderContext = {},
+  get: FetchText = fetchText,
+): Promise<RenderResult> {
+  const previous = weatherState(context.state);
+  const cached = context.event === undefined ? undefined : cachedForecast(previous, now);
+  const face = cached ?? (await fetchWeather(settings, get));
+  const fetchedAt = cached === undefined ? now.toISOString() : previous.fetchedAt;
+  const result = renderWeatherResult(face, now, context);
+  const drawn = typeof result === "string" ? { svg: result } : result;
+  return {
+    svg: drawn.svg,
+    state: { ...(drawn.state as WeatherState), forecast: face, fetchedAt },
+  };
 }
 
 interface Palette {
@@ -249,6 +322,7 @@ export function parseForecast(body: string, place: string): WeatherFace {
     high: wholeDegrees(high),
     low: wholeDegrees(low),
     hourly: hourlySteps(document, typeof current.time === "string" ? current.time : ""),
+    daily: dailySteps(document),
   };
 }
 
@@ -293,6 +367,76 @@ function hourlySteps(document: Json, currentTime: string): HourlyStep[] {
   return steps;
 }
 
+const WEEKDAYS = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"] as const;
+
+/** Open-Meteo returns local dates with no offset; read the calendar, not the host clock. */
+function weekdayOf(date: string): string | undefined {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (match === null) {
+    return undefined;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const instant = new Date(Date.UTC(year, month - 1, day));
+  if (
+    instant.getUTCFullYear() !== year ||
+    instant.getUTCMonth() !== month - 1 ||
+    instant.getUTCDate() !== day
+  ) {
+    return undefined;
+  }
+  return WEEKDAYS[instant.getUTCDay()];
+}
+
+function dailySteps(document: Json): DailyStep[] {
+  const daily = document.daily;
+  if (!isObject(daily)) {
+    return [];
+  }
+  const {
+    time,
+    weather_code: codes,
+    temperature_2m_max: maximums,
+    temperature_2m_min: minimums,
+  } = daily;
+  if (
+    !Array.isArray(time) ||
+    !Array.isArray(codes) ||
+    !Array.isArray(maximums) ||
+    !Array.isArray(minimums)
+  ) {
+    return [];
+  }
+
+  const steps: DailyStep[] = [];
+  for (let index = 0; index < time.length && steps.length < 6; index += 1) {
+    const date = time[index];
+    const label = typeof date === "string" ? weekdayOf(date) : undefined;
+    const code = finite(codes[index]);
+    const maximum = temperature(maximums[index]);
+    const minimum = temperature(minimums[index]);
+    if (
+      typeof date !== "string" ||
+      label === undefined ||
+      code === undefined ||
+      maximum === undefined ||
+      minimum === undefined
+    ) {
+      continue;
+    }
+    steps.push({
+      date,
+      label,
+      high: wholeDegrees(Math.max(maximum, minimum)),
+      low: wholeDegrees(Math.min(maximum, minimum)),
+      condition: conditionFromWmo(code, true),
+      summary: summaryFromWmo(code),
+    });
+  }
+  return steps;
+}
+
 export async function fetchWeather(settings: Settings, get: FetchText): Promise<WeatherFace> {
   const location = text(settings, "location");
   if (location === "") {
@@ -330,9 +474,9 @@ export async function fetchWeather(settings: Settings, get: FetchText): Promise<
     ["latitude", String(latitude)],
     ["longitude", String(longitude)],
     ["current", "temperature_2m,weather_code,is_day"],
-    ["daily", "temperature_2m_max,temperature_2m_min"],
+    ["daily", "weather_code,temperature_2m_max,temperature_2m_min"],
     ["hourly", "temperature_2m,weather_code,is_day"],
-    ["forecast_days", "2"],
+    ["forecast_days", "6"],
     ["timezone", "auto"],
   ];
   if (text(settings, "units") === "imperial") {
@@ -359,19 +503,210 @@ const f2 = (value: number): string => fixed(value, 2);
 export function renderWeather(face: WeatherFace): string {
   const canvas = new Canvas(CANVAS_WIDTH, CANVAS_HEIGHT);
   canvas.rect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT, GROUND);
-  drawHero(canvas, face, PALETTES[face.condition]);
+  drawHero(canvas, nowContent(face), PALETTES[face.condition]);
   drawStrip(canvas, face);
   return canvas.finish();
 }
 
-function drawHero(canvas: Canvas, face: WeatherFace, palette: Palette): void {
+const DAYS_GLYPH_SCALE = 18;
+/** Tomorrow takes the hero, so the strip carries the four days after it. */
+const DAYS_IN_STRIP = 4;
+/** Between a day's high and the low that trails it. */
+const READING_GAP = 7;
+
+/**
+ * The second view: tomorrow in the hero the current conditions usually hold, and
+ * the days after it in the strip the hours usually hold.
+ *
+ * It is the same two modules in the same places, because it is the same face
+ * saying the same kind of thing about a later moment. An earlier draft spent the
+ * hero on the words "Coming days" beside an icon, which told the owner what they
+ * were looking at instead of telling them the weather -- a label above a heading,
+ * which `DESIGN.md` rules out.
+ */
+export function renderWeatherDays(face: WeatherFace): string {
+  const canvas = new Canvas(CANVAS_WIDTH, CANVAS_HEIGHT);
+  canvas.rect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT, GROUND);
+
+  // `daily[0]` is today, which the resting view already covers.
+  const lead = face.daily[1] ?? face.daily[0];
+  if (lead === undefined) {
+    drawHero(canvas, nowContent(face), PALETTES[face.condition]);
+    canvas.roundedRect(MARGIN, STRIP_TOP, CONTENT_WIDTH, STRIP_HEIGHT, RADIUS_MODULE, SURFACE);
+    canvas.text({
+      x: CANVAS_WIDTH / 2,
+      baseline: baselineFromCenter(STRIP_TOP + STRIP_HEIGHT / 2, SIZE_CAPTION),
+      content: "Daily forecast unavailable",
+      size: SIZE_CAPTION,
+      fill: INK_3,
+      anchor: "middle",
+    });
+    return canvas.finish();
+  }
+
+  const eyebrow = face.daily[1] === undefined ? lead.label : "Tomorrow";
+  drawHero(canvas, dayContent(lead, eyebrow), PALETTES[lead.condition]);
+
+  canvas.roundedRect(MARGIN, STRIP_TOP, CONTENT_WIDTH, STRIP_HEIGHT, RADIUS_MODULE, SURFACE);
+  const rest = face.daily.slice(face.daily[1] === undefined ? 1 : 2, DAYS_IN_STRIP + 2);
+  if (rest.length === 0) {
+    canvas.text({
+      x: CANVAS_WIDTH / 2,
+      baseline: baselineFromCenter(STRIP_TOP + STRIP_HEIGHT / 2, SIZE_CAPTION),
+      content: "No further days forecast",
+      size: SIZE_CAPTION,
+      fill: INK_3,
+      anchor: "middle",
+    });
+    return canvas.finish();
+  }
+
+  const columnWidth = CONTENT_WIDTH / rest.length;
+  for (let index = 1; index < rest.length; index += 1) {
+    canvas.rect(
+      MARGIN + index * columnWidth,
+      STRIP_TOP + 2 * GRID,
+      1,
+      STRIP_HEIGHT - 4 * GRID,
+      HAIRLINE,
+    );
+  }
+  rest.forEach((step, index) => {
+    const centerX = MARGIN + (index + 0.5) * columnWidth;
+    canvas.text({
+      x: centerX,
+      baseline: baselineFromCapTop(STRIP_TOP + 2 * GRID, SIZE_EYEBROW),
+      content: fitTracked(
+        step.label,
+        SIZE_EYEBROW,
+        WEIGHT_SEMIBOLD,
+        TRACKING_EYEBROW,
+        columnWidth - 2 * GRID,
+      ),
+      size: SIZE_EYEBROW,
+      fill: INK_3,
+      weight: WEIGHT_SEMIBOLD,
+      anchor: "middle",
+      tracking: TRACKING_EYEBROW,
+    });
+    drawGlyph(
+      canvas,
+      centerX,
+      STRIP_TOP + STRIP_HEIGHT * 0.5,
+      DAYS_GLYPH_SCALE,
+      step.condition,
+      PALETTES[step.condition],
+    );
+    // The strip is the hourly strip's height, which holds three rows, so the two
+    // readings share the last one: the high in full ink, the low behind it.
+    const high = `${step.high}°`;
+    const low = `${step.low}°`;
+    const highWidth = textWidth(high, SIZE_BODY, WEIGHT_SEMIBOLD);
+    const lowWidth = textWidth(low, SIZE_CAPTION, WEIGHT_SEMIBOLD);
+    const readingsLeft = centerX - (highWidth + READING_GAP + lowWidth) / 2;
+    const readingsBaseline = baselineFromCapTop(
+      STRIP_BOTTOM - 2 * GRID - SIZE_BODY * CAP_HEIGHT,
+      SIZE_BODY,
+    );
+    canvas.text({
+      x: readingsLeft,
+      baseline: readingsBaseline,
+      content: high,
+      size: SIZE_BODY,
+      fill: INK,
+      weight: WEIGHT_SEMIBOLD,
+    });
+    canvas.text({
+      x: readingsLeft + highWidth + READING_GAP,
+      baseline: readingsBaseline,
+      content: low,
+      size: SIZE_CAPTION,
+      fill: INK_3,
+      weight: WEIGHT_SEMIBOLD,
+    });
+  });
+  return canvas.finish();
+}
+
+const TEMPORARY_VIEW_MS = 10 * 60 * 1_000;
+
+function weatherState(value: unknown): WeatherState {
+  if (typeof value !== "object" || value === null) {
+    return { view: "now", tappedAt: null };
+  }
+  const candidate = value as {
+    view?: unknown;
+    tappedAt?: unknown;
+    forecast?: unknown;
+    fetchedAt?: unknown;
+  };
+  // The cached forecast is only carried forward when it still looks like one.
+  // State is read back from a file the server wrote, so a shape that drifted
+  // between deploys must fall back to fetching rather than draw from rubble.
+  const forecast = candidate.forecast as WeatherFace | undefined;
+  const usable =
+    typeof forecast === "object" &&
+    forecast !== null &&
+    Array.isArray(forecast.hourly) &&
+    Array.isArray(forecast.daily);
+  return {
+    view: candidate.view === "days" ? "days" : "now",
+    tappedAt: typeof candidate.tappedAt === "string" ? candidate.tappedAt : null,
+    ...(usable ? { forecast } : {}),
+    ...(typeof candidate.fetchedAt === "string" ? { fetchedAt: candidate.fetchedAt } : {}),
+  };
+}
+
+/** Chooses a view and returns the state the next scheduled refresh or tap will receive. */
+export function renderWeatherResult(
+  face: WeatherFace,
+  now: Date,
+  context?: RenderContext,
+): RenderResult {
+  let state = weatherState(context?.state);
+  if (context?.event !== undefined) {
+    if (context.event.taps % 2 !== 0) {
+      state = { ...state, view: state.view === "now" ? "days" : "now" };
+    }
+    state = { ...state, tappedAt: now.toISOString() };
+  } else if (state.view === "days") {
+    const tappedAt = state.tappedAt === null ? Number.NaN : Date.parse(state.tappedAt);
+    if (!Number.isFinite(tappedAt) || now.getTime() - tappedAt > TEMPORARY_VIEW_MS) {
+      state = { view: "now", tappedAt: null };
+    }
+  }
+  return {
+    svg: state.view === "days" ? renderWeatherDays(face) : renderWeather(face),
+    state,
+  };
+}
+
+/**
+ * What the hero module says, whichever view is drawing it.
+ *
+ * Both views use this one component deliberately: the current conditions and
+ * tomorrow are the same thing said about a different moment, and giving the second
+ * view its own layout would mean two designs to keep in step. The eyebrow is the
+ * only part that differs -- the place when the reading is now, the day when it is
+ * not.
+ */
+interface HeroContent {
+  eyebrow: string;
+  reading: string;
+  summary: string;
+  condition: Condition;
+  high: number;
+  low: number;
+}
+
+function drawHero(canvas: Canvas, content: HeroContent, palette: Palette): void {
   canvas.roundedRect(MARGIN, HERO_TOP, CONTENT_WIDTH, HERO_HEIGHT, RADIUS_MODULE, palette.ground);
 
   const inset = MARGIN + 2.5 * GRID;
   const glyphCenterX = MARGIN + CONTENT_WIDTH - HERO_GLYPH_SCALE - 2.5 * GRID;
   const typeRoom = glyphCenterX - HERO_GLYPH_SCALE - inset - GRID;
 
-  const range = `H ${face.high}°   L ${face.low}°`;
+  const range = `H ${content.high}°   L ${content.low}°`;
   const rangeWidth = textWidth(range, SIZE_CAPTION, WEIGHT_SEMIBOLD);
   const eyebrowBaseline = baselineFromCapTop(HERO_TOP + 2.5 * GRID, SIZE_EYEBROW);
   canvas.text({
@@ -389,7 +724,7 @@ function drawHero(canvas: Canvas, face: WeatherFace, palette: Palette): void {
   // long "city, country" drew straight through the range beside it.
   const placeRoom = CONTENT_WIDTH - 5 * GRID - rangeWidth - 2 * GRID;
   const place = fitTracked(
-    normalizeWhitespace(face.place).toUpperCase(),
+    normalizeWhitespace(content.eyebrow).toUpperCase(),
     SIZE_EYEBROW,
     WEIGHT_SEMIBOLD,
     TRACKING_EYEBROW,
@@ -407,7 +742,7 @@ function drawHero(canvas: Canvas, face: WeatherFace, palette: Palette): void {
     });
   }
 
-  const reading = `${face.temperature}°`;
+  const reading = content.reading;
   const size = fitSize(reading, WEIGHT_SEMIBOLD, typeRoom, HERO_STEPS);
   const readingCapTop = HERO_TOP + 6.5 * GRID;
   canvas.text({
@@ -420,7 +755,12 @@ function drawHero(canvas: Canvas, face: WeatherFace, palette: Palette): void {
   });
 
   const summaryTop = readingCapTop + size * CAP_HEIGHT + 1.5 * GRID;
-  const summary = fit(normalizeWhitespace(face.summary), SIZE_SUBHEAD, WEIGHT_SEMIBOLD, typeRoom);
+  const summary = fit(
+    normalizeWhitespace(content.summary),
+    SIZE_SUBHEAD,
+    WEIGHT_SEMIBOLD,
+    typeRoom,
+  );
   if (summary !== "") {
     canvas.text({
       x: inset,
@@ -438,9 +778,33 @@ function drawHero(canvas: Canvas, face: WeatherFace, palette: Palette): void {
     glyphCenterX,
     readingCapTop + (size * CAP_HEIGHT) / 2,
     HERO_GLYPH_SCALE,
-    face.condition,
+    content.condition,
     palette,
   );
+}
+
+/** The current conditions as hero content. */
+function nowContent(face: WeatherFace): HeroContent {
+  return {
+    eyebrow: face.place,
+    reading: `${face.temperature}°`,
+    summary: face.summary,
+    condition: face.condition,
+    high: face.high,
+    low: face.low,
+  };
+}
+
+/** A forecast day as hero content, read as that day's high. */
+function dayContent(step: DailyStep, eyebrow: string): HeroContent {
+  return {
+    eyebrow,
+    reading: `${step.high}°`,
+    summary: step.summary,
+    condition: step.condition,
+    high: step.high,
+    low: step.low,
+  };
 }
 
 function drawStrip(canvas: Canvas, face: WeatherFace): void {
@@ -667,6 +1031,7 @@ function drawFog(canvas: Canvas, cx: number, cy: number, scale: number, color: s
 export const weather: FaceDefinition = {
   kind: "weather",
   label: "Weather",
+  tap: "Tap the panel for the coming days.",
   fields: [
     { type: "text", key: "location", label: "Location", placeholder: "Dubai" },
     {
@@ -680,7 +1045,7 @@ export const weather: FaceDefinition = {
       ],
     },
   ],
-  async render(settings) {
-    return renderWeather(await fetchWeather(settings, fetchText));
+  async render(settings, now, context) {
+    return renderWeatherRequest(settings, now, context);
   },
 };

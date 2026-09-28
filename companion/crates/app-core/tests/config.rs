@@ -88,7 +88,7 @@ fn full_fixture_compiles_deterministically_to_the_current_wire_contract() {
     assert_eq!(first.layout.cards[1].card_id, "pomodoro");
     assert_eq!(first.layout.cards[1].tap_action, TapAction::StartPause);
     assert_eq!(first.layout.cards[2].card_id, "picture");
-    assert_eq!(first.layout.cards[2].tap_action, TapAction::None);
+    assert_eq!(first.layout.cards[2].tap_action, TapAction::StartPause);
 
     // Only a card that has a timer contributes one; a clock and a picture do
     // not, where protocol v1 sent all three a field bag.
@@ -373,6 +373,7 @@ fn runtime_snapshot_uses_tagged_states_for_frontend_contract() {
             ota_state: None,
             active_card_id: Some("clock".into()),
             counters: DeviceCounters::default(),
+            asset_store: None,
         },
         pomodoros: vec![PomodoroSnapshot {
             card_id: "pomodoro".into(),
@@ -721,8 +722,7 @@ fn a_picture_card_naming_an_unknown_source_is_a_typed_missing_reference() {
 }
 
 #[test]
-fn a_picture_card_compiles_to_an_ordinary_wire_card_with_no_tap_action() {
-    // The device learns nothing new: picture content arrives through the durable asset path.
+fn a_picture_card_reports_taps_whatever_its_document_says() {
     let mut config = AppConfig {
         image_sources: vec![ImageSource {
             id: "limits".into(),
@@ -734,7 +734,33 @@ fn a_picture_card_compiles_to_an_ordinary_wire_card_with_no_tap_action() {
 
     let compiled = config.compile(1).expect("compiles");
     assert_eq!(compiled.layout.cards[0].card_id, "shot");
+    assert_eq!(compiled.layout.cards[0].tap_action, TapAction::StartPause);
+}
+
+#[test]
+fn a_clock_still_reports_nothing_and_a_pomodoro_keeps_its_own_action() {
+    let config = AppConfig {
+        cards: vec![clock_card("clock"), pomodoro_card("focus", CardAlert::None)],
+        advance: CarouselAdvance::Manual,
+        ..AppConfig::default()
+    };
+
+    let compiled = config.compile(1).expect("valid");
     assert_eq!(compiled.layout.cards[0].tap_action, TapAction::None);
+    assert_eq!(compiled.layout.cards[1].tap_action, TapAction::StartPause);
+}
+
+#[test]
+fn a_picture_cards_document_value_is_untouched_by_lowering() {
+    // The document still says what the device does locally, which for a picture is
+    // nothing. Lowering is a host decision and must not rewrite what was saved.
+    let config = AppConfig {
+        cards: vec![picture_card("shot", "limits")],
+        ..AppConfig::default()
+    };
+
+    let saved = serde_json::to_value(&config).expect("serialize");
+    assert_eq!(saved["cards"][0]["tap_action"]["kind"], "none");
 }
 
 #[test]
@@ -917,4 +943,32 @@ fn set_card_dwell(mut card: CardSettings, dwell: Option<u16>) -> CardSettings {
         *dwell_seconds = dwell;
     }
     card
+}
+
+#[test]
+fn a_picture_card_with_a_host_only_tap_action_is_still_refused() {
+    // Lowering every picture to StartPause must not swallow an action this build
+    // cannot perform: `open-url` stays a typed refusal rather than silently becoming
+    // "re-render the face".
+    let mut config = AppConfig {
+        image_sources: vec![ImageSource {
+            id: "limits".into(),
+            name: "L".into(),
+        }],
+        ..AppConfig::default()
+    };
+    let mut card = picture_card("shot", "limits");
+    if let CardSettings::Picture { tap_action, .. } = &mut card {
+        *tap_action = WidgetTapAction::OpenUrl {
+            url: "https://example.com/".into(),
+        };
+    }
+    config.cards = vec![card];
+
+    let issues = config
+        .compile(1)
+        .expect_err("a host-only action cannot lower")
+        .issues;
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].code, ValidationCode::RequiresCapability);
 }

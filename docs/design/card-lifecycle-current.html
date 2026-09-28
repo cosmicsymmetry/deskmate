@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Picture Card Lifecycle</title>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#ECECF0; --tile:#FFFFFF; --tile-3:#E6E6EB;
+    --ink:#1D1D1F; --ink-2:#62626B; --ink-3:#6A6A72;
+    --rule:rgba(29,29,31,0.12);
+    --accent:#E5004C; --accent-tint:rgba(229,0,76,0.08);
+    --link:#0062E0;
+  }
+  /* Deliberately light-only: this is an editorial diagram on paper, and the
+     SVG carries inline fills that a dark inversion would only half-reach. */
+  :root{color-scheme:light}
+  *{box-sizing:border-box}
+  body{
+    margin:0; padding:3rem 2rem 4rem; background:var(--paper); color:var(--ink);
+    font-family:'Geist',system-ui,sans-serif; -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1300px;margin:0 auto}
+  .eyebrow{
+    font-family:'Geist Mono',monospace; font-size:8px; letter-spacing:0.18em;
+    text-transform:uppercase; color:var(--ink-3); margin:0 0 0.5rem;
+  }
+  h1{font-family:'Instrument Serif',serif; font-weight:400; font-size:2.25rem; line-height:1.1; margin:0 0 0.5rem}
+  .sub{color:var(--ink-2); font-size:0.9rem; margin:0 0 2rem; max-width:64ch; line-height:1.5}
+  svg{display:block;width:100%;height:auto}
+  .cards{display:grid; grid-template-columns:1.15fr 1fr 0.85fr; gap:1rem; margin-top:2.5rem}
+  .card{background:var(--tile); border:1px solid var(--rule); border-radius:6px; padding:1.25rem}
+  .card h3{font-family:'Geist',sans-serif; font-size:0.9rem; font-weight:600; margin:0}
+  .card-header{display:flex; align-items:center; gap:0.5rem; margin:0.25rem 0 0.75rem}
+  .card-dot{width:7px;height:7px;border-radius:50%;flex:none}
+  .dot-ink{background:var(--ink)} .dot-coral{background:var(--accent)} .dot-muted{background:var(--ink-2)}
+  .card ul{margin:0;padding-left:1.1rem;color:var(--ink-2);font-size:0.82rem;line-height:1.65}
+  .card code{font-family:'Geist Mono',monospace;font-size:0.76rem;color:var(--ink)}
+  @media (max-width:720px){
+    body{padding:2rem 1rem 3rem}
+    h1{font-size:1.75rem}
+    .cards{grid-template-columns:1fr}
+  }
+  footer{
+    margin-top:2.5rem; padding-top:1rem; border-top:1px solid var(--rule);
+    font-family:'Geist Mono',monospace; font-size:8px; letter-spacing:0.14em;
+    text-transform:uppercase; color:var(--ink-3);
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p class="eyebrow">Deskmate · Track C1 · current state</p>
+  <h1>How a picture card lives</h1>
+  <p class="sub">One frame, from the moment something asks for it to the moment it is on the glass. Times are measured on <code style="font-family:'Geist Mono',monospace">dev-0005</code>, 2026-09-26 and 2026-09-27.</p>
+
+  <svg viewBox="0 0 1240 848" role="img" aria-labelledby="cardlife-title cardlife-desc">
+    <title id="cardlife-title">How a Deskmate picture card lives</title>
+    <desc id="cardlife-desc">A sequence diagram following one picture frame from a tap on the panel, through rendering by the face and encoding by the server, over the wire in seventeen chunks, into the device's durable flash store where it costs a 1.5 second write and a 9.4 second compaction — while the volatile PSRAM tier, which has two free slots, receives nothing at all.</desc>
+
+    <defs>
+      <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+        <polygon points="0 0, 8 3, 0 6" fill="#62626B"/>
+      </marker>
+      <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+        <polygon points="0 0, 8 3, 0 6" fill="#E5004C"/>
+      </marker>
+      <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+        <polygon points="0 0, 8 3, 0 6" fill="#0062E0"/>
+      </marker>
+      <marker id="arrow-open" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+        <polyline points="0 0, 8 3, 0 6" fill="none" stroke="#62626B" stroke-width="1.2"/>
+      </marker>
+    </defs>
+
+    <rect width="100%" height="100%" fill="#ECECF0"/>
+
+    <!-- ============ lifelines (drawn first, behind everything) ============ -->
+    <line x1="140"  y1="108" x2="140"  y2="708" stroke="rgba(29,29,31,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+    <line x1="360"  y1="108" x2="360"  y2="708" stroke="rgba(29,29,31,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+    <line x1="640"  y1="108" x2="640"  y2="708" stroke="rgba(29,29,31,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+    <line x1="880"  y1="108" x2="880"  y2="708" stroke="rgba(29,29,31,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+    <line x1="1100" y1="108" x2="1100" y2="708" stroke="rgba(229,0,76,0.35)" stroke-width="1" stroke-dasharray="3,3"/>
+
+    <!-- ============ activation bars ============ -->
+    <rect x="136" y="196" width="8" height="48" fill="rgba(29,29,31,0.06)" stroke="#62626B" stroke-width="0.8"/>
+    <rect x="876" y="504" width="8" height="24" fill="rgba(29,29,31,0.06)" stroke="#62626B" stroke-width="0.8"/>
+    <rect x="876" y="668" width="8" height="36" fill="rgba(229,0,76,0.10)" stroke="#E5004C" stroke-width="0.8"/>
+
+    <!-- ============ loop fragment (behind its messages) ============ -->
+    <rect x="336" y="372" width="328" height="72" rx="4" fill="rgba(29,29,31,0.02)" stroke="rgba(29,29,31,0.22)" stroke-width="1"/>
+    <rect x="336" y="372" width="40" height="16" rx="2" fill="#ECECF0" stroke="rgba(29,29,31,0.22)" stroke-width="1"/>
+    <text x="356" y="384" fill="#62626B" font-size="8" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.12em">LOOP</text>
+    <text x="348" y="404" fill="#62626B" font-size="8" font-family="'Geist Mono',monospace" letter-spacing="0.04em">[17 chunks · 1,920 B each · ~76 ms per ack]</text>
+
+    <!-- ============ messages ============ -->
+
+    <!-- 1. tap event -->
+    <line x1="640" y1="148" x2="364" y2="148" stroke="#62626B" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow-open)"/>
+    <rect x="466" y="128" width="72" height="12" rx="2" fill="#ECECF0"/>
+    <text x="502" y="137" fill="#6A6A72" font-size="8" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.06em">TAP EVENT</text>
+
+    <!-- 2. render -->
+    <line x1="360" y1="196" x2="144" y2="196" stroke="#62626B" stroke-width="1" marker-end="url(#arrow)"/>
+    <rect x="216" y="176" width="68" height="12" rx="2" fill="#ECECF0"/>
+    <text x="250" y="185" fill="#6A6A72" font-size="8" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.06em">RENDER</text>
+
+    <!-- 3. png + state (return) -->
+    <line x1="140" y1="240" x2="356" y2="240" stroke="#62626B" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+    <rect x="212" y="220" width="76" height="12" rx="2" fill="#ECECF0"/>
+    <text x="250" y="229" fill="#6A6A72" font-size="8" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.06em">PNG + STATE</text>
+
+    <!-- 4. server self-message: encode -->
+    <path d="M360,284 H396 V308 H364" fill="none" stroke="#62626B" stroke-width="1" marker-end="url(#arrow)"/>
+    <rect x="404" y="290" width="88" height="12" rx="2" fill="#ECECF0"/>
+    <text x="448" y="299" fill="#6A6A72" font-size="8" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.06em">RLE565 ENCODE</text>
+
+    <!-- 5. assetbegin -->
+    <line x1="360" y1="348" x2="636" y2="348" stroke="#0062E0" stroke-width="1" marker-end="url(#arrow-link)"/>
+    <rect x="462" y="328" width="76" height="12" rx="2" fill="#ECECF0"/>
+    <text x="500" y="337" fill="#0062E0" font-size="8" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.06em">ASSETBEGIN</text>
+    <rect x="456" y="356" width="88" height="12" rx="2" fill="#ECECF0"/>
+    <text x="500" y="365" fill="#E5004C" font-size="8" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.04em">volatile: false</text>
+
+    <!-- 6. assetchunk (inside loop) -->
+    <line x1="360" y1="428" x2="636" y2="428" stroke="#0062E0" stroke-width="1" marker-end="url(#arrow-link)"/>
+    <rect x="460" y="408" width="80" height="12" rx="2" fill="#ECECF0"/>
+    <text x="500" y="417" fill="#0062E0" font-size="8" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.06em">ASSETCHUNK</text>
+
+    <!-- 7. assetcommit -->
+    <line x1="360" y1="472" x2="636" y2="472" stroke="#0062E0" stroke-width="1" marker-end="url(#arrow-link)"/>
+    <rect x="458" y="452" width="84" height="12" rx="2" fill="#ECECF0"/>
+    <text x="500" y="461" fill="#0062E0" font-size="8" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.06em">ASSETCOMMIT</text>
+
+    <!-- 8. write to flash -->
+    <line x1="640" y1="508" x2="872" y2="508" stroke="#62626B" stroke-width="1" marker-end="url(#arrow)"/>
+    <rect x="724" y="488" width="72" height="12" rx="2" fill="#ECECF0"/>
+    <text x="760" y="497" fill="#6A6A72" font-size="8" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.06em">WRITE 1.5 S</text>
+
+    <!-- 9. pushscene -->
+    <line x1="360" y1="556" x2="636" y2="556" stroke="#0062E0" stroke-width="1" marker-end="url(#arrow-link)"/>
+    <rect x="464" y="536" width="72" height="12" rx="2" fill="#ECECF0"/>
+    <text x="500" y="545" fill="#0062E0" font-size="8" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.06em">PUSHSCENE</text>
+
+    <!-- 10. mmap read back -->
+    <line x1="880" y1="588" x2="644" y2="588" stroke="#62626B" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+    <rect x="726" y="568" width="68" height="12" rx="2" fill="#ECECF0"/>
+    <text x="760" y="577" fill="#6A6A72" font-size="8" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.06em">MMAP READ</text>
+
+    <!-- 11. assetrelease -->
+    <line x1="360" y1="640" x2="636" y2="640" stroke="#0062E0" stroke-width="1" marker-end="url(#arrow-link)"/>
+    <rect x="456" y="620" width="88" height="12" rx="2" fill="#ECECF0"/>
+    <text x="500" y="629" fill="#0062E0" font-size="8" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.06em">ASSETRELEASE</text>
+
+    <!-- 12. compaction -->
+    <line x1="640" y1="672" x2="872" y2="672" stroke="#E5004C" stroke-width="1.2" marker-end="url(#arrow-accent)"/>
+    <rect x="720" y="652" width="80" height="12" rx="2" fill="#ECECF0"/>
+    <text x="760" y="661" fill="#E5004C" font-size="8" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.06em">COMPACT 9.4 S</text>
+
+    <!-- ============ actors (painted last, over the lines) ============ -->
+
+    <!-- Face -->
+    <rect x="60" y="48" width="160" height="60" rx="6" fill="#ECECF0"/>
+    <rect x="60" y="48" width="160" height="60" rx="6" fill="#FFFFFF" stroke="#1D1D1F" stroke-width="1"/>
+    <rect x="68" y="54" width="40" height="12" rx="2" fill="transparent" stroke="rgba(29,29,31,0.40)" stroke-width="0.8"/>
+    <text x="88" y="63" fill="rgba(29,29,31,0.8)" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.08em">BUN</text>
+    <text x="140" y="84" fill="#1D1D1F" font-size="12" font-weight="600" font-family="'Geist',sans-serif" text-anchor="middle">Face</text>
+    <text x="140" y="100" fill="#62626B" font-size="9" font-family="'Geist Mono',monospace" text-anchor="middle">weather.ts</text>
+
+    <!-- Server -->
+    <rect x="280" y="48" width="160" height="60" rx="6" fill="#ECECF0"/>
+    <rect x="280" y="48" width="160" height="60" rx="6" fill="#FFFFFF" stroke="#1D1D1F" stroke-width="1"/>
+    <rect x="288" y="54" width="40" height="12" rx="2" fill="transparent" stroke="rgba(29,29,31,0.40)" stroke-width="0.8"/>
+    <text x="308" y="63" fill="rgba(29,29,31,0.8)" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.08em">RUST</text>
+    <text x="360" y="84" fill="#1D1D1F" font-size="12" font-weight="600" font-family="'Geist',sans-serif" text-anchor="middle">Server</text>
+    <text x="360" y="100" fill="#62626B" font-size="9" font-family="'Geist Mono',monospace" text-anchor="middle">data_cards</text>
+
+    <!-- Panel -->
+    <rect x="560" y="48" width="160" height="60" rx="6" fill="#ECECF0"/>
+    <rect x="560" y="48" width="160" height="60" rx="6" fill="#FFFFFF" stroke="#1D1D1F" stroke-width="1"/>
+    <rect x="568" y="54" width="48" height="12" rx="2" fill="transparent" stroke="rgba(29,29,31,0.40)" stroke-width="0.8"/>
+    <text x="592" y="63" fill="rgba(29,29,31,0.8)" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.08em">ESP32</text>
+    <text x="640" y="84" fill="#1D1D1F" font-size="12" font-weight="600" font-family="'Geist',sans-serif" text-anchor="middle">Panel</text>
+    <text x="640" y="100" fill="#62626B" font-size="9" font-family="'Geist Mono',monospace" text-anchor="middle">dev-0005</text>
+
+    <!-- Flash -->
+    <rect x="800" y="48" width="160" height="60" rx="6" fill="#ECECF0"/>
+    <rect x="800" y="48" width="160" height="60" rx="6" fill="rgba(29,29,31,0.05)" stroke="#62626B" stroke-width="1"/>
+    <rect x="808" y="54" width="44" height="12" rx="2" fill="transparent" stroke="rgba(98,98,107,0.40)" stroke-width="0.8"/>
+    <text x="830" y="63" fill="rgba(98,98,107,0.9)" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.08em">STORE</text>
+    <text x="880" y="84" fill="#1D1D1F" font-size="12" font-weight="600" font-family="'Geist',sans-serif" text-anchor="middle">Flash</text>
+    <text x="880" y="100" fill="#62626B" font-size="9" font-family="'Geist Mono',monospace" text-anchor="middle">6 MB · durable</text>
+
+    <!-- PSRAM — focal -->
+    <rect x="1020" y="48" width="160" height="60" rx="6" fill="#ECECF0"/>
+    <rect x="1020" y="48" width="160" height="60" rx="6" fill="rgba(229,0,76,0.08)" stroke="#E5004C" stroke-width="1"/>
+    <rect x="1028" y="54" width="44" height="12" rx="2" fill="transparent" stroke="rgba(229,0,76,0.50)" stroke-width="0.8"/>
+    <text x="1050" y="63" fill="#E5004C" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.08em">STORE</text>
+    <text x="1100" y="84" fill="#1D1D1F" font-size="12" font-weight="600" font-family="'Geist',sans-serif" text-anchor="middle">PSRAM</text>
+    <text x="1100" y="100" fill="#E5004C" font-size="9" font-family="'Geist Mono',monospace" text-anchor="middle">8 MB · volatile</text>
+
+    <!-- ============ editorial callout on the idle tier ============ -->
+    <rect x="996" y="392" width="208" height="8" fill="#ECECF0"/>
+    <text x="1100" y="412" fill="#1D1D1F" font-size="14" font-family="'Instrument Serif',serif" font-style="italic" text-anchor="middle">Two slots. Both free.</text>
+    <text x="1100" y="432" fill="#1D1D1F" font-size="14" font-family="'Instrument Serif',serif" font-style="italic" text-anchor="middle">Nothing was ever</text>
+    <text x="1100" y="452" fill="#1D1D1F" font-size="14" font-family="'Instrument Serif',serif" font-style="italic" text-anchor="middle">addressed to them.</text>
+    <rect x="1036" y="472" width="128" height="12" rx="2" fill="#ECECF0"/>
+    <text x="1100" y="481" fill="#E5004C" font-size="8" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.06em">COMMIT WOULD BE 73 MS</text>
+
+    <!-- ============ legend ============ -->
+    <line x1="40" y1="756" x2="1200" y2="756" stroke="rgba(29,29,31,0.10)" stroke-width="0.8"/>
+    <text x="40" y="776" fill="#62626B" font-size="8" font-family="'Geist Mono',monospace" letter-spacing="0.14em">LEGEND</text>
+
+    <line x1="140" y1="772" x2="168" y2="772" stroke="#0062E0" stroke-width="1" marker-end="url(#arrow-link)"/>
+    <text x="176" y="776" fill="#62626B" font-size="8" font-family="'Geist Mono',monospace" letter-spacing="0.06em">WIRE MESSAGE</text>
+
+    <line x1="316" y1="772" x2="344" y2="772" stroke="#62626B" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+    <text x="352" y="776" fill="#62626B" font-size="8" font-family="'Geist Mono',monospace" letter-spacing="0.06em">RETURN / READ</text>
+
+    <line x1="496" y1="772" x2="524" y2="772" stroke="#62626B" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow-open)"/>
+    <text x="532" y="776" fill="#62626B" font-size="8" font-family="'Geist Mono',monospace" letter-spacing="0.06em">DEVICE EVENT</text>
+
+    <line x1="676" y1="772" x2="704" y2="772" stroke="#E5004C" stroke-width="1.2" marker-end="url(#arrow-accent)"/>
+    <text x="712" y="776" fill="#62626B" font-size="8" font-family="'Geist Mono',monospace" letter-spacing="0.06em">THE EXPENSIVE ONE</text>
+
+    <rect x="880" y="766" width="28" height="12" rx="2" fill="rgba(29,29,31,0.05)" stroke="#62626B" stroke-width="0.8"/>
+    <text x="916" y="776" fill="#62626B" font-size="8" font-family="'Geist Mono',monospace" letter-spacing="0.06em">STORAGE TIER</text>
+  </svg>
+
+  <div class="cards">
+    <div class="card">
+      <p class="eyebrow">What happens</p>
+      <div class="card-header"><span class="card-dot dot-ink"></span><h3>Every frame takes the same road</h3></div>
+      <ul>
+        <li>A tap, or a 15-minute timer, wakes the refresher.</li>
+        <li>The face fetches and draws an SVG; <code>resvg</code> rasterises it.</li>
+        <li>The server encodes RLE565 and takes the SHA-256 that names it.</li>
+        <li>It goes over the wire in 1,920-byte chunks, <strong>one ack each</strong>.</li>
+        <li><code>PushScene</code> names the digest; the panel draws it.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <p class="eyebrow">Where it lands</p>
+      <div class="card-header"><span class="card-dot dot-coral"></span><h3>Flash, always</h3></div>
+      <ul>
+        <li><code>AssetBegin</code> carries <code>volatile: false</code>, hardcoded.</li>
+        <li>The commit erases and writes flash: <strong>1.5 s</strong>.</li>
+        <li><code>AssetRelease</code> compacts the blob region: <strong>9.4 s</strong>.</li>
+        <li>Drawing reads it back <code>mmap</code>'d, so it costs no RAM.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <p class="eyebrow">What it buys</p>
+      <div class="card-header"><span class="card-dot dot-muted"></span><h3>Nothing</h3></div>
+      <ul>
+        <li>The config declares <code>assets: []</code> — no fonts, no icons.</li>
+        <li>Frames change every 15 min, so every digest is new.</li>
+        <li>After 21 h away, all four re-transferred in full.</li>
+        <li>Written, compacted, superseded — never read.</li>
+      </ul>
+    </div>
+  </div>
+
+  <footer>Deskmate · measured on dev-0005 · 2026-09-26 and 2026-09-27 · failure paths omitted, see detail diagram</footer>
+</div>
+</body>
+</html>

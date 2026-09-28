@@ -153,7 +153,14 @@ function describeFaceStatus(
  * for the first picture" while the window said "Saved to the server". Clicking the
  * window's save still works, because the click blurs the field first.
  */
-function PictureFaceSettings({ sourceId }: { sourceId: string }) {
+function PictureFaceSettings({
+  sourceId,
+  onTapSentence,
+}: {
+  sourceId: string;
+  /** Lifts the face's own tap sentence to the editor's one gesture note. */
+  onTapSentence: (sentence: string | null) => void;
+}) {
   const requestGeneration = useRef(0);
   const saveInFlight = useRef(false);
   const [descriptor, setDescriptor] = useState<FaceDescriptor | null>(null);
@@ -167,6 +174,7 @@ function PictureFaceSettings({ sourceId }: { sourceId: string }) {
     const generation = requestGeneration.current + 1;
     requestGeneration.current = generation;
     setDescriptor(null);
+    onTapSentence(null);
     setStatus(null);
     setValues({});
     setLoading(true);
@@ -188,6 +196,7 @@ function PictureFaceSettings({ sourceId }: { sourceId: string }) {
           return;
         }
         setDescriptor(source.face);
+        onTapSentence(source.face?.tap ?? null);
         setStatus(source.face_status);
         setValues(source.face ? descriptorValues(source.face) : {});
       })
@@ -217,7 +226,7 @@ function PictureFaceSettings({ sourceId }: { sourceId: string }) {
       requestGeneration.current += 1;
       window.clearInterval(poll);
     };
-  }, [sourceId]);
+  }, [sourceId, onTapSentence]);
 
   if (loading) {
     return (
@@ -362,6 +371,9 @@ export function CardEditor({
   onRemove,
   onTimerAction,
 }: CardEditorProps) {
+  // The face's tap sentence, lifted out of the settings form so the editor's one
+  // gesture note can state it instead of claiming a tap does nothing.
+  const [faceTap, setFaceTap] = useState<string | null>(null);
   if (!card) {
     return (
       <section className="panel" aria-labelledby="editor-heading">
@@ -552,7 +564,7 @@ export function CardEditor({
               </div>
             )}
 
-            <PictureFaceSettings sourceId={card.source_id} />
+            <PictureFaceSettings sourceId={card.source_id} onTapSentence={setFaceTap} />
           </>
         )}
 
@@ -632,7 +644,7 @@ export function CardEditor({
         )}
 
         <div className="gesture-note">
-          <p>{tapActionDescription(card)}</p>
+          <p>{tapActionDescription(card, faceTap)}</p>
           <p>
             Swiping the screen moves through the loop. While an alert is on screen, a tap dismisses
             it instead of performing the card's usual tap action.

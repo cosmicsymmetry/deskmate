@@ -105,6 +105,11 @@ export interface FaceDescriptor {
   /** Opaque server metadata. The app renders `fields` and never branches on this value. */
   kind: string;
   label: string;
+  /**
+   * What the face says a tap on the panel does, in its own words. Absent means this
+   * face ignores taps -- the server drops them rather than re-rendering.
+   */
+  tap?: string;
   fields: FaceFieldDescriptor[];
 }
 
@@ -241,6 +246,20 @@ export interface DeviceSnapshot {
   ota_state: DeviceOtaState | null;
   active_card_id: string | null;
   counters: DeviceCounters;
+  asset_store: DeviceAssetStore | null;
+}
+
+/**
+ * The display's durable flash asset store, as it reports it. Flash numbers, not
+ * PSRAM ones: they say whether the flash is still being written for picture
+ * frames, not how much room the volatile frame tier has left. Nothing renders
+ * them -- the snapshot's change key blanks them, because they move on every
+ * frame a face draws.
+ */
+export interface DeviceAssetStore {
+  used_bytes: number;
+  free_bytes: number;
+  asset_count: number;
 }
 
 export type DeviceTier = "local" | "networked";
@@ -328,6 +347,7 @@ export interface RuntimeDiagnostics {
   command_queue_full: number;
   subscriber_snapshots_overwritten: number;
   interrupt_dismissals_ignored: number;
+  taps_dropped: number;
 }
 
 export type PomodoroAction = "start" | "pause" | "toggle" | "reset";

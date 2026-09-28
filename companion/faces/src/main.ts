@@ -4,44 +4,113 @@
 //
 //   main.ts describe   -> stdout: the face catalog as JSON. The browser's add menu
 //                         and settings form are built from it.
-//   main.ts render     <- stdin:  {"kind": "...", "settings": {...}}
-//                      -> stdout: a 448x368 PNG, which the server feeds to the same
-//                         ingest path an external producer's POST arrives through.
+//   main.ts render     <- stdin:  {"kind": "...", "settings": {...}, "state": ...}
+//                      -> stdout: {"png": "<base64>", "state": ...}, which the server
+//                         feeds to the same ingest path an external producer's POST
+//                         arrives through.
 //
 // Exit codes are the error taxonomy: 0 is a frame, 2 means the owner must change a
 // setting (retrying cannot help), anything else is transient and the stored frame
-// stays. The one line on stderr is what the server logs. Nothing but the PNG may
-// reach stdout in `render`, which is why diagnostics never use `console.log` here.
+// stays. The one line on stderr is what the server logs. Nothing but the JSON result
+// may reach stdout in `render`, which is why diagnostics never use `console.log` here.
 
-import { ConfigurationError, type Settings } from "./face";
+import { ConfigurationError, type FaceDefinition, type RenderContext, type Settings } from "./face";
 import { pngFromSvg } from "./kit/raster";
 import { FACES, faceOfKind } from "./registry";
 
 const EXIT_CONFIGURATION = 2;
 const EXIT_TRANSIENT = 1;
 
-function describe(): string {
+export function describeCatalog(faces: readonly FaceDefinition[] = FACES): string {
   return JSON.stringify(
-    FACES.map(({ kind, label, fields }) => ({ kind, label, fields })),
+    faces.map(({ kind, label, fields, tap }) =>
+      tap === undefined ? { kind, label, fields } : { kind, label, fields, tap },
+    ),
     null,
     2,
   );
 }
 
-async function render(input: string, now: Date): Promise<Uint8Array> {
+function tapEvent(value: unknown): RenderContext["event"] {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const { taps, point } = value as { taps?: unknown; point?: unknown };
+  if (typeof taps !== "number" || !Number.isFinite(taps) || !Number.isInteger(taps)) {
+    return undefined;
+  }
+  const boundedTaps = Math.min(32, Math.max(1, taps));
+  // An absent point is as valid as an explicit null: C1 has no point to send, and a
+  // dropped event here would silently swallow the tap.
+  if (point === null || point === undefined) {
+    return { taps: boundedTaps, point: null };
+  }
+  if (typeof point !== "object") {
+    return undefined;
+  }
+  const { x, y } = point as { x?: unknown; y?: unknown };
+  if (
+    typeof x !== "number" ||
+    !Number.isFinite(x) ||
+    typeof y !== "number" ||
+    !Number.isFinite(y)
+  ) {
+    return undefined;
+  }
+  return { taps: boundedTaps, point: { x, y } };
+}
+
+export async function renderRequest(
+  request: { kind?: unknown; settings?: unknown; state?: unknown; event?: unknown },
+  face?: FaceDefinition,
+  now: Date = new Date(),
+): Promise<{ png: string; state?: unknown }> {
+  const definition =
+    face ?? (typeof request.kind === "string" ? faceOfKind(request.kind) : undefined);
+  if (definition === undefined) {
+    throw new ConfigurationError(
+      `this faces package has no face of kind ${JSON.stringify(request.kind)}`,
+    );
+  }
+  const values =
+    typeof request.settings === "object" && request.settings !== null
+      ? (request.settings as Settings)
+      : {};
+  const result = await definition.render(values, now, {
+    state: request.state,
+    event: tapEvent(request.event),
+  });
+  const svg = typeof result === "string" ? result : result.svg;
+  const png = Buffer.from(pngFromSvg(svg)).toString("base64");
+  // A bare SVG means "leave the stored state alone"; an explicit null clears it.
+  return typeof result === "string" || !("state" in result)
+    ? { png }
+    : { png, state: result.state };
+}
+
+function describe(): string {
+  return describeCatalog();
+}
+
+async function render(input: string, now: Date): Promise<string> {
   let request: unknown;
   try {
     request = JSON.parse(input);
   } catch {
     throw new Error("the render request on stdin is not JSON");
   }
-  const { kind, settings } = (request ?? {}) as { kind?: unknown; settings?: unknown };
-  const face = typeof kind === "string" ? faceOfKind(kind) : undefined;
-  if (face === undefined) {
-    throw new ConfigurationError(`this faces package has no face of kind ${JSON.stringify(kind)}`);
-  }
-  const values = typeof settings === "object" && settings !== null ? (settings as Settings) : {};
-  return pngFromSvg(await face.render(values, now));
+  return JSON.stringify(
+    await renderRequest(
+      (request ?? {}) as {
+        kind?: unknown;
+        settings?: unknown;
+        state?: unknown;
+        event?: unknown;
+      },
+      undefined,
+      now,
+    ),
+  );
 }
 
 async function main(): Promise<number> {
@@ -51,18 +120,21 @@ async function main(): Promise<number> {
     return 0;
   }
   if (verb === "render") {
-    const png = await render(await Bun.stdin.text(), new Date());
-    await Bun.write(Bun.stdout, png);
+    // Bun.write is awaited to completion; process.stdout.write is not, and an
+    // immediate process.exit can truncate a ~60 KB envelope mid-flight.
+    await Bun.write(Bun.stdout, await render(await Bun.stdin.text(), new Date()));
     return 0;
   }
-  process.stderr.write("usage: main.ts describe | render < request.json > face.png\n");
+  process.stderr.write("usage: main.ts describe | render < request.json > result.json\n");
   return 64;
 }
 
-main()
-  .then((code) => process.exit(code))
-  .catch((error: unknown) => {
-    const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`${message.replace(/\s+/g, " ").slice(0, 300)}\n`);
-    process.exit(error instanceof ConfigurationError ? EXIT_CONFIGURATION : EXIT_TRANSIENT);
-  });
+if (import.meta.main) {
+  main()
+    .then((code) => process.exit(code))
+    .catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`${message.replace(/\s+/g, " ").slice(0, 300)}\n`);
+      process.exit(error instanceof ConfigurationError ? EXIT_CONFIGURATION : EXIT_TRANSIENT);
+    });
+}

@@ -408,7 +408,16 @@ async fn events(
 fn change_key(value: &serde_json::Value) -> String {
     let mut value = value.clone();
     if let Some(device) = value.get_mut("device").and_then(|d| d.as_object_mut()) {
-        for volatile in ["uptime_ms", "free_heap", "wifi_rssi", "counters"] {
+        for volatile in [
+            "uptime_ms",
+            "free_heap",
+            "wifi_rssi",
+            "counters",
+            // The store's byte tallies move whenever an asset is written, which
+            // is every refresh of every picture card. The page renders none of
+            // them, and letting them through would re-render it on each frame.
+            "asset_store",
+        ] {
             if let Some(field) = device.get_mut(volatile) {
                 *field = serde_json::Value::Null;
             }

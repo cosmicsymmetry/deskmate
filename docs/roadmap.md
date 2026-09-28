@@ -40,6 +40,7 @@ can write a plugin and either self-host it or submit it to run on ours.
 | **D. Landing page** | Research first (vibebuddy.sh is the reference the owner likes), then the site | Research now | A, for sign-up and checkout |
 | **E. Socials and marketing** | Channels, content, launch. Free where possible | Now | D, for somewhere to send people |
 | **F. Store and fulfilment** | Checkout, flashing, shipping | Later | A, and a device worth selling |
+| **G. Desk agent** | A headless daemon on the owner's machine that runs local actions a server cannot: open a URL, focus an app, run a macro | Later | C1 phase 2, and A for an identity |
 
 ## How the tracks run in parallel
 
@@ -59,14 +60,20 @@ can write a plugin and either self-host it or submit it to run on ours.
 
 ## Board
 
-**Schema/wire lock:** free.
+**Schema/wire lock:** **held by C1** since 2026-09-28, for the wire and firmware halves of
+`docs/superpowers/specs/2026-09-28-deskmate-frames-live-in-psram-design.md` (the volatile
+frame pool: `VOLATILE_ASSET_SLOT_COUNT` 2 -> 16, a new `StatusResponse` key, and the
+`docs/protocol/v2.md` amendment). `CURRENT_SCHEMA_VERSION` is untouched and stays free.
+Phase 1 needed no lock -- tap-to-face crossed no boundary -- and C1 releases this one when
+the batch merges.
 
 | Track | Status | Branch | Waiting on |
 |---|---|---|---|
-| A | Accounts + claiming built and reviewed; PR #5 open, CI green. Needs no schema/wire lock. Deploys after C1 (owner, 2026-09-25); the live owner account is re.aleksandrov1@gmail.com | `feat/track-a-accounts` | C1's merge (PR #4), then a rebase that migrates C1's `face-state.json` per account; the Web Serial spike at the board |
+| A | Accounts + claiming built and reviewed; C1 merged in and made per-account (face state, taps). PR #5, needs no schema/wire lock. Live owner account: re.aleksandrov1@gmail.com | `feat/track-a-accounts` | Deploy, then the owner's merge approval; the Web Serial spike at the board |
 | B | Not started | -- | -- |
-| C1 | Not started | -- | -- |
+| C1 | Phase 1 works on hardware. The 13.3 s tap was measured, diagnosed (flash, not the wire) and cut: frames go to PSRAM and reclaiming is rate-limited. All four faces answer a tap. The frames-in-PSRAM spec is written and its step 1 (the host reads the device's asset-store stats) has shipped; steps 2-4 are **authorized (2026-09-28) and in progress** as one batch ending in a flash, batched with C2 | `track-c1-frames-in-psram` | The board on USB for the flash, and the on-board OTA re-verification afterwards |
 | C2 | Not started | -- | C1 |
-| D | Not started | -- | -- |
+| D | **Live** at deskmate-site.pages.dev (2026-09-25) | `deskmate-site`, own repo | A domain before E launches; real photographs; A for sign-up |
 | E | Not started | -- | -- |
 | F | Not started | -- | A |
+| G | Not started | -- | C1 phase 2, A |

@@ -19,8 +19,8 @@ use std::path::Path;
 use app_core::{
     AlertHold, AppConfig, AppPreferences, AppSnapshot, AssetKind, AssetSource,
     CURRENT_SCHEMA_VERSION, CardAlert, CardDataSnapshot, CardError, CardErrorKind, CardField,
-    CardFieldValue, CardSettings, CarouselAdvance, ConnectionState, DeviceCapability,
-    DeviceCounters, DeviceOtaState, DeviceSnapshot, DeviceTier, DeviceWifiState,
+    CardFieldValue, CardSettings, CarouselAdvance, ConnectionState, DeviceAssetStore,
+    DeviceCapability, DeviceCounters, DeviceOtaState, DeviceSnapshot, DeviceTier, DeviceWifiState,
     DisplayOrientation, DisplayTemplate, IconGlyphMapping, PersistenceState, PomodoroAction,
     PomodoroSnapshot, PomodoroState, RefreshPolicy, RuntimeDiagnostics, RuntimeState,
     SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE, SaveReceipt, StoreWarning, UpdateChannel,
@@ -202,6 +202,11 @@ fn contract_fixtures() -> ContractFixtures {
                     host_dropped_events: 12,
                     detected_event_gaps: 13,
                 },
+                asset_store: Some(DeviceAssetStore {
+                    used_bytes: 141_312,
+                    free_bytes: 6_149_120,
+                    asset_count: 4,
+                }),
             },
             pomodoros: vec![PomodoroSnapshot {
                 card_id: "pomodoro".into(),
@@ -226,6 +231,7 @@ fn contract_fixtures() -> ContractFixtures {
                 command_queue_full: 2,
                 subscriber_snapshots_overwritten: 6,
                 interrupt_dismissals_ignored: 7,
+                taps_dropped: 8,
             },
         },
     };

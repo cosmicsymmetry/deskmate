@@ -13,6 +13,7 @@ import { XMLParser } from "fast-xml-parser";
 import {
   ConfigurationError,
   type FaceDefinition,
+  type RenderContext,
   type Settings,
   text,
   TransientError,
@@ -61,8 +62,17 @@ export interface RssFace {
 // `escapeXml`, so markup inside one is ugly text at worst -- never an element.
 // ---------------------------------------------------------------------------
 
-/** One lead plus three followers is what the face can show. */
+/** One lead plus three followers is what the face can show at once. */
 const MAX_ITEMS = 4;
+
+/**
+ * How many entries are kept so a tap has somewhere to go.
+ *
+ * Four pages is plenty for a desk feed, and sixteen entries of a title plus a
+ * short age string sit comfortably inside the 16 KB the server allows per
+ * source's face state.
+ */
+const STORED_ITEMS = MAX_ITEMS * 4;
 
 const parser = new XMLParser({
   ignoreAttributes: true,
@@ -115,7 +125,7 @@ export function parseFeed(body: string, now: Date): FeedEntry[] {
   const channel = rss?.channel as Record<string, unknown> | undefined;
   const items = [...asArray(channel?.item), ...asArray(rdf?.item), ...asArray(atom?.entry)];
 
-  return items.slice(0, MAX_ITEMS).map((raw) => {
+  return items.slice(0, STORED_ITEMS).map((raw) => {
     const item = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
     const dated = nodeText(item.pubDate ?? item.published ?? item.updated ?? item.date).trim();
     const published = dated === "" ? Number.NaN : Date.parse(dated);
@@ -305,14 +315,102 @@ function drawEmptyState(canvas: Canvas): void {
   });
 }
 
+/** What the face carries between renders: the entries it fetched, and where in them it is. */
+export interface RssState {
+  feedTitle: string;
+  entries: FeedEntry[];
+  page: number;
+  tappedAt: string | null;
+}
+
+/** A page returns to the top after this long untouched, so the card rests on its lead story. */
+const TEMPORARY_PAGE_MS = 10 * 60 * 1_000;
+
+function storedState(value: unknown): RssState | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const candidate = value as Partial<RssState>;
+  if (!Array.isArray(candidate.entries)) {
+    return undefined;
+  }
+  return {
+    feedTitle: typeof candidate.feedTitle === "string" ? candidate.feedTitle : "",
+    entries: candidate.entries as FeedEntry[],
+    page:
+      typeof candidate.page === "number" && Number.isFinite(candidate.page) ? candidate.page : 0,
+    tappedAt: typeof candidate.tappedAt === "string" ? candidate.tappedAt : null,
+  };
+}
+
+function pageCount(entries: FeedEntry[]): number {
+  return Math.max(1, Math.ceil(entries.length / MAX_ITEMS));
+}
+
+/** Wraps, so the last page taps back to the first rather than stopping dead. */
+function normalizedPage(page: number, entries: FeedEntry[]): number {
+  const pages = pageCount(entries);
+  return ((page % pages) + pages) % pages;
+}
+
+function recentTap(tappedAt: string | null, now: Date): boolean {
+  if (tappedAt === null) {
+    return false;
+  }
+  const at = Date.parse(tappedAt);
+  return Number.isFinite(at) && now.getTime() - at <= TEMPORARY_PAGE_MS;
+}
+
+function faceForPage(state: RssState): RssFace {
+  const start = state.page * MAX_ITEMS;
+  return {
+    feedTitle: state.feedTitle,
+    entries: state.entries.slice(start, start + MAX_ITEMS),
+  };
+}
+
+/**
+ * A tap turns the page **without fetching**: the entries are already in state,
+ * so answering costs a draw and nothing else. The upstream feed is only read on
+ * a scheduled refresh.
+ */
+export async function renderRssRequest(
+  settings: Settings,
+  now: Date,
+  context: RenderContext = {},
+  get: FetchText = fetchText,
+): Promise<{ svg: string; state: RssState }> {
+  const previous = storedState(context.state);
+  if (context.event !== undefined && previous !== undefined && previous.entries.length > 0) {
+    const state: RssState = {
+      ...previous,
+      page: normalizedPage(previous.page + context.event.taps, previous.entries),
+      tappedAt: now.toISOString(),
+    };
+    return { svg: renderRss(faceForPage(state)), state };
+  }
+
+  const fresh = await fetchRss(settings, now, get);
+  const keepPage =
+    context.event === undefined && previous !== undefined && recentTap(previous.tappedAt, now);
+  const state: RssState = {
+    feedTitle: fresh.feedTitle,
+    entries: fresh.entries,
+    page: keepPage ? normalizedPage(previous.page, fresh.entries) : 0,
+    tappedAt: keepPage ? previous.tappedAt : context.event === undefined ? null : now.toISOString(),
+  };
+  return { svg: renderRss(faceForPage(state)), state };
+}
+
 export const rss: FaceDefinition = {
   kind: "rss",
   label: "RSS feed",
+  tap: "Tap the panel for the next headlines.",
   fields: [
     { type: "url", key: "url", label: "Feed URL", placeholder: "https://example.com/feed.xml" },
     { type: "text", key: "title", label: "Title", placeholder: "News" },
   ],
-  async render(settings, now) {
-    return renderRss(await fetchRss(settings, now, fetchText));
+  async render(settings, now, context) {
+    return renderRssRequest(settings, now, context);
   },
 };

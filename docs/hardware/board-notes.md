@@ -5324,3 +5324,319 @@ Observed over SSH at 14:44 UTC, with the pre-retirement binary still running:
 To restore one: move its file back. The current binary will refuse it as
 `UnsupportedVersion` (visibly, and without overwriting it); only a pre-2026-09-19 binary can
 migrate it.
+
+## 2026-09-23 -- tap to face (track C1, phase 1) deployed; the tap itself is NOT yet observed
+
+The server, the browser companion and the faces were deployed from
+`track-c1-tap-to-face` at 10:11 UTC. What follows is **server-side evidence only**, in the
+sense `CLAUDE.md` means it: a frame in the store is not the panel, and no finger has
+touched the glass yet.
+
+Observed:
+
+- **The new lowering did not disturb the board.** Every picture card's wire `CardConfig`
+  changed with this build (all of them now lower to `StartPause`, which is the only way
+  protocol v2 reports a tap at all). The link closed with the old binary at 10:11:12 and was
+  established again at 10:11:15 -- three seconds -- and no `StaleRevision`, no
+  `VersionMismatch` and no refusal of any kind appears in the unit's log since.
+- **The envelope reaches the real faces package.** The weather face refreshed at 10:11:13
+  through the new `{png, state}` path and its frame came back **digest-unchanged**
+  (`the face is unchanged`), which is the strongest available proof that base64 round-trips
+  byte-for-byte: the same face drawn by the old bare-PNG path produced the same digest.
+- **`dev-0005` is linked**, Wi-Fi connected at -70 dBm, IP 192.168.8.168, update idle,
+  mounting "landscape flipped" (270 degrees), reported by the live companion.
+- **The live window states the tap.** The weather card's editor reads "Tap the panel for the
+  coming days." where it previously read "Tapping this card does nothing." That sentence is
+  the face's own, carried from `describe` through `FaceDescriptor`.
+
+**Still owed on the board, and not claimable without it:**
+
+- A **tap on the panel** doing anything at all. This is the whole point of the track and it
+  needs a person at the desk. The weather card on `dev-0005` is a weather face, so it is the
+  card to tap: one tap should redraw it as tomorrow plus the four days after, and a second
+  tap should return it to the current conditions.
+- The same at **both mountings** (the board is currently at 270).
+- The **tap-to-redraw latency**, wall clock. Nobody has measured it. A weather frame is about
+  32 KB / 17 chunks; Hacker News is 61 KB / 33 and would be the slower case.
+- **Hacker News paging on the panel.** The card named "Hacker News" in the live loop is an
+  *RSS* face pointed at the Hacker News feed, not the `hackernews` face, so it does not take
+  taps. Exercising the paging on hardware needs a `hackernews` picture card added to the
+  loop, which is the owner's to add.
+
+## 2026-09-24 -- the first tap on the glass: it works once, then the link falls over
+
+The owner tapped the weather card on `dev-0005` (270 degrees, firmware `v2.1.0-proto2`).
+**This is the first tap ever observed on hardware, and it found a defect.** Reported from the
+desk: nothing happened for a few seconds, so they tapped several more times; the panel fell
+back to the standalone clock, then showed the tomorrow view, then went back to the clock,
+went back and forth, and then **the device rebooted**.
+
+Server-side timeline, from `deskmate-server`'s journal and `face-state.json` (UTC):
+
+| time | event |
+|---|---|
+| 13:02:28 | `device link established dev-0005`, firmware check `v2.1.0-proto2` |
+| 13:08:07.273 | `face-state.json` written `{"view":"days","tappedAt":"...13:08:07.273Z"}` -- a tap-driven render was accepted |
+| 13:08:32.253 | WARN `the frame is stored but the device was not notified` ... `runtime command response timed out` |
+| 13:08:32.978 | the same warning again, 0.725 s later |
+| 13:08:50.375 | WARN `device link refused: owner already live` |
+| 13:08:52.290 | the same refusal again |
+| 13:08:52.943 | `device link closed` -- the stale session finally released |
+| 13:08:55.618 | `device link established` (the rebooted device) |
+| 13:08:57.302 | firmware check, `v2.1.0-proto2` |
+
+Two measurements reframe that timeline, and both were taken off the board:
+
+- **A weather render costs 0.66 s** end to end on the VM -- `bun` start, the Open-Meteo
+  fetch and the resvg raster included, measured three times at 0.66 / 0.68 / 0.64 s for a
+  23,801-byte envelope. So the seconds the owner waited are **not** the face, and two renders
+  finishing 0.725 s apart needs no hidden concurrency: the refresher loop is sequential and
+  simply ran twice.
+- **`ImageSourceUpdated` carries the 25-second `SYNCHRONIZING_COMMAND_TIMEOUT`**, not the
+  short budget. Both warnings are therefore a *full budget* expiring: the notifications were
+  submitted at about 13:08:07.25 and 13:08:07.98 and timed out 25 s later. The device stopped
+  answering the moment the first tap-driven push began.
+
+What that makes true, and what it does not:
+
+- **A tap does reach the face and does change what is drawn.** The state file flipping to
+  `"days"` proves the whole seam -- touch, firmware, wire, runtime, sink, coalescer, the
+  faces subprocess, the state store. That much of C1 phase 1 is real.
+- **The tap is NOT what broke the push.** That was the first reading and it was wrong; this
+  correction is the most important line in the entry. The same unit's journal across the
+  whole day shows the identical failure with **no taps involved**: the Hacker News source
+  (`image-8e361aa...`, the biggest frame at about 61 KB / 33 chunks) went un-notified at
+  13:28:09, 15:28:16 and 15:43:17, and the token source failed at 15:57:54 with
+  `device: AssetCommit ... failed: device request timed out`. Per-day counts of
+  push-timeouts / link-closes / `owner already live`, remembering that the board is normally
+  off so a zero may only mean it was unplugged: 09-20 `0/1/0`, 09-21 `2/4/2`, 09-22 `0/0/0`,
+  09-23 `1/3/1`, 09-24 `6/8/5`. **09-21 predates the tap feature**, so the mechanism is older
+  than Track C1. A tap is merely the first time anyone stands at the desk waiting for a push,
+  which is why the tap got the blame.
+- **A second tap's frame still cannot be delivered while the first push is in flight.** That
+  part is a real weakness of the tap design: `notify_image_source_changed` is fire-and-forget
+  (`spawn_blocking`) and `ImageSourceUpdated` carries the 25 s `SYNCHRONIZING_COMMAND_TIMEOUT`,
+  so a second notification queues behind the first at the runtime worker. Robustness defect,
+  not the cause of anything observed here.
+- **A rebooted device is locked out of its own link for about 4.5 s.** Its first two
+  reconnect attempts were refused `owner already live` because the server still held the
+  previous session's lease; the lease was released at 13:08:52.943 and the link came back at
+  13:08:55.618. Not tap-specific, and it recurred at 15:03 and 16:26 the same day.
+- **Why the device rebooted is NOT observed and must not be claimed.** The server cannot see
+  it, the shipping console is UART0-only, and attaching USB serial reboots the board, so that
+  boot's crash is gone.
+
+What the device's own counters say, read from the admin snapshot afterwards (`/v1/devices/dev-0005`):
+
+- `crc_errors: 0`, `malformed_frames: 0`, `dropped_events: 0`, `dropped_responses: 0`,
+  `overflow_frames: 0`, `rx_dropped_bytes: 0`, `valid_frames: 143` -- **nothing is corrupting
+  or overflowing.** Whatever fails, fails as a stall, not as bad bytes.
+- `free_heap: 8358839` -- about 8 MB free. **Heap exhaustion is not indicated**, which is the
+  first hypothesis this entry originally reached for.
+- `host_reconnects: 9`, and the runtime's last state is `error: device request timed out`.
+- The host-side `command_queue_full: 0`, so nothing backed up in the command channel.
+
+**The strongest remaining hypothesis, and it is still only that:** asset transfers to this
+board stall on the network path. `dev-0005` reaches the server at
+`wss://deskmate.rodi.one/v1/device/link` -- Wi-Fi, router, the public internet, Cloudflare,
+cloudflared, Caddy -- **even though the board and the VM share a LAN**. The largest asset
+fails most often, which is what a per-chunk stall predicts and what neither a heap nor a
+protocol fault predicts. `CLAUDE.md` already flagged that "whether the tunnel carries the
+Hacker News face's 33 chunks is not known"; it often does not. Confirming this needs
+per-chunk reply latency, which is a server-side instrumentation change and needs no board
+and no flash.
+
+Also found while reading this path, unrelated to the incident: **`taps_dropped` never reaches
+the admin snapshot.** It has a tested accessor (`RuntimeHandle::taps_dropped`), so it is not
+write-only, but `RuntimeDiagnosticCounters::snapshot()` does not copy it into the public
+`RuntimeDiagnostics` the way it copies `interrupt_dismissals_ignored`. The consequence is that
+nothing outside the process can read it -- not `/v1/devices/{id}`, not the companion -- which
+is half of the "a declined tap and an event that never arrived look identical" problem its
+sibling counter's doc comment describes.
+
+### What changed in response, and what deliberately did not
+
+Shipped the same day, all server-side, no wire and no firmware:
+
+- **Per-transfer asset instrumentation** (`runtime_device.rs`). Every completed push now logs
+  one line -- `chunks`, `bytes`, `slowest_chunk_ms`, `commit_ms`, `total_ms` -- and a chunk
+  slower than 250 ms gets its own. A failed chunk reports how many chunks had already landed
+  and how long the transfer had been open. `slowest_chunk` rather than a mean is the whole
+  point: one chunk past the 2 s `REQUEST_TIMEOUT` fails the push, and a mean of 33 hides it.
+  The accumulation lives in the server, not in `app-core`, because `app-core` has no `tracing`
+  dependency and should not gain one.
+- **`taps_dropped` now travels in `RuntimeDiagnostics`**, so `/v1/devices/{id}` and the
+  companion can read it. Needed the browser contract fixture regenerated.
+
+**Deliberately NOT changed, with the numbers that decided it:**
+
+- **The `owner already live` refusal stays.** `PING_INTERVAL` is 3 s, `IDLE_TIMEOUT` is 30 s
+  (`DEVICE_NETWORK_LINK_TIMEOUT` 45 s minus a 15 s margin), and the device retries about every
+  2 s, so an unclean reboot costs one or two refusals and the link is back in about 5 s -- as
+  observed, 13:08:50 first refusal to 13:08:55 established. Making a new authenticated link
+  evict the old session would shave those 5 s off, at the cost of letting a flapping network
+  thrash sessions, and it would be treating the symptom of a failure whose cause is still
+  unmeasured. `runtime_device.rs` already has a test
+  (`the_server_releases_a_dead_link_before_the_device_redials`) pinning the ordering that
+  handles the *idle* case; the reboot case is simply faster than a ping.
+- **The tap-push interlock is not built, and on inspection should not be.** The idea was to
+  make the refresher await its `ImageSourceUpdated` before rendering again, so a burst of taps
+  could not queue renders behind a notification that may sit for the full 25 s. Working out
+  what it would actually buy killed it. Today a tap renders at once and the frame lands in the
+  store, so the tap's intent is recorded promptly and whichever synchronize next succeeds
+  carries the *newest* view to the panel. An interlock would delay that by up to 25 s -- it
+  would make a tap during a stuck push do nothing at all for the length of the stall. What
+  today's code wastes is a render (0.66 s of CPU) and one Open-Meteo call per redundant tap;
+  what the interlock would cost is the responsiveness the whole track exists to add. The
+  coalescing that already happens while the loop is parked in its `select!` covers the case
+  that matters.
+
+  Recorded because a first pass here claimed the interlock was merely **untestable**, which was
+  simply false and would have misled the next reader: `RuntimeHandle::start_with_ports` takes a
+  `Box<dyn RuntimeDevice>` and that trait is public, so the server's own unit tests can drive a
+  runtime over a deliberately slow fake device. The seam exists. The reason not to use it here
+  is that the change is not wanted, not that it cannot be checked.
+
+Still owed, unchanged by this session: the same test at the other mounting, a tap-to-redraw
+latency measured on a build whose push path is trusted, and Hacker News paging (the live
+"Hacker News" card is an RSS face and takes no taps).
+
+## 2026-09-26 -- a tap, filmed and correlated: it works, and the wire is not the problem
+
+The owner filmed a single tap on the weather card (30 s, 720x1280, `dev-0005` at 270 degrees)
+and the new instrumentation caught the same event server-side. This is the first
+tap-to-redraw ever measured. **Nothing failed**: no link drop, no timeout, no reboot. It was
+simply slow -- **13.3 seconds from finger to new picture**.
+
+Video time was anchored to the panel's own clock: the minute flips to 15:12 between video
+t=15.6 s and t=15.7 s, so **t=0 = 15:11:44.35 UTC**, +/- 0.1 s. (The panel reads UTC because
+`preferences.timezone` is `UTC` in the live config -- correct behaviour, not a fault; the
+value is seeded on first run and never rewritten.)
+
+| video t | UTC | event | source |
+|---|---|---|---|
+| 5.0-5.5 | 15:11:49.4-49.9 | finger on the glass | video |
+| 7.25 | 15:11:51.604 | `face-state.json` -> `view: days`; frame rendered and accepted | state file |
+| ~8.0 | ~15:11:52.4 | asset transfer opens | derived from `total_ms` |
+| 9.0-9.5 | 15:11:53.4-53.9 | **panel drops to the clock face** | video |
+| 10.88 | 15:11:55.226 | transfer completed: 17 chunks, 32,224 B, slowest chunk **84 ms**, commit **1,540 ms**, total 2,826 ms | journal |
+| 18.8 | 15:12:03.15 | **new picture drawn** (tomorrow, 23 degrees, Overcast) | video |
+| 20.38 | 15:12:04.726 | `AssetRelease` acked: **9,359 ms** | journal |
+
+### Where the 13.3 seconds actually goes
+
+| phase | cost | share |
+|---|---|---|
+| tap event + face render (0.66 s of it is the face) | 1.75 s | 13% |
+| chunk phase on the wire (17 chunks, ~76 ms each) | ~1.29 s | **10%** |
+| `AssetCommit` (device writes the asset to flash) | 1.54 s | 12% |
+| `AssetRelease` (device compacts the flash blob region) | ~7.9 s visible | **59%** |
+
+**The network is under 10% of it.** The Cloudflare-tunnel hypothesis from 2026-09-24 is
+refuted by its own instrument: the 33-chunk Hacker News frame in the same session delivered
+all 62,752 bytes in 4,477 ms with a worst chunk of 569 ms, and typical chunks run 83-234 ms.
+Whatever is wrong with this board's pushes, **it is not the wire**, and the earlier entry's
+"strongest remaining hypothesis" should be read as closed.
+
+### The clock face is not a lost link
+
+The panel shows the standalone clock from 15:11:53.6 to 15:12:03.15 -- **9.55 s**, which
+tracks the 9.36 s release almost exactly (offset by ~1.7 s, the release's own round trip).
+This is what the owner described on 2026-09-24 as the device "switching into autonomous
+mode", and it is not a disconnection at all: **the panel falls back to the clock for the
+duration of the device's flash work on every asset change.** It looked like a dropped link
+because it lasts ten seconds.
+
+### The lever, and a field nobody reads
+
+`asset_sync.rs`'s `reconcile` sends `AssetRelease` **unconditionally at the end of every
+pass**, including passes where `already_present` short-circuited every transfer. Each one
+costs 9-10 s of device-side compaction. For a tap the release is doing real work -- the old
+weather digest really is being dropped -- so this is not simply a redundant call to delete;
+taking it out of the interactive path means deferring the garbage collection, not skipping
+it, and that needs a policy and a headroom number.
+
+The headroom number may already be on the wire and ignored. `encode_status_payload` in
+`firmware/main/core/protocol_message.c:2086` puts `asset_store_used_bytes`,
+`asset_store_free_bytes` and `asset_count` in **key 31** of every `StatusResponse`. Nothing in
+`companion/crates/` mentions any of the three, and `docs/protocol/v2.md` does not describe
+key 31. Decoding it would be purely additive on the host -- the device is already sending it.
+
+### Why it is 13 s, in one sentence: the frames live in flash and PSRAM is empty
+
+Where a picture actually lives, end to end:
+
+| stage | where | cost |
+|---|---|---|
+| rendered PNG -> canonical frame | server disk, `/var/lib/deskmate/configs/image-frames` | -- |
+| on the wire | RLE565, 1,920-byte chunks, **one ack per chunk** | 17 chunks ~= 1.29 s |
+| on the device | **durable flash blob region** | commit ~1.54 s, compaction ~9.4 s |
+| displayed | `asset_flash_map()` -- memory-mapped, no PSRAM copy | free |
+
+**The firmware has a PSRAM tier for exactly this and the host never asks for it.**
+`AssetBegin`'s `volatile` key is hardcoded `false` at `asset_sync.rs:148`, with a test at
+:555 pinning it. Meanwhile `dev-0005` advertises capability bit 9 `volatile-assets`,
+`firmware/main/core/volatile_asset_store.c` is fully implemented, `protocol_task.c` routes
+`begin->volatile_tier` through it, and `protocol_asset_resolver()` checks **volatile PSRAM
+before flash** with the comment "so an atomic replacement can be rendered without ever
+spending partition endurance". That is this exact workload, described by the firmware author,
+and unused.
+
+Numbers that decide the design:
+
+- **PSRAM: 8 MB octal at 80 MHz, `esp_get_free_heap_size()` reports 8,358,839 free.** A
+  decoded volatile frame is exactly 329,740 B, so a frame costs 4% of what is free.
+- **The v2 contract caps the volatile tier at two slots** -- "the displayed frame and one
+  incoming atomic replacement" (`docs/protocol/v2.md:378`). Four picture cards do not fit.
+  Raising it is a contract amendment plus a firmware image, so it needs the owner.
+- **Compaction cost is proportional to bytes moved, not to the release itself.**
+  `asset_store_plan_compaction` emits moves only for records after a dead one, so a keep-set
+  where nothing died is cheap. The 9.4 s was real work: the old weather frame died mid-region
+  and everything after it shifted down. With four faces refreshing every fifteen minutes this
+  runs about four times per fifteen minutes, forever, on a flash partition.
+- **The chunk phase is round-trip-bound, not bandwidth-bound.** 76 ms per 1,920-byte chunk on
+  the weather frame, 88 ms on Hacker News, and the slowest single chunk was 84 ms -- the
+  spread is tiny, which is the signature of latency rather than congestion. 32 KB is nothing;
+  **17 sequential acks over a WAN round trip is everything.** The board dials
+  `wss://deskmate.rodi.one` -- out to Cloudflare and back -- while the VM sits on the same
+  LAN at 192.168.8.20.
+
+## 2026-09-26 evening -- what the morning's test is testing
+
+Deployed: the interactive frame goes to PSRAM, reclaiming is rate-limited, and
+every server-rendered face answers a tap. Nothing here has been seen on the board.
+
+**The expected budget**, from the 2026-09-26 measurements minus what was removed:
+
+| phase | before | now | why |
+|---|---|---|---|
+| tap event + render | 1.75 s | 1.75 s | unchanged; rss and token still fetch on a tap, weather still refetches |
+| chunks on the wire | 1.29 s | 1.29 s | unchanged; still 17 sequential acks over the tunnel |
+| `AssetCommit` (flash write) | 1.54 s | **0** | the frame goes to the volatile PSRAM tier |
+| `AssetRelease` (compaction) | 9.36 s | **0** | rate-limited to once per 30 min, and never in front of the picture |
+| **tap -> pixels** | **13.3 s** | **~3 s expected** | |
+
+**What each card should do when tapped:**
+
+| card | face | tap |
+|---|---|---|
+| Clock | device-local | nothing; it is not a picture |
+| Claude limits | external producer | nothing, and this cannot change from the faces package -- a producer posts a PNG and declares no views |
+| Weather | `weather` | now <-> tomorrow plus four days; a second tap returns |
+| Hacker News | `rss` | the next four headlines, wrapping after four pages |
+| Token price | `token` | line <-> candles |
+
+Verified off-board against the **live** feeds, not fixtures: each of the three
+returns a different PNG for a tap, and weather's second tap returns to its first.
+
+**What to watch for, because none of it is observed yet:**
+
+- The tap-to-redraw time. If it is still ten seconds, the volatile path did not
+  take and the journal will say so: a durable push logs `an asset transfer
+  completed` with a `commit_ms`, a volatile one logs nothing at all.
+- A card going blank. The volatile tier holds **one** committed frame, so tapping
+  a second picture card before the next reconcile evicts the first. Tapping
+  weather and then the token card inside the same refresh window is the way to
+  provoke it.
+- `an asset release was slow` should now appear at most twice an hour, not after
+  every frame.

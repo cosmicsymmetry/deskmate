@@ -24,14 +24,36 @@ export type FieldSpec =
  */
 export type Settings = Readonly<Record<string, unknown>>;
 
+/** What a face is told beyond its settings: where it left off, and why it is drawing now. */
+export interface RenderContext {
+  /** Whatever this face returned as `state` last time, or undefined. */
+  state?: unknown;
+  /**
+   * Absent for a scheduled refresh. `taps` is how many taps this render answers --
+   * they coalesce, so three quick taps can arrive as one render with taps: 3.
+   * `point` is always null until the wire carries one (C2); a face that wants to
+   * hit-test gets the point in the same 448x368 space it drew in.
+   */
+  event?: { taps: number; point: { x: number; y: number } | null };
+}
+
+/** A face returns a document, or a document plus the state it wants back next time. */
+export type RenderResult = string | { svg: string; state?: unknown };
+
 export interface FaceDefinition {
   /** The stable identifier stored in `data-cards.json`. */
   kind: string;
   /** What the add menu calls it. */
   label: string;
   fields: FieldSpec[];
-  /** Fetches and draws. Resolves to the SVG document. */
-  render(settings: Settings, now: Date): Promise<string>;
+  /** What the window tells the owner a tap does. A face without it ignores taps. */
+  tap?: string;
+  /** Fetches and draws. Resolves to the SVG document, optionally with new state. */
+  render(
+    settings: Settings,
+    now: Date,
+    context?: RenderContext,
+  ): Promise<RenderResult> | RenderResult;
 }
 
 /**

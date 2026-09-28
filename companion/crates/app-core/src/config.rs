@@ -1046,6 +1046,10 @@ impl CardSettings {
     /// tap behavior. Faces arrive as host-built scenes, and alert policy stays
     /// on the host.
     fn wire_config(&self) -> Option<CardConfig> {
+        // A host-only action is still a refusal, on every card kind. Lowering one to
+        // StartPause because the card happens to be a picture would silently change
+        // its tap meaning, which is the exact failure `requires-capability` exists to
+        // prevent (`docs/config/v10.md`).
         let tap_action = match self.tap_action() {
             WidgetTapAction::None => TapAction::None,
             WidgetTapAction::StartPause => TapAction::StartPause,
@@ -1053,6 +1057,17 @@ impl CardSettings {
             WidgetTapAction::Dismiss
             | WidgetTapAction::OpenUrl { .. }
             | WidgetTapAction::OpenApplication { .. } => return None,
+        };
+        let tap_action = if matches!(self, Self::Picture { .. }) {
+            // `docs/superpowers/specs/2026-09-23-deskmate-tap-to-face-design.md`
+            // specifies this lowering. `firmware/main/ui/carousel.c:68` reports
+            // StartPause taps, `firmware/main/ui/scene_view.c:1385` makes their
+            // timerless local action a no-op, and `docs/protocol/v2.md` explicitly
+            // accepts a tap action on a card with no timer. What the tap MEANS is a
+            // host decision; the document still says what the device does locally.
+            TapAction::StartPause
+        } else {
+            tap_action
         };
         Some(CardConfig {
             card_id: self.id().into(),

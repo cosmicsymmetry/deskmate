@@ -11,6 +11,11 @@ pub(super) struct RuntimeDiagnosticCounters {
     pub(super) command_queue_full: AtomicU64,
     pub(super) subscriber_snapshots_overwritten: AtomicU64,
     pub(super) interrupt_dismissals_ignored: AtomicU64,
+    /// Taps the host received and could do nothing with: a card id that resolves to
+    /// nothing, or a picture card on a runtime with no tap sink installed. Counted
+    /// for the same reason dismissals are -- on hardware, a tap the host discarded
+    /// and a tap whose event never arrived look identical without this.
+    pub(super) taps_dropped: AtomicU64,
 }
 
 impl RuntimeDiagnosticCounters {
@@ -22,6 +27,7 @@ impl RuntimeDiagnosticCounters {
                 .subscriber_snapshots_overwritten
                 .load(Ordering::Relaxed),
             interrupt_dismissals_ignored: self.interrupt_dismissals_ignored.load(Ordering::Relaxed),
+            taps_dropped: self.taps_dropped.load(Ordering::Relaxed),
         }
     }
 }
@@ -201,5 +207,6 @@ pub fn empty_device(connection: ConnectionState) -> DeviceSnapshot {
         ota_state: None,
         active_card_id: None,
         counters: DeviceCounters::default(),
+        asset_store: None,
     }
 }

@@ -14,7 +14,7 @@ use crate::identity::{AccountId, DeviceState, IdentityError, IdentityStore, norm
 const IDENTITY_FILE: &str = "identity.db";
 const MIGRATING_IDENTITY_FILE: &str = "identity.db.migrating";
 const REGISTRY_FILE: &str = "device-identities.json";
-const ACCOUNT_FILES: [&str; 2] = ["image-sources.json", "data-cards.json"];
+const ACCOUNT_FILES: [&str; 3] = ["image-sources.json", "data-cards.json", "face-state.json"];
 const INSTANCE_FILES: [&str; 3] = [REGISTRY_FILE, "producer-credentials.json", "secrets.enc"];
 
 #[derive(Debug, PartialEq, Eq)]

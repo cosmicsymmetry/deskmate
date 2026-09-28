@@ -93,6 +93,12 @@ pub(crate) struct CatalogFace {
     #[serde(default)]
     pub(crate) tap: Option<String>,
     pub(crate) fields: Vec<CatalogField>,
+    /// The plugin's declared refresh cadence, in seconds. Absent for a built-in
+    /// face and for an older faces package that predates this key -- there is no
+    /// `deny_unknown_fields` here, so a NEWER package sending a key this binary
+    /// has never heard of still parses.
+    #[serde(default)]
+    pub(crate) refresh_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -461,6 +467,16 @@ mod tests {
             "an absent default is blank"
         );
         assert_eq!(token.fields[1].default_value(), "usd");
+    }
+
+    #[test]
+    fn an_unknown_catalog_key_is_ignored_rather_than_refusing_the_catalog() {
+        // A newer faces package can send a field this binary has never heard of;
+        // there is no `deny_unknown_fields` here on purpose, unlike `DataCardSpec`.
+        let json = r#"[{"kind":"p","label":"P","fields":[],"refresh_seconds":300,"future":1}]"#;
+        let faces: Vec<CatalogFace> =
+            serde_json::from_str(json).expect("an older server ignores what it does not know");
+        assert_eq!(faces[0].refresh_seconds, Some(300));
     }
 
     #[test]

@@ -141,6 +141,19 @@ const fn default_refresh_seconds() -> u64 {
     900
 }
 
+/// The refresh cadence for a NEW spec, seeded from the catalog's declared
+/// cadence and clamped to a sane range. `None` -- a built-in face, or a plugin
+/// that declares nothing -- falls back to [`default_refresh_seconds`].
+///
+/// Only a spec's creation calls this. An existing spec's `refresh_seconds` is
+/// whatever `DataCardSpec`'s own `#[serde(default)]` loaded or the owner later
+/// set by hand; a plugin update must never rewrite it.
+fn cadence_for_new_spec(declared: Option<u64>) -> u64 {
+    declared
+        .unwrap_or_else(default_refresh_seconds)
+        .clamp(60, 86_400)
+}
+
 /// Which face, and the settings it was given.
 ///
 /// Open-ended on purpose. The file shape is unchanged from when this was a closed
@@ -982,7 +995,9 @@ pub(crate) fn create_face(
         .data_cards
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let face = state
+    // The catalog entry itself, not just its blank settings: `refresh_seconds`
+    // lives on the entry and seeds this spec's cadence below.
+    let catalog_face = state
         .inner
         .face_catalog
         .lock()
@@ -990,7 +1005,7 @@ pub(crate) fn create_face(
         .catalog()
         .iter()
         .find(|candidate| candidate.kind == kind)
-        .map(blank_face)
+        .cloned()
         .ok_or_else(|| FaceUpdateError::UnknownField(kind.to_owned()))?;
     if data_cards
         .specs
@@ -1005,8 +1020,8 @@ pub(crate) fn create_face(
 
     let spec = DataCardSpec {
         source_id: source_id.to_owned(),
-        refresh_seconds: default_refresh_seconds(),
-        face,
+        refresh_seconds: cadence_for_new_spec(catalog_face.refresh_seconds),
+        face: blank_face(&catalog_face),
     };
     let mut updated_specs = data_cards.specs.clone();
     updated_specs.push(spec.clone());
@@ -1536,6 +1551,32 @@ mod tests {
             &descriptor_of(&specs[0].face).fields[1],
             FaceFieldDescriptor::Text { key, value, .. } if key == "currency" && value == "usd"
         ));
+    }
+
+    #[test]
+    fn a_new_spec_takes_the_catalogs_cadence_clamped() {
+        assert_eq!(cadence_for_new_spec(Some(300)), 300);
+        assert_eq!(cadence_for_new_spec(Some(10)), 60);
+        assert_eq!(cadence_for_new_spec(Some(1_000_000)), 86_400);
+        assert_eq!(cadence_for_new_spec(None), 900);
+    }
+
+    #[test]
+    fn an_existing_specs_cadence_survives_a_catalog_reload() {
+        // `reload_catalog` (above) only ever replaces `data_cards.catalog` -- it
+        // never touches `data_cards.specs` -- so loading the same spec file twice
+        // is what a reload amounts to for an existing spec. An owner's hand-set
+        // 300 must come back as 300, not as the 900 a NEW token spec would take.
+        let directory = write(
+            r#"[{"source_id": "ghi", "refresh_seconds": 300,
+                 "face": {"kind": "token", "coin_id": "solana", "currency": "usd"}}]"#,
+        );
+        let path = directory.path().join("cards.json");
+        let loaded_once = load_specs(&path).expect("the spec parses");
+        let loaded_again = load_specs(&path).expect("reloading the same file");
+        assert_eq!(loaded_once[0].refresh_seconds, 300);
+        assert_eq!(loaded_again[0].refresh_seconds, 300);
+        assert_ne!(loaded_once[0].refresh_seconds, cadence_for_new_spec(None));
     }
 
     #[test]

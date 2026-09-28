@@ -480,6 +480,46 @@ mod tests {
     }
 
     #[test]
+    fn the_catalog_sample_committed_by_the_faces_package_still_deserializes() {
+        // companion/faces/test/catalog-sample.json is real describeCatalog() output,
+        // and companion/faces/test/catalog-sample.test.ts pins it against the
+        // package's own output on the TypeScript side. Reading the SAME file here
+        // means the two languages drifting on the catalog wire -- a key renamed,
+        // a case changed, a shape moved -- fails a test on whichever side moved,
+        // instead of silently deserializing to `None` the way `refreshSeconds` vs
+        // `refresh_seconds` once did (Task 9's Critical: the field existed on both
+        // sides and still went dead, because nothing read the same bytes twice).
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../faces/test/catalog-sample.json");
+        let bytes = std::fs::read(&path).unwrap_or_else(|error| {
+            panic!(
+                "could not read {} ({error}) -- if this file moved, update this path; the \
+                 Rust and TypeScript sides of the catalog wire have nothing else pinning them \
+                 to the same JSON shape",
+                path.display()
+            )
+        });
+        let faces: Vec<CatalogFace> = serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+            panic!(
+                "the Rust and TypeScript sides of the catalog wire disagree: {error}. \
+                 companion/faces's describeCatalog() and CatalogFace here must speak the same \
+                 JSON shape -- see companion/faces/test/catalog-sample.test.ts for the other half."
+            )
+        });
+        let sample_a = faces
+            .iter()
+            .find(|face| face.kind == "sample-a")
+            .expect("sample-a is in the committed sample");
+        assert_eq!(sample_a.refresh_seconds, Some(300));
+        assert!(sample_a.tap.is_some(), "sample-a declares a tap");
+        let sample_b = faces
+            .iter()
+            .find(|face| face.kind == "sample-b")
+            .expect("sample-b is in the committed sample");
+        assert_eq!(sample_b.refresh_seconds, None);
+    }
+
+    #[test]
     fn a_frame_comes_back_as_the_bytes_the_package_wrote() {
         let rendered =
             render(&fake(), request("weather", &steer("Dubai"), None, 0)).expect("a frame");

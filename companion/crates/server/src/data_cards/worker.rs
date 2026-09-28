@@ -13,11 +13,15 @@ use crate::image_sources::AcceptOutcome;
 use crate::{ImageNotificationOrigin, ServerState};
 
 /// A refresh no faster than this, whatever a spec asks for, for every face.
-const MIN_REFRESH: Duration = Duration::from_secs(60);
+///
+/// `pub(super)`: `cadence_for_new_spec` in the parent module clamps a NEW
+/// spec's stored cadence to this same range, so the persisted file never
+/// claims a cadence this scheduler would silently override at run time.
+pub(super) const MIN_REFRESH: Duration = Duration::from_secs(60);
 /// An unreachable source is retried on its own interval, but never slower than
 /// this, so a card that failed once during a network blip does not sit stale
-/// for a day.
-const MAX_REFRESH: Duration = Duration::from_hours(6);
+/// for a day. See [`MIN_REFRESH`] for why this is `pub(super)`.
+pub(super) const MAX_REFRESH: Duration = Duration::from_hours(6);
 
 pub(super) fn spawn_refresher(
     runtime: &tokio::runtime::Handle,

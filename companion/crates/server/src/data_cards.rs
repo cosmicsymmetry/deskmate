@@ -142,8 +142,14 @@ const fn default_refresh_seconds() -> u64 {
 }
 
 /// The refresh cadence for a NEW spec, seeded from the catalog's declared
-/// cadence and clamped to a sane range. `None` -- a built-in face, or a plugin
-/// that declares nothing -- falls back to [`default_refresh_seconds`].
+/// cadence. `None` -- a built-in face, or a plugin that declares nothing --
+/// falls back to [`default_refresh_seconds`].
+///
+/// Clamped to `worker`'s own [`worker::MIN_REFRESH`]/[`worker::MAX_REFRESH`],
+/// not a range invented here: `worker::clamped_refresh` re-clamps to that same
+/// range at schedule time, so storing anything outside it would let the
+/// persisted file and the panel's actual behaviour disagree with nothing to
+/// explain it. The scheduler owns the range; this only mirrors it.
 ///
 /// Only a spec's creation calls this. An existing spec's `refresh_seconds` is
 /// whatever `DataCardSpec`'s own `#[serde(default)]` loaded or the owner later
@@ -151,7 +157,7 @@ const fn default_refresh_seconds() -> u64 {
 fn cadence_for_new_spec(declared: Option<u64>) -> u64 {
     declared
         .unwrap_or_else(default_refresh_seconds)
-        .clamp(60, 86_400)
+        .clamp(worker::MIN_REFRESH.as_secs(), worker::MAX_REFRESH.as_secs())
 }
 
 /// Which face, and the settings it was given.
@@ -1555,9 +1561,12 @@ mod tests {
 
     #[test]
     fn a_new_spec_takes_the_catalogs_cadence_clamped() {
+        // The ceiling is the scheduler's own 6h MAX_REFRESH (21_600s), not an
+        // independently chosen number: worker::clamped_refresh would otherwise
+        // re-clamp a stored value the owner's file claims is honoured in full.
         assert_eq!(cadence_for_new_spec(Some(300)), 300);
         assert_eq!(cadence_for_new_spec(Some(10)), 60);
-        assert_eq!(cadence_for_new_spec(Some(1_000_000)), 86_400);
+        assert_eq!(cadence_for_new_spec(Some(1_000_000)), 21_600);
         assert_eq!(cadence_for_new_spec(None), 900);
     }
 
@@ -2125,6 +2134,60 @@ mod tests {
             assert_eq!(serde_json::to_value(&spec.face).unwrap(), expected);
             assert_eq!(persisted, retained.specs);
         }
+        state.shutdown();
+    }
+
+    #[tokio::test]
+    async fn create_face_seeds_the_new_specs_cadence_from_the_catalog() {
+        // The regression this test exists to catch: `create_face` computing
+        // `cadence_for_new_spec(catalog_face.refresh_seconds)` and then storing
+        // `default_refresh_seconds()` anyway. Every other cadence test exercises
+        // the pure function or `load_specs`, so that exact mistake left the
+        // whole suite green. A distinct fake kind (not `tests/support/fake-faces.sh`,
+        // whose weather/rss/token entries the 900-fallback test above pins) keeps
+        // that assertion intact while still exercising `create_face` end to end.
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("a temp directory");
+        let script = directory.path().join("describe-a-cadence.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+case "$1" in
+describe)
+	cat <<'JSON'
+[{"kind": "custom", "label": "Custom", "refresh_seconds": 300,
+  "fields": [{"type": "text", "key": "need", "label": "Need", "placeholder": ""}]}]
+JSON
+	;;
+*) echo "usage: describe" >&2; exit 64 ;;
+esac
+"#,
+        )
+        .expect("write the describe-only fake");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
+            .expect("make the fake executable");
+
+        let state = ServerState::in_memory();
+        set_faces(&state, FaceCommand::program(script));
+
+        let descriptor = create_face(&state, "custom-source", "custom").expect("create face");
+        assert!(
+            !face_is_complete(&descriptor),
+            "the blank required field keeps this face from starting a refresher"
+        );
+
+        let retained = state.inner.data_cards.lock().unwrap();
+        let spec = retained
+            .specs
+            .iter()
+            .find(|spec| spec.source_id == "custom-source")
+            .expect("the spec was persisted");
+        assert_eq!(
+            spec.refresh_seconds, 300,
+            "the catalog's declared cadence must reach the stored spec, not the 900 fallback"
+        );
+        drop(retained);
         state.shutdown();
     }
 

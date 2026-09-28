@@ -296,8 +296,13 @@ Kept from the superseded spec. Today `data_cards.rs` stamps every browser-create
 with `default_refresh_seconds()` = 900, which is why the token card's 300 s is documented
 as a hand-edit. A plugin declaring its own cadence is part of a plugin contract, so:
 
-- `describe` reports each plugin's `refreshSeconds` when it declares one.
-- The server uses it **when creating a spec**, clamped to 60…86400, falling back to 900.
+- `describe` reports each plugin's cadence as `refresh_seconds` (the catalog wire's own
+  snake_case, not the manifest's `refreshSeconds`) when it declares one.
+- The server uses it **when creating a spec**, clamped to 60…21600 (60s…6h) -- `worker.rs`'s
+  own `MIN_REFRESH`/`MAX_REFRESH`, the range the scheduler re-clamps to at run time in any
+  case, not an independently chosen 60…86400. A wider stored value would make the owner's
+  file claim a cadence the scheduler silently overrides. Falls back to 900 when the plugin
+  declares none.
 - An existing spec keeps the cadence it has. A plugin update never rewrites a cadence the
   owner set.
 

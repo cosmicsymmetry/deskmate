@@ -34,8 +34,18 @@ store has never held anything but picture frames, so `used_bytes` holding still 
 refreshes is the observable end of the flash wear. That is what step 1 delivers.
 
 **The PSRAM headroom figure needs a new status key**, which is a wire change. It belongs in
-the flash session (step 4), not ahead of it. Until then the pre-flight number comes from
-the device's own log over UART, not from the host.
+the flash session (step 4), not ahead of it.
+
+And it cannot be read off the board today either, which makes the spec's memory budget
+softer than it looks. `protocol_task.c:495` reports `free_heap` as
+`esp_get_free_heap_size()` — the **total** across every capability, internal SRAM included.
+The spec's arithmetic subtracts the 5.03 MB pool from that total ("8,358,839 B measured,
+leaving about 2.94 MiB"), so the PSRAM-specific headroom is smaller than 2.94 MiB by
+whatever internal SRAM contributes. The firmware calls `heap_caps_get_free_size` **nowhere**
+— grep confirms it — so no log line answers the question either. It is still comfortable
+arithmetic, but the pool's actual margin is unmeasured, not measured, and the risk that
+matters (sixteen 329,740-byte allocations succeeding in a heap mbedTLS also draws from) is
+untouched by the figure the spec quotes.
 
 ### Correction 2 — "every frame volatile" is wrong until the pool is real
 
@@ -177,9 +187,12 @@ The contract has to arrive with the caller that uses it.
 
 - [ ] `VOLATILE_ASSET_SLOT_COUNT` 2 → 16, and its comment stops describing the two-slot
       bound as the only safe one.
-- [ ] A new `StatusResponse` key for **volatile** store occupancy, so the pre-flight number
-      Correction 1 says is missing exists. Additive, and it is the one piece of the wire
-      change that pays for itself immediately.
+- [ ] A new `StatusResponse` key for **volatile** store occupancy **and PSRAM-specific free
+      size** (`heap_caps_get_free_size(MALLOC_CAP_SPIRAM)` plus its minimum-ever
+      counterpart), so the pre-flight number Correction 1 says is missing exists. Additive,
+      and it is the one piece of the wire change that pays for itself immediately. Reporting
+      only the store's own occupancy would not answer the fragmentation risk; the heap's
+      free and low-water figures are what do.
 - [ ] `docs/protocol/v2.md`: the two-allocation sentence becomes the sixteen-allocation
       sentence, and the undocumented `Busy` reserve refusal is written down.
       `PROTOCOL_CURRENT_CAPABILITIES` does not move — bit 9 already means what it means.

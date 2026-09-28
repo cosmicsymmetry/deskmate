@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describeCatalog, renderRequest } from "../src/main";
 
 const MAIN = `${import.meta.dir}/../src/main.ts`;
@@ -8,11 +11,13 @@ const SQUARE_SVG =
 async function run(
   verb: string,
   stdin = "",
+  env: Record<string, string> = {},
 ): Promise<{ code: number; out: Uint8Array; err: string }> {
   const child = Bun.spawn(["bun", "run", MAIN, verb], {
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
+    env: { ...process.env, ...env },
   });
   child.stdin.write(stdin);
   await child.stdin.end();
@@ -31,7 +36,16 @@ test("describe prints the catalog the server builds the add menu from", async ()
     kind: string;
     fields: { type: string; key: string }[];
   }[];
-  expect(catalog.map((face) => face.kind)).toEqual(["weather", "hackernews", "rss", "token"]);
+  // Built-ins first, then the worked-example plugin under `plugins/github-stats/`
+  // (`src/plugins/discovery.ts`) -- this is the default `DESKMATE_PLUGINS_DIR`, a
+  // real folder beside the package, discovered exactly as the server would.
+  expect(catalog.map((face) => face.kind)).toEqual([
+    "weather",
+    "hackernews",
+    "rss",
+    "token",
+    "github-stats",
+  ]);
   for (const face of catalog) {
     for (const field of face.fields) {
       expect(["text", "url", "enum"]).toContain(field.type);
@@ -88,6 +102,40 @@ test("a render with no state and no event is what every existing face already ge
   expect(seen).toEqual([{ state: undefined, event: undefined }]);
 });
 
+test("a request carrying a timezone passes it into the face's context", async () => {
+  const seen: unknown[] = [];
+  await renderRequest(
+    { kind: "probe", settings: {}, timezone: "Asia/Dubai" },
+    {
+      kind: "probe",
+      label: "Probe",
+      fields: [],
+      render: (_settings, _now, context) => {
+        seen.push(context?.timezone);
+        return SQUARE_SVG;
+      },
+    },
+  );
+  expect(seen).toEqual(["Asia/Dubai"]);
+});
+
+test("a request with no timezone leaves the face's context without one", async () => {
+  const seen: unknown[] = [];
+  await renderRequest(
+    { kind: "probe", settings: {} },
+    {
+      kind: "probe",
+      label: "Probe",
+      fields: [],
+      render: (_settings, _now, context) => {
+        seen.push("timezone" in (context ?? {}));
+        return SQUARE_SVG;
+      },
+    },
+  );
+  expect(seen).toEqual([false]);
+});
+
 test("describe carries a face's tap sentence and omits it otherwise", () => {
   const catalog = JSON.parse(
     describeCatalog([
@@ -103,6 +151,17 @@ test("describe carries a face's tap sentence and omits it otherwise", () => {
   );
   expect(catalog[0].tap).toBe("Tap the panel for more.");
   expect("tap" in catalog[1]).toBe(false);
+});
+
+test("describe carries a face's refreshSeconds and omits it otherwise", () => {
+  const catalog = JSON.parse(
+    describeCatalog([
+      { kind: "a", label: "A", fields: [], refreshSeconds: 120, render: async () => SQUARE_SVG },
+      { kind: "b", label: "B", fields: [], render: async () => SQUARE_SVG },
+    ]),
+  );
+  expect(catalog[0].refreshSeconds).toBe(120);
+  expect("refreshSeconds" in catalog[1]).toBe(false);
 });
 
 test("an unknown kind and an incomplete setting are configuration errors: exit 2, nothing on stdout", async () => {
@@ -174,4 +233,67 @@ test("a whole envelope reaches stdout without truncation", async () => {
     // No network in this environment: the face failed, which is a clean exit path.
     expect(out).toBe("");
   }
+});
+
+test("a broken plugin folder does not empty the catalog: the built-ins and a good plugin survive", async () => {
+  // `load_catalog` on the Rust side treats a failed `describe` as an EMPTY catalog --
+  // an empty add menu -- so this is the property Task 9 exists to guarantee, driven
+  // through the real CLI subprocess boundary the server actually uses.
+  const root = join(tmpdir(), `main-plugins-${Math.random().toString(36).slice(2)}`);
+  const write = (folder: string, manifest: unknown, source: string) => {
+    mkdirSync(join(root, folder), { recursive: true });
+    writeFileSync(join(root, folder, "plugin.json"), JSON.stringify(manifest));
+    writeFileSync(join(root, folder, "index.js"), source);
+  };
+  write(
+    "sound-plugin",
+    {
+      api: 1,
+      id: "sound-plugin",
+      version: "1.0.0",
+      label: "Sound plugin",
+      description: "d",
+      author: "a",
+      hosts: [],
+      secrets: [],
+      fields: [],
+    },
+    `export function plan(){ return []; }
+     export function render(){ return { layout: { type: "div", style: { display: "flex", width: 448, height: 368, background: "#000" }, children: "ok" } }; }`,
+  );
+  write(
+    "broken-plugin",
+    {
+      api: 1,
+      id: "broken-plugin",
+      version: "1.0.0",
+      label: "Broken plugin",
+      description: "d",
+      author: "a",
+      hosts: [],
+      secrets: [],
+      fields: [],
+    },
+    "export function plan(){ this does not parse }",
+  );
+
+  const { code, out, err } = await run("describe", "", { DESKMATE_PLUGINS_DIR: root });
+  expect(code).toBe(0);
+  const catalog = JSON.parse(new TextDecoder().decode(out)) as { kind: string }[];
+  expect(catalog.map((face) => face.kind)).toEqual([
+    "weather",
+    "hackernews",
+    "rss",
+    "token",
+    "sound-plugin",
+  ]);
+  expect(err).toContain("broken-plugin");
+
+  // The built-ins still render, unaffected by the broken folder sitting beside them.
+  const rendered = await run(
+    "render",
+    JSON.stringify({ kind: "weather", settings: { location: "Berlin" } }),
+    { DESKMATE_PLUGINS_DIR: root },
+  );
+  expect(rendered.code === 0 || rendered.code === 1).toBe(true); // 1: no network here
 });

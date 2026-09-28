@@ -35,6 +35,14 @@ export interface RenderContext {
    * hit-test gets the point in the same 448x368 space it drew in.
    */
   event?: { taps: number; point: { x: number; y: number } | null };
+  /**
+   * The owner's IANA zone, when the caller has one to send. Absent for an older
+   * caller (additive) or when the caller has none configured; a face that needs a
+   * zone -- currently only a plugin, via `runPlugin` -- falls back to the host
+   * process's own zone and then to UTC. The server sending the owner's configured
+   * zone here, rather than the host's, is still owed.
+   */
+  timezone?: string;
 }
 
 /** A face returns a document, or a document plus the state it wants back next time. */
@@ -48,6 +56,13 @@ export interface FaceDefinition {
   fields: FieldSpec[];
   /** What the window tells the owner a tap does. A face without it ignores taps. */
   tap?: string;
+  /**
+   * How often this face wants pushing, in seconds. Only a plugin sets this today, from
+   * its manifest; a built-in face is silent and the server's own default applies. Read
+   * by the server ONLY when creating a new card's spec (`data_cards.rs`, Task 10) --
+   * changing a plugin's declared cadence after a card already exists does not move it.
+   */
+  refreshSeconds?: number;
   /** Fetches and draws. Resolves to the SVG document, optionally with new state. */
   render(
     settings: Settings,

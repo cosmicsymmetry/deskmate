@@ -1,0 +1,28 @@
+{
+  "api": 1,
+  "id": "github-stats",
+  "version": "1.0.0",
+  "label": "GitHub stats",
+  "description": "Public repos, followers and following for a GitHub username.",
+  "author": "Deskmate",
+  "hosts": ["api.github.com"],
+  "secrets": [
+    {
+      "key": "github_token",
+      "label": "GitHub token",
+      "kind": "api_key",
+      "host": "api.github.com",
+      "send_as": "bearer"
+    }
+  ],
+  "fields": [
+    {
+      "type": "text",
+      "key": "user",
+      "label": "Username",
+      "placeholder": "octocat",
+      "default": "octocat"
+    }
+  ],
+  "refreshSeconds": 900
+}

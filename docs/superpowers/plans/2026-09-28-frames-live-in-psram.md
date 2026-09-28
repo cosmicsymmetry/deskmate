@@ -112,6 +112,14 @@ at one resident slot.
 
 Faces-only; `deploy.sh --faces-only`; no Rust.
 
+**Task A cannot be landed on its own either, and the reason is sharper than "it would have
+no consumer".** Every face's tap behaviour lives *inside* `render` today — `weather.ts`
+flips its view in `renderWeatherResult`, `rss` and `hackernews` advance a page, `token`
+rotates `TAPPABLE_CHARTS`. Moving that into `onTap` while the server still calls only
+`render` leaves two possibilities, both worse than waiting: the logic exists twice and can
+drift, or `onTap` is the version nothing runs and the one that ships is still the old one.
+The contract has to arrive with the caller that uses it.
+
 - [ ] `faces/src/face.ts`: add `views?(settings): ViewId[]` (priority order, first is the
       resting view) and `onTap?(state, event, views): ViewId` (pure — no fetch, no draw).
       `render` gains the selected view in `RenderContext`. A face with no `views()` keeps

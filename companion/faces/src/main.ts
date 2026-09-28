@@ -29,7 +29,15 @@ export function describeCatalog(faces: readonly FaceDefinition[] = FACES): strin
       label,
       fields,
       ...(tap === undefined ? {} : { tap }),
-      ...(refreshSeconds === undefined ? {} : { refreshSeconds }),
+      // snake_case on the wire, deliberately: this JSON is read by
+      // `crates/server/src/data_cards/faces_package.rs`'s `CatalogFace`, which has no
+      // `#[serde(rename)]` and no `deny_unknown_fields` -- a camelCase key here is
+      // silently ignored, not refused, and the field quietly deserializes to `None`.
+      // `kind`/`label`/`fields`/`tap` are single words so this was invisible until a
+      // compound-word field arrived. `FaceDefinition.refreshSeconds` and the
+      // manifest's own `refreshSeconds` (author-facing) are unaffected -- only this
+      // wire-facing key changes shape.
+      ...(refreshSeconds === undefined ? {} : { refresh_seconds: refreshSeconds }),
     })),
     null,
     2,

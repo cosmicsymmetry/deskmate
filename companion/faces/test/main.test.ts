@@ -153,15 +153,26 @@ test("describe carries a face's tap sentence and omits it otherwise", () => {
   expect("tap" in catalog[1]).toBe(false);
 });
 
-test("describe carries a face's refreshSeconds and omits it otherwise", () => {
+test("describe carries a face's refreshSeconds as refresh_seconds, snake_case for the Rust catalog, and omits the key entirely otherwise", () => {
+  // `crates/server/src/data_cards/faces_package.rs`'s `CatalogFace` has no
+  // `#[serde(rename)]` and no `deny_unknown_fields`: a camelCase `refreshSeconds`
+  // here deserializes to `None` there, silently. See catalog-sample.json below,
+  // which pins this exact shape across both languages.
   const catalog = JSON.parse(
     describeCatalog([
       { kind: "a", label: "A", fields: [], refreshSeconds: 120, render: async () => SQUARE_SVG },
       { kind: "b", label: "B", fields: [], render: async () => SQUARE_SVG },
     ]),
   );
-  expect(catalog[0].refreshSeconds).toBe(120);
-  expect("refreshSeconds" in catalog[1]).toBe(false);
+  expect(catalog[0].refresh_seconds).toBe(120);
+  expect("refreshSeconds" in catalog[0]).toBe(false);
+  // Absent, not `null`: the Rust side distinguishes "no cadence declared" from an
+  // explicit null, and `Option<u64>`'s `#[serde(default)]` only supplies `None` for
+  // a MISSING key -- an explicit `null` still deserializes fine here (serde treats
+  // `null` as `None` for an `Option`), but this pins that this package never sends
+  // one, which is the stricter and correct claim: this plugin declared nothing.
+  expect("refresh_seconds" in catalog[1]).toBe(false);
+  expect(JSON.stringify(catalog[1])).not.toContain("refresh_seconds");
 });
 
 test("an unknown kind and an incomplete setting are configuration errors: exit 2, nothing on stdout", async () => {

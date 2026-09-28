@@ -37,10 +37,11 @@ one or the other:
 - **The host can validate every request before performing it**, because your requests
   are data, not code that runs partway through your render. A request to a host your
   manifest did not declare is refused before any connection is attempted.
-- **A plugin is a pure function of its inputs**, so it is testable with no network at
-  all: record a set of answers, call `render` with them, compare the card. The
-  `github-stats` example below is tested exactly that way in
-  `companion/faces/test/plugins/discovery.test.ts`.
+- **A plugin is a pure function of its inputs**, so it is testable with no real
+  network at all: stand up a stub `request` function that returns a recorded
+  answer, run the plugin through `runPlugin`, and assert on the card it drew and
+  how many requests it actually made. The `github-stats` example below is tested
+  exactly that way in `companion/faces/test/plugins/discovery.test.ts`.
 
 Everything that crosses the boundary between your code and the host -- `plan`'s
 return value, `render`'s return value, a thrown error -- is serialized with
@@ -103,6 +104,11 @@ function username(context) {
 }
 
 export function plan(context) {
+  // One answer is everything this plugin needs: return [] once it has one, or the
+  // host re-runs plan() up to the 3-round cap and spends three GitHub requests
+  // instead of one. See "Rounds" below.
+  const answers = (context && context.answers) || [];
+  if (answers.length > 0) return [];
   const user = username(context);
   return [
     {
@@ -201,7 +207,7 @@ reads without opening `index.js`. Parsed and validated in
 | `hosts` | string[] | Bare hostnames only (`api.github.com`), lowercase-compared. An IP literal (v4 or bracketed v6) is refused here, and refused again independently when a request is validated. No wildcards, no suffix matching: a request to a host not in this exact list is never performed. |
 | `secrets` | array | See below. |
 | `fields` | array | `FieldSpec[]`, the same shape the browser already renders for a built-in face's settings form (`{type: "text"\|"url", key, label, placeholder, default?}` or `{type: "enum", key, label, default, options}`) -- no new form code exists for a plugin. |
-| `refreshSeconds` | integer, optional | Seconds. Read by the server **only when creating a new card's spec**, clamped to 60...86400, falling back to 900 if you omit it. Changing this in a plugin update never moves an existing card's cadence -- only the owner editing it does. |
+| `refreshSeconds` | integer, optional | Seconds. Read by the server **only when creating a new card's spec**, clamped to 60...21,600 (6 hours) and falling back to 900 if you omit it. The range is the refresh scheduler's own -- `worker::MIN_REFRESH`/`MAX_REFRESH` (`companion/crates/server/src/data_cards/worker.rs:19-23`) -- not a separate cadence-declaration limit: a plugin's declared cadence used to be stored at its own value and silently run at a shorter one when the two disagreed, and `cadence_for_new_spec` (`companion/crates/server/src/data_cards.rs:147-159`) now clamps against the same constants the scheduler enforces, so what is stored is what actually runs. Declaring more than 21,600 gets you 6 hours, with nothing in the window telling you so. Changing this in a plugin update never moves an existing card's cadence -- only the owner editing it does. |
 | `tap` | string, optional | The sentence the settings window shows the owner about what a tap does. A plugin that omits it ignores taps, which is every plugin's default. |
 
 ### Secrets, and the one-host rule
@@ -281,7 +287,11 @@ with the accumulated answers -- **up to three times** -- before running `render`
 `answers` on `PlanContext` starts empty and grows with each round, in the order the
 requests were declared, across every round so far. Returning `[]` from `plan` on any
 round ends the loop immediately: a plugin that got everything it needed on round one
-should return `[]` on round two, not repeat its round-one requests.
+should return `[]` on round two, not repeat its round-one requests. This is not
+optional bookkeeping -- `github-stats`'s `plan` above checks
+`context.answers.length` for exactly this reason; without that check the same
+request is declared on every one of the three rounds and the plugin spends three
+GitHub calls per render instead of one, with nothing failing to reveal it.
 
 The request count (8), byte budget (4 MB) and measurement count (64) are **spent
 across all three rounds, not reset per round** -- a plugin that uses 5 requests on
@@ -569,6 +579,17 @@ exercises for `github-stats` and for the hostile-input fixtures under
    secrets configured" and never an error -- your plugin must render sensibly with
    every secret absent, because that is the state of most renders before an owner
    fills the field in.
+
+## Reaching the panel
+
+A plugin folder needs no step of its own to ship: it lives inside `companion/faces/`,
+which is the tree `deploy.sh` rsyncs to the VM wholesale
+(`docs/images/server-rendered-cards.md`, "Who does what"). `deploy.sh --faces-only`
+carries your plugin folder exactly as it carries a built-in face's own source file --
+no Rust build, no restart, and the catalog is re-read every 60 s, so the plugin
+appears in the add menu on its own once the deploy finishes. There is no separate
+publish, review, or registration step for a plugin on this branch; getting it into
+`companion/faces/plugins/` on the branch that gets deployed is the whole submission.
 
 ## Not yet true, though the design record describes it
 

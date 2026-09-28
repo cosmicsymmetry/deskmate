@@ -1,9 +1,11 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FaceDefinition } from "../../src/face";
 import { discoverPlugins } from "../../src/plugins/discovery";
+import { parseManifest } from "../../src/plugins/manifest";
+import { runPlugin } from "../../src/plugins/run";
 import { warmSandbox } from "../../src/plugins/sandbox";
 
 beforeAll(async () => {
@@ -144,5 +146,73 @@ describe("discoverPlugins", () => {
     await expect(
       firstFace(faces).render({}, new Date("2026-09-23T10:00:00Z"), {}),
     ).resolves.toBeDefined();
+  });
+
+  describe("the shipped github-stats example", () => {
+    // The real folder, not a throwaway fixture -- `docs/plugins/contract-v1.md`
+    // points authors here as the copy-this-pattern example of recording an answer
+    // and comparing the rendered card with no network involved.
+    const root = join(import.meta.dir, "..", "..", "plugins", "github-stats");
+    const manifest = parseManifest(
+      JSON.parse(readFileSync(join(root, "plugin.json"), "utf8")),
+      "github-stats",
+    );
+    const source = readFileSync(join(root, "index.js"), "utf8");
+
+    test("fetches exactly once per render, not once per round", async () => {
+      const seen: string[] = [];
+      const request = async (input: { url: string }) => {
+        seen.push(input.url);
+        return {
+          status: 200,
+          body: '{"public_repos":42,"followers":1234,"following":56}',
+          json: { public_repos: 42, followers: 1234, following: 56 },
+        };
+      };
+      const result = await runPlugin({
+        manifest,
+        source,
+        settings: { user: "octocat" },
+        now: new Date("2026-09-23T10:00:00Z"),
+        timezone: "UTC",
+        secrets: {},
+        request,
+      });
+      // A plan() that ignores context.answers keeps declaring the same request
+      // until the 3-round cap stops it -- three GitHub requests for one render.
+      // This plugin's plan() returns [] once it has an answer, so there is one.
+      expect(seen).toEqual(["https://api.github.com/users/octocat"]);
+      // Not "@octocat": satori splits a string into one <text> run per contiguous
+      // segment (Task 9's report hit the same thing with "Asia/Tokyo"), and "@"
+      // starts a new one -- "octocat" alone still pins the username was drawn.
+      expect(result.svg).toContain("octocat");
+      expect(result.svg).toContain("42");
+      expect(result.svg).toContain("1.2K");
+      expect(result.svg).toContain("56");
+    });
+
+    test("draws its placeholder dashes when the request fails, still in one round", async () => {
+      const seen: string[] = [];
+      const request = async (input: { url: string }) => {
+        seen.push(input.url);
+        return { status: 404, body: "not found" };
+      };
+      const result = await runPlugin({
+        manifest,
+        source,
+        settings: {},
+        now: new Date("2026-09-23T10:00:00Z"),
+        timezone: "UTC",
+        secrets: {},
+        request,
+      });
+      expect(seen).toEqual(["https://api.github.com/users/octocat"]);
+      // "--" draws as two separate single-"-" <text> runs, the same per-run
+      // splitting as above -- six dash glyphs (repos, followers, following,
+      // each "--"), and none of the real numbers.
+      expect(result.svg.match(/>-</g)?.length).toBe(6);
+      expect(result.svg).not.toContain("42");
+      expect(result.svg).not.toContain("1.2K");
+    });
   });
 });

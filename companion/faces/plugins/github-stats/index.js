@@ -18,6 +18,13 @@ function username(context) {
 }
 
 export function plan(context) {
+  // The host re-runs plan() after every round with the answers collected so far
+  // (docs/plugins/contract-v1.md, "Rounds"). One answer is everything this plugin
+  // needs, so it returns [] once it has one -- omitting this check does not fail
+  // anything (the sandbox simply stops at the 3-round cap instead), but it does
+  // spend three GitHub requests per render instead of one, silently.
+  const answers = (context && context.answers) || [];
+  if (answers.length > 0) return [];
   const user = username(context);
   return [
     {

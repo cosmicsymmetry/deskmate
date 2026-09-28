@@ -167,6 +167,9 @@ pub(crate) struct RenderRequest<'a> {
     pub(crate) state: Option<&'a serde_json::Value>,
     /// Zero means this is a scheduled refresh rather than a response to taps.
     pub(crate) taps: u32,
+    /// Which view to draw. `None` is the resting view, and is what a scheduled
+    /// refresh sends.
+    pub(crate) view: Option<&'a str>,
 }
 
 /// A rendered frame and the package's instruction for stored state.
@@ -384,9 +387,12 @@ pub(crate) fn views(
     .map_err(FaceRenderError::Transient)?;
     match finished.code {
         Some(0) => {
-            let answer: ViewsEnvelope = serde_json::from_slice(&finished.stdout).map_err(|error| {
-                FaceRenderError::Malformed(format!("the view list is not the expected JSON: {error}"))
-            })?;
+            let answer: ViewsEnvelope =
+                serde_json::from_slice(&finished.stdout).map_err(|error| {
+                    FaceRenderError::Malformed(format!(
+                        "the view list is not the expected JSON: {error}"
+                    ))
+                })?;
             Ok(answer.views)
         }
         Some(EXIT_CONFIGURATION) => Err(FaceRenderError::Configuration(message_of(&finished))),
@@ -444,6 +450,9 @@ pub(crate) fn render(
     });
     if let Some(state) = request.state {
         body["state"] = state.clone();
+    }
+    if let Some(view) = request.view {
+        body["view"] = serde_json::Value::String(view.to_owned());
     }
     if request.taps > 0 {
         // `point` is null until the wire carries one. Sending the key now means C2
@@ -542,6 +551,7 @@ mod tests {
             settings,
             state,
             taps,
+            view: None,
         }
     }
 

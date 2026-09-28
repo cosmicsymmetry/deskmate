@@ -75,7 +75,11 @@ impl CardTapSink for ServerTapSink {
         let state = self.state.clone();
         let space = std::sync::Arc::clone(&self.space);
         let source_id = source_id.to_owned();
-        std::mem::drop(self.runtime.spawn(async move {
+        // `spawn_blocking`, not `spawn`: routing a tap now asks the faces package
+        // which view it selects, and that is a subprocess. It is bounded at five
+        // seconds, but five seconds on an async worker thread would stall every
+        // other task sharing it.
+        std::mem::drop(self.runtime.spawn_blocking(move || {
             crate::data_cards::tapped(&state, &space, &source_id);
         }));
     }

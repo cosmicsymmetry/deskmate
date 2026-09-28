@@ -28,6 +28,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::ImageNotificationOrigin;
 use crate::ServerState;
 use crate::accounts::AccountSpace;
 
@@ -818,6 +819,13 @@ pub(crate) fn tapped(state: &ServerState, space: &AccountSpace, source_id: &str)
         return;
     }
 
+    // The fast path, and the reason the views seam exists: ask the face which
+    // view this tap selects, and if that view is already staged on the device,
+    // the whole answer is one PushScene. Nothing fetches and nothing rasterises.
+    if select_staged_view(state, space, source_id) {
+        return;
+    }
+
     let signal = {
         space
             .data_cards
@@ -832,6 +840,70 @@ pub(crate) fn tapped(state: &ServerState, space: &AccountSpace, source_id: &str)
         return;
     };
     signal.tap();
+}
+
+/// Resolves one tap to an already-staged frame, returning whether it landed.
+///
+/// `false` means the slow path still has to run -- the face declared no views,
+/// the view it chose was never staged, or the package is older than the verb.
+/// Every one of those is ordinary, so none of them is an error here.
+fn select_staged_view(state: &ServerState, space: &AccountSpace, source_id: &str) -> bool {
+    // Both locks are released before the subprocess runs. Holding either across
+    // it would stall every other tap and every refresh behind one face's answer.
+    let found = {
+        let data_cards = space
+            .data_cards
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        data_cards
+            .specs
+            .iter()
+            .find(|spec| spec.source_id == source_id)
+            .cloned()
+            .map(|spec| (spec, Arc::clone(&data_cards.face_state)))
+    };
+    let Some((spec, face_state)) = found else {
+        return false;
+    };
+    let faces = {
+        state
+            .inner
+            .face_catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .faces
+            .clone()
+    };
+    let Some(faces) = faces else {
+        return false;
+    };
+    let stored = face_state.get(source_id);
+    let Ok(selection) = faces_package::tap(
+        &faces,
+        &spec.face.kind,
+        &spec.face.settings,
+        stored.as_ref(),
+        1,
+    ) else {
+        return false;
+    };
+    let Some(digest) = space.image_sources.select_view(source_id, &selection.view) else {
+        return false;
+    };
+    // The face's own state moves with the view, or a scheduled refresh minutes
+    // later would draw the view the owner already tapped away from.
+    // Absent leaves the stored state alone; an explicit null clears it. That
+    // distinction is the faces package's, and `put` already speaks it.
+    if let Some(next) = selection.state {
+        face_state.put(source_id, next);
+    }
+    state.notify_image_source_changed(
+        &space.account_id,
+        source_id.to_owned(),
+        digest,
+        ImageNotificationOrigin::ServerRenderedRefresh,
+    );
+    true
 }
 
 /// What to tell the owner about `source_id`'s face, or `None` for a source that has
@@ -1297,6 +1369,71 @@ mod tests {
                 .collect()
         }
 
+        /// The `views` and `tap` calls, which are logged apart from renders so a
+        /// render assertion keeps counting renders.
+        fn plans(&self) -> Vec<serde_json::Value> {
+            let Ok(contents) = std::fs::read_to_string(self.directory.path().join("plans.jsonl"))
+            else {
+                return Vec::new();
+            };
+            contents
+                .lines()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect()
+        }
+
+        async fn wait_for_plans(&self, count: usize) -> Vec<serde_json::Value> {
+            for _ in 0..200 {
+                let plans = self.plans();
+                if plans.len() >= count {
+                    return plans;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!(
+                "only {} plan requests arrived; wanted {count}",
+                self.plans().len()
+            );
+        }
+
+        /// Waits until the named view has actually been drawn and stored, so a
+        /// test can measure what a tap costs without racing the staging pass
+        /// that the previous refresh kicked off.
+        async fn wait_for_staged_view(&self, view: &str) {
+            for _ in 0..200 {
+                if self
+                    .requests()
+                    .iter()
+                    .any(|request| request.get("view") == Some(&serde_json::json!(view)))
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("the view {view:?} was never staged: {:?}", self.requests());
+        }
+
+        /// The tap counts of the renders that answered a tap, once at least
+        /// `count` of them have happened.
+        async fn wait_for_tap_renders(&self, count: usize) -> Vec<u64> {
+            for _ in 0..200 {
+                let counts: Vec<u64> = self
+                    .requests()
+                    .iter()
+                    .filter_map(|request| request["event"]["taps"].as_u64())
+                    .collect();
+                if counts.len() >= count {
+                    return counts;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!(
+                "fewer than {count} renders answered a tap: {:?}",
+                self.requests()
+            );
+        }
+
         async fn wait_for_requests(&self, count: usize) -> Vec<serde_json::Value> {
             for _ in 0..200 {
                 let requests = self.requests();
@@ -1725,12 +1862,29 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_tap_on_a_tappable_face_renders_at_once_with_a_tap_count() {
+        // The point of the views seam: the first refresh stages the face's other
+        // view, so the tap that asks for it costs a `tap` call and NO render.
+        // Before staging existed this was a render carrying a tap count, which
+        // meant a fetch and a full transfer between finger and picture.
         let server = FaceTestServer::new("headlines", false, false).await;
         assert_eq!(server.requests()[0].get("event"), None);
+        server.wait_for_staged_view("page-1").await;
+        let renders_before = server.requests().len();
 
         tapped(&server.state, &server.space, &server.source_id);
-        let requests = server.wait_for_requests(2).await;
-        assert_eq!(requests[1]["event"]["taps"], serde_json::json!(1));
+        let plans = server.wait_for_plans(2).await;
+        let tap = plans
+            .iter()
+            .find(|plan| plan.get("event").is_some())
+            .expect("the tap was resolved through the faces package");
+        assert_eq!(tap["event"]["taps"], serde_json::json!(1));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            server.requests().len(),
+            renders_before,
+            "a tap on a staged view must draw nothing: {:?}",
+            server.requests()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1743,7 +1897,13 @@ mod tests {
         tapped(&server.state, &server.space, &server.source_id);
         tapped(&server.state, &server.space, &server.source_id);
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let requests_while_blocked = server.requests();
+        // Staging draws carry a `view` and are not what this test counts: it is
+        // about two taps arriving during one render becoming one further render.
+        let requests_while_blocked: Vec<serde_json::Value> = server
+            .requests()
+            .into_iter()
+            .filter(|request| request.get("view").is_none())
+            .collect();
         std::fs::write(server.directory.path().join("release"), b"")
             .expect("release blocked render");
         assert_eq!(
@@ -1752,11 +1912,11 @@ mod tests {
             "the existing refresher must finish before another render starts"
         );
 
-        let requests = server.wait_for_requests(3).await;
-        let counts: Vec<u64> = requests[1..]
-            .iter()
-            .map(|request| request["event"]["taps"].as_u64().expect("tap count"))
-            .collect();
+        // Only the renders that answer a tap: the startup refresh carries no
+        // event, and a staging draw carries a view instead of one. Waiting on a
+        // plain request count would be satisfied by the staging draw before the
+        // coalesced render had happened.
+        let counts = server.wait_for_tap_renders(2).await;
         assert_eq!(
             counts.iter().sum::<u64>(),
             3,
@@ -1815,16 +1975,31 @@ mod tests {
     async fn a_tapped_render_carries_stored_state_and_stores_what_comes_back() {
         let server = FaceTestServer::new("headlines", false, true).await;
 
+        // Scheduled renders fail here, so nothing is staged and the first tap
+        // falls back to rendering. That render succeeds, which stages the other
+        // view -- so the SECOND tap is answered from the store, and what it
+        // carries is the state the first one stored.
         tapped(&server.state, &server.space, &server.source_id);
         server.wait_for_requests(2).await;
         server
             .wait_for_face_state(serde_json::json!({ "page": 3 }))
             .await;
+        // Scheduled renders fail in this server, and a staging draw IS a
+        // scheduled draw -- so nothing is ever staged here and every tap takes
+        // the fallback. What this test pins is that the fallback still carries
+        // the face's stored state to the package. The fast path has its own test,
+        // on a server whose renders succeed.
         tapped(&server.state, &server.space, &server.source_id);
-        let requests = server.wait_for_requests(3).await;
-
-        assert_eq!(requests[2]["state"], serde_json::json!({ "page": 3 }));
-        assert_eq!(requests[2]["event"]["taps"], serde_json::json!(1));
+        let plans = server.wait_for_plans(2).await;
+        // The LAST tap call: the first tap also resolved through the package,
+        // before any state existed to carry.
+        let tap = plans
+            .iter()
+            .rev()
+            .find(|plan| plan.get("event").is_some())
+            .expect("the second tap was resolved through the faces package");
+        assert_eq!(tap["state"], serde_json::json!({ "page": 3 }));
+        assert_eq!(tap["event"]["taps"], serde_json::json!(1));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1842,8 +2017,16 @@ mod tests {
             .await;
         tokio::time::sleep(Duration::from_millis(250)).await;
 
+        // Staging draws are excluded: they carry a `view` and follow a refresh
+        // rather than being one. What this test is about is that a tap does not
+        // ADD a refresh, and that is a statement about refreshes.
+        let refreshes = server
+            .requests()
+            .iter()
+            .filter(|request| request.get("view").is_none())
+            .count();
         assert_eq!(
-            server.requests().len(),
+            refreshes,
             baseline + 1,
             "the startup render and tap render reset the interval"
         );

@@ -382,7 +382,7 @@ impl ImageSourceStore {
         let mut state = self.lock();
         let source = state.sources.iter_mut().find(|source| source.id == id)?;
         let digest = source.frames.get(view)?.digest;
-        source.selected = view.to_owned();
+        view.clone_into(&mut source.selected);
         Some(digest)
     }
 
@@ -588,7 +588,9 @@ fn load_frames(root: &Path, id: &str) -> Result<BTreeMap<ViewId, StoredFrame>, I
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(frames),
         Err(error) => {
-            return Err(storage_error(format!("read the image-frame directory: {error}")));
+            return Err(storage_error(format!(
+                "read the image-frame directory: {error}"
+            )));
         }
     };
     let prefix = format!("{id}--");

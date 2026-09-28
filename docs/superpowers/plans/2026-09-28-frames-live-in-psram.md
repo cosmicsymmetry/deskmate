@@ -3,8 +3,16 @@
 **Spec:** `docs/superpowers/specs/2026-09-28-deskmate-frames-live-in-psram-design.md`
 **Track:** C1 (branch `track-c1-tap-to-face`, PR #4)
 
-> **STATUS 2026-09-28.** Step 1 is **delivered** (`784ff52`). Steps 2–4 are **one batch,
-> not three**, and that batch needs the owner's authorization because it ends in a flash.
+> **STATUS 2026-09-28, updated.** Step 1 is delivered (`784ff52`). **Task D is delivered
+> and verified on hardware** (`68f15a8`): the owner authorized the flash, the board took
+> `v2.2.0-psram` by OTA, and the pool reports `capacity 16` with commits at 76-81 ms where
+> flash cost 1,528-1,678 ms and `Busy` refusals went from four to zero. See the 2026-09-28
+> entry in `docs/hardware/board-notes.md`. **Tasks A, B and C remain**, and they are now
+> unblocked: the pool they were waiting for exists on the fleet.
+>
+> The original status block, kept because its reasoning is what produced the corrections
+> below: steps 2-4 were one batch needing the owner's authorization because it ends in a
+> flash.
 > The spec sequenced 2 and 3 as landable ahead of the firmware; execution found that they
 > are not, for a reason the spec does not address — see **Correction 2** below. Nothing in
 > steps 2–4 has been started, and no file outside step 1 has been touched.
@@ -55,9 +63,12 @@ view per card and behave like today."
 
 It will not behave like today, and the budget rule cannot make it:
 
-- `firmware/main/core/volatile_asset_store.h:16` is `VOLATILE_ASSET_SLOT_COUNT 2U`, and its
-  own comment says that is "one displayed frame plus one incoming replacement". The
-  deployed fleet holds **one** committed volatile frame, not two.
+- `firmware/main/core/volatile_asset_store.h:16` is `VOLATILE_ASSET_SLOT_COUNT 2U`. Its
+  comment says that is "one displayed frame plus one incoming replacement", and **that
+  comment describes intent, not the store's bound** -- measured on `dev-0005` on
+  2026-09-28, the two-slot store committed **two** frames (76 ms and 97 ms) and refused
+  the third with `ERR_FULL`. This plan said "one" before the board was asked; the
+  argument below is unaffected, because two is still fewer than four picture cards.
 - The budget rule bounds **views per card**, not cards. With four picture cards its share
   is `max(1, floor(15 / 4))`, so it asks for one resident frame per card — four frames into
   one slot.

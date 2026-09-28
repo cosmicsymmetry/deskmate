@@ -8,7 +8,13 @@ This crosses the **wire contract** and **firmware**, two of the three expensive
 boundaries. It does not touch `CURRENT_SCHEMA_VERSION`. It needs the owner's explicit
 authorization and one flash session, batched with C2.
 
-> **AMENDED 2026-09-28 during implementation.** Step 1 shipped (`784ff52`). Two claims below
+> **AMENDED 2026-09-28 during implementation, then DELIVERED IN PART.** Step 1 shipped
+> (`784ff52`) and **step 4 shipped and is verified on hardware** (`68f15a8`): `dev-0005`
+> took `v2.2.0-psram` by OTA and reports `capacity 16`, with the flash commit and the
+> compaction stall both gone. Steps 2 and 3 remain. The measured figures, including the
+> PSRAM headroom this spec could only estimate, are in `docs/hardware/board-notes.md`.
+>
+> Step 1 shipped (`784ff52`). Two claims below
 > did not survive contact with the code, and both are corrected in place where they appear:
 > key 31 is a **flash** number and not the PSRAM pre-flight figure this spec takes it for
 > (see *Risks*), and steps 2–3 **cannot** be landed ahead of the firmware "behaving like
@@ -253,10 +259,10 @@ durable store has been timed on the board.
 **CORRECTED 2026-09-28: steps 2–4 are one batch, and step 1 was the only one that could
 ship alone.** This section said step 3 could land first "behind the budget rule, which will
 stage one view per card and behave like today". It cannot, for a reason stated nowhere else
-in this spec: `VOLATILE_ASSET_SLOT_COUNT` is 2 and its own comment reads "one displayed
-frame plus one incoming replacement", so the deployed fleet holds **one** committed volatile
-frame -- and the budget rule bounds views per *card*, not cards, so with four picture cards
-it asks for four resident frames. The device's carousel then advances on its own to a card
+in this spec: `VOLATILE_ASSET_SLOT_COUNT` was 2, which the board showed holds **two**
+committed frames before refusing the third (the header's "one displayed frame plus one
+incoming replacement" was intent, not the bound) -- and the budget rule bounds views per
+*card*, not cards, so with four picture cards it asks for four resident frames. The device's carousel then advances on its own to a card
 whose only copy was evicted, which is the blank card `docs/hardware/board-notes.md` already
 warns about from the other direction. Durable-for-non-visible is therefore not a legacy
 policy to remove early; at one resident slot it is correct, and only the 16-slot pool makes

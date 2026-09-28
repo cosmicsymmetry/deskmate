@@ -66,7 +66,7 @@ the batch merges.
 |---|---|---|---|
 | A | Not started | -- | -- |
 | B | Not started | -- | -- |
-| C1 | Phase 1 works on hardware. The 13.3 s tap was measured, diagnosed (flash, not the wire) and cut: frames go to PSRAM and reclaiming is rate-limited. All four faces answer a tap. The frames-in-PSRAM spec is written and its step 1 (the host reads the device's asset-store stats) has shipped; steps 2-4 are **authorized (2026-09-28) and in progress** as one batch ending in a flash, batched with C2 | `track-c1-frames-in-psram` | The board on USB for the flash, and the on-board OTA re-verification afterwards |
+| C1 | Phase 1 works on hardware. The frames-in-PSRAM spec's step 1 and step 4 are delivered and the flash is done: `dev-0005` took `v2.2.0-psram` by OTA on 2026-09-28, reports the 16-slot pool by name, and its frame commits went from 1.5-1.7 s of flash to 76-81 ms of PSRAM with `Busy` refusals gone. Tasks A-C (faces `views()`/`onTap`, server staging, host tier policy) remain and are now unblocked | `track-c1-frames-in-psram` | A tap on the glass and its redraw time; a server-rendered face at both mountings |
 | C2 | Not started | -- | C1 |
 | D | **Live** at deskmate-site.pages.dev (2026-09-25) | `deskmate-site`, own repo | A domain before E launches; real photographs; A for sign-up |
 | E | Not started | -- | -- |

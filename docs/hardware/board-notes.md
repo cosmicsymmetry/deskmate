@@ -5640,3 +5640,77 @@ returns a different PNG for a tap, and weather's second tap returns to its first
   provoke it.
 - `an asset release was slow` should now appear at most twice an hour, not after
   every frame.
+
+## 2026-09-28 -- the frame pool is real, and the OTA download is finally observed
+
+`dev-0005`, flashed by **OTA** from `v2.1.0-proto2` to `v2.2.0-psram`
+(`VOLATILE_ASSET_SLOT_COUNT` 2 -> 16, `StatusResponse` key 32). Server-side
+observation throughout, plus the device's own numbers read back through the new key.
+
+**The OTA download is verified.** It had been owed since 2026-09-11 against the
+-104-byte `.bss` shift, and it was never run. The board took the new image over the
+tunnel with nothing but a reset to prompt it:
+
+```
+11:32:28  firmware check dev-0005 current=v2.1.0-proto2   <- boot check sees the new offer
+11:32:28  device link closed                              <- download, then reboot
+11:32:55  device link established
+11:32:56  firmware check dev-0005 current=v2.2.0-psram    <- running the new image
+```
+
+It stayed on the new image (no rollback, so `ota_mark_running_image_valid()` ran) and
+has been serving frames since. Internal statics were **byte-flat** across the change --
+DIRAM 203,763, `.bss` 87,000, `.data` 23,128, IRAM 16,384/16,384 with 0 remaining --
+the same figures recorded for `v2.1.0-proto2`, because the 14 new slots are metadata
+inside `s_context`, a `MALLOC_CAP_SPIRAM` allocation. So this OTA does **not** discharge
+the question of whether a statics *shift* breaks a download; it discharges the weaker
+and still-unanswered one, that the download path works at all on this fleet.
+
+**Two slots versus sixteen, on the same board, twenty minutes apart.** This is the
+clearest evidence the project has for why the tier inversion cost what it did.
+
+| | v2.1.0-proto2 (2 slots), 11:29:54-11:30:13 | v2.2.0-psram (16 slots), 11:32:58-11:33:26 |
+|---|---|---|
+| `Busy: volatile asset reserve failed` | **4** | **0** |
+| `AssetCommit` | 1,528 / 1,558 / 1,589 / 1,678 ms (flash) | **76 / 76 / 79 / 81 ms** (PSRAM) |
+| `an asset release was slow` | 10,547 ms and 10,065 ms | **0 occurrences** |
+
+Before the change the first two frames committed volatile (76 ms, 97 ms) and every
+one after that was refused and fell back to flash. **Correction to the plan and the
+spec: the deployed two-slot store held TWO committed frames, not one** -- the header's
+"one displayed frame plus one incoming replacement" describes intent, not the store's
+bound, which is `VOLATILE_ASSET_SLOT_COUNT` committed and then `ERR_FULL`. The argument
+for the pool is unchanged (two is still fewer than four picture cards) but the number
+written down was wrong.
+
+**Key 32, read back through the deployed server's snapshot** -- the PSRAM figures this
+project has never had:
+
+```
+firmware_version: v2.2.0-psram        connection: online
+asset_store:      used 2,637,920  free 3,645,344  count 8        (flash, key 31)
+volatile_assets:  committed 4  capacity 16  used 1,318,960
+                  psram_free 6,977,400  psram_low_water 6,977,264  (key 32)
+```
+
+- `4 x 329,740 = 1,318,960` exactly, so occupancy accounting is right.
+- `capacity 16` is read by name from the running image, not assumed.
+- **The pool fits with room to spare, measured rather than derived.** Eleven more frames
+  are 3,627,140 bytes against 6,977,400 free, leaving ~3.2 MiB. The low-water mark sits
+  136 bytes under the current free figure, so nothing is dipping transiently.
+- The spec computed its headroom from `free_heap`, which is
+  `esp_get_free_heap_size()` -- a total across every capability. Measured here, total
+  free is 7,015,083 against PSRAM's 6,977,400, so that overstated PSRAM headroom by
+  about 38 KB. Directionally the correction was right and the magnitude was small.
+- Flash still holds 8 records and 2.6 MB from the old durable writes. `used_bytes` is
+  the number to watch now: it should stop moving.
+
+### Still owed, and not claimable from any of the above
+
+- A **tap** on the glass, and its redraw time on the new image. Everything above is
+  scheduled-refresh traffic; no tap was made.
+- A **server-rendered face at both mountings**, still never observed.
+- The **framebuffer matrix** (44 rows / 2 excluded / 42 comparable), last run 2026-09-06.
+- A **release with an empty durable store, timed** -- the durable tier still holds 8
+  records, so the cheap-release claim is untested.
+- Whether a statics **shift** still breaks an OTA download. This image moved none.

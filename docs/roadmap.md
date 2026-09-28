@@ -55,14 +55,18 @@ can write a plugin and either self-host it or submit it to run on ours.
 
 ## Board
 
-**Schema/wire lock:** free. C1 does not need it: tap-to-face crosses no schema, wire or
-firmware boundary (`docs/superpowers/specs/2026-09-23-deskmate-tap-to-face-design.md`).
+**Schema/wire lock:** **held by C1** since 2026-09-28, for the wire and firmware halves of
+`docs/superpowers/specs/2026-09-28-deskmate-frames-live-in-psram-design.md` (the volatile
+frame pool: `VOLATILE_ASSET_SLOT_COUNT` 2 -> 16, a new `StatusResponse` key, and the
+`docs/protocol/v2.md` amendment). `CURRENT_SCHEMA_VERSION` is untouched and stays free.
+Phase 1 needed no lock -- tap-to-face crossed no boundary -- and C1 releases this one when
+the batch merges.
 
 | Track | Status | Branch | Waiting on |
 |---|---|---|---|
 | A | Not started | -- | -- |
 | B | Not started | -- | -- |
-| C1 | Phase 1 works on hardware. The 13.3 s tap was measured, diagnosed (flash, not the wire) and cut: frames go to PSRAM and reclaiming is rate-limited. All four faces answer a tap. The frames-in-PSRAM spec is written and its step 1 (the host reads the device's asset-store stats) has shipped; steps 2-4 are one owner-authorized batch ending in a flash, batched with C2 | `track-c1-tap-to-face` | A tap-to-redraw measurement on the new build; the owner's authorization for the 16-slot pool's flash |
+| C1 | Phase 1 works on hardware. The 13.3 s tap was measured, diagnosed (flash, not the wire) and cut: frames go to PSRAM and reclaiming is rate-limited. All four faces answer a tap. The frames-in-PSRAM spec is written and its step 1 (the host reads the device's asset-store stats) has shipped; steps 2-4 are **authorized (2026-09-28) and in progress** as one batch ending in a flash, batched with C2 | `track-c1-frames-in-psram` | The board on USB for the flash, and the on-board OTA re-verification afterwards |
 | C2 | Not started | -- | C1 |
 | D | **Live** at deskmate-site.pages.dev (2026-09-25) | `deskmate-site`, own repo | A domain before E launches; real photographs; A for sign-up |
 | E | Not started | -- | -- |

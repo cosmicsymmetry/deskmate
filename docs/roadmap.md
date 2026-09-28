@@ -73,7 +73,7 @@ the batch merges.
 | B | Not started | -- | -- |
 | C1 | Phase 1 works on hardware. The 13.3 s tap was measured, diagnosed (flash, not the wire) and cut: frames go to PSRAM and reclaiming is rate-limited. All four faces answer a tap. The frames-in-PSRAM spec is written and its step 1 (the host reads the device's asset-store stats) has shipped; steps 2-4 are **authorized (2026-09-28) and in progress** as one batch ending in a flash, batched with C2 | `track-c1-frames-in-psram` | The board on USB for the flash, and the on-board OTA re-verification afterwards |
 | C2 | Not started | -- | C1 |
-| D | **Live** at deskmate-site.pages.dev (2026-09-25) | `deskmate-site`, own repo | A domain before E launches; real photographs; A for sign-up |
+| D | **Live** at deskmate-site.pages.dev (2026-09-25). The dev-only frame exporter (`app-core/examples/frame_export.rs`) merged to `main` 2026-09-28, so the pack regenerates from a clean checkout; it was re-run and its frames re-checked against the post-A, post-C1 workspace | `deskmate-site`, own repo | A domain before E launches; real photographs; A's **deploy** before the page can offer sign-up |
 | E | Not started | -- | -- |
 | F | Not started | -- | A |
 | G | Not started | -- | C1 phase 2, A |

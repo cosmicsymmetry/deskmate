@@ -222,6 +222,15 @@ pub(super) fn update_device_status(
         free_bytes: stats.free_bytes,
         asset_count: stats.asset_count,
     });
+    state.device.volatile_assets = status
+        .volatile_assets
+        .map(|pool| crate::DeviceVolatileAssets {
+            committed_count: pool.committed_count,
+            slot_capacity: pool.slot_capacity,
+            used_bytes: pool.used_bytes,
+            psram_free_bytes: pool.psram_free_bytes,
+            psram_low_water_bytes: pool.psram_low_water_bytes,
+        });
     state.device.counters = DeviceCounters {
         host_reconnects: diagnostics.reconnects,
         valid_frames: status.valid_frames,

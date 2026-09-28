@@ -1494,6 +1494,79 @@ static protocol_message_result_t assign_status_unsigned(
     return PROTOCOL_MESSAGE_OK;
 }
 
+static protocol_message_result_t decode_volatile_asset_stats(
+    CborValue *value,
+    protocol_status_response_t *status)
+{
+    if (!cbor_value_is_map(value)) {
+        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+    }
+    size_t count = 0U;
+    CborError error = cbor_value_get_map_length(value, &count);
+    if (error != CborNoError) {
+        return cbor_result(error);
+    }
+    CborValue fields;
+    error = cbor_value_enter_container(value, &fields);
+    if (error != CborNoError) {
+        return cbor_result(error);
+    }
+    uint32_t present = 0U;
+    uint64_t previous = 0U;
+    bool has_previous = false;
+    for (size_t i = 0U; i < count; ++i) {
+        uint64_t key = 0U;
+        protocol_message_result_t result =
+            read_key(&fields, &key, &previous, &has_previous);
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+        if (key <= 4U) {
+            uint64_t raw = 0U;
+            result = read_unsigned(&fields, &raw);
+            if (result == PROTOCOL_MESSAGE_OK && raw > UINT32_MAX) {
+                result = PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                switch (key) {
+                case 0U:
+                    status->volatile_committed_count = (uint32_t)raw;
+                    break;
+                case 1U:
+                    status->volatile_slot_capacity = (uint32_t)raw;
+                    break;
+                case 2U:
+                    status->volatile_used_bytes = (uint32_t)raw;
+                    break;
+                case 3U:
+                    status->psram_free_bytes = (uint32_t)raw;
+                    break;
+                default:
+                    status->psram_low_water_bytes = (uint32_t)raw;
+                    break;
+                }
+            }
+            present |= REQUIRED_BIT((uint32_t)key);
+        } else {
+            result = skip_value(&fields);
+        }
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+    }
+    error = cbor_value_leave_container(value, &fields);
+    if (error != CborNoError) {
+        return cbor_result(error);
+    }
+    uint32_t required = REQUIRED_BIT(0) | REQUIRED_BIT(1) | REQUIRED_BIT(2) |
+                       REQUIRED_BIT(3) | REQUIRED_BIT(4);
+    if ((present & required) != required) {
+        return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
+    }
+    status->has_volatile_asset_stats = true;
+    return PROTOCOL_MESSAGE_OK;
+}
+
 static protocol_message_result_t decode_asset_store_stats(
     CborValue *value,
     protocol_status_response_t *status)
@@ -1573,6 +1646,12 @@ static protocol_message_result_t decode_status(
     status->asset_store_used_bytes = 0U;
     status->asset_store_free_bytes = 0U;
     status->asset_count = 0U;
+    status->has_volatile_asset_stats = false;
+    status->volatile_committed_count = 0U;
+    status->volatile_slot_capacity = 0U;
+    status->volatile_used_bytes = 0U;
+    status->psram_free_bytes = 0U;
+    status->psram_low_water_bytes = 0U;
     CborParser parser;
     CborValue contents;
     size_t count = 0U;
@@ -1629,6 +1708,13 @@ static protocol_message_result_t decode_status(
         } else if (key == 31U) {
             result = decode_asset_store_stats(&contents, status);
             present |= REQUIRED_BIT(31);
+        } else if (key == 32U) {
+            /* No `present` bit, and key 33 will not get one either: `present`
+             * is a uint32_t and REQUIRED_BIT(32) shifts off the end of it.
+             * Nothing needs one here -- the required mask is the low 16 bits,
+             * and this key's own presence is carried by
+             * status->has_volatile_asset_stats. */
+            result = decode_volatile_asset_stats(&contents, status);
         } else if (key <= 25U || key == 28U) {
             uint64_t value = 0U;
             result = read_unsigned(&contents, &value);
@@ -2029,7 +2115,8 @@ static protocol_message_result_t encode_status_payload(
     size_t entry_count = 24U + 5U +
                          (status->has_last_network_error ? 1U : 0U) +
                          (status->has_last_ota_error ? 1U : 0U) +
-                         (status->has_asset_store_stats ? 1U : 0U);
+                         (status->has_asset_store_stats ? 1U : 0U) +
+                         (status->has_volatile_asset_stats ? 1U : 0U);
     protocol_message_result_t result = begin_map(root, &map, entry_count);
     if (result != PROTOCOL_MESSAGE_OK) return result;
     result = encode_pair_uint(&map, 0U, status->protocol_version);
@@ -2094,6 +2181,36 @@ static protocol_message_result_t encode_status_payload(
             }
             if (result == PROTOCOL_MESSAGE_OK) {
                 result = end_map(&map, &stats_map);
+            }
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK && status->has_volatile_asset_stats) {
+        result = encode_uint(&map, 32U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            CborEncoder pool_map;
+            result = begin_map(&map, &pool_map, 5U);
+            if (result == PROTOCOL_MESSAGE_OK) {
+                result = encode_pair_uint(&pool_map, 0U,
+                                          status->volatile_committed_count);
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                result = encode_pair_uint(&pool_map, 1U,
+                                          status->volatile_slot_capacity);
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                result = encode_pair_uint(&pool_map, 2U,
+                                          status->volatile_used_bytes);
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                result = encode_pair_uint(&pool_map, 3U,
+                                          status->psram_free_bytes);
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                result = encode_pair_uint(&pool_map, 4U,
+                                          status->psram_low_water_bytes);
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                result = end_map(&map, &pool_map);
             }
         }
     }

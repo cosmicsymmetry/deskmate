@@ -537,6 +537,22 @@ static void transmit_status(protocol_context_t *context, uint32_t request_id)
         status->asset_store_free_bytes = asset_stats.free_blob_bytes;
         status->asset_count = asset_stats.committed_count;
     }
+    // Key 32. Key 31 above describes flash; this describes the volatile frame
+    // pool and the PSRAM heap its frames are allocated from. The heap figures
+    // are what answer whether the pool can actually fill: free_heap (key 3) is
+    // esp_get_free_heap_size(), a total across every capability, so it cannot
+    // say how much SPIRAM is left. The low-water mark is here because the
+    // fragmentation question is about the worst moment, not the current one.
+    volatile_asset_store_stats_t pool_stats;
+    volatile_asset_store_stats(&context->volatile_assets, &pool_stats);
+    status->has_volatile_asset_stats = true;
+    status->volatile_committed_count = pool_stats.committed_count;
+    status->volatile_slot_capacity = pool_stats.capacity;
+    status->volatile_used_bytes = pool_stats.used_bytes;
+    status->psram_free_bytes =
+        (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    status->psram_low_water_bytes =
+        (uint32_t)heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
     transmit(context, request_id, reply);
 }
 

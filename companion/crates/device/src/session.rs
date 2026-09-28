@@ -49,6 +49,15 @@ pub struct ReceivedEvent {
     pub missed_before: u64,
 }
 
+// `Request` is large because `Message` is, and `Message` grew when StatusResponse
+// gained the asset-store and frame-pool reports. Clippy's suggestion is to box
+// the message; that trades a fixed 240 bytes on a bounded one-in-flight channel
+// for a heap allocation on every device request, which is the worse side of the
+// deal here. The allow is also the conservative choice for this file: CLAUDE.md
+// records that this worker was left textually alone during the 2026-09-19 sweep
+// and has not been verified on hardware since, so a mechanical edit to how its
+// commands are moved is not worth a lint.
+#[allow(clippy::large_enum_variant)]
 enum WorkerCommand<T> {
     Request {
         message: Message,

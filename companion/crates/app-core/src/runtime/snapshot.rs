@@ -208,5 +208,6 @@ pub fn empty_device(connection: ConnectionState) -> DeviceSnapshot {
         active_card_id: None,
         counters: DeviceCounters::default(),
         asset_store: None,
+        volatile_assets: None,
     }
 }

@@ -264,27 +264,72 @@ static void test_second_begin_frees_only_the_interrupted_incoming_frame(void)
     assert(heap.live == 0U);
 }
 
-static void test_third_live_allocation_is_refused(void)
+static void test_a_full_pool_refuses_one_more_and_loses_no_committed_frame(void)
 {
     tracked_heap_t heap = {0};
     volatile_asset_store_t store = new_store(&heap);
-    uint8_t first[ASSET_DIGEST_BYTES];
-    uint8_t second[ASSET_DIGEST_BYTES];
-    uint8_t third[ASSET_DIGEST_BYTES];
-    uint8_t *frame = new_frame(0x53U, third);
-    commit_frame(&store, 0x51U, first);
-    commit_frame(&store, 0x52U, second);
+    uint8_t digests[VOLATILE_ASSET_SLOT_COUNT][ASSET_DIGEST_BYTES];
+    uint8_t overflow[ASSET_DIGEST_BYTES];
+    uint8_t *frame = new_frame(0x7fU, overflow);
 
+    // Filling every slot is the store's own bound, not the host's. The host
+    // keeps one slot spare so an atomic replacement always has somewhere to
+    // land; the store itself will happily commit into the last one and then
+    // refuse, which is the case this pins.
+    for (size_t i = 0U; i < VOLATILE_ASSET_SLOT_COUNT; ++i) {
+        commit_frame(&store, (uint8_t)(0x51U + i), digests[i]);
+    }
     assert(heap.live == VOLATILE_ASSET_SLOT_COUNT);
-    assert(volatile_asset_store_begin(&store, third, ASSET_KIND_IMAGE,
+
+    // ERR_FULL specifically, because protocol_task.c maps exactly this result
+    // to PROTOCOL_ERROR_BUSY and anything else to INVALID_PAYLOAD -- and the
+    // host retries on Busy alone.
+    assert(volatile_asset_store_begin(&store, overflow, ASSET_KIND_IMAGE,
                                       VOLATILE_ASSET_FRAME_BYTES) ==
            VOLATILE_ASSET_STORE_ERR_FULL);
     assert(heap.live == VOLATILE_ASSET_SLOT_COUNT);
-    assert_found(&store, first, 0x51U);
-    assert_found(&store, second, 0x52U);
+    for (size_t i = 0U; i < VOLATILE_ASSET_SLOT_COUNT; ++i) {
+        assert_found(&store, digests[i], (uint8_t)(0x51U + i));
+    }
 
     free(frame);
     volatile_asset_store_destroy(&store);
+    assert(heap.live == 0U);
+}
+
+static void test_stats_count_committed_frames_only(void)
+{
+    tracked_heap_t heap = {0};
+    volatile_asset_store_t store = new_store(&heap);
+    volatile_asset_store_stats_t stats;
+
+    volatile_asset_store_stats(&store, &stats);
+    assert(stats.capacity == (uint32_t)VOLATILE_ASSET_SLOT_COUNT);
+    assert(stats.committed_count == 0U);
+    assert(stats.used_bytes == 0U);
+
+    uint8_t committed[ASSET_DIGEST_BYTES];
+    commit_frame(&store, 0x31U, committed);
+    volatile_asset_store_stats(&store, &stats);
+    assert(stats.committed_count == 1U);
+    assert(stats.used_bytes == VOLATILE_ASSET_FRAME_BYTES);
+
+    // An incoming allocation is live heap but not occupancy: no scene can name
+    // it until it commits, so counting it would tell the host the pool is
+    // fuller than it is reservable.
+    uint8_t incoming[ASSET_DIGEST_BYTES];
+    uint8_t *frame = new_frame(0x32U, incoming);
+    assert(volatile_asset_store_begin(&store, incoming, ASSET_KIND_IMAGE,
+                                      VOLATILE_ASSET_FRAME_BYTES) ==
+           VOLATILE_ASSET_STORE_OK);
+    assert(heap.live == 2U);
+    volatile_asset_store_stats(&store, &stats);
+    assert(stats.committed_count == 1U);
+    assert(stats.used_bytes == VOLATILE_ASSET_FRAME_BYTES);
+
+    free(frame);
+    volatile_asset_store_destroy(&store);
+    assert(heap.live == 0U);
 }
 
 static void test_release_frees_exactly_digests_absent_from_the_keep_set(void)
@@ -639,7 +684,8 @@ int main(void)
     test_rle_begin_one_byte_chunks_commit_and_find();
     test_duplicate_begin_reports_already_present();
     test_second_begin_frees_only_the_interrupted_incoming_frame();
-    test_third_live_allocation_is_refused();
+    test_a_full_pool_refuses_one_more_and_loses_no_committed_frame();
+    test_stats_count_committed_frames_only();
     test_release_frees_exactly_digests_absent_from_the_keep_set();
     test_non_image_zero_and_over_limit_begins_are_rejected();
     test_wrong_digest_refuses_commit_without_losing_prior_frame();

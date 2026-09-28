@@ -306,6 +306,15 @@ typedef struct {
     uint32_t asset_store_used_bytes;
     uint32_t asset_store_free_bytes;
     uint32_t asset_count;
+    /* Key 32. The durable stats above describe flash; these describe the
+     * volatile frame pool and the PSRAM heap it draws from, which is the only
+     * place a host can learn whether the pool has room. */
+    bool has_volatile_asset_stats;
+    uint32_t volatile_committed_count;
+    uint32_t volatile_slot_capacity;
+    uint32_t volatile_used_bytes;
+    uint32_t psram_free_bytes;
+    uint32_t psram_low_water_bytes;
 } protocol_status_response_t;
 
 typedef struct {

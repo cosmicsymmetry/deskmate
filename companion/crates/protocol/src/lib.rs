@@ -29,7 +29,7 @@ pub use message::{
     TYPE_ERROR, TYPE_FACTORY_RESET, TYPE_HEARTBEAT, TYPE_HEARTBEAT_ACK, TYPE_NETWORK_CONFIG,
     TYPE_PUSH_SCENE, TYPE_PUSH_TIMER, TYPE_STATUS_REQUEST, TYPE_STATUS_RESPONSE, TYPE_TIME_SYNC,
     TYPE_TRIGGER_INTERRUPT, TapAction, Tier, TimeSync, TriggerInterrupt,
-    VOLATILE_IMAGE_DECODED_LENGTH, WifiState, decode_message, encode_message,
+    VOLATILE_IMAGE_DECODED_LENGTH, VolatileAssetStats, WifiState, decode_message, encode_message,
     expected_response_type, validate_message,
 };
 pub use rle::{Rle565Error, decode_rle565, encode_rle565};

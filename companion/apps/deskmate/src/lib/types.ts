@@ -247,6 +247,7 @@ export interface DeviceSnapshot {
   active_card_id: string | null;
   counters: DeviceCounters;
   asset_store: DeviceAssetStore | null;
+  volatile_assets: DeviceVolatileAssets | null;
 }
 
 /**
@@ -260,6 +261,19 @@ export interface DeviceAssetStore {
   used_bytes: number;
   free_bytes: number;
   asset_count: number;
+}
+
+/**
+ * The display's volatile frame pool and the PSRAM heap its frames come from.
+ * Null on any firmware built before the pool existed. Unlike the flash store
+ * above, these numbers say whether another frame will fit. Nothing renders them.
+ */
+export interface DeviceVolatileAssets {
+  committed_count: number;
+  slot_capacity: number;
+  used_bytes: number;
+  psram_free_bytes: number;
+  psram_low_water_bytes: number;
 }
 
 export type DeviceTier = "local" | "networked";

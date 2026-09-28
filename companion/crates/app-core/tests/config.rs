@@ -374,6 +374,7 @@ fn runtime_snapshot_uses_tagged_states_for_frontend_contract() {
             active_card_id: Some("clock".into()),
             counters: DeviceCounters::default(),
             asset_store: None,
+            volatile_assets: None,
         },
         pomodoros: vec![PomodoroSnapshot {
             card_id: "pomodoro".into(),

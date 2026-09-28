@@ -307,6 +307,30 @@ pub struct AssetStoreStats {
     pub asset_count: u32,
 }
 
+/// The volatile frame pool, and the PSRAM heap its frames are allocated from --
+/// key 32.
+///
+/// This is the tier a picture frame actually lives in, and the only place a host
+/// can learn whether the pool has room. `free_heap` cannot answer that:
+/// `protocol_task.c` fills it from `esp_get_free_heap_size()`, a total across
+/// every capability, so it counts internal SRAM the pool cannot use.
+/// `psram_low_water_bytes` is the minimum ever seen rather than the figure now,
+/// because the question a pool of 330 KB allocations raises is about the worst
+/// moment, not the current one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VolatileAssetStats {
+    /// Committed frames only. An incoming allocation is live heap, but no scene
+    /// can name it yet, so it is not occupancy.
+    pub committed_count: u32,
+    /// `VOLATILE_ASSET_SLOT_COUNT` as the running image was built with it. The
+    /// host reads it rather than assuming, because the capacity is not a wire
+    /// constant and a fleet mid-rollout has both values in it.
+    pub slot_capacity: u32,
+    pub used_bytes: u32,
+    pub psram_free_bytes: u32,
+    pub psram_low_water_bytes: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusResponse {
     pub protocol_version: u8,
@@ -343,6 +367,9 @@ pub struct StatusResponse {
     /// Absent until the flash store has formatted; the device omits key 31
     /// rather than encoding it empty.
     pub asset_store: Option<AssetStoreStats>,
+    /// Absent on any image built before the frame pool existed. A reader must
+    /// not read that absence as a pool with no room.
+    pub volatile_assets: Option<VolatileAssetStats>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -862,7 +889,8 @@ fn encode_status_payload(encoder: &mut Encoder, status: &StatusResponse) {
         + 5
         + usize::from(status.last_network_error.is_some())
         + usize::from(status.last_ota_error.is_some())
-        + usize::from(status.asset_store.is_some());
+        + usize::from(status.asset_store.is_some())
+        + usize::from(status.volatile_assets.is_some());
     encoder.map(entry_count);
     encoder.unsigned(0);
     encoder.unsigned(u64::from(status.protocol_version));
@@ -923,6 +951,20 @@ fn encode_status_payload(encoder: &mut Encoder, status: &StatusResponse) {
         encoder.unsigned(u64::from(stats.free_bytes));
         encoder.unsigned(2);
         encoder.unsigned(u64::from(stats.asset_count));
+    }
+    if let Some(pool) = &status.volatile_assets {
+        encoder.unsigned(32);
+        encoder.map(5);
+        encoder.unsigned(0);
+        encoder.unsigned(u64::from(pool.committed_count));
+        encoder.unsigned(1);
+        encoder.unsigned(u64::from(pool.slot_capacity));
+        encoder.unsigned(2);
+        encoder.unsigned(u64::from(pool.used_bytes));
+        encoder.unsigned(3);
+        encoder.unsigned(u64::from(pool.psram_free_bytes));
+        encoder.unsigned(4);
+        encoder.unsigned(u64::from(pool.psram_low_water_bytes));
     }
 }
 
@@ -1574,6 +1616,7 @@ fn decode_status(payload: &[u8]) -> Result<StatusResponse, MessageError> {
     let mut last_network_error = None;
     let mut last_ota_error = None;
     let mut asset_store = None;
+    let mut volatile_assets = None;
     for _ in 0..len {
         match next_numeric_key(&mut decoder, &mut previous)? {
             0 => protocol_version = Some(read_u8(&mut decoder, "protocol version")?),
@@ -1627,6 +1670,7 @@ fn decode_status(payload: &[u8]) -> Result<StatusResponse, MessageError> {
             29 => last_network_error = Some(decoder.text()?.to_owned()),
             30 => last_ota_error = Some(decoder.text()?.to_owned()),
             31 => asset_store = Some(decode_asset_store_stats(&mut decoder)?),
+            32 => volatile_assets = Some(decode_volatile_asset_stats(&mut decoder)?),
             _ => decoder.skip()?,
         }
     }
@@ -1666,6 +1710,41 @@ fn decode_status(payload: &[u8]) -> Result<StatusResponse, MessageError> {
         last_network_error,
         last_ota_error,
         asset_store,
+        volatile_assets,
+    })
+}
+
+/// Key 32's nested map, all five sub-keys required, for the same reason key 31's
+/// three are: the device encodes the whole map or omits the key, so a partial one
+/// is a malformed frame. Defaulting a gap to zero would be worse here than for
+/// key 31 -- a zero `slot_capacity` reads as a device with no pool at all, and a
+/// zero `psram_free_bytes` as one with no memory left.
+fn decode_volatile_asset_stats(
+    decoder: &mut Decoder<'_>,
+) -> Result<VolatileAssetStats, MessageError> {
+    let len = decoder.map_len()?;
+    let mut previous = None;
+    let mut committed_count = None;
+    let mut slot_capacity = None;
+    let mut used_bytes = None;
+    let mut psram_free_bytes = None;
+    let mut psram_low_water_bytes = None;
+    for _ in 0..len {
+        match next_numeric_key(decoder, &mut previous)? {
+            0 => committed_count = Some(read_u32(decoder, "volatile committed count")?),
+            1 => slot_capacity = Some(read_u32(decoder, "volatile slot capacity")?),
+            2 => used_bytes = Some(read_u32(decoder, "volatile used bytes")?),
+            3 => psram_free_bytes = Some(read_u32(decoder, "PSRAM free bytes")?),
+            4 => psram_low_water_bytes = Some(read_u32(decoder, "PSRAM low water bytes")?),
+            _ => decoder.skip()?,
+        }
+    }
+    Ok(VolatileAssetStats {
+        committed_count: committed_count.ok_or(MessageError::MissingField(32))?,
+        slot_capacity: slot_capacity.ok_or(MessageError::MissingField(32))?,
+        used_bytes: used_bytes.ok_or(MessageError::MissingField(32))?,
+        psram_free_bytes: psram_free_bytes.ok_or(MessageError::MissingField(32))?,
+        psram_low_water_bytes: psram_low_water_bytes.ok_or(MessageError::MissingField(32))?,
     })
 }
 
@@ -2218,6 +2297,112 @@ mod tests {
         assert_eq!(
             decode_status(&unsorted),
             Err(MessageError::DuplicateOrUnsortedKey)
+        );
+    }
+
+    #[test]
+    fn volatile_pool_stats_are_optional_whole_and_forward_compatible() {
+        // Four frames of a sixteen-slot pool, with the heap figures a board
+        // holding them would report.
+        let mut present = status();
+        present.volatile_assets = Some(VolatileAssetStats {
+            committed_count: 4,
+            slot_capacity: 16,
+            used_bytes: 1_318_960,
+            psram_free_bytes: 7_012_352,
+            psram_low_water_bytes: 6_803_456,
+        });
+        round_trip(
+            "status_volatile_pool_stats",
+            42,
+            &Message::StatusResponse(present),
+        );
+
+        // Absent is every image built before the pool existed, including the one
+        // the fleet is running right now.
+        assert!(status().volatile_assets.is_none());
+        let absent = encode_payload(&Message::StatusResponse(status())).unwrap();
+        assert!(decode_status(&absent).unwrap().volatile_assets.is_none());
+
+        // Keys 31 and 32 are independent, and both present is what a device on
+        // the new image actually sends.
+        let mut both = status();
+        both.asset_store = Some(AssetStoreStats {
+            used_bytes: 4,
+            free_bytes: 9,
+            asset_count: 2,
+        });
+        both.volatile_assets = Some(VolatileAssetStats {
+            committed_count: 1,
+            slot_capacity: 2,
+            used_bytes: 3,
+            psram_free_bytes: 5,
+            psram_low_water_bytes: 6,
+        });
+        let mut trunk = encode_payload(&Message::StatusResponse(both)).unwrap();
+        let mut decoder = Decoder::new(&trunk);
+        assert_eq!(
+            decoder.map_len().unwrap(),
+            31,
+            "keys 31 and 32 should add one outer entry each"
+        );
+        let pool = trunk.split_off(trunk.len() - 13);
+        assert_eq!(
+            pool,
+            [
+                0x18, 0x20, 0xa5, 0x00, 0x01, 0x01, 0x02, 0x02, 0x03, 0x03, 0x05, 0x04, 0x06
+            ]
+        );
+
+        // Each omission separately: one case pins only the last field read, and
+        // a zero here reads as a device with no pool or no memory left.
+        for (omitted, pairs) in [
+            (
+                "committed count",
+                vec![0x01, 0x02, 0x02, 0x03, 0x03, 0x05, 0x04, 0x06],
+            ),
+            (
+                "slot capacity",
+                vec![0x00, 0x01, 0x02, 0x03, 0x03, 0x05, 0x04, 0x06],
+            ),
+            (
+                "used bytes",
+                vec![0x00, 0x01, 0x01, 0x02, 0x03, 0x05, 0x04, 0x06],
+            ),
+            (
+                "PSRAM free",
+                vec![0x00, 0x01, 0x01, 0x02, 0x02, 0x03, 0x04, 0x06],
+            ),
+            (
+                "PSRAM low water",
+                vec![0x00, 0x01, 0x01, 0x02, 0x02, 0x03, 0x03, 0x05],
+            ),
+        ] {
+            let mut partial = trunk.clone();
+            partial.extend_from_slice(&[0x18, 0x20, 0xa4]);
+            partial.extend_from_slice(&pairs);
+            assert_eq!(
+                decode_status(&partial),
+                Err(MessageError::MissingField(32)),
+                "a pool map without its {omitted} should be refused"
+            );
+        }
+
+        // A sub-key this host has never heard of is skipped, not refused.
+        let mut extended = trunk;
+        extended.extend_from_slice(&[
+            0x18, 0x20, 0xa6, 0x00, 0x01, 0x01, 0x02, 0x02, 0x03, 0x03, 0x05, 0x04, 0x06, 0x05,
+            0x07,
+        ]);
+        assert_eq!(
+            decode_status(&extended).unwrap().volatile_assets,
+            Some(VolatileAssetStats {
+                committed_count: 1,
+                slot_capacity: 2,
+                used_bytes: 3,
+                psram_free_bytes: 5,
+                psram_low_water_bytes: 6,
+            })
         );
     }
 

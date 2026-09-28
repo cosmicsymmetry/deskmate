@@ -289,10 +289,26 @@ impl AssetSync {
         }
 
         for asset in desired {
+            // An image is a picture frame, and a picture frame belongs in PSRAM
+            // whenever the device will take one. This is the same rule
+            // `apply_image_source_update` applies to a single frame, applied to
+            // the whole set -- without it a reconnect re-wrote every frame to
+            // flash, which is how the wear survived Task C on the live fleet
+            // while every test passed: the tests drive the update path and a
+            // reconnect drives this one.
+            //
+            // Fonts and icon fonts stay durable. They are memory-mapped for
+            // drawing, cost no RAM resident, and are not ephemeral -- nothing the
+            // host emits declares one today, but the tier they would want is
+            // still flash.
+            let volatile =
+                asset.kind == AssetKind::Image && capabilities & CAPABILITY_VOLATILE_ASSETS != 0;
             let selected = if asset.kind == AssetKind::Image {
+                // The volatile tier always decodes RLE565; bit 10 gates the
+                // durable tier only.
                 Self::select_image_encoding(
                     asset,
-                    capabilities & CAPABILITY_DURABLE_ASSET_ENCODING != 0,
+                    volatile || capabilities & CAPABILITY_DURABLE_ASSET_ENCODING != 0,
                 )?
             } else {
                 SelectedAssetEncoding {
@@ -304,7 +320,7 @@ impl AssetSync {
             Self::transfer_one(
                 device,
                 asset,
-                false,
+                volatile,
                 &selected.wire,
                 selected.encoding,
                 selected.decoded_length,
@@ -552,6 +568,53 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_sends_a_frame_to_psram_and_a_font_to_flash_and_keeps_both() {
+        // The reconnect path. Every link re-establishment runs a full reconcile,
+        // so if this one wrote frames to flash the wear would survive every other
+        // change -- which is exactly what happened on the live fleet on
+        // 2026-09-28 while the update-path tests all passed.
+        let mut device = FakeDevice::new();
+        let frame_digest = [0x6a; ASSET_DIGEST_LEN];
+        let font_digest = [0x6b; ASSET_DIGEST_LEN];
+        let desired = vec![
+            raster_frame(frame_digest, false),
+            asset_blob(font_digest, 4_096),
+        ];
+
+        let keep_set = AssetSync::reconcile(
+            &mut device,
+            &desired,
+            CAPABILITY_VOLATILE_ASSETS | CAPABILITY_DURABLE_ASSET_ENCODING,
+        )
+        .expect("a mixed reconcile");
+
+        let tier_of = |digest: &[u8; ASSET_DIGEST_LEN]| {
+            device
+                .begins()
+                .iter()
+                .find(|begin| &begin.digest == digest)
+                .unwrap_or_else(|| panic!("no AssetBegin for {digest:02x?}"))
+                .volatile
+        };
+        assert!(
+            tier_of(&frame_digest),
+            "a picture frame belongs in PSRAM even on a reconnect"
+        );
+        assert!(
+            !tier_of(&font_digest),
+            "a font is memory-mapped for drawing and stays in flash"
+        );
+        // The keep-set spans both tiers, which is what lets one AssetRelease
+        // speak for a volatile frame and a durable font at once.
+        assert_eq!(keep_set, vec![frame_digest, font_digest]);
+        assert_eq!(
+            device.last_release(),
+            Some(vec![frame_digest, font_digest]),
+            "a reconnect still closes with the keep-set"
+        );
+    }
+
+    #[test]
     fn a_volatile_transfer_spends_no_flash_and_no_inventory() {
         // The whole point of the tier. A durable pass writes the record and then
         // sends the AssetRelease whose compaction was measured at 9.4 s on
@@ -760,7 +823,11 @@ mod tests {
     fn reconcile_durable_keeps_raw_encoding_when_rle_is_unavailable_or_larger() {
         for (name, fill, high_entropy, capabilities) in [
             ("rle-expands", 0xd2, true, CAPABILITY_DURABLE_ASSET_ENCODING),
-            ("capability-absent", 0xd3, false, CAPABILITY_VOLATILE_ASSETS),
+            // Neither bit: no RLE on flash, and no volatile tier to send the
+            // frame to instead. CAPABILITY_VOLATILE_ASSETS stood here until
+            // 2026-09-28, when an image with bit 9 stopped being a durable
+            // transfer at all.
+            ("no-encoding-and-no-pool", 0xd3, false, 0),
         ] {
             let mut device = FakeDevice::new();
             let frame = raster_frame([fill; ASSET_DIGEST_LEN], high_entropy);
@@ -796,12 +863,10 @@ mod tests {
             CAPABILITY_DURABLE_ASSET_ENCODING,
         )
         .expect("RLE durable reconcile");
-        AssetSync::reconcile(
-            &mut raw_device,
-            std::slice::from_ref(&frame),
-            CAPABILITY_VOLATILE_ASSETS,
-        )
-        .expect("raw durable reconcile");
+        // No capabilities at all: a device that takes neither RLE on flash nor a
+        // volatile image is the only one that still receives a raw durable frame.
+        AssetSync::reconcile(&mut raw_device, std::slice::from_ref(&frame), 0)
+            .expect("raw durable reconcile");
 
         let rle_chunks = rle_device.chunks_sent_for(&frame.digest);
         let raw_chunks = raw_device.chunks_sent_for(&frame.digest);

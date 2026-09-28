@@ -66,13 +66,17 @@ export interface FaceDefinition {
    */
   views?(settings: Settings, state?: unknown): ViewId[];
   /**
-   * Which view a tap selects, and the state to store. Pure: no fetch, no draw.
+   * Which view a tap selects, and the state to store. Pure: no fetch, no draw,
+   * and no clock of its own -- `now` is passed in, so a face that stamps when it
+   * was tapped can be tested at a fixed time and cannot disagree with the `now`
+   * that `render` later compares that stamp against.
    * A face with views() must have this, and the reverse.
    */
   onTap?(
     settings: Settings,
     state: unknown,
     event: TapEvent,
+    now: Date,
   ): { view: ViewId; state?: unknown };
   /** Fetches and draws. Resolves to the SVG document, optionally with new state. */
   render(

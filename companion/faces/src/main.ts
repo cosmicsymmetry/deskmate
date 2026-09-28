@@ -95,10 +95,7 @@ function settingsFor(request: FaceRequest): Settings {
     : {};
 }
 
-export function viewsRequest(
-  request: FaceRequest,
-  face?: FaceDefinition,
-): { views: ViewId[] } {
+export function viewsRequest(request: FaceRequest, face?: FaceDefinition): { views: ViewId[] } {
   const definition = definitionFor(request, face);
   return {
     views: definition.views?.(settingsFor(request), request.state) ?? [""],
@@ -108,6 +105,7 @@ export function viewsRequest(
 export function tapRequest(
   request: FaceRequest & { event?: unknown },
   face?: FaceDefinition,
+  now: Date = new Date(),
 ): { view: ViewId; state?: unknown } {
   const definition = definitionFor(request, face);
   if (definition.onTap === undefined) {
@@ -117,7 +115,7 @@ export function tapRequest(
   if (event === undefined) {
     throw new Error("the tap request has no valid event");
   }
-  return definition.onTap(settingsFor(request), request.state, event);
+  return definition.onTap(settingsFor(request), request.state, event, now);
 }
 
 export async function renderRequest(
@@ -143,7 +141,10 @@ function describe(): string {
   return describeCatalog();
 }
 
-function requestFromJson(input: string, verb: string): FaceRequest & {
+function requestFromJson(
+  input: string,
+  verb: string,
+): FaceRequest & {
   event?: unknown;
   view?: unknown;
 } {
@@ -157,9 +158,7 @@ function requestFromJson(input: string, verb: string): FaceRequest & {
 }
 
 async function render(input: string, now: Date): Promise<string> {
-  return JSON.stringify(
-    await renderRequest(requestFromJson(input, "render"), undefined, now),
-  );
+  return JSON.stringify(await renderRequest(requestFromJson(input, "render"), undefined, now));
 }
 
 function views(input: string): string {
@@ -190,7 +189,9 @@ async function main(): Promise<number> {
     await Bun.write(Bun.stdout, tap(await Bun.stdin.text()));
     return 0;
   }
-  process.stderr.write("usage: main.ts describe | render | views | tap < request.json > result.json\n");
+  process.stderr.write(
+    "usage: main.ts describe | render | views | tap < request.json > result.json\n",
+  );
   return 64;
 }
 

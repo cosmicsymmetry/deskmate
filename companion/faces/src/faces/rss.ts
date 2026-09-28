@@ -393,7 +393,12 @@ export async function renderRssRequest(
   get: FetchText = fetchText,
 ): Promise<{ svg: string; state: RssState }> {
   const previous = storedState(context.state);
-  if (context.event !== undefined && previous !== undefined) {
+  // A render that is TOLD which view to draw must not fetch: answering a tap
+  // from what is already in hand is the entire point of the views split. The
+  // event is still honoured beside it, because the server and this package
+  // deploy independently and a server that sends a tap without a view is the
+  // one running right now.
+  if ((context.view !== undefined || context.event !== undefined) && previous !== undefined) {
     return {
       svg: renderRss(
         faceForPage({ ...previous, page: pageForView(context.view, previous.entries) }),
@@ -412,7 +417,12 @@ export async function renderRssRequest(
   };
   return {
     svg: renderRss(
-      faceForPage({ ...state, page: pageForView(context.view, fresh.entries) }),
+      faceForPage({
+        ...state,
+        // As in hackernews: an absent view is a scheduled refresh, which draws
+        // the page the state decided rather than resetting to the first one.
+        page: context.view === undefined ? state.page : pageForView(context.view, fresh.entries),
+      }),
     ),
     state,
   };
@@ -430,7 +440,7 @@ export const rss: FaceDefinition = {
     const state = storedState(value);
     return state === undefined ? [""] : pageViews(state.entries);
   },
-  onTap(_settings, value, event) {
+  onTap(_settings, value, event, now) {
     const previous = storedState(value);
     if (previous === undefined) {
       return { view: "" };
@@ -439,7 +449,7 @@ export const rss: FaceDefinition = {
     const state: RssState = {
       ...previous,
       page,
-      tappedAt: new Date().toISOString(),
+      tappedAt: now.toISOString(),
     };
     return { view: pageViews(state.entries)[page] ?? "", state };
   },

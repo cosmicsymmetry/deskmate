@@ -851,7 +851,7 @@ function chartForView(settings: Settings, view: ViewId | undefined): ChartStyle 
 function viewForChart(settings: Settings, selected: ChartStyle): ViewId {
   const charts = orderedCharts(settings);
   const index = charts.indexOf(selected);
-  return index <= 0 ? "" : chartViews(settings)[index] ?? "";
+  return index <= 0 ? "" : (chartViews(settings)[index] ?? "");
 }
 
 function storedState(value: unknown): TokenState | undefined {
@@ -905,7 +905,7 @@ export async function renderTokenRequest(
   let state: TokenState;
   if (
     previous !== undefined &&
-    (context.event !== undefined || recentTap(previous.tappedAt, now))
+    (context.view !== undefined || context.event !== undefined || recentTap(previous.tappedAt, now))
   ) {
     state = previous;
   } else {
@@ -938,14 +938,14 @@ export const token: FaceDefinition = {
   views(settings) {
     return chartViews(settings);
   },
-  onTap(settings, value, event) {
+  onTap(settings, value, event, now) {
     const configured = configuredChart(settings);
     if (configured === "none") {
       return { view: "", state: null };
     }
     const previous = storedState(value);
     const chart = nextChart(previous?.chart ?? configured, event.taps);
-    const state: TokenState = { chart, tappedAt: new Date().toISOString() };
+    const state: TokenState = { chart, tappedAt: now.toISOString() };
     return { view: viewForChart(settings, chart), state };
   },
   async render(settings, now, context) {

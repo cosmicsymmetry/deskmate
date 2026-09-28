@@ -737,7 +737,12 @@ export async function renderHackerNewsRequest(
   get: FetchText = fetchText,
 ): Promise<{ svg: string; state: HackerNewsState }> {
   const previous = storedState(context.state);
-  if (context.event !== undefined && previous !== undefined) {
+  // A render that is TOLD which view to draw must not fetch: answering a tap
+  // from what is already in hand is the entire point of the views split. The
+  // event is still honoured beside it, because the server and this package
+  // deploy independently and a server that sends a tap without a view is the
+  // one running right now.
+  if ((context.view !== undefined || context.event !== undefined) && previous !== undefined) {
     return {
       svg: drawState({ ...previous, page: pageForView(context.view, previous.stories) }),
       state: previous,
@@ -751,10 +756,11 @@ export async function renderHackerNewsRequest(
     page: keepPage ? normalizedPage(previous.page, fresh.stories) : 0,
     tappedAt: keepPage ? previous.tappedAt : null,
   };
-  return {
-    svg: drawState({ ...state, page: pageForView(context.view, fresh.stories) }),
-    state,
-  };
+  // A scheduled refresh names no view, and must draw the page the state above
+  // just decided -- that is where "a tap holds its page for ten minutes" lives.
+  // Reading an absent view as page zero threw that decision away.
+  const page = context.view === undefined ? state.page : pageForView(context.view, fresh.stories);
+  return { svg: drawState({ ...state, page }), state };
 }
 
 export const hackernews: FaceDefinition = {
@@ -780,7 +786,7 @@ export const hackernews: FaceDefinition = {
     const state = storedState(value);
     return state === undefined ? [""] : pageViews(state.stories);
   },
-  onTap(_settings, value, event) {
+  onTap(_settings, value, event, now) {
     const previous = storedState(value);
     if (previous === undefined) {
       return { view: "" };
@@ -789,7 +795,7 @@ export const hackernews: FaceDefinition = {
     const state: HackerNewsState = {
       ...previous,
       page,
-      tappedAt: new Date().toISOString(),
+      tappedAt: now.toISOString(),
     };
     return { view: pageViews(state.stories)[page] ?? "", state };
   },

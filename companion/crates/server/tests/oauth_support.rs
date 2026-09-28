@@ -17,6 +17,10 @@ pub fn integration_state(
     grant: Option<IntegrationSecret>,
 ) -> IntegrationFixture {
     let state = ServerState::in_memory();
+    state
+        .identity()
+        .create_account("owner@example.com", true, true, chrono::Utc::now())
+        .expect("owner account");
     let tempdir = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(
         IntegrationStore::open(

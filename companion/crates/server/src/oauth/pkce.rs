@@ -4,13 +4,13 @@ use base64::prelude::{BASE64_URL_SAFE_NO_PAD, Engine as _};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
-pub(super) struct PkcePair {
-    pub(super) verifier: String,
-    pub(super) challenge: String,
+pub(crate) struct PkcePair {
+    pub(crate) verifier: String,
+    pub(crate) challenge: String,
 }
 
 /// Generates a fresh PKCE verifier and its S256 challenge.
-pub(super) fn generate_pkce() -> PkcePair {
+pub(crate) fn generate_pkce() -> PkcePair {
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);
     let verifier = BASE64_URL_SAFE_NO_PAD.encode(bytes);
@@ -30,7 +30,7 @@ pub(super) fn challenge_for(verifier: &str) -> String {
 
 /// A random opaque CSRF `state` value.
 #[must_use]
-pub(super) fn generate_state() -> String {
+pub(crate) fn generate_state() -> String {
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);
     BASE64_URL_SAFE_NO_PAD.encode(bytes)

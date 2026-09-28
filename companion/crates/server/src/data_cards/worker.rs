@@ -7,6 +7,7 @@ use tokio::task::JoinHandle;
 use super::face_state::FaceStateStore;
 use super::faces_package::{self, FaceCommand, FaceRenderError, RenderRequest};
 use super::{DataCardSpec, RefreshOutcome, TapSignal, record_outcome};
+use crate::accounts::AccountSpace;
 use crate::image_ingest::{CanonicalFrame, canonical_frame_from_png};
 use crate::image_sources::AcceptOutcome;
 use crate::{ImageNotificationOrigin, ServerState};
@@ -21,38 +22,75 @@ const MAX_REFRESH: Duration = Duration::from_hours(6);
 pub(super) fn spawn_refresher(
     runtime: &tokio::runtime::Handle,
     state: ServerState,
+    space: std::sync::Arc<AccountSpace>,
     faces: FaceCommand,
     face_state: Arc<FaceStateStore>,
     taps: Arc<TapSignal>,
     spec: DataCardSpec,
 ) -> JoinHandle<()> {
     let refresh = clamped_refresh(spec.refresh_seconds);
-    spawn_refresher_with_refresh(runtime, state, faces, face_state, taps, spec, refresh)
+    spawn_refresher_with_refresh(
+        runtime,
+        RefresherJob::new(state, space, faces, face_state, taps, spec),
+        refresh,
+    )
 }
 
-fn spawn_refresher_with_refresh(
-    runtime: &tokio::runtime::Handle,
+pub(super) struct RefresherJob {
     state: ServerState,
+    space: Arc<AccountSpace>,
     faces: FaceCommand,
     face_state: Arc<FaceStateStore>,
     taps: Arc<TapSignal>,
     spec: DataCardSpec,
+}
+
+impl RefresherJob {
+    pub(super) fn new(
+        state: ServerState,
+        space: Arc<AccountSpace>,
+        faces: FaceCommand,
+        face_state: Arc<FaceStateStore>,
+        taps: Arc<TapSignal>,
+        spec: DataCardSpec,
+    ) -> Self {
+        Self {
+            state,
+            space,
+            faces,
+            face_state,
+            taps,
+            spec,
+        }
+    }
+}
+
+fn spawn_refresher_with_refresh(
+    runtime: &tokio::runtime::Handle,
+    job: RefresherJob,
     refresh: Duration,
 ) -> JoinHandle<()> {
-    runtime.spawn(async move { refresh_loop(state, faces, face_state, taps, spec, refresh).await })
+    runtime.spawn(async move {
+        refresh_loop(
+            job.state,
+            job.space,
+            job.faces,
+            job.face_state,
+            job.taps,
+            job.spec,
+            refresh,
+        )
+        .await;
+    })
 }
 
 #[cfg(test)]
 pub(super) fn spawn_refresher_for_test(
     runtime: &tokio::runtime::Handle,
-    state: ServerState,
-    faces: FaceCommand,
-    face_state: Arc<FaceStateStore>,
-    taps: Arc<TapSignal>,
-    spec: DataCardSpec,
+    job: RefresherJob,
     refresh: Duration,
 ) -> JoinHandle<()> {
-    spawn_refresher_with_refresh(runtime, state, faces, face_state, taps, spec, refresh)
+    spawn_refresher_with_refresh(runtime, job, refresh)
 }
 
 fn clamped_refresh(refresh_seconds: u64) -> Duration {
@@ -136,6 +174,7 @@ fn next_attempt(
 /// is a bug rather than an outcome, and ends the refresher.
 async fn refresh_once(
     state: &ServerState,
+    space: &std::sync::Arc<AccountSpace>,
     faces: &FaceCommand,
     face_state: &Arc<FaceStateStore>,
     spec: &DataCardSpec,
@@ -174,12 +213,12 @@ async fn refresh_once(
         }
     };
 
-    let accept_state = state.clone();
     let accept_source = source_id.clone();
+    let accept_space = Arc::clone(space);
     let next_face_state = rendered.state;
     let face_state = Arc::clone(face_state);
     let accepted = tokio::task::spawn_blocking(move || {
-        let outcome = accept_state.image_sources().accept_server_rendered(
+        let outcome = accept_space.image_sources.accept_server_rendered(
             &accept_source,
             rendered.frame,
             Utc::now(),
@@ -194,7 +233,7 @@ async fn refresh_once(
     .await;
     match accepted {
         Ok(Ok(outcome)) => {
-            if !notify_image_source_outcome(state, source_id, &outcome) {
+            if !notify_image_source_outcome(state, space, source_id, &outcome) {
                 tracing::debug!(target: "server::data_cards", source_id = %source_id, kind, "the face is unchanged");
             }
             Some(RefreshOutcome::Drawn)
@@ -214,6 +253,7 @@ async fn refresh_once(
 
 async fn refresh_loop(
     state: ServerState,
+    space: std::sync::Arc<AccountSpace>,
     faces: FaceCommand,
     face_state: Arc<FaceStateStore>,
     taps: Arc<TapSignal>,
@@ -234,7 +274,8 @@ async fn refresh_loop(
     // The first attempt is immediate, which is what fills a freshly started server's
     // panels instead of leaving them blank for fifteen minutes.
     loop {
-        let Some(outcome) = refresh_once(&state, &faces, &face_state, &spec, tap_count).await
+        let Some(outcome) =
+            refresh_once(&state, &space, &faces, &face_state, &spec, tap_count).await
         else {
             return;
         };
@@ -243,7 +284,7 @@ async fn refresh_loop(
             RefreshOutcome::Drawn | RefreshOutcome::NeedsAttention(_) => 0,
         };
         let wait = next_attempt(refresh, &outcome, consecutive_failures);
-        record_outcome(&state, &spec.source_id, task, outcome);
+        record_outcome(&space, &spec.source_id, task, outcome);
         tap_count = tokio::select! {
             () = tokio::time::sleep(wait) => 0,
             () = taps.notify.notified() => taps.take().max(1),
@@ -253,12 +294,14 @@ async fn refresh_loop(
 
 fn notify_image_source_outcome(
     state: &ServerState,
+    space: &AccountSpace,
     source_id: &str,
     outcome: &AcceptOutcome,
 ) -> bool {
     match outcome {
         AcceptOutcome::Changed { digest } => {
             state.notify_image_source_changed(
+                &space.account_id,
                 source_id.to_owned(),
                 *digest,
                 ImageNotificationOrigin::ServerRenderedRefresh,
@@ -275,6 +318,14 @@ mod tests {
 
     use super::*;
     use crate::data_cards::FaceSpec;
+
+    fn test_space(state: &ServerState) -> Arc<AccountSpace> {
+        let account = state
+            .identity()
+            .create_account("owner@example.com", true, true, Utc::now())
+            .expect("create account");
+        state.account_space(&account.id)
+    }
 
     fn spec(steer: &str) -> DataCardSpec {
         DataCardSpec {
@@ -342,9 +393,11 @@ mod tests {
         ));
         face_state.put("source", Some(serde_json::json!({ "page": 2 })));
         let state = ServerState::in_memory();
+        let space = test_space(&state);
 
         let outcome = refresh_once(
             &state,
+            &space,
             &faces_package::fake(),
             &face_state,
             &spec("echo-the-request"),
@@ -371,13 +424,15 @@ mod tests {
             directory.path().join("face-state.json"),
         ));
         let state = ServerState::in_memory();
-        let source = state.image_sources().mint("Weather").expect("a source");
+        let space = test_space(&state);
+        let source = space.image_sources.mint("Weather").expect("a source");
 
         let mut accepted_spec = spec("answer-with-an-envelope");
         accepted_spec.source_id.clone_from(&source.id);
         assert_eq!(
             refresh_once(
                 &state,
+                &space,
                 &faces_package::fake(),
                 &face_state,
                 &accepted_spec,
@@ -400,6 +455,7 @@ mod tests {
         assert!(matches!(
             refresh_once(
                 &state,
+                &space,
                 &faces_package::fake(),
                 &face_state,
                 &refused_spec,
@@ -414,8 +470,8 @@ mod tests {
             "an unaccepted frame must not advance state"
         );
 
-        let clear_source = state
-            .image_sources()
+        let clear_source = space
+            .image_sources
             .mint("Forecast")
             .expect("another source");
         face_state.put(
@@ -425,7 +481,15 @@ mod tests {
         let mut clear_spec = spec("answer-with-a-null-state");
         clear_spec.source_id.clone_from(&clear_source.id);
         assert_eq!(
-            refresh_once(&state, &faces_package::fake(), &face_state, &clear_spec, 0,).await,
+            refresh_once(
+                &state,
+                &space,
+                &faces_package::fake(),
+                &face_state,
+                &clear_spec,
+                0,
+            )
+            .await,
             Some(RefreshOutcome::Drawn)
         );
         assert_eq!(face_state.get(&clear_source.id), None);
@@ -489,24 +553,33 @@ mod tests {
     #[tokio::test]
     async fn changed_outcomes_notify_devices_and_unchanged_outcomes_do_not() {
         let state = ServerState::in_memory();
+        let account = state
+            .identity()
+            .create_account("owner@example.com", true, true, Utc::now())
+            .unwrap();
+        let space = state.account_space(&account.id);
         let digest = [0x5a; protocol::ASSET_DIGEST_LEN];
 
         assert!(notify_image_source_outcome(
             &state,
+            &space,
             "server-face",
             &AcceptOutcome::Changed { digest },
         ));
         assert_eq!(
             state.image_notifications_for_test(),
             [(
+                account.id,
                 "server-face".to_owned(),
                 digest,
                 ImageNotificationOrigin::ServerRenderedRefresh,
+                Vec::new(),
             )]
         );
 
         assert!(!notify_image_source_outcome(
             &state,
+            &space,
             "server-face",
             &AcceptOutcome::Unchanged,
         ));

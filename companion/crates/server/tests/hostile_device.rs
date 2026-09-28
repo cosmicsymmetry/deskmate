@@ -15,7 +15,12 @@ mod support;
 
 type DeviceSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-async fn spawn() -> (String, server::registry::DeviceIdentity, String) {
+async fn spawn() -> (
+    String,
+    server::registry::DeviceIdentity,
+    String,
+    support::TestAccount,
+) {
     // Paced for a test. This file is about hostile frames closing the link and
     // the ownership slot being released afterwards -- not about how long a
     // reconnect waits. With production pacing each of the four reconnects cost a
@@ -27,17 +32,24 @@ async fn spawn() -> (String, server::registry::DeviceIdentity, String) {
         pomodoro_interval: Duration::from_millis(10),
         ..app_core::RuntimeOptions::default()
     });
-    let identity = state.registry().mint().expect("mint identity");
+    let owner = support::owner_account(&state);
+    let identity = support::mint_owned_device(&state, &owner);
     let admin_token = support::IN_MEMORY_ADMIN_TOKEN.to_string();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app(state)).await.unwrap();
+        axum::serve(
+            listener,
+            app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     (
         format!("127.0.0.1:{}", address.port()),
         identity,
         admin_token,
+        owner,
     )
 }
 
@@ -90,7 +102,7 @@ async fn assert_rejected(host: &str, identity: &server::registry::DeviceIdentity
 
 #[tokio::test]
 async fn hostile_device_frames_are_bounded_and_concatenated_frames_decode() {
-    let (host, identity, admin_token) = spawn().await;
+    let (host, identity, admin_token, _owner) = spawn().await;
 
     let mut corrupt_delimiter = protocol::encode_message(1, &Message::StatusRequest).unwrap();
     corrupt_delimiter.insert(corrupt_delimiter.len() / 2, 0);
@@ -182,14 +194,15 @@ fn exact_png() -> Vec<u8> {
 
 #[tokio::test]
 async fn an_image_push_does_not_wait_for_a_silent_device() {
-    let (host, identity, admin_token) = spawn().await;
+    let (host, identity, _admin_token, owner) = spawn().await;
     // Connected, bootstrapped, and from here on it answers nothing.
     let _socket = connect(&host, &identity).await;
 
     let client = reqwest::Client::new();
     let minted: serde_json::Value = client
         .post(format!("http://{host}/v1/images"))
-        .bearer_auth(&admin_token)
+        .header("cookie", &owner.cookie)
+        .header("origin", "https://deskmate.test")
         .header("Content-Type", "application/json")
         .body(r#"{"name":"Panel"}"#)
         .send()

@@ -16,8 +16,6 @@ import { snapshot } from "./fixtures";
 // Bun mocks replace a process-global namespace, so capture the real wrapper first.
 export const realMintImageSource = backendModule.mintImageSource;
 export const realListenToAppState = backendModule.listenToAppState;
-export const realSignInAndSelectDevice = backendModule.signInAndSelectDevice;
-export const realSignIn = backendModule.signIn;
 export { backendModule };
 
 function defaults() {
@@ -39,14 +37,6 @@ function defaults() {
     device_id: "desk-1",
     tier: "networked",
   });
-  const signInAndSelectDeviceImpl: (
-    deviceId: string,
-    adminToken: string,
-  ) => Promise<NetworkSettings> = async (deviceId) => ({
-    server_url: "https://desk.example",
-    device_id: deviceId,
-    tier: "networked",
-  });
   const imageSourcesImpl: () => Promise<ImageSourceDescriptor[]> = async () => [];
   const updateImageSourceFaceImpl: (
     sourceId: string,
@@ -63,7 +53,6 @@ function defaults() {
     saveConfigImpl,
     resumeImpl,
     networkSettingsImpl,
-    signInAndSelectDeviceImpl,
     imageSourcesImpl,
     updateImageSourceFaceImpl,
   };
@@ -84,8 +73,6 @@ mock.module("../../src/lib/backend", () => ({
   saveConfig: (config: AppConfig) => backendMocks.saveConfigImpl(config),
   resumePushing: () => backendMocks.resumeImpl(),
   getNetworkSettings: () => backendMocks.networkSettingsImpl(),
-  signInAndSelectDevice: (deviceId: string, adminToken: string) =>
-    backendMocks.signInAndSelectDeviceImpl(deviceId, adminToken),
   listImageSources: () => backendMocks.imageSourcesImpl(),
   updateImageSourceFace: (sourceId: string, fields: Record<string, string>) =>
     backendMocks.updateImageSourceFaceImpl(sourceId, fields),

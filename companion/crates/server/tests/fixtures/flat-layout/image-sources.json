@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "image-0123456789abcdef01234567",
+      "name": "Kitchen weather",
+      "token_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "recent_push_times": [
+        "2026-09-23T12:00:00.000000000Z"
+      ]
+    }
+  ]
+}

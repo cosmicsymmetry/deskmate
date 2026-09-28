@@ -68,7 +68,35 @@ export function installHttpLifecycle(cleanup: () => Promise<void>) {
     http.failures.length = 0;
     http.handlers.clear();
     httpState.creatableFacesResponse = [];
+    http.handlers.set("GET /v1/app/instance", () =>
+      jsonResponse({
+        setup_required: false,
+        google_enabled: false,
+        signups_open: true,
+        edition: "self-hosted",
+      }),
+    );
     http.handlers.set("GET /v1/faces", () => jsonResponse(httpState.creatableFacesResponse));
+    // Opening the settings sheet loads the signed-in account and its panels.
+    http.handlers.set("GET /v1/app/account", () =>
+      jsonResponse({
+        id: "acc_test",
+        email: "owner@example.com",
+        email_verified: true,
+        is_instance_owner: true,
+      }),
+    );
+    http.handlers.set("GET /v1/app/devices", () =>
+      jsonResponse([
+        {
+          id: "dev-0001",
+          connected: true,
+          has_saved_config: true,
+          configured_at: 1_800_000_000,
+          state: "active",
+        },
+      ]),
+    );
     globalThis.fetch = Object.assign(http.fetch, { preconnect: originalFetch.preconnect });
   });
   afterEach(async () => {

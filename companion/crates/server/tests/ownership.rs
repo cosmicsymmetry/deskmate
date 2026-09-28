@@ -22,12 +22,18 @@ async fn spawn_state(
     state: ServerState,
     admin_token: &str,
 ) -> (String, server::registry::DeviceIdentity, String) {
-    let identity = state.registry().mint().expect("mint identity");
+    let owner = support::owner_account(&state);
+    let identity = support::mint_owned_device(&state, &owner);
     let admin_token = admin_token.to_string();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app(state)).await.unwrap();
+        axum::serve(
+            listener,
+            app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     (
         format!("127.0.0.1:{}", address.port()),
@@ -336,7 +342,13 @@ async fn config_is_written_under_the_explicit_config_directory() {
     .await;
 
     assert_eq!(response.status(), 200);
-    assert!(config_root.join("dev-0001.json").is_file());
+    let account_root = std::fs::read_dir(config_root.join("accounts"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(account_root.join("devices/dev-0001.json").is_file());
     assert!(!former_derived_root.join("dev-0001.json").exists());
 }
 
@@ -608,13 +620,18 @@ async fn admin_status_reports_defaults_used_after_stored_config_validation_failu
         server::firmware::FirmwareCatalog::in_memory(),
         config_root.clone(),
     );
-    let identity = state.registry().mint().expect("mint identity");
+    let owner = support::owner_account(&state);
+    let identity = support::mint_owned_device(&state, &owner);
+    let account_root = state.account_space(&owner.id).root.clone();
+    std::fs::create_dir_all(account_root.join("devices")).expect("create account devices root");
     let admin_token = ADMIN_TOKEN.to_string();
     let mut invalid: serde_json::Value =
         serde_json::from_str(&clock_config()).expect("fixture JSON");
     invalid["cards"][0]["dwell_seconds"] = 1.into();
     std::fs::write(
-        config_root.join(format!("{}.json", identity.device_id)),
+        account_root
+            .join("devices")
+            .join(format!("{}.json", identity.device_id)),
         serde_json::to_vec(&invalid).expect("invalid config JSON"),
     )
     .expect("write invalid stored config");
@@ -622,7 +639,12 @@ async fn admin_status_reports_defaults_used_after_stored_config_validation_failu
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app(state)).await.unwrap();
+        axum::serve(
+            listener,
+            app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     let host = format!("127.0.0.1:{}", address.port());
     let mut socket = connect_device(&host, &identity.token)
@@ -657,22 +679,27 @@ async fn linked_config_recovery_remains_visible_until_explicit_save() {
         server::firmware::FirmwareCatalog::in_memory(),
         config_root.clone(),
     );
-    let refused = state
-        .registry()
-        .mint()
-        .expect("mint refused-config identity");
-    let healthy = state.registry().mint().expect("mint healthy identity");
-    let refused_path = config_root.join(format!("{}.json", refused.device_id));
+    let owner = support::owner_account(&state);
+    let refused = support::mint_owned_device(&state, &owner);
+    let healthy = support::mint_owned_device(&state, &owner);
+    let devices_root = state.account_space(&owner.id).root.join("devices");
+    std::fs::create_dir_all(&devices_root).expect("create account devices root");
+    let refused_path = devices_root.join(format!("{}.json", refused.device_id));
     let refused_bytes = br#"{"schema_version":11,"future_body":true}"#;
     std::fs::write(&refused_path, refused_bytes).expect("write unsupported config");
-    let healthy_path = config_root.join(format!("{}.json", healthy.device_id));
+    let healthy_path = devices_root.join(format!("{}.json", healthy.device_id));
     let valid = clock_config();
     std::fs::write(&healthy_path, &valid).expect("write healthy config");
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app(state)).await.unwrap();
+        axum::serve(
+            listener,
+            app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     let host = format!("127.0.0.1:{}", address.port());
     let client = reqwest::Client::new();
@@ -689,11 +716,9 @@ async fn linked_config_recovery_remains_visible_until_explicit_save() {
     let healthy_apply = support::drive_until_config(&mut healthy_socket, "clock-1").await;
     assert_eq!(healthy_apply.cards[0].card_id, "clock-1");
 
-    let refused_snapshot =
-        companion_snapshot(&client, &host, &refused.device_id, ADMIN_TOKEN).await;
+    let refused_snapshot = companion_snapshot(&client, &host, &refused.device_id, &owner).await;
     assert_recoverable_unsupported(&refused_snapshot);
-    let healthy_snapshot =
-        companion_snapshot(&client, &host, &healthy.device_id, ADMIN_TOKEN).await;
+    let healthy_snapshot = companion_snapshot(&client, &host, &healthy.device_id, &owner).await;
     assert_eq!(healthy_snapshot["persistence"]["kind"], "clean");
 
     let status = admin_status(&client, &host, &refused.device_id, ADMIN_TOKEN).await;
@@ -702,13 +727,13 @@ async fn linked_config_recovery_remains_visible_until_explicit_save() {
     assert_eq!(status["config"]["fallback_reason"], "recovery");
     assert_recoverable_unsupported(&status["snapshot"]);
 
-    let event = first_app_state_event(&client, &host, &refused.device_id, ADMIN_TOKEN).await;
+    let event = first_app_state_event(&client, &host, &refused.device_id, &owner).await;
     assert_recoverable_unsupported(&event);
 
     drop(refused_socket);
     let mut refused_socket = connect_after_release(&host, &refused.token).await;
     support::bootstrap_runtime(&mut refused_socket).await;
-    let after_reconnect = companion_snapshot(&client, &host, &refused.device_id, ADMIN_TOKEN).await;
+    let after_reconnect = companion_snapshot(&client, &host, &refused.device_id, &owner).await;
     assert_recoverable_unsupported(&after_reconnect);
     assert_eq!(std::fs::read(&refused_path).unwrap(), refused_bytes);
     assert_eq!(std::fs::read_to_string(&healthy_path).unwrap(), valid);
@@ -727,7 +752,7 @@ async fn linked_config_recovery_remains_visible_until_explicit_save() {
     assert_eq!(saved.status(), 200);
     assert_eq!(applied.cards[0].card_id, "clock-1");
 
-    let cleared = companion_snapshot(&client, &host, &refused.device_id, ADMIN_TOKEN).await;
+    let cleared = companion_snapshot(&client, &host, &refused.device_id, &owner).await;
     assert_eq!(cleared["persistence"]["kind"], "clean");
     let status = admin_status(&client, &host, &refused.device_id, ADMIN_TOKEN).await;
     assert_eq!(status["config"]["origin"], "current");
@@ -740,11 +765,12 @@ async fn companion_snapshot(
     client: &reqwest::Client,
     host: &str,
     device_id: &str,
-    admin_token: &str,
+    account: &support::TestAccount,
 ) -> serde_json::Value {
     let response = client
         .get(format!("http://{host}/v1/app/{device_id}/snapshot"))
-        .bearer_auth(admin_token)
+        .header("cookie", &account.cookie)
+        .header("origin", "https://deskmate.test")
         .send()
         .await
         .expect("companion snapshot");
@@ -782,11 +808,12 @@ async fn first_app_state_event(
     client: &reqwest::Client,
     host: &str,
     device_id: &str,
-    admin_token: &str,
+    account: &support::TestAccount,
 ) -> serde_json::Value {
     let mut response = client
         .get(format!("http://{host}/v1/app/{device_id}/events"))
-        .bearer_auth(admin_token)
+        .header("cookie", &account.cookie)
+        .header("origin", "https://deskmate.test")
         .send()
         .await
         .expect("event stream");

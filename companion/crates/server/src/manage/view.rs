@@ -176,23 +176,9 @@ authorization lapsed, and only reconnecting fixes it.</p>",
     page("Deskmate", &body)
 }
 
-pub(crate) fn render_login(error: Option<&str>) -> String {
-    let mut body = String::from("<h1>Deskmate</h1>");
-    if let Some(error) = error {
-        let _ = write!(body, "<p class=\"bad\">{}</p>", escape_html(error));
-    }
-    body.push_str(
-        "<form method=\"post\" action=\"/v1/manage/login\">\
-<p><label>Admin token<br><input type=\"password\" name=\"token\" autocomplete=\"off\" \
-size=\"48\"></label></p><button>Sign in</button></form>",
-    );
-    page("Deskmate — sign in", &body)
-}
-
-/// A plain error page. Distinct from [`render_login`] on purpose: showing a
-/// sign-in form for a failure that has nothing to do with the session tells
-/// the operator to re-authenticate, which will not help and hides the real
-/// cause.
+/// A plain error page. Sign-in happens in the web app now; a failure here that
+/// has nothing to do with the session must say what it is, not send the owner
+/// to re-authenticate.
 pub(crate) fn render_error(message: &str) -> String {
     let body = format!(
         "<h1>Deskmate</h1><p class=\"bad\">{}</p><p><a href=\"/v1/manage\">Back</a></p>",
@@ -347,14 +333,6 @@ mod tests {
         let html = render_minted_credential("google", "abc123");
         assert!(html.contains("abc123"));
         assert!(html.to_lowercase().contains("once"));
-    }
-
-    #[test]
-    fn the_login_form_does_not_echo_a_submitted_token() {
-        let html = render_login(Some("That token was not accepted."));
-        assert!(html.contains("<form"));
-        assert!(html.contains("type=\"password\""));
-        assert!(html.contains("That token was not accepted."));
     }
 
     #[test]

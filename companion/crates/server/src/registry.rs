@@ -214,6 +214,7 @@ impl Registry {
 
     /// Every minted device id, sorted. Ids only -- a digest never leaves this
     /// type, and the management surface reports presence, never credentials.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn device_ids(&self) -> Vec<String> {
         let state = self
@@ -239,6 +240,36 @@ impl Registry {
             .tokens
             .iter()
             .any(|candidate| candidate.device_id == device_id)
+    }
+
+    /// Revokes a device identity. Persistent registries commit the removal
+    /// before changing the in-memory authentication table.
+    pub fn revoke(&self, device_id: &str) -> Result<bool, RegistryError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(index) = state
+            .tokens
+            .iter()
+            .position(|record| record.device_id == device_id)
+        else {
+            return Ok(false);
+        };
+        let mut tokens = state
+            .tokens
+            .iter()
+            .map(|record| TokenRecord {
+                digest: record.digest,
+                device_id: record.device_id.clone(),
+            })
+            .collect::<Vec<_>>();
+        tokens.remove(index);
+        if let Some(path) = &self.path {
+            save_records(path, state.next_sequence, &tokens)?;
+        }
+        state.tokens = tokens;
+        Ok(true)
     }
 
     /// Whether this process discarded an unreadable or invalid store at boot.
@@ -322,7 +353,30 @@ fn decode_store(bytes: &[u8]) -> Result<RegistryState, RegistryError> {
 /// that must not be reused, even though their old bearer tokens are discarded.
 fn scan_config_high_water(store_path: &Path) -> Result<u64, RegistryError> {
     let parent = usable_parent(store_path)?;
-    let entries = match fs::read_dir(parent) {
+    let mut high_water = scan_device_config_directory(parent)?;
+    let accounts = parent.join("accounts");
+    let account_entries = match fs::read_dir(&accounts) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(high_water),
+        Err(error) => return Err(io_error("scan account config ids", &error)),
+    };
+    for entry in account_entries {
+        let entry = entry.map_err(|error| io_error("read account config id", &error))?;
+        if !entry
+            .file_type()
+            .map_err(|error| io_error("inspect account config directory", &error))?
+            .is_dir()
+        {
+            continue;
+        }
+        let devices = entry.path().join("devices");
+        high_water = high_water.max(scan_device_config_directory(&devices)?);
+    }
+    Ok(high_water)
+}
+
+fn scan_device_config_directory(directory: &Path) -> Result<u64, RegistryError> {
+    let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
         Err(error) => return Err(io_error("scan device config ids", &error)),
@@ -416,13 +470,31 @@ fn save_store(
     next_sequence: u64,
     new_record: &TokenRecord,
 ) -> Result<(), RegistryError> {
+    let records = state
+        .tokens
+        .iter()
+        .map(|record| TokenRecord {
+            digest: record.digest,
+            device_id: record.device_id.clone(),
+        })
+        .chain(std::iter::once(TokenRecord {
+            digest: new_record.digest,
+            device_id: new_record.device_id.clone(),
+        }))
+        .collect::<Vec<_>>();
+    save_records(path, next_sequence, &records)
+}
+
+fn save_records(
+    path: &Path,
+    next_sequence: u64,
+    records: &[TokenRecord],
+) -> Result<(), RegistryError> {
     let parent = usable_parent(path)?;
     secure_file::create_directory(parent).map_err(file_io_error)?;
 
-    let devices = state
-        .tokens
+    let devices = records
         .iter()
-        .chain(std::iter::once(new_record))
         .map(|record| PersistedDevice {
             device_id: record.device_id.clone(),
             token_sha256: protocol::digest_hex(&record.digest),
@@ -675,5 +747,31 @@ mod tests {
                 .expect("read archive test dir")
                 .all(|entry| entry.expect("read archive entry").path() == store_path)
         );
+    }
+
+    #[test]
+    fn revoke_removes_the_identity_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(DEVICE_IDENTITY_STORE_FILE);
+        let registry = Registry::load(&path);
+        let minted = registry.mint().unwrap();
+        assert!(registry.revoke(&minted.device_id).unwrap());
+        assert!(registry.authenticate(&minted.token).is_none());
+        assert!(!Registry::load(&path).contains_device(&minted.device_id));
+        assert!(
+            !registry.revoke(&minted.device_id).unwrap(),
+            "second revoke is a no-op"
+        );
+    }
+
+    #[test]
+    fn high_water_scan_sees_per_account_device_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let devices = dir.path().join("accounts/acc_x/devices");
+        std::fs::create_dir_all(&devices).unwrap();
+        std::fs::write(devices.join("dev-0042.json"), b"{}").unwrap();
+        std::fs::write(dir.path().join(DEVICE_IDENTITY_STORE_FILE), b"not json").unwrap();
+        let registry = Registry::load(dir.path().join(DEVICE_IDENTITY_STORE_FILE));
+        assert_eq!(registry.mint().unwrap().device_id, "dev-0043");
     }
 }

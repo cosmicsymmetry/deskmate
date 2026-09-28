@@ -42,24 +42,47 @@ file, so no second unit-local value should be added. Startup also rejects a valu
 cannot name a served firmware image: it must be 1–32 ASCII letters, digits, dots,
 hyphens, or underscores, and it must not contain `..`.
 
-**`DESKMATE_ADMIN_TOKEN` controls the browser-facing operator surface.** Generate it
-with `openssl rand -hex 32` and paste it straight into the file; never type it
-on a command line where it lands in shell history, and never commit
-`/etc/deskmate/server.env` (it is deliberately outside this repo). The 0600
-mode above is load-bearing.
+**`DESKMATE_ADMIN_TOKEN` is for CLI operations and account recovery, not browser
+sign-in.** Generate it with `openssl rand -hex 32` and paste it straight into the
+file; never type it on a command line where it lands in shell history, and never
+commit `/etc/deskmate/server.env` (it is deliberately outside this repo). The
+0600 mode above is load-bearing.
 
-**`RUST_LOG` is load-bearing too, and its absence is silent.**
-`tracing_subscriber::fmt::init()` defaults its `EnvFilter` to **ERROR** when
-`RUST_LOG` is unset, so an unset value discards every device-link diagnostic --
-including `device link established`, `device link refused: owner already live`,
-and the unknown-token warnings. The startup line you still see comes from a
-`println!`, so logging *looks* alive while reporting nothing. The launchd plist
-sets `RUST_LOG` in its own `EnvironmentVariables`; the systemd unit reads this
-file only, so a Linux deployment that omits it runs blind. A live server was
-found in exactly that state on 2026-08-19, which made accepted connections
-impossible to observe. Keep `info`
+**`RUST_LOG` defaults to `info` when unset.** Until 2026-09-23 an unset value
+meant ERROR only, which silently discarded every device-link diagnostic (a live
+server ran that way on 2026-08-19) and, with accounts, would also hide the
+first-run setup code and the sign-in links a server without SMTP prints. Keep `info`
 unless you have a reason not to; `info,server=debug` additionally logs each
 device's firmware check, which is useful while diagnosing updates.
+
+### Signing in
+
+`DESKMATE_PUBLIC_URL` is required and must be the browser-visible origin. Use
+HTTPS in production; HTTP is accepted only for localhost or a loopback IP. New
+accounts are closed by default (`DESKMATE_SIGNUPS=closed`), and the first account
+to set up a fresh server becomes its instance owner.
+
+On a fresh server, open `DESKMATE_PUBLIC_URL` and enter the one-time setup code
+printed at startup. On systemd, find it with:
+
+```sh
+journalctl -u deskmate-server | grep -A3 'setup code'
+```
+
+Without SMTP, requested email sign-in links are printed in the journal in a
+clearly marked block. To deliver them by mail, set `DESKMATE_SMTP_URL` and
+`DESKMATE_MAIL_FROM` together. A server upgrading from the old flat layout must
+also set `DESKMATE_OWNER_EMAIL` for its one-time migration; the server refuses
+to guess the existing owner's address.
+
+If an existing account cannot sign in, the admin bearer can mint a recovery link.
+It does not create a browser session itself:
+
+```sh
+curl -sS -X POST https://<host>/v1/admin/signin-link \
+  -H "Authorization: Bearer $DESKMATE_ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"email":"you@example.com"}'
+```
 
 ### Device identity persistence
 
@@ -148,8 +171,9 @@ For settings absent from the browser, such as `api_key` and `refresh_seconds`, f
 [Advanced manual settings](../../../../docs/images/server-rendered-cards.md#advanced-manual-settings):
 stop the server, edit the existing file while retaining all other entries, then
 restart. `data-cards.json.example` illustrates the shape; do not install it over
-an existing spec file. The default is `data-cards.json` under `DESKMATE_CONFIG_DIR`,
-with `DESKMATE_DATA_CARDS` as the override.
+an existing spec file. Each account's file is
+`DESKMATE_CONFIG_DIR/accounts/<account-id>/data-cards.json`; there is no global
+path override because one path cannot represent several accounts.
 
 Two consequences worth stating before you enable this:
 

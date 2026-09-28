@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "sources": {
+    "image-0123456789abcdef01234567": {
+      "page": 3,
+      "stories": [
+        { "title": "A retained face state from the flat layout" }
+      ]
+    }
+  }
+}

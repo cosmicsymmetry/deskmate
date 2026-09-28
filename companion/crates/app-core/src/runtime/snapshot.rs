@@ -207,5 +207,6 @@ pub fn empty_device(connection: ConnectionState) -> DeviceSnapshot {
         ota_state: None,
         active_card_id: None,
         counters: DeviceCounters::default(),
+        asset_store: None,
     }
 }

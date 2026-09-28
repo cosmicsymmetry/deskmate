@@ -127,6 +127,11 @@ export const apiContractFixtures = {
         "ui_queue_high_water": 11,
         "host_dropped_events": 12,
         "detected_event_gaps": 13
+      },
+      "asset_store": {
+        "used_bytes": 141312,
+        "free_bytes": 6149120,
+        "asset_count": 4
       }
     },
     "pomodoros": [

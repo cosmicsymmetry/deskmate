@@ -328,6 +328,10 @@ fn base_status() -> StatusResponse {
         ota_state: OtaState::Idle,
         last_network_error: None,
         last_ota_error: None,
+        // The checked-in golden frames predate key 31 and stay byte-identical:
+        // their job is to prove a frame captured before an extension still
+        // decodes after it.
+        asset_store: None,
     }
 }
 

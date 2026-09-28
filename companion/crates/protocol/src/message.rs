@@ -290,6 +290,23 @@ pub struct Ack {
     pub already_present: Option<bool>,
 }
 
+/// The device's own accounting of its **durable** asset store -- the 6 MB flash
+/// partition, not the volatile PSRAM tier.
+///
+/// `firmware/main/link/protocol_task.c` fills key 31 from
+/// `asset_store_stats(asset_flash_store(), ..)`, and `free_bytes` is
+/// `blob_region_size - high_water` (`firmware/main/core/asset_store.c`), so
+/// these three numbers say nothing about PSRAM occupancy. What they are good for
+/// is watching `used_bytes` stop moving once picture frames become volatile: the
+/// durable tier has never held anything but picture frames, because every font
+/// the host emits is baked and the config declares no assets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AssetStoreStats {
+    pub used_bytes: u32,
+    pub free_bytes: u32,
+    pub asset_count: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusResponse {
     pub protocol_version: u8,
@@ -323,6 +340,9 @@ pub struct StatusResponse {
     pub ota_state: OtaState,
     pub last_network_error: Option<String>,
     pub last_ota_error: Option<String>,
+    /// Absent until the flash store has formatted; the device omits key 31
+    /// rather than encoding it empty.
+    pub asset_store: Option<AssetStoreStats>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -841,7 +861,8 @@ fn encode_status_payload(encoder: &mut Encoder, status: &StatusResponse) {
     let entry_count = 24
         + 5
         + usize::from(status.last_network_error.is_some())
-        + usize::from(status.last_ota_error.is_some());
+        + usize::from(status.last_ota_error.is_some())
+        + usize::from(status.asset_store.is_some());
     encoder.map(entry_count);
     encoder.unsigned(0);
     encoder.unsigned(u64::from(status.protocol_version));
@@ -892,6 +913,16 @@ fn encode_status_payload(encoder: &mut Encoder, status: &StatusResponse) {
     if let Some(diagnostic) = &status.last_ota_error {
         encoder.unsigned(30);
         encoder.text(diagnostic);
+    }
+    if let Some(stats) = &status.asset_store {
+        encoder.unsigned(31);
+        encoder.map(3);
+        encoder.unsigned(0);
+        encoder.unsigned(u64::from(stats.used_bytes));
+        encoder.unsigned(1);
+        encoder.unsigned(u64::from(stats.free_bytes));
+        encoder.unsigned(2);
+        encoder.unsigned(u64::from(stats.asset_count));
     }
 }
 
@@ -1542,6 +1573,7 @@ fn decode_status(payload: &[u8]) -> Result<StatusResponse, MessageError> {
     let mut ota_state = None;
     let mut last_network_error = None;
     let mut last_ota_error = None;
+    let mut asset_store = None;
     for _ in 0..len {
         match next_numeric_key(&mut decoder, &mut previous)? {
             0 => protocol_version = Some(read_u8(&mut decoder, "protocol version")?),
@@ -1594,6 +1626,7 @@ fn decode_status(payload: &[u8]) -> Result<StatusResponse, MessageError> {
             28 => ota_state = Some(ota_state_from_wire(read_u8(&mut decoder, "ota state")?)?),
             29 => last_network_error = Some(decoder.text()?.to_owned()),
             30 => last_ota_error = Some(decoder.text()?.to_owned()),
+            31 => asset_store = Some(decode_asset_store_stats(&mut decoder)?),
             _ => decoder.skip()?,
         }
     }
@@ -1632,6 +1665,35 @@ fn decode_status(payload: &[u8]) -> Result<StatusResponse, MessageError> {
         ota_state: ota_state.unwrap_or(OtaState::Idle),
         last_network_error,
         last_ota_error,
+        asset_store,
+    })
+}
+
+/// Key 31's nested map, all three sub-keys required.
+///
+/// The device either omits the key or encodes every field of it
+/// (`firmware/main/core/protocol_message.c` refuses its own partial map with
+/// `ERR_MISSING_FIELD`), so a partial map is a malformed frame rather than a
+/// device with less to say. `MissingField` names the outer key, which is what a
+/// reader of the diagnostic has to go looking for.
+fn decode_asset_store_stats(decoder: &mut Decoder<'_>) -> Result<AssetStoreStats, MessageError> {
+    let len = decoder.map_len()?;
+    let mut previous = None;
+    let mut used_bytes = None;
+    let mut free_bytes = None;
+    let mut asset_count = None;
+    for _ in 0..len {
+        match next_numeric_key(decoder, &mut previous)? {
+            0 => used_bytes = Some(read_u32(decoder, "asset store used bytes")?),
+            1 => free_bytes = Some(read_u32(decoder, "asset store free bytes")?),
+            2 => asset_count = Some(read_u32(decoder, "asset store count")?),
+            _ => decoder.skip()?,
+        }
+    }
+    Ok(AssetStoreStats {
+        used_bytes: used_bytes.ok_or(MessageError::MissingField(31))?,
+        free_bytes: free_bytes.ok_or(MessageError::MissingField(31))?,
+        asset_count: asset_count.ok_or(MessageError::MissingField(31))?,
     })
 }
 
@@ -2074,6 +2136,89 @@ mod tests {
         }
         decoder.finish().unwrap();
         assert_eq!(released_fields, (1_u32 << 21) - 1);
+    }
+
+    #[test]
+    fn asset_store_stats_are_optional_whole_and_forward_compatible() {
+        // The realistic shape: four picture frames in the 6 MB blob region.
+        let mut present = status();
+        present.asset_store = Some(AssetStoreStats {
+            used_bytes: 141_312,
+            free_bytes: 6_149_120,
+            asset_count: 4,
+        });
+        round_trip(
+            "status_asset_store_stats",
+            42,
+            &Message::StatusResponse(present),
+        );
+
+        // Absent is the ordinary case for a store that never formatted, and it
+        // is what every golden frame in `tests/fixtures.rs` was captured as.
+        assert!(status().asset_store.is_none());
+        let absent = encode_payload(&Message::StatusResponse(status())).unwrap();
+        assert!(decode_status(&absent).unwrap().asset_store.is_none());
+
+        // Single-byte values so the nested map's bytes can be named exactly.
+        let mut small = status();
+        small.asset_store = Some(AssetStoreStats {
+            used_bytes: 4,
+            free_bytes: 9,
+            asset_count: 2,
+        });
+        let mut trunk = encode_payload(&Message::StatusResponse(small)).unwrap();
+        let mut decoder = Decoder::new(&trunk);
+        assert_eq!(
+            decoder.map_len().unwrap(),
+            30,
+            "key 31 should add exactly one outer entry"
+        );
+        let stats = trunk.split_off(trunk.len() - 9);
+        assert_eq!(
+            stats,
+            [0x18, 0x1f, 0xa3, 0x00, 0x04, 0x01, 0x09, 0x02, 0x02]
+        );
+
+        // The device encodes all three sub-keys or omits the key, and refuses
+        // its own partial map with a missing-field error. A host that filled any
+        // one gap with a zero would report a full store as an empty one, so each
+        // omission is named: one case alone only pins the last field read.
+        for (omitted, pairs) in [
+            ("used bytes", [0x01, 0x09, 0x02, 0x02]),
+            ("free bytes", [0x00, 0x04, 0x02, 0x02]),
+            ("asset count", [0x00, 0x04, 0x01, 0x09]),
+        ] {
+            let mut partial = trunk.clone();
+            partial.extend_from_slice(&[0x18, 0x1f, 0xa2]);
+            partial.extend_from_slice(&pairs);
+            assert_eq!(
+                decode_status(&partial),
+                Err(MessageError::MissingField(31)),
+                "a map without its {omitted} should be refused"
+            );
+        }
+
+        // A sub-key this host has never heard of is skipped, not refused.
+        let mut extended = trunk.clone();
+        extended.extend_from_slice(&[
+            0x18, 0x1f, 0xa4, 0x00, 0x04, 0x01, 0x09, 0x02, 0x02, 0x03, 0x07,
+        ]);
+        assert_eq!(
+            decode_status(&extended).unwrap().asset_store,
+            Some(AssetStoreStats {
+                used_bytes: 4,
+                free_bytes: 9,
+                asset_count: 2,
+            })
+        );
+
+        // The nested map obeys the same key ordering as every other map here.
+        let mut unsorted = trunk;
+        unsorted.extend_from_slice(&[0x18, 0x1f, 0xa3, 0x01, 0x09, 0x00, 0x04, 0x02, 0x02]);
+        assert_eq!(
+            decode_status(&unsorted),
+            Err(MessageError::DuplicateOrUnsortedKey)
+        );
     }
 
     #[test]

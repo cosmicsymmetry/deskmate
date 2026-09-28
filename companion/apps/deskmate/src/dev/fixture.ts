@@ -128,6 +128,9 @@ export function mockSnapshot(config: AppConfig): AppSnapshot {
       ota_state: "idle",
       active_card_id: "clock",
       counters: MOCK_COUNTERS,
+      // What a linked board with four picture frames in flash reports. Nothing
+      // renders it; it is here because the harness mirrors the shipped shape.
+      asset_store: { used_bytes: 141_312, free_bytes: 6_149_120, asset_count: 4 },
     },
     pomodoros: [
       {

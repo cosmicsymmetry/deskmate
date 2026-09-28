@@ -114,6 +114,25 @@ pub struct DeviceSnapshot {
     pub ota_state: Option<DeviceOtaState>,
     pub active_card_id: Option<String>,
     pub counters: DeviceCounters,
+    #[serde(default)]
+    pub asset_store: Option<DeviceAssetStore>,
+}
+
+/// What the device says about its **durable flash** asset store, from key 31 of
+/// every `StatusResponse`. `None` means the device is not reporting it, which is
+/// what a store that never formatted does.
+///
+/// These are flash numbers and not PSRAM ones, so they do not measure the
+/// volatile tier a picture frame is headed for. What they answer is whether the
+/// flash is still being written for frames at all: the durable store has never
+/// held anything else, because every font the host emits is baked and a config
+/// declares no assets. `used_bytes` holding still across refreshes is the
+/// observable end of the wear this project has been paying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceAssetStore {
+    pub used_bytes: u32,
+    pub free_bytes: u32,
+    pub asset_count: u32,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]

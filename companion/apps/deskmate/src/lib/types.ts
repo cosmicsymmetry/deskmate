@@ -246,6 +246,20 @@ export interface DeviceSnapshot {
   ota_state: DeviceOtaState | null;
   active_card_id: string | null;
   counters: DeviceCounters;
+  asset_store: DeviceAssetStore | null;
+}
+
+/**
+ * The display's durable flash asset store, as it reports it. Flash numbers, not
+ * PSRAM ones: they say whether the flash is still being written for picture
+ * frames, not how much room the volatile frame tier has left. Nothing renders
+ * them -- the snapshot's change key blanks them, because they move on every
+ * frame a face draws.
+ */
+export interface DeviceAssetStore {
+  used_bytes: number;
+  free_bytes: number;
+  asset_count: number;
 }
 
 export type DeviceTier = "local" | "networked";

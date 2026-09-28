@@ -169,22 +169,125 @@ fn a_refused_picture_scene_is_retried_only_for_a_new_digest() {
 }
 
 #[test]
-fn an_image_source_update_for_a_card_that_is_not_on_screen_pushes_no_scene() {
+fn an_image_source_update_for_a_card_that_is_not_on_screen_costs_no_flash_and_no_scene() {
+    // Every picture frame is volatile since `v2.2.0-psram`, not just the one on
+    // the glass, so an off-screen refresh writes nothing to flash at all. This
+    // test asserted the opposite until 2026-09-28: the off-screen path used to
+    // run a durable reconcile, re-sending and committing the whole desired set,
+    // because the pool held two frames and could not be spent on a card nobody
+    // was looking at. It holds sixteen now.
     let existing_digest = [0x50; protocol::ASSET_DIGEST_LEN];
     let picture_digest = [0x51; protocol::ASSET_DIGEST_LEN];
     let operations = run_image_source_update_case(false, existing_digest, picture_digest);
+
     assert_eq!(
-        operations.len(),
-        6,
-        "unexpected update transcript: {operations:?}"
+        operations,
+        vec![
+            Operation::VolatileAssetBegin(picture_digest),
+            Operation::AssetChunk(picture_digest, 0),
+            Operation::AssetCommit(picture_digest),
+        ],
+        "an off-screen refresh should be one PSRAM transfer and nothing else: {operations:?}"
     );
-    assert_image_update_asset_prefix(&operations, existing_digest, picture_digest);
+
+    // Spelled out separately from the transcript equality above, because these
+    // three are the properties that matter and a future transcript change should
+    // have to argue with each of them by name.
     assert!(
-        operations
+        !operations
             .iter()
-            .all(|operation| !matches!(operation, Operation::PushScene(_))),
-        "an off-screen frame becomes resident without rebuilding the visible face"
+            .any(|operation| matches!(operation, Operation::AssetBegin(_))),
+        "an off-screen frame must not be written to flash: {operations:?}"
     );
+    assert!(
+        !operations
+            .iter()
+            .any(|operation| matches!(operation, Operation::PushScene(_))),
+        "an off-screen frame becomes resident without rebuilding the visible face: {operations:?}"
+    );
+    assert!(
+        !operations
+            .iter()
+            .any(|operation| matches!(operation, Operation::AssetRelease(_))),
+        "reclaiming waits until the pool is pressed: {operations:?}"
+    );
+}
+
+#[test]
+fn a_pressed_frame_pool_is_reclaimed_after_the_frame_lands_and_a_roomy_one_is_not() {
+    // Every refresh yields a new digest and a committed volatile frame is freed
+    // only when an AssetRelease keep-set omits it, so a pool nobody reclaims
+    // fills up and starts refusing reservations. The host watches the device's
+    // own occupancy (StatusResponse key 32) rather than trusting the refresh
+    // arithmetic, because the arithmetic breaks as soon as a card is added.
+    let existing_digest = [0x60; protocol::ASSET_DIGEST_LEN];
+    let picture_digest = [0x61; protocol::ASSET_DIGEST_LEN];
+
+    for (label, committed_count, expect_release) in [
+        ("a roomy pool", 4, false),
+        // 13 committed + 1 incoming reaches 16 - 2 of headroom.
+        ("a pressed pool", 13, true),
+    ] {
+        let control = MockDeviceControl::default();
+        control.set_status(StatusResponse {
+            volatile_assets: Some(protocol::VolatileAssetStats {
+                committed_count,
+                slot_capacity: 16,
+                used_bytes: committed_count * 329_740,
+                psram_free_bytes: 6_977_400,
+                psram_low_water_bytes: 6_977_264,
+            }),
+            ..status(0)
+        });
+        let host = FakeImageSourceHostControl::default();
+        host.set_desired_assets(vec![DesiredAsset {
+            digest: existing_digest,
+            kind: protocol::AssetKind::Image,
+            bytes: Arc::from(&b"resident picture"[..]),
+        }]);
+        let runtime =
+            start_picture_runtime(picture_config(false), &control, Some(Box::new(host.host())));
+        wait_for(Duration::from_secs(1), || {
+            control.operations().iter().any(
+                |operation| matches!(operation, Operation::AssetRelease(digests) if digests == &vec![existing_digest]),
+            )
+        });
+        let before = control.operations().len();
+
+        host.stage_picture_frame("camera", picture_digest, PICTURE_BLOB, false);
+        runtime
+            .image_source_updated("camera", picture_digest)
+            .unwrap();
+        wait_for(Duration::from_secs(1), || {
+            control.operations()[before..]
+                .iter()
+                .any(|operation| matches!(operation, Operation::AssetCommit(digest) if digest == &picture_digest))
+        });
+        let after: Vec<Operation> = control.operations()[before..].to_vec();
+        runtime.shutdown().unwrap();
+
+        let commit_at = after
+            .iter()
+            .position(
+                |operation| matches!(operation, Operation::AssetCommit(digest) if digest == &picture_digest),
+            )
+            .unwrap_or_else(|| panic!("{label}: the frame never committed: {after:?}"));
+        let release_at = after
+            .iter()
+            .position(|operation| matches!(operation, Operation::AssetRelease(_)));
+        assert_eq!(
+            release_at.is_some(),
+            expect_release,
+            "{label} should{} reclaim: {after:?}",
+            if expect_release { "" } else { " not" }
+        );
+        if let Some(release_at) = release_at {
+            assert!(
+                commit_at < release_at,
+                "{label}: reclaiming must follow the frame, never precede it: {after:?}"
+            );
+        }
+    }
 }
 
 #[test]

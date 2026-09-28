@@ -872,6 +872,9 @@ fn process_command(
 /// Reclaiming is housekeeping: nothing waits on it, and it costs the panel
 /// seconds of its own clock. Rate-limiting it is what takes flash compaction out
 /// of the path between a tap and its picture.
+///
+/// The cadence alone is not enough once every frame is volatile, which is why
+/// [`volatile_pool_is_pressed`] can override it -- see that function.
 fn claim_asset_release(state: &mut WorkerState, now: Instant) -> bool {
     let due = state
         .last_asset_release
@@ -880,6 +883,102 @@ fn claim_asset_release(state: &mut WorkerState, now: Instant) -> bool {
         state.last_asset_release = Some(now);
     }
     due
+}
+
+/// Slots left unclaimed when deciding the pool needs reclaiming: one for the
+/// incoming replacement every transfer needs, and one so a second card's refresh
+/// landing in the same moment is not refused.
+const VOLATILE_POOL_HEADROOM: u32 = 2;
+
+/// Whether the device's frame pool is close enough to full that superseded
+/// frames must be released now rather than at the next cadence.
+///
+/// Every refresh of a face yields a new digest, and a committed volatile frame
+/// is freed only when an `AssetRelease` keep-set omits it. Four picture cards on
+/// a fifteen-minute refresh produce sixteen frames an hour, so a sixteen-slot
+/// pool fills in about an hour if nothing reclaims it. The thirty-minute cadence
+/// happens to survive that (eight superseded plus four current), but it has no
+/// margin: a fifth picture card exhausts the pool between releases and the
+/// device starts answering `Busy`.
+///
+/// So the host watches the pool instead of trusting the arithmetic. The figures
+/// come from `StatusResponse` key 32, which is why that key reports occupancy
+/// and not just a capacity. A device that does not report it -- any image built
+/// before the pool -- leaves this false and keeps the old cadence, which is
+/// correct for it: with two slots the host is not staging anything to fill them.
+fn volatile_pool_is_pressed(state: &WorkerState) -> bool {
+    state.device.volatile_assets.is_some_and(|pool| {
+        pool.committed_count + 1 >= pool.slot_capacity.saturating_sub(VOLATILE_POOL_HEADROOM)
+    })
+}
+
+/// Tell the device which frames are still wanted, so it can free the rest.
+///
+/// `AssetRelease` is a device-wide KEEP-SET spanning both tiers, so the complete
+/// desired set is the only safe thing to send: a partial list reads as "release
+/// every digest I left out". Sending it is the only way a superseded volatile
+/// frame is ever freed.
+///
+/// A failure is not reported, and not swallowed either: the cadence is stamped
+/// only on success, so a failed pass leaves the pool still pressed and the very
+/// next frame update tries again. The picture is already on the glass by the time
+/// this runs and nothing waits on the outcome, so turning a delivered frame into
+/// a reported error would be a lie about what the owner can see. This crate logs
+/// nothing anywhere -- the server owns diagnostics -- so self-correction is the
+/// handling rather than a warning nobody would read.
+fn reclaim_superseded_frames(
+    state: &mut WorkerState,
+    device: &mut dyn RuntimeDevice,
+    desired: &[DesiredAsset],
+) {
+    if let Ok(keep_set) =
+        AssetSync::reconcile_releasing(device, desired, state.device.capability_bits(), true)
+    {
+        state.last_asset_release = Some(Instant::now());
+        state.confirmed_resident_assets = keep_set.into_iter().collect();
+    }
+}
+
+/// One authoritative host snapshot, read before the device is touched.
+///
+/// A stale queued notification must not reconcile a set that no longer contains
+/// the digest it names, and an empty or partial set would make `AssetRelease`
+/// delete unrelated device-wide assets. Both checks are here rather than at the
+/// call site so the order -- read once, validate, then speak to the device -- is
+/// not something a later edit can accidentally interleave.
+fn desired_assets_for_update(
+    state: &mut WorkerState,
+    source_id: &str,
+    digest: [u8; protocol::ASSET_DIGEST_LEN],
+) -> Result<Vec<DesiredAsset>, RuntimeError> {
+    let host = state
+        .image_source_host
+        .as_deref_mut()
+        .ok_or_else(|| RuntimeError::ImageSource {
+            message: "cannot apply an image update because no image source host is configured"
+                .into(),
+        })?;
+    let desired = host.desired_assets();
+    if !desired.iter().any(|asset| asset.digest == digest) {
+        return Err(RuntimeError::ImageSource {
+            message: format!(
+                "image source {source_id:?} is missing from the host's complete desired asset set"
+            ),
+        });
+    }
+    let frame = host
+        .image_source_frame(source_id)
+        .ok_or_else(|| RuntimeError::ImageSource {
+            message: format!("image source {source_id:?} has no frame to install"),
+        })?;
+    if frame.digest != digest {
+        return Err(RuntimeError::ImageSource {
+            message: format!(
+                "image source {source_id:?} now holds a different frame than this update"
+            ),
+        });
+    }
+    Ok(desired)
 }
 
 fn apply_image_source_update(
@@ -903,42 +1002,7 @@ fn apply_image_source_update(
         })
     });
 
-    // Read one authoritative host snapshot before touching the device. A stale
-    // queued notification must not reconcile a set that no longer contains
-    // the digest it names, and an empty/partial set would make AssetRelease
-    // delete unrelated device-wide assets.
-    let desired = {
-        let host =
-            state
-                .image_source_host
-                .as_deref_mut()
-                .ok_or_else(|| RuntimeError::ImageSource {
-                    message:
-                        "cannot apply an image update because no image source host is configured"
-                            .into(),
-                })?;
-        let desired = host.desired_assets();
-        if !desired.iter().any(|asset| asset.digest == digest) {
-            return Err(RuntimeError::ImageSource {
-                message: format!(
-                    "image source {source_id:?} is missing from the host's complete desired asset set"
-                ),
-            });
-        }
-        let frame =
-            host.image_source_frame(source_id)
-                .ok_or_else(|| RuntimeError::ImageSource {
-                    message: format!("image source {source_id:?} has no frame to install"),
-                })?;
-        if frame.digest != digest {
-            return Err(RuntimeError::ImageSource {
-                message: format!(
-                    "image source {source_id:?} now holds a different frame than this update"
-                ),
-            });
-        }
-        desired
-    };
+    let desired = desired_assets_for_update(state, source_id, digest)?;
 
     if state.config.preferences.paused {
         if visible_picture_card_id.is_some() {
@@ -947,49 +1011,60 @@ fn apply_image_source_update(
         return Ok(());
     }
 
-    // The interactive path: the frame that just changed is the one on the glass.
+    // EVERY picture frame is volatile, not just the one on the glass.
     //
-    // A durable pass would cost an `AssetCommit` that writes flash and then an
+    // A durable pass costs an `AssetCommit` that writes flash and then an
     // `AssetRelease` whose compaction moves every record after the one it just
-    // orphaned. Measured on `dev-0005` on 2026-09-26: 1.54 s and 9.36 s, and the
-    // panel shows its clock for the whole of the second one -- 9.5 of the 13.3
-    // seconds between a tap and its new picture. The volatile tier is a `memcpy`
-    // into PSRAM with neither cost, which is what it was built for
-    // (`volatile_asset_store.c`, capability bit 9).
+    // orphaned. Measured on `dev-0005`: 1.53-1.68 s and 10.5 s, against 76-81 ms
+    // for the same frame as a `memcpy` into PSRAM (2026-09-28, both tiers on the
+    // same board twenty minutes apart). Flash buys a picture frame nothing: the
+    // faces re-render every fifteen minutes, every render yields a new digest, so
+    // a durable frame is superseded long before its endurance mattered.
     //
-    // The durable copy is not written here and does not need to be: the digest
-    // addresses decoded bytes, so it is the same in both tiers, and the next
-    // ordinary reconcile -- any other source's refresh, or a reconnect -- carries
-    // this frame to flash under the digest the scene already names. The device
-    // resolves PSRAM before flash, so that arrival is invisible.
+    // This used to be the visible card only, because the pool held two frames and
+    // a third reservation was refused. It holds sixteen since `v2.2.0-psram`, so
+    // the tier fits every picture card at once -- which is what makes the
+    // condition here about capability and capacity rather than about what is on
+    // screen.
     //
-    // KNOWN GAP, bounded and accepted: the tier holds one committed frame, so
-    // tapping a *second* picture card before that reconcile evicts this one, and
-    // its card is blank until its durable copy lands (at most one refresh
-    // interval). Only one face takes taps today. Raising
-    // `VOLATILE_ASSET_SLOT_COUNT` closes it and needs a wire-contract amendment.
-    if let Some(card_id) = visible_picture_card_id.as_ref()
-        && state.device.capability_bits() & protocol::CAPABILITY_VOLATILE_ASSETS != 0
+    // A device that does not advertise bit 9, or a digest the host cannot produce,
+    // still falls through to the durable path below.
+    if state.device.capability_bits() & protocol::CAPABILITY_VOLATILE_ASSETS != 0
         && let Some(frame) = desired.iter().find(|asset| asset.digest == digest)
     {
-        return match AssetSync::transfer_volatile(device, frame, state.device.capability_bits()) {
+        match AssetSync::transfer_volatile(device, frame, state.device.capability_bits()) {
             Ok(()) => {
                 // The device holds it now, in PSRAM. Without this the scene gate
                 // would refuse to name the digest and the picture would wait for
                 // the durable write -- which is the wait this whole path removes.
                 state.confirmed_resident_assets.insert(digest);
                 clear_asset_sync_refusals(state);
-                state.active_scene_dirty = true;
-                push_active_scene(state, device, reconnect_interval);
-                Ok(())
+                // Only the card on screen earns a push. Rebuilding an unrelated
+                // face would turn every background refresh into panel traffic.
+                if visible_picture_card_id.is_some() {
+                    state.active_scene_dirty = true;
+                    push_active_scene(state, device, reconnect_interval);
+                }
+                // Reclaim AFTER the picture has landed, never before it, and only
+                // when the pool is filling: a release still runs the flash store's
+                // compaction planner, which is seconds while any durable record
+                // remains. See `volatile_pool_is_pressed`.
+                if volatile_pool_is_pressed(state) {
+                    reclaim_superseded_frames(state, device, &desired);
+                }
+                return Ok(());
             }
             Err(error) => {
                 let message = error.to_string();
                 state.active_scene_dirty = false;
-                handle_automatic_asset_error(state, card_id.clone(), error, reconnect_interval);
-                Err(RuntimeError::Device { message })
+                // A card error belongs to a card the owner is looking at. A
+                // background refusal is the link's business, not this card's.
+                if let Some(card_id) = visible_picture_card_id.as_ref() {
+                    handle_automatic_asset_error(state, card_id.clone(), error, reconnect_interval);
+                }
+                return Err(RuntimeError::Device { message });
             }
-        };
+        }
     }
 
     // This is deliberately the entire host-owned set. AssetRelease is a

@@ -11,10 +11,12 @@
 > tab group -- and found that an unset `RUST_LOG` hid the setup code (fixed, `f7ce7c1`);
 > step 3 migrated a copy of the live config (5 devices, 4 picture sources, the loop intact).
 > **Open:** Task 1 (Web Serial spike, needs the owner at the board); Task 13 steps 4-7.
-> **Deploy waits for Track C1 to merge** (owner, 2026-09-25): the live server runs C1's
-> branch build. After C1 lands, rebase onto it and make the migration also move C1's
-> `face-state.json` (per-source face state) into the owner's account folder, since its
-> sources are per account now. Live `DESKMATE_OWNER_EMAIL` is re.aleksandrov1@gmail.com.
+> **Merged 2026-09-28 (PR #5), after C1 phase 1 was merged in and made per-account.**
+> Deploy rides C1's next deploy (owner's choice): the live server was running C1's phase-2
+> branch, and replacing it mid-session was ruled out. `DESKMATE_PUBLIC_URL` and
+> `DESKMATE_OWNER_EMAIL=re.aleksandrov1@gmail.com` are already in the live `server.env`
+> (backed up first), so that first start migrates instead of refusing. Task 13 steps 5-6
+> (observe the migration live; claim `dev-0005`) are owed after that deploy.
 
 **Goal:** Turn the single-owner server into a multi-account one (email-link and Google sign-in, one folder per account, a first-run setup code) and let a signed-in owner put a panel on their Wi-Fi and claim it from the web page over Web Serial.
 

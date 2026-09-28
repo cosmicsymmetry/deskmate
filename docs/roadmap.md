@@ -69,7 +69,7 @@ the batch merges.
 
 | Track | Status | Branch | Waiting on |
 |---|---|---|---|
-| A | Accounts + claiming built and reviewed; C1 merged in and made per-account (face state, taps). PR #5, needs no schema/wire lock. Live owner account: re.aleksandrov1@gmail.com | `feat/track-a-accounts` | Deploy, then the owner's merge approval; the Web Serial spike at the board |
+| A | **Accounts + claiming merged** (PR #5, 2026-09-28). Not deployed yet: on the owner's direction **C1's next deploy carries it** -- C1 merges main, and the first start of that build migrates the live config into re.aleksandrov1@gmail.com's account (`DESKMATE_PUBLIC_URL` and `DESKMATE_OWNER_EMAIL` are already in the live `server.env`). After it, sign-in is an email link from the server log. Next: plan limits and billing, and self-host packaging | -- | The Web Serial spike at the board (plan Task 1) |
 | B | Not started | -- | -- |
 | C1 | Phase 1 works on hardware. The 13.3 s tap was measured, diagnosed (flash, not the wire) and cut: frames go to PSRAM and reclaiming is rate-limited. All four faces answer a tap. The frames-in-PSRAM spec is written and its step 1 (the host reads the device's asset-store stats) has shipped; steps 2-4 are **authorized (2026-09-28) and in progress** as one batch ending in a flash, batched with C2 | `track-c1-frames-in-psram` | The board on USB for the flash, and the on-board OTA re-verification afterwards |
 | C2 | Not started | -- | C1 |

@@ -3,6 +3,18 @@
 **Spec:** `docs/superpowers/specs/2026-09-28-deskmate-frames-live-in-psram-design.md`
 **Track:** C1 (branch `track-c1-tap-to-face`, PR #4)
 
+> **STATUS 2026-09-29. Every task is implemented; one is unverified on the board.**
+> Step 1, Task D (the firmware pool and key 32, flashed and verified on `dev-0005`),
+> Task C (every frame volatile, with pool-pressure reclamation), Task A (the faces
+> `views()`/`onTap()` contract) and Task B (the server stages views; a tap on a staged
+> view draws nothing) are all on `track-c1-frames-in-psram` with every gate green.
+>
+> **What is NOT done: the deploy, and therefore the tap measurement.** A/B ship the
+> latency win and neither has been seen on hardware -- the tap on the glass is still the
+> one thing this track has never observed. The deploy is held because the next one also
+> carries Track A's account migration and changes how the web app signs in, which is the
+> owner's call and not a peer's.
+>
 > **STATUS 2026-09-28, updated.** Step 1 is delivered (`784ff52`). **Task D is delivered
 > and verified on hardware** (`68f15a8`): the owner authorized the flash, the board took
 > `v2.2.0-psram` by OTA, and the pool reports `capacity 16` with commits at 76-81 ms where

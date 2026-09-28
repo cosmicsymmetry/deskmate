@@ -16,6 +16,14 @@ new is only the producer.
 unchanged and remains the right answer for anything that needs credentials or a machine
 this server is not.
 
+A third-party **plugin** is a fourth way to fill a picture card, distinct from all
+three of the above: an author's code runs sandboxed on our own host, declares the
+requests it needs, and never sees the owner's credentials. It is documented separately
+for the author who writes one -- `docs/plugins/contract-v1.md` -- because that
+document is a contract for outside code, not operational material for running this
+server. This document keeps the latter: `data-cards.json`, the manual settings below,
+and what the owner is told.
+
 ## Who does what (since 2026-09-20)
 
 | | Where | Language |

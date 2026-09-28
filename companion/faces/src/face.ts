@@ -24,6 +24,15 @@ export type FieldSpec =
  */
 export type Settings = Readonly<Record<string, unknown>>;
 
+/** A view a face can draw. Stable, opaque to the server, unique within a face. */
+export type ViewId = string;
+
+/** One coalesced panel-tap event. */
+export interface TapEvent {
+  taps: number;
+  point: { x: number; y: number } | null;
+}
+
 /** What a face is told beyond its settings: where it left off, and why it is drawing now. */
 export interface RenderContext {
   /** Whatever this face returned as `state` last time, or undefined. */
@@ -34,7 +43,9 @@ export interface RenderContext {
    * `point` is always null until the wire carries one (C2); a face that wants to
    * hit-test gets the point in the same 448x368 space it drew in.
    */
-  event?: { taps: number; point: { x: number; y: number } | null };
+  event?: TapEvent;
+  /** Which view to draw. Absent means the resting view, which is views()[0]. */
+  view?: ViewId;
 }
 
 /** A face returns a document, or a document plus the state it wants back next time. */
@@ -48,6 +59,21 @@ export interface FaceDefinition {
   fields: FieldSpec[];
   /** What the window tells the owner a tap does. A face without it ignores taps. */
   tap?: string;
+  /**
+   * The views this face offers, in priority order; the first is the resting view.
+   * Pure: no fetch, no draw. A face without it has exactly one view and keeps
+   * today's behaviour.
+   */
+  views?(settings: Settings, state?: unknown): ViewId[];
+  /**
+   * Which view a tap selects, and the state to store. Pure: no fetch, no draw.
+   * A face with views() must have this, and the reverse.
+   */
+  onTap?(
+    settings: Settings,
+    state: unknown,
+    event: TapEvent,
+  ): { view: ViewId; state?: unknown };
   /** Fetches and draws. Resolves to the SVG document, optionally with new state. */
   render(
     settings: Settings,

@@ -24,6 +24,7 @@ import {
   type FaceDefinition,
   type RenderContext,
   type Settings,
+  type ViewId,
   text,
   TransientError,
 } from "../face";
@@ -701,6 +702,17 @@ function normalizedPage(page: number, stories: Story[]): number {
   return page % pageCount(stories);
 }
 
+function pageViews(stories: Story[]): ViewId[] {
+  return Array.from({ length: pageCount(stories) }, (_, page) =>
+    page === 0 ? "" : `page-${page + 1}`,
+  );
+}
+
+function pageForView(view: ViewId | undefined, stories: Story[]): number {
+  const page = pageViews(stories).indexOf(view ?? "");
+  return page === -1 ? 0 : page;
+}
+
 function recentTap(tappedAt: string | null, now: Date): boolean {
   if (tappedAt === null) {
     return false;
@@ -725,24 +737,24 @@ export async function renderHackerNewsRequest(
   get: FetchText = fetchText,
 ): Promise<{ svg: string; state: HackerNewsState }> {
   const previous = storedState(context.state);
-  if (context.event !== undefined && previous !== undefined && previous.stories.length > 0) {
-    const state: HackerNewsState = {
-      stories: previous.stories,
-      page: normalizedPage(previous.page + context.event.taps, previous.stories),
-      tappedAt: now.toISOString(),
+  if (context.event !== undefined && previous !== undefined) {
+    return {
+      svg: drawState({ ...previous, page: pageForView(context.view, previous.stories) }),
+      state: previous,
     };
-    return { svg: drawState(state), state };
   }
 
   const fresh = await fetchHackerNews(settings, now, get);
-  const keepPage =
-    context.event === undefined && previous !== undefined && recentTap(previous.tappedAt, now);
+  const keepPage = previous !== undefined && recentTap(previous.tappedAt, now);
   const state: HackerNewsState = {
     stories: fresh.stories,
     page: keepPage ? normalizedPage(previous.page, fresh.stories) : 0,
-    tappedAt: keepPage ? previous.tappedAt : context.event === undefined ? null : now.toISOString(),
+    tappedAt: keepPage ? previous.tappedAt : null,
   };
-  return { svg: drawState(state), state };
+  return {
+    svg: drawState({ ...state, page: pageForView(context.view, fresh.stories) }),
+    state,
+  };
 }
 
 export const hackernews: FaceDefinition = {
@@ -764,6 +776,23 @@ export const hackernews: FaceDefinition = {
       ],
     },
   ],
+  views(_settings, value) {
+    const state = storedState(value);
+    return state === undefined ? [""] : pageViews(state.stories);
+  },
+  onTap(_settings, value, event) {
+    const previous = storedState(value);
+    if (previous === undefined) {
+      return { view: "" };
+    }
+    const page = normalizedPage(previous.page + event.taps, previous.stories);
+    const state: HackerNewsState = {
+      ...previous,
+      page,
+      tappedAt: new Date().toISOString(),
+    };
+    return { view: pageViews(state.stories)[page] ?? "", state };
+  },
   render(settings, now, context) {
     return renderHackerNewsRequest(settings, now, context);
   },

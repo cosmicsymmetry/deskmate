@@ -15,6 +15,7 @@ import {
   type FaceDefinition,
   type RenderContext,
   type Settings,
+  type ViewId,
   text,
   TransientError,
 } from "../face";
@@ -353,6 +354,17 @@ function normalizedPage(page: number, entries: FeedEntry[]): number {
   return ((page % pages) + pages) % pages;
 }
 
+function pageViews(entries: FeedEntry[]): ViewId[] {
+  return Array.from({ length: pageCount(entries) }, (_, page) =>
+    page === 0 ? "" : `page-${page + 1}`,
+  );
+}
+
+function pageForView(view: ViewId | undefined, entries: FeedEntry[]): number {
+  const page = pageViews(entries).indexOf(view ?? "");
+  return page === -1 ? 0 : page;
+}
+
 function recentTap(tappedAt: string | null, now: Date): boolean {
   if (tappedAt === null) {
     return false;
@@ -381,25 +393,29 @@ export async function renderRssRequest(
   get: FetchText = fetchText,
 ): Promise<{ svg: string; state: RssState }> {
   const previous = storedState(context.state);
-  if (context.event !== undefined && previous !== undefined && previous.entries.length > 0) {
-    const state: RssState = {
-      ...previous,
-      page: normalizedPage(previous.page + context.event.taps, previous.entries),
-      tappedAt: now.toISOString(),
+  if (context.event !== undefined && previous !== undefined) {
+    return {
+      svg: renderRss(
+        faceForPage({ ...previous, page: pageForView(context.view, previous.entries) }),
+      ),
+      state: previous,
     };
-    return { svg: renderRss(faceForPage(state)), state };
   }
 
   const fresh = await fetchRss(settings, now, get);
-  const keepPage =
-    context.event === undefined && previous !== undefined && recentTap(previous.tappedAt, now);
+  const keepPage = previous !== undefined && recentTap(previous.tappedAt, now);
   const state: RssState = {
     feedTitle: fresh.feedTitle,
     entries: fresh.entries,
     page: keepPage ? normalizedPage(previous.page, fresh.entries) : 0,
-    tappedAt: keepPage ? previous.tappedAt : context.event === undefined ? null : now.toISOString(),
+    tappedAt: keepPage ? previous.tappedAt : null,
   };
-  return { svg: renderRss(faceForPage(state)), state };
+  return {
+    svg: renderRss(
+      faceForPage({ ...state, page: pageForView(context.view, fresh.entries) }),
+    ),
+    state,
+  };
 }
 
 export const rss: FaceDefinition = {
@@ -410,6 +426,23 @@ export const rss: FaceDefinition = {
     { type: "url", key: "url", label: "Feed URL", placeholder: "https://example.com/feed.xml" },
     { type: "text", key: "title", label: "Title", placeholder: "News" },
   ],
+  views(_settings, value) {
+    const state = storedState(value);
+    return state === undefined ? [""] : pageViews(state.entries);
+  },
+  onTap(_settings, value, event) {
+    const previous = storedState(value);
+    if (previous === undefined) {
+      return { view: "" };
+    }
+    const page = normalizedPage(previous.page + event.taps, previous.entries);
+    const state: RssState = {
+      ...previous,
+      page,
+      tappedAt: new Date().toISOString(),
+    };
+    return { view: pageViews(state.entries)[page] ?? "", state };
+  },
   async render(settings, now, context) {
     return renderRssRequest(settings, now, context);
   },

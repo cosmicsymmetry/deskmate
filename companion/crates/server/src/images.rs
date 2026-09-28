@@ -443,20 +443,24 @@ fn map_ingest_error(error: ImageIngestError) -> ImageRouteError {
 fn map_mint_error(error: &ImageSourceError) -> ImageRouteError {
     match error {
         ImageSourceError::Capacity => ImageRouteError::Capacity,
-        // Neither of these can reach a mint; they are folded in so the match
+        // None of these can reach a mint; they are folded in so the match
         // stays exhaustive without a wildcard that would hide a new variant.
         ImageSourceError::Io { .. }
         | ImageSourceError::UnknownToken
-        | ImageSourceError::TooSoon => ImageRouteError::Internal,
+        | ImageSourceError::TooSoon
+        | ImageSourceError::InvalidView
+        | ImageSourceError::TooManyViews => ImageRouteError::Internal,
     }
 }
 
 fn map_revoke_error(error: &ImageSourceError) -> ImageRouteError {
     match error {
         ImageSourceError::UnknownToken => ImageRouteError::NotFound,
-        ImageSourceError::Io { .. } | ImageSourceError::Capacity | ImageSourceError::TooSoon => {
-            ImageRouteError::Internal
-        }
+        ImageSourceError::Io { .. }
+        | ImageSourceError::Capacity
+        | ImageSourceError::TooSoon
+        | ImageSourceError::InvalidView
+        | ImageSourceError::TooManyViews => ImageRouteError::Internal,
     }
 }
 
@@ -465,8 +469,14 @@ fn map_accept_error(error: &ImageSourceError) -> ImageRouteError {
         ImageSourceError::UnknownToken => ImageRouteError::ProducerUnauthorized,
         ImageSourceError::TooSoon => ImageRouteError::RateLimited,
         // The source ceiling is unreachable on an accept: minting already
-        // refused the source that would have exceeded it.
-        ImageSourceError::Io { .. } | ImageSourceError::Capacity => ImageRouteError::Internal,
+        // refused the source that would have exceeded it. A producer's POST is
+        // always the resting view, so an invalid view cannot come from one; the
+        // view ceiling is reachable only if a face staged the maximum without a
+        // resting frame, which is our bug and not the producer's.
+        ImageSourceError::Io { .. }
+        | ImageSourceError::Capacity
+        | ImageSourceError::InvalidView
+        | ImageSourceError::TooManyViews => ImageRouteError::Internal,
     }
 }
 

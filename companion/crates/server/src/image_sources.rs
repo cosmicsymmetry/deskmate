@@ -5,6 +5,7 @@
 //! once at startup into `Arc<[u8]>` and stay there, so later asset reconciliation
 //! neither re-reads nor re-hashes bytes.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -35,6 +36,13 @@ const LVGL_IMAGE_HEADER_BYTES: usize = 12;
 const CANONICAL_FRAME_BYTES: usize = LVGL_IMAGE_HEADER_BYTES
     + protocol::SCENE_CANVAS_WIDTH as usize * protocol::SCENE_CANVAS_HEIGHT as usize * 2;
 const SOURCE_ID_RANDOM_HEX_LEN: usize = 24;
+/// Long enough for a readable view name, short enough that a source's frame
+/// paths stay well inside any filesystem's component limit.
+const MAX_VIEW_ID_LEN: usize = 32;
+/// How many frames one source may hold. The real ceiling is the wire's
+/// 32-digest `AssetRelease`, which the staged total has to fit; this bounds
+/// what a single misbehaving face can do to the store on its own.
+const MAX_VIEWS_PER_SOURCE: usize = 16;
 const _: () = assert!(MAX_IMAGE_SOURCES <= protocol::MAX_ASSET_DIGESTS);
 
 pub(crate) struct ImageSourceStore {
@@ -87,7 +95,37 @@ struct SourceRecord {
     name: String,
     token_digest: [u8; 32],
     recent_push_times: Vec<DateTime<Utc>>,
-    frame: Option<StoredFrame>,
+    /// One frame per view the face offers, keyed by [`ViewId`]. The resting view
+    /// is [`RESTING_VIEW`] and is the only entry an external producer ever
+    /// writes.
+    frames: BTreeMap<ViewId, StoredFrame>,
+    /// Which view the device should be showing. Not persisted: after a restart
+    /// the resting view is the right answer, and a volatile frame did not
+    /// survive the reboot either.
+    selected: ViewId,
+}
+
+/// A face's name for one of the pictures it can draw. Opaque to the server
+/// except that it becomes part of a filename, which is why [`valid_view_id`]
+/// exists.
+pub(crate) type ViewId = String;
+
+/// The view every source has, and the only one a producer's POST writes.
+///
+/// The empty string rather than a word, so a face that declares no views and the
+/// frame a source has always had are the same key here and the same path on
+/// disk. That is what keeps every existing frame on the live VM readable.
+pub(crate) const RESTING_VIEW: &str = "";
+
+/// A view id may become `image-frames/<source>--<view>.bin`, so it is bounded and
+/// restricted before it ever reaches the filesystem. The faces package is our
+/// own code, but it is also the one input here that is not the server's.
+fn valid_view_id(view: &str) -> bool {
+    view == RESTING_VIEW
+        || (view.len() <= MAX_VIEW_ID_LEN
+            && view
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'))
 }
 
 #[derive(Clone)]
@@ -128,6 +166,10 @@ pub(crate) enum ImageSourceError {
     Io { message: String },
     #[error("the image source was pushed too recently")]
     TooSoon,
+    #[error("the view name is not a valid frame key")]
+    InvalidView,
+    #[error("the image source already holds {MAX_VIEWS_PER_SOURCE} views")]
+    TooManyViews,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -175,7 +217,8 @@ impl ImageSourceStore {
             name: name.to_owned(),
             token_digest: token_digest(&token),
             recent_push_times: Vec::new(),
-            frame: None,
+            frames: BTreeMap::new(),
+            selected: RESTING_VIEW.to_owned(),
         };
         let mut candidate = state.clone();
         candidate.sources.push(record);
@@ -198,7 +241,7 @@ impl ImageSourceStore {
         save_store(&self.root, &candidate)?;
         *state = candidate;
 
-        remove_frame(&self.root, &removed.id)
+        remove_frames(&self.root, &removed.id)
     }
 
     /// Authenticates against digest records only. Output-equivalence tests
@@ -242,6 +285,20 @@ impl ImageSourceStore {
         self.accept_paced(id, frame, now, false)
     }
 
+    /// Accepts a frame the SERVER drew for one named view, without the producer
+    /// rate limit. Staging a view does not change what the device is showing --
+    /// only [`ImageSourceStore::select_view`] does that -- so this returns
+    /// whether the frame is new, not whether the panel should be told.
+    pub(crate) fn accept_staged_view(
+        &self,
+        id: &str,
+        view: &str,
+        frame: CanonicalFrame,
+        now: DateTime<Utc>,
+    ) -> Result<AcceptOutcome, ImageSourceError> {
+        self.accept_into_view(id, view, frame, now, false)
+    }
+
     fn accept_paced(
         &self,
         id: &str,
@@ -249,6 +306,20 @@ impl ImageSourceStore {
         now: DateTime<Utc>,
         rate_limited: bool,
     ) -> Result<AcceptOutcome, ImageSourceError> {
+        self.accept_into_view(id, RESTING_VIEW, frame, now, rate_limited)
+    }
+
+    fn accept_into_view(
+        &self,
+        id: &str,
+        view: &str,
+        frame: CanonicalFrame,
+        now: DateTime<Utc>,
+        rate_limited: bool,
+    ) -> Result<AcceptOutcome, ImageSourceError> {
+        if !valid_view_id(view) {
+            return Err(ImageSourceError::InvalidView);
+        }
         let mut state = self.lock();
         let index = state
             .sources
@@ -264,6 +335,9 @@ impl ImageSourceStore {
                 return Err(ImageSourceError::TooSoon);
             }
         }
+        if !source.frames.contains_key(view) && source.frames.len() >= MAX_VIEWS_PER_SOURCE {
+            return Err(ImageSourceError::TooManyViews);
+        }
 
         let mut recent_push_times = source.recent_push_times.clone();
         recent_push_times.push(now);
@@ -272,8 +346,8 @@ impl ImageSourceStore {
         }
 
         let unchanged = source
-            .frame
-            .as_ref()
+            .frames
+            .get(view)
             .is_some_and(|stored| stored.digest == frame.digest);
         let mut candidate = state.clone();
         candidate.sources[index].recent_push_times = recent_push_times;
@@ -284,28 +358,48 @@ impl ImageSourceStore {
             return Ok(AcceptOutcome::Unchanged);
         }
 
-        write_frame(&self.root, id, &frame.bytes)?;
+        write_frame(&self.root, id, view, &frame.bytes)?;
         let digest = frame.digest;
-        candidate.sources[index].frame = Some(StoredFrame {
-            digest,
-            bytes: Arc::from(frame.bytes),
-        });
+        candidate.sources[index].frames.insert(
+            view.to_owned(),
+            StoredFrame {
+                digest,
+                bytes: Arc::from(frame.bytes),
+            },
+        );
         save_store(&self.root, &candidate)?;
         *state = candidate;
         Ok(AcceptOutcome::Changed { digest })
     }
 
+    /// Points the source at one of its staged views and reports that view's
+    /// digest, so the caller can tell the runtime which frame to draw.
+    ///
+    /// Returns `None` when the view is not staged, which is the ordinary answer
+    /// for a view past the card's share of the pool: the caller renders it on
+    /// demand instead.
+    pub(crate) fn select_view(&self, id: &str, view: &str) -> Option<[u8; 32]> {
+        let mut state = self.lock();
+        let source = state.sources.iter_mut().find(|source| source.id == id)?;
+        let digest = source.frames.get(view)?.digest;
+        source.selected = view.to_owned();
+        Some(digest)
+    }
+
+    /// The frame the device should be showing: the selected view, or the resting
+    /// view when the selection has nothing staged behind it.
     pub(crate) fn frame(&self, id: &str, now: DateTime<Utc>) -> Option<app_core::ImageSourceFrame> {
         let state = self.lock();
         let source = state.sources.iter().find(|source| source.id == id)?;
-        source
-            .frame
-            .as_ref()
-            .map(|frame| app_core::ImageSourceFrame {
-                digest: frame.digest,
-                bytes: Arc::clone(&frame.bytes),
-                stale: is_stale(&source.recent_push_times, now),
-            })
+        let frame = source
+            .frames
+            .get(&source.selected)
+            .or_else(|| source.frames.get(RESTING_VIEW))?;
+        Some(app_core::ImageSourceFrame {
+            digest: frame.digest,
+            bytes: Arc::clone(&frame.bytes),
+            stale: is_stale(&source.recent_push_times, now),
+        })
     }
 
     /// Liveness metadata for the management surface.
@@ -321,7 +415,7 @@ impl ImageSourceStore {
             .map(|source| SourceSummary {
                 id: source.id.clone(),
                 name: source.name.clone(),
-                has_frame: source.frame.is_some(),
+                has_frame: !source.frames.is_empty(),
                 stale: is_stale(&source.recent_push_times, now),
                 last_push: source.recent_push_times.last().copied(),
             })
@@ -331,10 +425,13 @@ impl ImageSourceStore {
     fn desired_assets(&self) -> Vec<app_core::DesiredAsset> {
         let state = self.lock();
         let mut desired = Vec::new();
+        // Every staged view, not only the one on screen: a tap is one PushScene
+        // precisely because the frame it names is already resident, and a frame
+        // absent from this set is one the runtime refuses to name.
         for frame in state
             .sources
             .iter()
-            .filter_map(|source| source.frame.as_ref())
+            .flat_map(|source| source.frames.values())
         {
             if desired
                 .iter()
@@ -419,13 +516,14 @@ fn load_store(root: &Path) -> Result<ImageSourceState, ImageSourceError> {
             return Err(storage_error("recent push times are not chronological"));
         }
 
-        let frame = load_frame(root, &persisted_source.id)?;
+        let frames = load_frames(root, &persisted_source.id)?;
         sources.push(SourceRecord {
             id: persisted_source.id,
             name: persisted_source.name,
             token_digest,
             recent_push_times,
-            frame,
+            frames,
+            selected: RESTING_VIEW.to_owned(),
         });
     }
 
@@ -474,8 +572,57 @@ fn save_store(root: &Path, state: &ImageSourceState) -> Result<(), ImageSourceEr
     Ok(())
 }
 
-fn load_frame(root: &Path, id: &str) -> Result<Option<StoredFrame>, ImageSourceError> {
-    let path = frame_path(root, id);
+/// Every frame this source has on disk, keyed by view.
+///
+/// **This is why a per-view store needs no schema bump.** A frame was never
+/// recorded in `image-sources.json` -- the file is probed and the bytes re-hashed
+/// -- so extra views are discovered by listing the directory, and a store written
+/// before views existed loads as exactly one resting frame.
+fn load_frames(root: &Path, id: &str) -> Result<BTreeMap<ViewId, StoredFrame>, ImageSourceError> {
+    let mut frames = BTreeMap::new();
+    if let Some(frame) = load_frame(root, id, RESTING_VIEW)? {
+        frames.insert(RESTING_VIEW.to_owned(), frame);
+    }
+    let directory = root.join(IMAGE_FRAME_DIRECTORY);
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(frames),
+        Err(error) => {
+            return Err(storage_error(format!("read the image-frame directory: {error}")));
+        }
+    };
+    let prefix = format!("{id}--");
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            storage_error(format!("read an image-frame directory entry: {error}"))
+        })?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(view) = name
+            .strip_prefix(&prefix)
+            .and_then(|rest| rest.strip_suffix(".bin"))
+        else {
+            continue;
+        };
+        // A file whose name is not a view this server would ever write is left
+        // alone rather than loaded or deleted: it is not ours to interpret.
+        if !valid_view_id(view) || view == RESTING_VIEW {
+            continue;
+        }
+        if frames.len() >= MAX_VIEWS_PER_SOURCE {
+            return Err(storage_error(format!(
+                "image source {id} has more than {MAX_VIEWS_PER_SOURCE} stored views"
+            )));
+        }
+        if let Some(frame) = load_frame(root, id, view)? {
+            frames.insert(view.to_owned(), frame);
+        }
+    }
+    Ok(frames)
+}
+
+fn load_frame(root: &Path, id: &str, view: &str) -> Result<Option<StoredFrame>, ImageSourceError> {
+    let path = frame_path(root, id, view);
     let Some(bytes) = secure_file::read_bounded(&path, CANONICAL_FRAME_BYTES)
         .map_err(|error| bounded_read_error("image-source frame", error))?
     else {
@@ -494,31 +641,42 @@ fn load_frame(root: &Path, id: &str) -> Result<Option<StoredFrame>, ImageSourceE
     }))
 }
 
-fn write_frame(root: &Path, id: &str, bytes: &[u8]) -> Result<(), ImageSourceError> {
+fn write_frame(root: &Path, id: &str, view: &str, bytes: &[u8]) -> Result<(), ImageSourceError> {
     let directory = root.join(IMAGE_FRAME_DIRECTORY);
     secure_file::create_directory(&directory)
         .map_err(|error| file_error("image-frame directory", error))?;
-    let path = frame_path(root, id);
+    let path = frame_path(root, id, view);
     secure_file::write_and_replace_binary(&path, bytes)
         .map_err(|error| file_error("image-source frame", error))?;
     sync_parent_best_effort(&directory, &path);
     Ok(())
 }
 
-fn remove_frame(root: &Path, id: &str) -> Result<(), ImageSourceError> {
-    let path = frame_path(root, id);
-    match fs::remove_file(&path) {
-        Ok(()) => {
-            sync_parent_best_effort(&root.join(IMAGE_FRAME_DIRECTORY), &path);
-            Ok(())
+/// Removes every view's frame for one source, which is what revoking it means.
+fn remove_frames(root: &Path, id: &str) -> Result<(), ImageSourceError> {
+    let views: Vec<ViewId> = load_frames(root, id)?.into_keys().collect();
+    for view in views {
+        let path = frame_path(root, id, &view);
+        match fs::remove_file(&path) {
+            Ok(()) => sync_parent_best_effort(&root.join(IMAGE_FRAME_DIRECTORY), &path),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(storage_error(format!("remove image-source frame: {error}")));
+            }
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(storage_error(format!("remove image-source frame: {error}"))),
     }
+    Ok(())
 }
 
-fn frame_path(root: &Path, id: &str) -> PathBuf {
-    root.join(IMAGE_FRAME_DIRECTORY).join(format!("{id}.bin"))
+/// The resting view keeps the path it has always had, so every frame already on
+/// the live VM stays where it is and every producer's POST still lands there.
+fn frame_path(root: &Path, id: &str, view: &str) -> PathBuf {
+    let directory = root.join(IMAGE_FRAME_DIRECTORY);
+    if view == RESTING_VIEW {
+        directory.join(format!("{id}.bin"))
+    } else {
+        directory.join(format!("{id}--{view}.bin"))
+    }
 }
 
 fn sync_parent_best_effort(parent: &Path, path: &Path) {

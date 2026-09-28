@@ -664,19 +664,14 @@ export function renderWeatherResult(
   context?: RenderContext,
 ): RenderResult {
   let state = weatherState(context?.state);
-  if (context?.event !== undefined) {
-    if (context.event.taps % 2 !== 0) {
-      state = { ...state, view: state.view === "now" ? "days" : "now" };
-    }
-    state = { ...state, tappedAt: now.toISOString() };
-  } else if (state.view === "days") {
+  if (context?.event === undefined && state.view === "days") {
     const tappedAt = state.tappedAt === null ? Number.NaN : Date.parse(state.tappedAt);
     if (!Number.isFinite(tappedAt) || now.getTime() - tappedAt > TEMPORARY_VIEW_MS) {
       state = { view: "now", tappedAt: null };
     }
   }
   return {
-    svg: state.view === "days" ? renderWeatherDays(face) : renderWeather(face),
+    svg: context?.view === "days" ? renderWeatherDays(face) : renderWeather(face),
     state,
   };
 }
@@ -1045,6 +1040,17 @@ export const weather: FaceDefinition = {
       ],
     },
   ],
+  views() {
+    return ["", "days"];
+  },
+  onTap(_settings, value, event) {
+    let state = weatherState(value);
+    if (event.taps % 2 !== 0) {
+      state = { ...state, view: state.view === "now" ? "days" : "now" };
+    }
+    state = { ...state, tappedAt: new Date().toISOString() };
+    return { view: state.view === "days" ? "days" : "", state };
+  },
   async render(settings, now, context) {
     return renderWeatherRequest(settings, now, context);
   },

@@ -5714,3 +5714,49 @@ volatile_assets:  committed 4  capacity 16  used 1,318,960
 - A **release with an empty durable store, timed** -- the durable tier still holds 8
   records, so the cheap-release claim is untested.
 - Whether a statics **shift** still breaks an OTA download. This image moved none.
+
+### 2026-09-28, later -- every frame volatile, and what the low-water mark says
+
+Task C deployed, then corrected an hour later. The correction is the interesting part:
+`apply_image_source_update` was volatile, and **the reconnect path was not**. Every link
+re-establishment runs `synchronize_full` -> `AssetSync::reconcile`, which still sent
+`volatile: false`, so minutes after the deploy the board was still paying flash:
+
+```
+12:14:53  commit_ms=1550     12:14:56  commit_ms=1535     12:15:06  release 10,565 ms
+```
+
+Every host test passed throughout, because the tests drive the update path and a
+reconnect drives the other one. After choosing the tier by what the asset *is*
+(an image is volatile whenever bit 9 is advertised, fonts stay durable):
+
+```
+12:20:53  commit_ms=141      12:20:55  commit_ms=79       12:20:57  commit_ms=79
+12:21:01  release 4,789 ms   <- down from 10.5 s, and still draining the old records
+```
+
+**The durable store is emptying**, which is the spec's wear claim becoming observable:
+
+| | before | after |
+|---|---|---|
+| `asset_store.used_bytes` | 2,637,920 | **329,740** |
+| `asset_store.asset_count` | 8 | **1** |
+
+The last record is one frame still named by the keep-set; it goes when its digest next
+changes. Releases should fall to milliseconds once it does -- **not yet observed**, and
+it is the remaining half of the "a release with an empty durable store, timed" item.
+
+**The pool's real margin, from key 32's low-water mark:**
+
+```
+volatile_assets: committed 4  capacity 16  used 1,318,960
+                 psram_free 6,977,392  psram_low_water 4,961,976
+```
+
+`psram_low_water` is **2.0 MB below** the current free figure, so something transient --
+most likely the OTA download buffer -- took that much at its peak. Scaling to a full
+pool: 15 frames is 4,946,100 bytes, which would leave about 3.35 MB free, and a 2 MB
+transient on top of that leaves roughly **1.35 MB**. It fits, but the headroom is about
+half what `16 x 329,740` against total free suggested. This is the number the spec wanted
+and could not get, and it exists only because key 32 reports the allocator's low-water
+mark rather than the store's slot count.

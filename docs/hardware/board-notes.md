@@ -5760,3 +5760,51 @@ transient on top of that leaves roughly **1.35 MB**. It fits, but the headroom i
 half what `16 x 329,740` against total free suggested. This is the number the spec wanted
 and could not get, and it exists only because key 32 reports the allocator's low-water
 mark rather than the store's slot count.
+
+## 2026-09-29 -- the views seam, verified on the live server (not yet on the glass)
+
+Deployed with Track A's account migration, which moved the flat layout into
+`acc_559b1e35eb57508ad1b822c7ab27b7fa` and kept the originals under
+`configs/legacy-20260929T093211Z` (5 devices). A copy of the pre-migration `configs/`
+was taken first, as `configs-backup-<ts>`, because a migration is one-way.
+
+**Staging works against the real faces package**, first refresh after the restart:
+
+```
+09:32:12  staged a view for a tap  source_id=image-8e361aaf...  view=page-2
+09:32:12  staged a view for a tap  source_id=image-8e361aaf...  view=page-3
+09:32:19  staged a view for a tap  source_id=image-a9773eb4...  view=days
+```
+
+**The staged views are the ones a tap will actually select.** This looked wrong at first
+-- rss staged `page-2` and `page-3` while its stored page was 0, so `page-1` appeared to be
+missing -- and it is not: the face names pages the way a reader counts them, so the resting
+view **is** page 1. Asked directly, with the live state:
+
+```
+views → {"views":["","page-2","page-3","page-4"]}
+tap   → {"view":"page-2", ...}
+```
+
+`page-2` is staged, so the first tap takes the fast path. The second (`page-3`) does too;
+the third falls back to a render, which is what `MAX_STAGED_FRAMES_PER_SOURCE = 3` means.
+
+**The store, and the two ceilings it has to respect:**
+
+| | count |
+|---|---|
+| sources | 7 |
+| frames on disk | 10 (rss 3, weather 2, five others 1 each) |
+| device resident slots | 15 |
+| wire `AssetRelease` digests | 32 |
+
+Ten is comfortably inside both. A fifth tappable face would want watching.
+
+### What is still NOT observed, and cannot be from here
+
+- **A tap on the glass, and its redraw time.** This is the measurement the whole track is
+  for, and it needs a finger on the panel. `dev-0005` was not linked during this window
+  (its resting state), so nothing above touched the device at all.
+- Every figure in this entry is server-side. The tap path has been proven as far as "the
+  face chooses a staged view and the frame is in the store" -- which is exactly the
+  boundary `CLAUDE.md` warns is not the panel.

@@ -5640,3 +5640,34 @@ returns a different PNG for a tap, and weather's second tap returns to its first
   provoke it.
 - `an asset release was slow` should now appear at most twice an hour, not after
   every frame.
+
+## 2026-09-29 -- a third-party plugin's card, drawn on dev-0005
+
+**Observed by the owner, not by the session that built it.** The owner added the
+`github-stats` plugin card from the live window and reports: "I saw the card, it worked."
+
+What that establishes: a plugin folder under `companion/faces/plugins/` reaches the panel
+through the ordinary picture-card asset path -- discovery, the sandbox, the layout, the
+raster, the frame store and the wire all carry a card whose code the server never knew by
+name. Before this, no plugin-drawn frame had reached the glass.
+
+What it does NOT establish, and what a later session must not read into it:
+
+- **One mounting only.** Both mountings were not compared, so the orientation question for
+  a plugin frame is open exactly as it was.
+- **No tap.** `github-stats` declares no `tap`, so nothing about the tap path was exercised
+  by this card.
+- **No credential.** The card drew with `--` placeholders: no `plugin-secrets.json` existed,
+  and at that moment the child could not have read one anyway (see below). A plugin card
+  rendering REAL private data has still never been seen on the panel.
+- **Not the cadence.** The example declares 900 s, which is also the default, so the live
+  spec cannot distinguish a declared cadence from a fallback. The Rust test does.
+
+**A defect that this deploy did not exercise, found by reading afterwards.** The server
+spawns the faces child with `env_clear()`, and `secrets.ts` looked for
+`DESKMATE_CONFIG_DIR` -- never set in the child, so every deployed render read no secrets
+at all. The whole credential feature was inert in production while passing every test,
+because the tests set that variable in their own process. Fixed by passing the rendering
+account's own directory (accounts are per-account since Track A) on the `render` verb only.
+**The fix is not yet observed on the board**: it needs a real credential in a real
+`plugin-secrets.json`, which the owner has not yet provided.

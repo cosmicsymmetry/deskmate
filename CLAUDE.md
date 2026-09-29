@@ -74,6 +74,14 @@ default. This section states only what is true now.
   the admin token. **Adding a face is a file in `faces/src/faces/` plus
   `deploy.sh --faces-only`: no Rust, no restart**, because `DESKMATE_FACES_DIR` is read
   per refresh and the catalog re-read every minute, exactly as `DESKMATE_WEB_DIR` is.
+  **A third-party author instead gets a folder under `faces/plugins/`** (a pinned
+  `plugin.json` manifest plus an `index.js` exporting `plan`/`render`): the code runs
+  sandboxed (QuickJS/WASM, no imports -- no `fetch`, no `require`, no files, no
+  environment), it only *declares* the requests it needs and never performs one
+  itself, every request is checked against the manifest's own `hosts` allowlist
+  before the host performs it, and a secret is substituted by the host only into the
+  position its manifest entry names -- the plugin's own code never sees the value.
+  Contract, worked example, and every limit with its number: `docs/plugins/contract-v1.md`.
   - **The server makes no outbound GET again.** The faces fetch from their own process,
     behind their own guard (`faces/src/kit/http.ts`: private/loopback/metadata refused on
     every redirect hop, body cap, deadline, and the resolved address PINNED -- the

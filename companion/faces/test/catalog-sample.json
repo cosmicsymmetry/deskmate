@@ -1,0 +1,21 @@
+[
+  {
+    "kind": "sample-a",
+    "label": "Sample A",
+    "fields": [
+      {
+        "type": "text",
+        "key": "user",
+        "label": "Username",
+        "placeholder": "octocat"
+      }
+    ],
+    "tap": "Tap for detail.",
+    "refresh_seconds": 300
+  },
+  {
+    "kind": "sample-b",
+    "label": "Sample B",
+    "fields": []
+  }
+]

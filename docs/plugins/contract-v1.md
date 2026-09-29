@@ -567,18 +567,24 @@ exercises for `github-stats` and for the hostile-input fixtures under
    point of the pure-function shape. Run the package's own gates before trusting a
    change: `bun test`, `bun run check`, `bun run lint`, `bun run format:check`.
 5. **Configure a secret**, if your plugin declares one: create (or edit)
-   `plugin-secrets.json` under whatever `DESKMATE_CONFIG_DIR` points at, shaped
-   (`companion/faces/src/plugins/secrets.ts:1-16`):
+   `plugin-secrets.json` in the *owning account's own directory* --
+   `DESKMATE_CONFIG_DIR/accounts/<account-id>/plugin-secrets.json`, not the
+   top-level config root -- shaped (`companion/faces/src/plugins/secrets.ts:1-16`):
 
    ```json
    { "github-stats": { "github_token": "ghp_..." } }
    ```
 
-   The top-level key is your plugin's `id`; a plugin only ever sees its own entry. No
-   file, no `DESKMATE_CONFIG_DIR`, or no entry for your plugin's id are all "no
-   secrets configured" and never an error -- your plugin must render sensibly with
-   every secret absent, because that is the state of most renders before an owner
-   fills the field in.
+   The top-level key is your plugin's `id`; a plugin only ever sees its own entry,
+   and only for the account whose card is being rendered: on every `render` (never
+   on `describe`) the server points the child's `DESKMATE_CONFIG_DIR` at that one
+   account's directory, so a secret filed for account A's card is never visible to
+   account B's render of the same plugin
+   (`companion/crates/server/src/data_cards/faces_package.rs`). No file, no
+   `DESKMATE_CONFIG_DIR`, or no entry for your plugin's id are all "no secrets
+   configured" and never an error -- your plugin must render sensibly with every
+   secret absent, because that is the state of most renders before an owner fills
+   the field in.
 
 ## Reaching the panel
 

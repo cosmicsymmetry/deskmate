@@ -57,6 +57,7 @@ render)
 	*answer-with-a-flood*) head -c 3000000 /dev/zero ;;
 	*never-answer*) exec sleep 600 ;;
 	*echo-the-environment*) env >&2; exit 1 ;;
+	*echo-the-config-dir*) printf 'DESKMATE_CONFIG_DIR=%s\n' "${DESKMATE_CONFIG_DIR:-<unset>}" >&2; exit 1 ;;
 	*alternate-frame*) cat "$here/fake-face-alt.png" ;;
 	*'"event":'*) printf '{"png":"%s","state":{"page":3}}' "$(base64 < "$here/fake-face.png" | tr -d '\n')" ;;
 	*) cat "$here/fake-face.png" ;;

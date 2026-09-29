@@ -83,9 +83,11 @@ A face that needs any of those is not a face.
 
 ## Advanced manual settings
 
-The server persists specs in `data-cards.json` inside `DESKMATE_CONFIG_DIR`;
-`DESKMATE_DATA_CARDS` overrides that path. Settings such as `refresh_seconds` and
-an optional token `api_key` are deliberately absent from the browser descriptors.
+The server persists each account's specs at
+`DESKMATE_CONFIG_DIR/accounts/<account-id>/data-cards.json`; there is no global path
+override (`DESKMATE_DATA_CARDS` was removed when specs went per-account). Settings
+such as `refresh_seconds` and an optional token `api_key` are deliberately absent
+from the browser descriptors.
 
 To edit an existing persisted spec, stop the server, back up the file, and change
 only the intended entry, retaining every other entry. Then restart the server:
@@ -216,7 +218,13 @@ rather than to their network.
 
 The subprocess gets a **cleared environment**. The server's holds
 `DESKMATE_ADMIN_TOKEN`, and a process whose job is to fetch arbitrary URLs has no
-business with it.
+business with it. The one variable added back is `DESKMATE_CONFIG_DIR`, and only on
+`render`: it is set to the *rendering account's own directory*
+(`accounts/<account-id>/`, never the top-level config root), because that is where a
+third-party plugin's `plugin-secrets.json` lives
+(`docs/plugins/contract-v1.md`, "Configure a secret") and the child reads it for
+itself, so the server never holds or forwards a credential value. `describe` gets no
+directory at all -- it draws for no account.
 
 ## What the owner is told
 

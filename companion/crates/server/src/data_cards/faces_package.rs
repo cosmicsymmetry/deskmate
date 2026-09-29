@@ -20,7 +20,14 @@
 //!
 //! The environment is cleared. The server's own environment carries
 //! `DESKMATE_ADMIN_TOKEN`, and a process whose job is to fetch arbitrary feed
-//! URLs has no business holding it.
+//! URLs has no business holding it. The one addition is `DESKMATE_CONFIG_DIR`,
+//! set on `render` only, to the *rendering account's own directory*
+//! (`AccountSpace::root`) -- never the top-level config root, and never sent on
+//! `describe`. That is how a plugin reads its stored credential without the
+//! server ever holding or forwarding the value itself: the child reads
+//! `$DESKMATE_CONFIG_DIR/plugin-secrets.json`
+//! (`companion/faces/src/plugins/secrets.ts`) for itself, scoped to whichever
+//! account's card is being drawn.
 //!
 //! # Nothing here waits unboundedly
 //!
@@ -240,8 +247,10 @@ fn run(
     stdin: &[u8],
     stdout_cap: usize,
     timeout: Duration,
+    account_dir: Option<&Path>,
 ) -> Result<Finished, String> {
-    let mut child = Command::new(&command.program)
+    let mut builder = Command::new(&command.program);
+    builder
         .args(&command.arguments)
         .arg(verb)
         .env_clear()
@@ -249,7 +258,17 @@ fn run(
         // unit's home is not writable and a cache miss costs milliseconds.
         .env("PATH", "/usr/local/bin:/usr/bin:/bin")
         .env("BUN_RUNTIME_TRANSPILER_CACHE_PATH", "0")
-        .env("NO_COLOR", "1")
+        .env("NO_COLOR", "1");
+    if let Some(account_dir) = account_dir {
+        // Safe to add back where the admin token is deliberately withheld: this is
+        // a directory the caller (the render's own account scope) already chose for
+        // this one render, not a credential itself, and it grants the child nothing
+        // beyond reading one file under it
+        // (`companion/faces/src/plugins/secrets.ts::readPluginSecrets`). `describe`
+        // never passes one -- it draws for no account, so there is nothing to scope.
+        builder.env("DESKMATE_CONFIG_DIR", account_dir);
+    }
+    let mut child = builder
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -330,6 +349,7 @@ pub(crate) fn describe(command: &FaceCommand) -> Result<Vec<CatalogFace>, String
         &[],
         MAX_CATALOG_BYTES,
         DESCRIBE_TIMEOUT,
+        None,
     )?;
     if finished.code != Some(0) {
         return Err(format!("describe failed: {}", message_of(&finished)));
@@ -344,9 +364,15 @@ pub(crate) fn describe(command: &FaceCommand) -> Result<Vec<CatalogFace>, String
 }
 
 /// Fetches and draws one face, returning its PNG and state instruction.
+///
+/// `account_dir` is the rendering account's own directory (`AccountSpace::root`),
+/// passed to the child as `DESKMATE_CONFIG_DIR` so a plugin can read its stored
+/// credential -- see the module doc for why this one variable is safe to add back
+/// to an otherwise cleared environment.
 pub(crate) fn render(
     command: &FaceCommand,
     request: RenderRequest<'_>,
+    account_dir: &Path,
 ) -> Result<Rendered, FaceRenderError> {
     let mut body = serde_json::json!({
         "kind": request.kind,
@@ -369,6 +395,7 @@ pub(crate) fn render(
         body.to_string().as_bytes(),
         MAX_PNG_BYTES,
         RENDER_TIMEOUT,
+        Some(account_dir),
     )
     .map_err(FaceRenderError::Transient)?;
     match finished.code {
@@ -455,6 +482,13 @@ mod tests {
         }
     }
 
+    /// A stand-in account directory for tests that do not care which one is used,
+    /// only that some directory reaches the child. It need not exist: the fake
+    /// package only ever echoes the variable, never reads a file under it.
+    fn test_account_dir() -> &'static Path {
+        Path::new("/test-account")
+    }
+
     #[test]
     fn the_catalog_is_read_with_its_defaults() {
         let catalog = describe(&fake()).expect("the fake package describes itself");
@@ -521,15 +555,24 @@ mod tests {
 
     #[test]
     fn a_frame_comes_back_as_the_bytes_the_package_wrote() {
-        let rendered =
-            render(&fake(), request("weather", &steer("Dubai"), None, 0)).expect("a frame");
+        let rendered = render(
+            &fake(),
+            request("weather", &steer("Dubai"), None, 0),
+            test_account_dir(),
+        )
+        .expect("a frame");
         assert!(rendered.png.starts_with(b"\x89PNG"));
         assert!(crate::image_ingest::canonical_frame_from_png(&rendered.png).is_ok());
     }
 
     #[test]
     fn a_legacy_bare_png_is_still_a_frame_and_leaves_state_alone() {
-        let rendered = render(&fake(), request("weather", &steer(""), None, 0)).expect("a frame");
+        let rendered = render(
+            &fake(),
+            request("weather", &steer(""), None, 0),
+            test_account_dir(),
+        )
+        .expect("a frame");
         assert_eq!(&rendered.png[..4], b"\x89PNG");
         assert!(rendered.state.is_none());
     }
@@ -539,6 +582,7 @@ mod tests {
         let rendered = render(
             &fake(),
             request("weather", &steer("answer-with-an-envelope"), None, 0),
+            test_account_dir(),
         )
         .expect("a frame");
         assert_eq!(&rendered.png[..4], b"\x89PNG");
@@ -550,6 +594,7 @@ mod tests {
         let rendered = render(
             &fake(),
             request("weather", &steer("answer-with-a-null-state"), None, 0),
+            test_account_dir(),
         )
         .expect("a frame");
         assert_eq!(rendered.state, Some(None));
@@ -562,6 +607,7 @@ mod tests {
         let error = render(
             &fake(),
             request("weather", &steer("echo-the-request"), Some(&state), 3),
+            test_account_dir(),
         )
         .expect_err("the fake refuses on purpose");
         let FaceRenderError::Transient(message) = error else {
@@ -576,6 +622,7 @@ mod tests {
         let error = render(
             &fake(),
             request("weather", &steer("echo-the-request"), None, 0),
+            test_account_dir(),
         )
         .expect_err("the fake refuses on purpose");
         let FaceRenderError::Transient(message) = error else {
@@ -589,6 +636,7 @@ mod tests {
         let error = render(
             &fake(),
             request("weather", &steer("answer-with-garbage"), None, 0),
+            test_account_dir(),
         )
         .expect_err("not a frame");
         // Not Transient: retrying cannot fix a package that cannot answer, and the
@@ -601,6 +649,7 @@ mod tests {
         let error = render(
             &fake(),
             request("weather", &steer("answer-with-bad-base64"), None, 0),
+            test_account_dir(),
         )
         .expect_err("not a frame");
         assert!(matches!(error, FaceRenderError::Malformed(_)), "{error:?}");
@@ -612,6 +661,7 @@ mod tests {
             render(
                 &fake(),
                 request("token", &steer("refuse-as-configuration"), None, 0),
+                test_account_dir(),
             ),
             Err(FaceRenderError::Configuration(
                 "the coin was not found; check the coin ID".into()
@@ -621,6 +671,7 @@ mod tests {
             render(
                 &fake(),
                 request("token", &steer("refuse-as-transient"), None, 0),
+                test_account_dir(),
             ),
             Err(FaceRenderError::Transient(
                 "api.example returned HTTP 503".into()
@@ -635,6 +686,7 @@ mod tests {
             render(
                 &nowhere,
                 request("weather", &BTreeMap::new(), None, 0),
+                test_account_dir(),
             ),
             Err(FaceRenderError::Transient(message)) if message.contains("could not start")
         ));
@@ -647,6 +699,7 @@ mod tests {
             render(
                 &fake(),
                 request("weather", &steer("answer-with-a-flood"), None, 0),
+                test_account_dir(),
             ),
             Err(FaceRenderError::Transient(message)) if message.contains("more than")
         ));
@@ -661,6 +714,7 @@ mod tests {
             br#"{"x":"never-answer"}"#,
             1024,
             Duration::from_millis(150),
+            Some(test_account_dir()),
         );
         assert!(outcome.is_err_and(|message| message.contains("did not answer")));
         assert!(
@@ -683,6 +737,7 @@ mod tests {
             br#"{"x":"echo-the-environment"}"#,
             1024,
             Duration::from_secs(5),
+            Some(test_account_dir()),
         )
         .expect("the fake runs");
         assert!(
@@ -692,6 +747,54 @@ mod tests {
         assert!(
             !finished.stderr.contains("HOME="),
             "and the server's was not inherited"
+        );
+    }
+
+    // -- Regression coverage for the dropped `DESKMATE_CONFIG_DIR` defect --
+    //
+    // The server clears the child's environment, and a plugin's stored credential
+    // is read by the child itself from `$DESKMATE_CONFIG_DIR/plugin-secrets.json`
+    // (`companion/faces/src/plugins/secrets.ts`). If the server ever stops setting
+    // that variable on `render`, every plugin secret goes back to invisible in
+    // production while every test here still passes, unless a test pins the exact
+    // bytes the child receives -- which is what these two do.
+
+    #[test]
+    fn render_passes_the_accounts_directory_as_deskmate_config_dir() {
+        let error = render(
+            &fake(),
+            request("weather", &steer("echo-the-config-dir"), None, 0),
+            Path::new("/accounts/acc-123"),
+        )
+        .expect_err("the fake refuses on purpose");
+        let FaceRenderError::Transient(message) = error else {
+            panic!("expected transient")
+        };
+        // `message_of` is the fake's LAST stderr line, so this fails both if the
+        // `.env("DESKMATE_CONFIG_DIR", ...)` line is removed (the fake would print
+        // "<unset>") and if a different value than the one passed in reaches the
+        // child.
+        assert_eq!(message, "DESKMATE_CONFIG_DIR=/accounts/acc-123");
+    }
+
+    #[test]
+    fn describe_never_receives_a_config_directory() {
+        // `describe()` always calls `run` with `account_dir: None`; this pins that
+        // `None` leaves the variable out of the child's environment regardless of
+        // verb, which is the other half of `describe` drawing for no account.
+        let finished = run(
+            &fake(),
+            "render",
+            br#"{"kind":"weather","settings":{"location":"echo-the-config-dir"}}"#,
+            1024,
+            Duration::from_secs(5),
+            None,
+        )
+        .expect("the fake runs");
+        assert!(
+            finished.stderr.contains("DESKMATE_CONFIG_DIR=<unset>"),
+            "{}",
+            finished.stderr
         );
     }
 }

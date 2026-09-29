@@ -246,65 +246,100 @@ test("a whole envelope reaches stdout without truncation", async () => {
   }
 });
 
-test("a broken plugin folder does not empty the catalog: the built-ins and a good plugin survive", async () => {
-  // `load_catalog` on the Rust side treats a failed `describe` as an EMPTY catalog --
-  // an empty add menu -- so this is the property Task 9 exists to guarantee, driven
-  // through the real CLI subprocess boundary the server actually uses.
-  const root = join(tmpdir(), `main-plugins-${Math.random().toString(36).slice(2)}`);
-  const write = (folder: string, manifest: unknown, source: string) => {
-    mkdirSync(join(root, folder), { recursive: true });
-    writeFileSync(join(root, folder, "plugin.json"), JSON.stringify(manifest));
-    writeFileSync(join(root, folder, "index.js"), source);
-  };
-  write(
-    "sound-plugin",
-    {
-      api: 1,
-      id: "sound-plugin",
-      version: "1.0.0",
-      label: "Sound plugin",
-      description: "d",
-      author: "a",
-      hosts: [],
-      secrets: [],
-      fields: [],
-    },
-    `export function plan(){ return []; }
+// Two full `bun run main.ts` subprocess spawns below, each doing its own bun boot
+// and QuickJS WASM instantiation, so the test below is not fast even when discovery
+// itself is (see `DISCOVERY_PROBE_DEADLINE_MS`, `src/plugins/discovery.ts`). Bun's
+// default per-test timeout is 5000 ms; a generous, explicit one here is the fallback
+// a slow machine gets, not the fix -- the fix is that deadline being short.
+const BROKEN_PLUGIN_FOLDER_TEST_TIMEOUT_MS = 20_000;
+
+test(
+  "a broken plugin folder does not empty the catalog: the built-ins and a good plugin survive",
+  async () => {
+    // `load_catalog` on the Rust side treats a failed `describe` as an EMPTY catalog --
+    // an empty add menu -- so this is the property Task 9 exists to guarantee, driven
+    // through the real CLI subprocess boundary the server actually uses.
+    const root = join(tmpdir(), `main-plugins-${Math.random().toString(36).slice(2)}`);
+    const write = (folder: string, manifest: unknown, source: string) => {
+      mkdirSync(join(root, folder), { recursive: true });
+      writeFileSync(join(root, folder, "plugin.json"), JSON.stringify(manifest));
+      writeFileSync(join(root, folder, "index.js"), source);
+    };
+    write(
+      "sound-plugin",
+      {
+        api: 1,
+        id: "sound-plugin",
+        version: "1.0.0",
+        label: "Sound plugin",
+        description: "d",
+        author: "a",
+        hosts: [],
+        secrets: [],
+        fields: [],
+      },
+      `export function plan(){ return []; }
      export function render(){ return { layout: { type: "div", style: { display: "flex", width: 448, height: 368, background: "#000" }, children: "ok" } }; }`,
-  );
-  write(
-    "broken-plugin",
-    {
-      api: 1,
-      id: "broken-plugin",
-      version: "1.0.0",
-      label: "Broken plugin",
-      description: "d",
-      author: "a",
-      hosts: [],
-      secrets: [],
-      fields: [],
-    },
-    "export function plan(){ this does not parse }",
-  );
+    );
+    write(
+      "broken-plugin",
+      {
+        api: 1,
+        id: "broken-plugin",
+        version: "1.0.0",
+        label: "Broken plugin",
+        description: "d",
+        author: "a",
+        hosts: [],
+        secrets: [],
+        fields: [],
+      },
+      "export function plan(){ this does not parse }",
+    );
+    write(
+      "hostile-plugin",
+      {
+        api: 1,
+        id: "hostile-plugin",
+        version: "1.0.0",
+        label: "Hostile plugin",
+        description: "d",
+        author: "a",
+        hosts: [],
+        secrets: [],
+        fields: [],
+      },
+      // A `plan` that never returns is exactly what discovery's own short probe
+      // deadline (`DISCOVERY_PROBE_DEADLINE_MS`, `src/plugins/discovery.ts`) exists
+      // to catch quickly -- at the render path's full 2000 ms deadline this one
+      // folder alone would cost two seconds of every 60 s catalog re-read, and this
+      // test used to time out on a slower machine because of exactly that.
+      `export function plan(){ while(true){} }
+     export function render(){ return { layout: { type: "div", style: { display: "flex", width: 448, height: 368, background: "#000" }, children: "ok" } }; }`,
+    );
 
-  const { code, out, err } = await run("describe", "", { DESKMATE_PLUGINS_DIR: root });
-  expect(code).toBe(0);
-  const catalog = JSON.parse(new TextDecoder().decode(out)) as { kind: string }[];
-  expect(catalog.map((face) => face.kind)).toEqual([
-    "weather",
-    "hackernews",
-    "rss",
-    "token",
-    "sound-plugin",
-  ]);
-  expect(err).toContain("broken-plugin");
+    const { code, out, err } = await run("describe", "", { DESKMATE_PLUGINS_DIR: root });
+    expect(code).toBe(0);
+    const catalog = JSON.parse(new TextDecoder().decode(out)) as { kind: string }[];
+    expect(catalog.map((face) => face.kind)).toEqual([
+      "weather",
+      "hackernews",
+      "rss",
+      "token",
+      "sound-plugin",
+    ]);
+    expect(err).toContain("broken-plugin");
+    expect(err).toContain("hostile-plugin");
 
-  // The built-ins still render, unaffected by the broken folder sitting beside them.
-  const rendered = await run(
-    "render",
-    JSON.stringify({ kind: "weather", settings: { location: "Berlin" } }),
-    { DESKMATE_PLUGINS_DIR: root },
-  );
-  expect(rendered.code === 0 || rendered.code === 1).toBe(true); // 1: no network here
-});
+    // A good plugin still renders, unaffected by the broken folders sitting beside
+    // it -- deliberately the discovered plugin itself, not a built-in like `weather`,
+    // so this assertion is a fast, deterministic exercise of the exact code path this
+    // task is about (`discoverPlugins` -> the adapter's `render`) rather than a real
+    // network fetch, which was this test's actual dominant cost before this rewrite.
+    const rendered = await run("render", JSON.stringify({ kind: "sound-plugin", settings: {} }), {
+      DESKMATE_PLUGINS_DIR: root,
+    });
+    expect(rendered.code).toBe(0);
+  },
+  BROKEN_PLUGIN_FOLDER_TEST_TIMEOUT_MS,
+);

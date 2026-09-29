@@ -58,12 +58,32 @@ function reasonFor(error: unknown): string {
   return String(error);
 }
 
+/**
+ * Discovery's own deadline for the one-time verify `plan()` call below -- deliberately
+ * far short of `SANDBOX_LIMITS.deadlineMs` (the render path's 2000 ms), and NOT to be
+ * unified with it. An empty context carries no data, so a well-behaved plugin's `plan`
+ * returns immediately; a hostile or broken one that loops or blocks is exactly what
+ * this call exists to catch, and catching it slowly is still catching it slowly. The
+ * server re-reads the catalog every 60 s (`docs/images/server-rendered-cards.md`), so
+ * this deadline is paid once PER BROKEN FOLDER, every minute, for as long as that
+ * folder sits there -- ten broken folders at the render deadline would be 20 s of that
+ * minute gone to folders nothing will ever use. A real render, by contrast, has actual
+ * work to do (a fetch can legitimately take most of a second), which is why that path
+ * keeps the full 2000 ms unchanged.
+ */
+const DISCOVERY_PROBE_DEADLINE_MS = 200;
+
 /** Runs `plan()` once against an empty context, the way discovery does, to confirm
  * the source at least parses and exports both functions. Reused for the one-time
  * verify at discovery and nowhere else -- a real render always goes through
- * `runPlugin`, never this. */
+ * `runPlugin`, never this, and never with this short a deadline. */
 function verifyLoads(source: string): void {
-  runInSandbox(`${FORMAT_SOURCE}\n${source}`, "plan", {});
+  runInSandbox(
+    `${FORMAT_SOURCE}\n${source}`,
+    "plan",
+    {},
+    { deadlineMs: DISCOVERY_PROBE_DEADLINE_MS },
+  );
 }
 
 interface LoadedPlugin {

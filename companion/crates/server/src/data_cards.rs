@@ -2170,14 +2170,16 @@ esac
 
         let state = ServerState::in_memory();
         set_faces(&state, FaceCommand::program(script));
+        let space = test_space(&state);
 
-        let descriptor = create_face(&state, "custom-source", "custom").expect("create face");
+        let descriptor =
+            create_face(&state, &space, "custom-source", "custom").expect("create face");
         assert!(
             !face_is_complete(&descriptor),
             "the blank required field keeps this face from starting a refresher"
         );
 
-        let retained = state.inner.data_cards.lock().unwrap();
+        let retained = space.data_cards.lock().unwrap();
         let spec = retained
             .specs
             .iter()

@@ -14,7 +14,10 @@
 > Chief Claude's 2026-09-29 direction supersedes the earlier deploy hold:
 > after integrated local gates and CI pass, merge then deploy using the ROD-3
 > deploy-runbook. No flash or new schema/wire change is part of this integration.
-> Final verification is being run; earlier baseline gates do not certify it.
+> Integrated local gates PASS on `6d06181`: firmware host + sanitizer,
+> Rust fmt/clippy/all-targets/doctests, web 216 tests + check/lint/format/build,
+> faces 429 tests + check/lint/format. Exact logs and Rust counts are saved in
+> ROD-3's verification document. CI is pending; no merge/deploy is claimed.
 > The newer lab entry records a prior migration and views deploy; the older
 > status below is historical. Glass latency is still unmeasured.
 >

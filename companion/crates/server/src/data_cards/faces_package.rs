@@ -20,7 +20,14 @@
 //!
 //! The environment is cleared. The server's own environment carries
 //! `DESKMATE_ADMIN_TOKEN`, and a process whose job is to fetch arbitrary feed
-//! URLs has no business holding it.
+//! URLs has no business holding it. The one addition is `DESKMATE_CONFIG_DIR`,
+//! set on `render` only, to the *rendering account's own directory*
+//! (`AccountSpace::root`) -- never the top-level config root, and never sent on
+//! `describe`. That is how a plugin reads its stored credential without the
+//! server ever holding or forwarding the value itself: the child reads
+//! `$DESKMATE_CONFIG_DIR/plugin-secrets.json`
+//! (`companion/faces/src/plugins/secrets.ts`) for itself, scoped to whichever
+//! account's card is being drawn.
 //!
 //! # Nothing here waits unboundedly
 //!
@@ -100,6 +107,12 @@ pub(crate) struct CatalogFace {
     #[serde(default)]
     pub(crate) tap: Option<String>,
     pub(crate) fields: Vec<CatalogField>,
+    /// The plugin's declared refresh cadence, in seconds. Absent for a built-in
+    /// face and for an older faces package that predates this key -- there is no
+    /// `deny_unknown_fields` here, so a NEWER package sending a key this binary
+    /// has never heard of still parses.
+    #[serde(default)]
+    pub(crate) refresh_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -258,8 +271,10 @@ fn run(
     stdin: &[u8],
     stdout_cap: usize,
     timeout: Duration,
+    account_dir: Option<&Path>,
 ) -> Result<Finished, String> {
-    let mut child = Command::new(&command.program)
+    let mut builder = Command::new(&command.program);
+    builder
         .args(&command.arguments)
         .arg(verb)
         .env_clear()
@@ -267,7 +282,17 @@ fn run(
         // unit's home is not writable and a cache miss costs milliseconds.
         .env("PATH", "/usr/local/bin:/usr/bin:/bin")
         .env("BUN_RUNTIME_TRANSPILER_CACHE_PATH", "0")
-        .env("NO_COLOR", "1")
+        .env("NO_COLOR", "1");
+    if let Some(account_dir) = account_dir {
+        // Safe to add back where the admin token is deliberately withheld: this is
+        // a directory the caller (the render's own account scope) already chose for
+        // this one render, not a credential itself, and it grants the child nothing
+        // beyond reading one file under it
+        // (`companion/faces/src/plugins/secrets.ts::readPluginSecrets`). `describe`
+        // never passes one -- it draws for no account, so there is nothing to scope.
+        builder.env("DESKMATE_CONFIG_DIR", account_dir);
+    }
+    let mut child = builder
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -348,6 +373,7 @@ pub(crate) fn describe(command: &FaceCommand) -> Result<Vec<CatalogFace>, String
         &[],
         MAX_CATALOG_BYTES,
         DESCRIBE_TIMEOUT,
+        None,
     )?;
     if finished.code != Some(0) {
         return Err(format!("describe failed: {}", message_of(&finished)));
@@ -440,9 +466,15 @@ pub(crate) fn tap(
 }
 
 /// Fetches and draws one face, returning its PNG and state instruction.
+///
+/// `account_dir` is the rendering account's own directory (`AccountSpace::root`),
+/// passed to the child as `DESKMATE_CONFIG_DIR` so a plugin can read its stored
+/// credential -- see the module doc for why this one variable is safe to add back
+/// to an otherwise cleared environment.
 pub(crate) fn render(
     command: &FaceCommand,
     request: RenderRequest<'_>,
+    account_dir: &Path,
 ) -> Result<Rendered, FaceRenderError> {
     let mut body = serde_json::json!({
         "kind": request.kind,
@@ -468,6 +500,7 @@ pub(crate) fn render(
         body.to_string().as_bytes(),
         MAX_PNG_BYTES,
         RENDER_TIMEOUT,
+        Some(account_dir),
     )
     .map_err(FaceRenderError::Transient)?;
     match finished.code {
@@ -555,6 +588,13 @@ mod tests {
         }
     }
 
+    /// A stand-in account directory for tests that do not care which one is used,
+    /// only that some directory reaches the child. It need not exist: the fake
+    /// package only ever echoes the variable, never reads a file under it.
+    fn test_account_dir() -> &'static Path {
+        Path::new("/test-account")
+    }
+
     #[test]
     fn the_catalog_is_read_with_its_defaults() {
         let catalog = describe(&fake()).expect("the fake package describes itself");
@@ -570,16 +610,75 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_catalog_key_is_ignored_rather_than_refusing_the_catalog() {
+        // A newer faces package can send a field this binary has never heard of;
+        // there is no `deny_unknown_fields` here on purpose, unlike `DataCardSpec`.
+        let json = r#"[{"kind":"p","label":"P","fields":[],"refresh_seconds":300,"future":1}]"#;
+        let faces: Vec<CatalogFace> =
+            serde_json::from_str(json).expect("an older server ignores what it does not know");
+        assert_eq!(faces[0].refresh_seconds, Some(300));
+    }
+
+    #[test]
+    fn the_catalog_sample_committed_by_the_faces_package_still_deserializes() {
+        // companion/faces/test/catalog-sample.json is real describeCatalog() output,
+        // and companion/faces/test/catalog-sample.test.ts pins it against the
+        // package's own output on the TypeScript side. Reading the SAME file here
+        // means the two languages drifting on the catalog wire -- a key renamed,
+        // a case changed, a shape moved -- fails a test on whichever side moved,
+        // instead of silently deserializing to `None` the way `refreshSeconds` vs
+        // `refresh_seconds` once did (Task 9's Critical: the field existed on both
+        // sides and still went dead, because nothing read the same bytes twice).
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../faces/test/catalog-sample.json");
+        let bytes = std::fs::read(&path).unwrap_or_else(|error| {
+            panic!(
+                "could not read {} ({error}) -- if this file moved, update this path; the \
+                 Rust and TypeScript sides of the catalog wire have nothing else pinning them \
+                 to the same JSON shape",
+                path.display()
+            )
+        });
+        let faces: Vec<CatalogFace> = serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+            panic!(
+                "the Rust and TypeScript sides of the catalog wire disagree: {error}. \
+                 companion/faces's describeCatalog() and CatalogFace here must speak the same \
+                 JSON shape -- see companion/faces/test/catalog-sample.test.ts for the other half."
+            )
+        });
+        let sample_a = faces
+            .iter()
+            .find(|face| face.kind == "sample-a")
+            .expect("sample-a is in the committed sample");
+        assert_eq!(sample_a.refresh_seconds, Some(300));
+        assert!(sample_a.tap.is_some(), "sample-a declares a tap");
+        let sample_b = faces
+            .iter()
+            .find(|face| face.kind == "sample-b")
+            .expect("sample-b is in the committed sample");
+        assert_eq!(sample_b.refresh_seconds, None);
+    }
+
+    #[test]
     fn a_frame_comes_back_as_the_bytes_the_package_wrote() {
-        let rendered =
-            render(&fake(), request("weather", &steer("Dubai"), None, 0)).expect("a frame");
+        let rendered = render(
+            &fake(),
+            request("weather", &steer("Dubai"), None, 0),
+            test_account_dir(),
+        )
+        .expect("a frame");
         assert!(rendered.png.starts_with(b"\x89PNG"));
         assert!(crate::image_ingest::canonical_frame_from_png(&rendered.png).is_ok());
     }
 
     #[test]
     fn a_legacy_bare_png_is_still_a_frame_and_leaves_state_alone() {
-        let rendered = render(&fake(), request("weather", &steer(""), None, 0)).expect("a frame");
+        let rendered = render(
+            &fake(),
+            request("weather", &steer(""), None, 0),
+            test_account_dir(),
+        )
+        .expect("a frame");
         assert_eq!(&rendered.png[..4], b"\x89PNG");
         assert!(rendered.state.is_none());
     }
@@ -589,6 +688,7 @@ mod tests {
         let rendered = render(
             &fake(),
             request("weather", &steer("answer-with-an-envelope"), None, 0),
+            test_account_dir(),
         )
         .expect("a frame");
         assert_eq!(&rendered.png[..4], b"\x89PNG");
@@ -600,6 +700,7 @@ mod tests {
         let rendered = render(
             &fake(),
             request("weather", &steer("answer-with-a-null-state"), None, 0),
+            test_account_dir(),
         )
         .expect("a frame");
         assert_eq!(rendered.state, Some(None));
@@ -612,6 +713,7 @@ mod tests {
         let error = render(
             &fake(),
             request("weather", &steer("echo-the-request"), Some(&state), 3),
+            test_account_dir(),
         )
         .expect_err("the fake refuses on purpose");
         let FaceRenderError::Transient(message) = error else {
@@ -626,6 +728,7 @@ mod tests {
         let error = render(
             &fake(),
             request("weather", &steer("echo-the-request"), None, 0),
+            test_account_dir(),
         )
         .expect_err("the fake refuses on purpose");
         let FaceRenderError::Transient(message) = error else {
@@ -639,6 +742,7 @@ mod tests {
         let error = render(
             &fake(),
             request("weather", &steer("answer-with-garbage"), None, 0),
+            test_account_dir(),
         )
         .expect_err("not a frame");
         // Not Transient: retrying cannot fix a package that cannot answer, and the
@@ -651,6 +755,7 @@ mod tests {
         let error = render(
             &fake(),
             request("weather", &steer("answer-with-bad-base64"), None, 0),
+            test_account_dir(),
         )
         .expect_err("not a frame");
         assert!(matches!(error, FaceRenderError::Malformed(_)), "{error:?}");
@@ -662,6 +767,7 @@ mod tests {
             render(
                 &fake(),
                 request("token", &steer("refuse-as-configuration"), None, 0),
+                test_account_dir(),
             ),
             Err(FaceRenderError::Configuration(
                 "the coin was not found; check the coin ID".into()
@@ -671,6 +777,7 @@ mod tests {
             render(
                 &fake(),
                 request("token", &steer("refuse-as-transient"), None, 0),
+                test_account_dir(),
             ),
             Err(FaceRenderError::Transient(
                 "api.example returned HTTP 503".into()
@@ -685,6 +792,7 @@ mod tests {
             render(
                 &nowhere,
                 request("weather", &BTreeMap::new(), None, 0),
+                test_account_dir(),
             ),
             Err(FaceRenderError::Transient(message)) if message.contains("could not start")
         ));
@@ -697,6 +805,7 @@ mod tests {
             render(
                 &fake(),
                 request("weather", &steer("answer-with-a-flood"), None, 0),
+                test_account_dir(),
             ),
             Err(FaceRenderError::Transient(message)) if message.contains("more than")
         ));
@@ -711,6 +820,7 @@ mod tests {
             br#"{"x":"never-answer"}"#,
             1024,
             Duration::from_millis(150),
+            Some(test_account_dir()),
         );
         assert!(outcome.is_err_and(|message| message.contains("did not answer")));
         assert!(
@@ -733,6 +843,7 @@ mod tests {
             br#"{"x":"echo-the-environment"}"#,
             1024,
             Duration::from_secs(5),
+            Some(test_account_dir()),
         )
         .expect("the fake runs");
         assert!(
@@ -742,6 +853,54 @@ mod tests {
         assert!(
             !finished.stderr.contains("HOME="),
             "and the server's was not inherited"
+        );
+    }
+
+    // -- Regression coverage for the dropped `DESKMATE_CONFIG_DIR` defect --
+    //
+    // The server clears the child's environment, and a plugin's stored credential
+    // is read by the child itself from `$DESKMATE_CONFIG_DIR/plugin-secrets.json`
+    // (`companion/faces/src/plugins/secrets.ts`). If the server ever stops setting
+    // that variable on `render`, every plugin secret goes back to invisible in
+    // production while every test here still passes, unless a test pins the exact
+    // bytes the child receives -- which is what these two do.
+
+    #[test]
+    fn render_passes_the_accounts_directory_as_deskmate_config_dir() {
+        let error = render(
+            &fake(),
+            request("weather", &steer("echo-the-config-dir"), None, 0),
+            Path::new("/accounts/acc-123"),
+        )
+        .expect_err("the fake refuses on purpose");
+        let FaceRenderError::Transient(message) = error else {
+            panic!("expected transient")
+        };
+        // `message_of` is the fake's LAST stderr line, so this fails both if the
+        // `.env("DESKMATE_CONFIG_DIR", ...)` line is removed (the fake would print
+        // "<unset>") and if a different value than the one passed in reaches the
+        // child.
+        assert_eq!(message, "DESKMATE_CONFIG_DIR=/accounts/acc-123");
+    }
+
+    #[test]
+    fn describe_never_receives_a_config_directory() {
+        // `describe()` always calls `run` with `account_dir: None`; this pins that
+        // `None` leaves the variable out of the child's environment regardless of
+        // verb, which is the other half of `describe` drawing for no account.
+        let finished = run(
+            &fake(),
+            "render",
+            br#"{"kind":"weather","settings":{"location":"echo-the-config-dir"}}"#,
+            1024,
+            Duration::from_secs(5),
+            None,
+        )
+        .expect("the fake runs");
+        assert!(
+            finished.stderr.contains("DESKMATE_CONFIG_DIR=<unset>"),
+            "{}",
+            finished.stderr
         );
     }
 }

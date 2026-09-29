@@ -142,6 +142,25 @@ const fn default_refresh_seconds() -> u64 {
     900
 }
 
+/// The refresh cadence for a NEW spec, seeded from the catalog's declared
+/// cadence. `None` -- a built-in face, or a plugin that declares nothing --
+/// falls back to [`default_refresh_seconds`].
+///
+/// Clamped to `worker`'s own [`worker::MIN_REFRESH`]/[`worker::MAX_REFRESH`],
+/// not a range invented here: `worker::clamped_refresh` re-clamps to that same
+/// range at schedule time, so storing anything outside it would let the
+/// persisted file and the panel's actual behaviour disagree with nothing to
+/// explain it. The scheduler owns the range; this only mirrors it.
+///
+/// Only a spec's creation calls this. An existing spec's `refresh_seconds` is
+/// whatever `DataCardSpec`'s own `#[serde(default)]` loaded or the owner later
+/// set by hand; a plugin update must never rewrite it.
+fn cadence_for_new_spec(declared: Option<u64>) -> u64 {
+    declared
+        .unwrap_or_else(default_refresh_seconds)
+        .clamp(worker::MIN_REFRESH.as_secs(), worker::MAX_REFRESH.as_secs())
+}
+
 /// Which face, and the settings it was given.
 ///
 /// Open-ended on purpose. The file shape is unchanged from when this was a closed
@@ -1054,7 +1073,9 @@ pub(crate) fn create_face(
         .data_cards
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let face = state
+    // The catalog entry itself, not just its blank settings: `refresh_seconds`
+    // lives on the entry and seeds this spec's cadence below.
+    let catalog_face = state
         .inner
         .face_catalog
         .lock()
@@ -1062,7 +1083,7 @@ pub(crate) fn create_face(
         .catalog()
         .iter()
         .find(|candidate| candidate.kind == kind)
-        .map(blank_face)
+        .cloned()
         .ok_or_else(|| FaceUpdateError::UnknownField(kind.to_owned()))?;
     if data_cards
         .specs
@@ -1077,8 +1098,8 @@ pub(crate) fn create_face(
 
     let spec = DataCardSpec {
         source_id: source_id.to_owned(),
-        refresh_seconds: default_refresh_seconds(),
-        face,
+        refresh_seconds: cadence_for_new_spec(catalog_face.refresh_seconds),
+        face: blank_face(&catalog_face),
     };
     let mut updated_specs = data_cards.specs.clone();
     updated_specs.push(spec.clone());
@@ -1676,6 +1697,35 @@ mod tests {
     }
 
     #[test]
+    fn a_new_spec_takes_the_catalogs_cadence_clamped() {
+        // The ceiling is the scheduler's own 6h MAX_REFRESH (21_600s), not an
+        // independently chosen number: worker::clamped_refresh would otherwise
+        // re-clamp a stored value the owner's file claims is honoured in full.
+        assert_eq!(cadence_for_new_spec(Some(300)), 300);
+        assert_eq!(cadence_for_new_spec(Some(10)), 60);
+        assert_eq!(cadence_for_new_spec(Some(1_000_000)), 21_600);
+        assert_eq!(cadence_for_new_spec(None), 900);
+    }
+
+    #[test]
+    fn an_existing_specs_cadence_survives_a_catalog_reload() {
+        // `reload_catalog` (above) only ever replaces `data_cards.catalog` -- it
+        // never touches `data_cards.specs` -- so loading the same spec file twice
+        // is what a reload amounts to for an existing spec. An owner's hand-set
+        // 300 must come back as 300, not as the 900 a NEW token spec would take.
+        let directory = write(
+            r#"[{"source_id": "ghi", "refresh_seconds": 300,
+                 "face": {"kind": "token", "coin_id": "solana", "currency": "usd"}}]"#,
+        );
+        let path = directory.path().join("cards.json");
+        let loaded_once = load_specs(&path).expect("the spec parses");
+        let loaded_again = load_specs(&path).expect("reloading the same file");
+        assert_eq!(loaded_once[0].refresh_seconds, 300);
+        assert_eq!(loaded_again[0].refresh_seconds, 300);
+        assert_ne!(loaded_once[0].refresh_seconds, cadence_for_new_spec(None));
+    }
+
+    #[test]
     fn a_malformed_spec_file_is_a_loud_error_rather_than_zero_cards() {
         for contents in [
             "[{ malformed",
@@ -2267,6 +2317,62 @@ mod tests {
             assert_eq!(serde_json::to_value(&spec.face).unwrap(), expected);
             assert_eq!(persisted, retained.specs);
         }
+        state.shutdown();
+    }
+
+    #[tokio::test]
+    async fn create_face_seeds_the_new_specs_cadence_from_the_catalog() {
+        // The regression this test exists to catch: `create_face` computing
+        // `cadence_for_new_spec(catalog_face.refresh_seconds)` and then storing
+        // `default_refresh_seconds()` anyway. Every other cadence test exercises
+        // the pure function or `load_specs`, so that exact mistake left the
+        // whole suite green. A distinct fake kind (not `tests/support/fake-faces.sh`,
+        // whose weather/rss/token entries the 900-fallback test above pins) keeps
+        // that assertion intact while still exercising `create_face` end to end.
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("a temp directory");
+        let script = directory.path().join("describe-a-cadence.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+case "$1" in
+describe)
+	cat <<'JSON'
+[{"kind": "custom", "label": "Custom", "refresh_seconds": 300,
+  "fields": [{"type": "text", "key": "need", "label": "Need", "placeholder": ""}]}]
+JSON
+	;;
+*) echo "usage: describe" >&2; exit 64 ;;
+esac
+"#,
+        )
+        .expect("write the describe-only fake");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
+            .expect("make the fake executable");
+
+        let state = ServerState::in_memory();
+        set_faces(&state, FaceCommand::program(script));
+        let space = test_space(&state);
+
+        let descriptor =
+            create_face(&state, &space, "custom-source", "custom").expect("create face");
+        assert!(
+            !face_is_complete(&descriptor),
+            "the blank required field keeps this face from starting a refresher"
+        );
+
+        let retained = space.data_cards.lock().unwrap();
+        let spec = retained
+            .specs
+            .iter()
+            .find(|spec| spec.source_id == "custom-source")
+            .expect("the spec was persisted");
+        assert_eq!(
+            spec.refresh_seconds, 300,
+            "the catalog's declared cadence must reach the stored spec, not the 900 fallback"
+        );
+        drop(retained);
         state.shutdown();
     }
 

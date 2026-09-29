@@ -28,16 +28,29 @@ import {
   type ViewId,
 } from "./face";
 import { pngFromSvg } from "./kit/raster";
-import { FACES, faceOfKind } from "./registry";
+import { warmSandbox } from "./plugins/sandbox";
+import { FACES, allFaces, faceOfKind } from "./registry";
 
 const EXIT_CONFIGURATION = 2;
 const EXIT_TRANSIENT = 1;
 
 export function describeCatalog(faces: readonly FaceDefinition[] = FACES): string {
   return JSON.stringify(
-    faces.map(({ kind, label, fields, tap }) =>
-      tap === undefined ? { kind, label, fields } : { kind, label, fields, tap },
-    ),
+    faces.map(({ kind, label, fields, tap, refreshSeconds }) => ({
+      kind,
+      label,
+      fields,
+      ...(tap === undefined ? {} : { tap }),
+      // snake_case on the wire, deliberately: this JSON is read by
+      // `crates/server/src/data_cards/faces_package.rs`'s `CatalogFace`, which has no
+      // `#[serde(rename)]` and no `deny_unknown_fields` -- a camelCase key here is
+      // silently ignored, not refused, and the field quietly deserializes to `None`.
+      // `kind`/`label`/`fields`/`tap` are single words so this was invisible until a
+      // compound-word field arrived. `FaceDefinition.refreshSeconds` and the
+      // manifest's own `refreshSeconds` (author-facing) are unaffected -- only this
+      // wire-facing key changes shape.
+      ...(refreshSeconds === undefined ? {} : { refresh_seconds: refreshSeconds }),
+    })),
     null,
     2,
   );
@@ -76,6 +89,7 @@ interface FaceRequest {
   kind?: unknown;
   settings?: unknown;
   state?: unknown;
+  timezone?: unknown;
 }
 
 function definitionFor(request: FaceRequest, face?: FaceDefinition): FaceDefinition {
@@ -109,7 +123,7 @@ export function tapRequest(
 ): { view: ViewId; state?: unknown } {
   const definition = definitionFor(request, face);
   if (definition.onTap === undefined) {
-    return { view: "" };
+    throw new Error("this face handles taps through render");
   }
   const event = tapEvent(request.event);
   if (event === undefined) {
@@ -128,6 +142,9 @@ export async function renderRequest(
     state: request.state,
     event: tapEvent(request.event),
     view: typeof request.view === "string" ? request.view : undefined,
+    // Additive: an older server simply omits this, and a plugin that needs a zone
+    // falls back to the host process's own (see `plugins/discovery.ts`).
+    ...(typeof request.timezone === "string" ? { timezone: request.timezone } : {}),
   });
   const svg = typeof result === "string" ? result : result.svg;
   const png = Buffer.from(pngFromSvg(svg)).toString("base64");
@@ -137,8 +154,8 @@ export async function renderRequest(
     : { png, state: result.state };
 }
 
-function describe(): string {
-  return describeCatalog();
+async function describe(): Promise<string> {
+  return describeCatalog(await allFaces());
 }
 
 function requestFromJson(
@@ -157,22 +174,40 @@ function requestFromJson(
   return (request ?? {}) as FaceRequest & { event?: unknown; view?: unknown };
 }
 
+async function requestedFace(request: FaceRequest): Promise<FaceDefinition> {
+  // Built-in planning stays on the fast path; plugin discovery runs sandboxed.
+  const builtin = typeof request.kind === "string" ? faceOfKind(request.kind) : undefined;
+  if (builtin !== undefined) return builtin;
+  await warmSandbox();
+  const faces = await allFaces();
+  return definitionFor(request, faces.find((face) => face.kind === request.kind));
+}
+
 async function render(input: string, now: Date): Promise<string> {
-  return JSON.stringify(await renderRequest(requestFromJson(input, "render"), undefined, now));
+  const request = requestFromJson(input, "render");
+  return JSON.stringify(await renderRequest(request, await requestedFace(request), now));
 }
 
-function views(input: string): string {
-  return JSON.stringify(viewsRequest(requestFromJson(input, "views")));
+async function views(input: string): Promise<string> {
+  const request = requestFromJson(input, "views");
+  return JSON.stringify(viewsRequest(request, await requestedFace(request)));
 }
 
-function tap(input: string): string {
-  return JSON.stringify(tapRequest(requestFromJson(input, "tap")));
+async function tap(input: string): Promise<string> {
+  const request = requestFromJson(input, "tap");
+  return JSON.stringify(tapRequest(request, await requestedFace(request)));
 }
 
 async function main(): Promise<number> {
   const verb = process.argv[2];
   if (verb === "describe") {
-    process.stdout.write(`${describe()}\n`);
+    // Discovery verifies each plugin folder by running its `plan()` in the sandbox
+    // (`plugins/discovery.ts`), and a render that resolves to a plugin runs its
+    // `plan`/`render` there too -- both need the WASM runtime loaded first.
+    await warmSandbox();
+  }
+  if (verb === "describe") {
+    process.stdout.write(`${await describe()}\n`);
     return 0;
   }
   if (verb === "render") {
@@ -182,11 +217,11 @@ async function main(): Promise<number> {
     return 0;
   }
   if (verb === "views") {
-    await Bun.write(Bun.stdout, views(await Bun.stdin.text()));
+    await Bun.write(Bun.stdout, await views(await Bun.stdin.text()));
     return 0;
   }
   if (verb === "tap") {
-    await Bun.write(Bun.stdout, tap(await Bun.stdin.text()));
+    await Bun.write(Bun.stdout, await tap(await Bun.stdin.text()));
     return 0;
   }
   process.stderr.write(

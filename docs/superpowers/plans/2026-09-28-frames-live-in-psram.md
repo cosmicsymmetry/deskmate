@@ -3,21 +3,20 @@
 **Spec:** `docs/superpowers/specs/2026-09-28-deskmate-frames-live-in-psram-design.md`
 **Track:** C1 (branch `track-c1-tap-to-face`, PR #4)
 
-> **RELEASE PREPARATION 2026-09-29 (ROD-3).** The baseline is
-> `6fb89a29786500b14c5f591cab3b2d237fde7e76`. No integration commit or live
-> operation was made: the managed GitHub launcher lacks credentials and supplies an
-> empty commit identity. Cached `origin/main` is `4253521`; local main is `3189129`,
-> still 3 ahead / 2 behind. Preserve the three Track D commits and shared untracked files.
-> Read-only merge preview identifies conflicts in faces `face.ts`, `main.ts`,
-> board notes, and roadmap; server changes also require semantic review.
-> The deploy/recovery/rollback runbook is the `deploy-runbook` document on ROD-3.
-> The newer 2026-09-29 board entry records a prior migration and views deployment;
-> the “not deployed” status below is the earlier snapshot, not current live proof.
-> No staged-view glass latency was observed in this release-preparation run.
-> Restore managed GitHub access, reconcile main without rewriting history, integrate,
-> run the full gates on that integrated commit, confirm CI, then release the lock
-> as part of the PR merge. Baseline verification is recorded on ROD-3; it cannot
-> certify the still-unmerged release. Do not deploy or flash in this task.
+> **RELEASE INTEGRATION 2026-09-29 (ROD-3).** Managed GitHub CLI access is
+> restored (ROD-7). Local main's three Track D commits are preserved by merging
+> main into C1, followed by origin/main (`4253521`, including Tracks A and B).
+> Shared main will fast-forward to the PR merge; no shared history is rewritten.
+> Conflict resolution preserves C1 views/taps, B plugin discovery/cadence/timezone,
+> both tracks' board observations, and account-scoped rendering for staged views.
+> A plugin without onTap must fall back to render, never select its old resting
+> frame; regression coverage exercises this at the real subprocess boundary.
+> Chief Claude's 2026-09-29 direction supersedes the earlier deploy hold:
+> after integrated local gates and CI pass, merge then deploy using the ROD-3
+> deploy-runbook. No flash or new schema/wire change is part of this integration.
+> Final verification is being run; earlier baseline gates do not certify it.
+> The newer lab entry records a prior migration and views deploy; the older
+> status below is historical. Glass latency is still unmeasured.
 >
 > **STATUS 2026-09-29. Every task is implemented; one is unverified on the board.**
 > Step 1, Task D (the firmware pool and key 32, flashed and verified on `dev-0005`),

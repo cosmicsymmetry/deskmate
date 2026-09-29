@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { describeCatalog, renderRequest } from "../src/main";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describeCatalog, renderRequest, tapRequest } from "../src/main";
 
 const MAIN = `${import.meta.dir}/../src/main.ts`;
 const SQUARE_SVG =
@@ -8,11 +11,13 @@ const SQUARE_SVG =
 async function run(
   verb: string,
   stdin = "",
+  env: Record<string, string> = {},
 ): Promise<{ code: number; out: Uint8Array; err: string }> {
   const child = Bun.spawn(["bun", "run", MAIN, verb], {
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
+    env: { ...process.env, ...env },
   });
   child.stdin.write(stdin);
   await child.stdin.end();
@@ -31,7 +36,16 @@ test("describe prints the catalog the server builds the add menu from", async ()
     kind: string;
     fields: { type: string; key: string }[];
   }[];
-  expect(catalog.map((face) => face.kind)).toEqual(["weather", "hackernews", "rss", "token"]);
+  // Built-ins first, then the worked-example plugin under `plugins/github-stats/`
+  // (`src/plugins/discovery.ts`) -- this is the default `DESKMATE_PLUGINS_DIR`, a
+  // real folder beside the package, discovered exactly as the server would.
+  expect(catalog.map((face) => face.kind)).toEqual([
+    "weather",
+    "hackernews",
+    "rss",
+    "token",
+    "github-stats",
+  ]);
   for (const face of catalog) {
     for (const field of face.fields) {
       expect(["text", "url", "enum"]).toContain(field.type);
@@ -88,6 +102,40 @@ test("a render with no state and no event is what every existing face already ge
   expect(seen).toEqual([{ state: undefined, event: undefined }]);
 });
 
+test("a request carrying a timezone passes it into the face's context", async () => {
+  const seen: unknown[] = [];
+  await renderRequest(
+    { kind: "probe", settings: {}, timezone: "Asia/Dubai" },
+    {
+      kind: "probe",
+      label: "Probe",
+      fields: [],
+      render: (_settings, _now, context) => {
+        seen.push(context?.timezone);
+        return SQUARE_SVG;
+      },
+    },
+  );
+  expect(seen).toEqual(["Asia/Dubai"]);
+});
+
+test("a request with no timezone leaves the face's context without one", async () => {
+  const seen: unknown[] = [];
+  await renderRequest(
+    { kind: "probe", settings: {} },
+    {
+      kind: "probe",
+      label: "Probe",
+      fields: [],
+      render: (_settings, _now, context) => {
+        seen.push("timezone" in (context ?? {}));
+        return SQUARE_SVG;
+      },
+    },
+  );
+  expect(seen).toEqual([false]);
+});
+
 test("describe carries a face's tap sentence and omits it otherwise", () => {
   const catalog = JSON.parse(
     describeCatalog([
@@ -103,6 +151,28 @@ test("describe carries a face's tap sentence and omits it otherwise", () => {
   );
   expect(catalog[0].tap).toBe("Tap the panel for more.");
   expect("tap" in catalog[1]).toBe(false);
+});
+
+test("describe carries a face's refreshSeconds as refresh_seconds, snake_case for the Rust catalog, and omits the key entirely otherwise", () => {
+  // `crates/server/src/data_cards/faces_package.rs`'s `CatalogFace` has no
+  // `#[serde(rename)]` and no `deny_unknown_fields`: a camelCase `refreshSeconds`
+  // here deserializes to `None` there, silently. See catalog-sample.json below,
+  // which pins this exact shape across both languages.
+  const catalog = JSON.parse(
+    describeCatalog([
+      { kind: "a", label: "A", fields: [], refreshSeconds: 120, render: async () => SQUARE_SVG },
+      { kind: "b", label: "B", fields: [], render: async () => SQUARE_SVG },
+    ]),
+  );
+  expect(catalog[0].refresh_seconds).toBe(120);
+  expect("refreshSeconds" in catalog[0]).toBe(false);
+  // Absent, not `null`: the Rust side distinguishes "no cadence declared" from an
+  // explicit null, and `Option<u64>`'s `#[serde(default)]` only supplies `None` for
+  // a MISSING key -- an explicit `null` still deserializes fine here (serde treats
+  // `null` as `None` for an `Option`), but this pins that this package never sends
+  // one, which is the stricter and correct claim: this plugin declared nothing.
+  expect("refresh_seconds" in catalog[1]).toBe(false);
+  expect(JSON.stringify(catalog[1])).not.toContain("refresh_seconds");
 });
 
 test("an unknown kind and an incomplete setting are configuration errors: exit 2, nothing on stdout", async () => {
@@ -174,4 +244,120 @@ test("a whole envelope reaches stdout without truncation", async () => {
     // No network in this environment: the face failed, which is a clean exit path.
     expect(out).toBe("");
   }
+});
+
+// Two full `bun run main.ts` subprocess spawns below, each doing its own bun boot
+// and QuickJS WASM instantiation, so the test below is not fast even when discovery
+// itself is (see `DISCOVERY_PROBE_DEADLINE_MS`, `src/plugins/discovery.ts`). Bun's
+// default per-test timeout is 5000 ms; a generous, explicit one here is the fallback
+// a slow machine gets, not the fix -- the fix is that deadline being short.
+const BROKEN_PLUGIN_FOLDER_TEST_TIMEOUT_MS = 20_000;
+
+test(
+  "a broken plugin folder does not empty the catalog: the built-ins and a good plugin survive",
+  async () => {
+    // `load_catalog` on the Rust side treats a failed `describe` as an EMPTY catalog --
+    // an empty add menu -- so this is the property Task 9 exists to guarantee, driven
+    // through the real CLI subprocess boundary the server actually uses.
+    const root = join(tmpdir(), `main-plugins-${Math.random().toString(36).slice(2)}`);
+    const write = (folder: string, manifest: unknown, source: string) => {
+      mkdirSync(join(root, folder), { recursive: true });
+      writeFileSync(join(root, folder, "plugin.json"), JSON.stringify(manifest));
+      writeFileSync(join(root, folder, "index.js"), source);
+    };
+    write(
+      "sound-plugin",
+      {
+        api: 1,
+        id: "sound-plugin",
+        version: "1.0.0",
+        label: "Sound plugin",
+        description: "d",
+        author: "a",
+        hosts: [],
+        secrets: [],
+        fields: [],
+      },
+      `export function plan(){ return []; }
+     export function render(){ return { layout: { type: "div", style: { display: "flex", width: 448, height: 368, background: "#000" }, children: "ok" } }; }`,
+    );
+    write(
+      "broken-plugin",
+      {
+        api: 1,
+        id: "broken-plugin",
+        version: "1.0.0",
+        label: "Broken plugin",
+        description: "d",
+        author: "a",
+        hosts: [],
+        secrets: [],
+        fields: [],
+      },
+      "export function plan(){ this does not parse }",
+    );
+    write(
+      "hostile-plugin",
+      {
+        api: 1,
+        id: "hostile-plugin",
+        version: "1.0.0",
+        label: "Hostile plugin",
+        description: "d",
+        author: "a",
+        hosts: [],
+        secrets: [],
+        fields: [],
+      },
+      // A `plan` that never returns is exactly what discovery's own short probe
+      // deadline (`DISCOVERY_PROBE_DEADLINE_MS`, `src/plugins/discovery.ts`) exists
+      // to catch quickly -- at the render path's full 2000 ms deadline this one
+      // folder alone would cost two seconds of every 60 s catalog re-read, and this
+      // test used to time out on a slower machine because of exactly that.
+      `export function plan(){ while(true){} }
+     export function render(){ return { layout: { type: "div", style: { display: "flex", width: 448, height: 368, background: "#000" }, children: "ok" } }; }`,
+    );
+
+    const { code, out, err } = await run("describe", "", { DESKMATE_PLUGINS_DIR: root });
+    expect(code).toBe(0);
+    const catalog = JSON.parse(new TextDecoder().decode(out)) as { kind: string }[];
+    expect(catalog.map((face) => face.kind)).toEqual([
+      "weather",
+      "hackernews",
+      "rss",
+      "token",
+      "sound-plugin",
+    ]);
+    expect(err).toContain("broken-plugin");
+    expect(err).toContain("hostile-plugin");
+
+    // A good plugin still renders, unaffected by the broken folders sitting beside
+    // it -- deliberately the discovered plugin itself, not a built-in like `weather`,
+    // so this assertion is a fast, deterministic exercise of the exact code path this
+    // task is about (`discoverPlugins` -> the adapter's `render`) rather than a real
+    // network fetch, which was this test's actual dominant cost before this rewrite.
+    const rendered = await run("render", JSON.stringify({ kind: "sound-plugin", settings: {} }), {
+      DESKMATE_PLUGINS_DIR: root,
+    });
+    expect(rendered.code).toBe(0);
+    const planned = await run("views", JSON.stringify({ kind: "sound-plugin" }), {
+      DESKMATE_PLUGINS_DIR: root,
+    });
+    expect(planned.code).toBe(0);
+    expect(JSON.parse(new TextDecoder().decode(planned.out))).toEqual({ views: [""] });
+    const tapped = await run("tap", JSON.stringify({ kind: "sound-plugin", event: { taps: 1, point: null } }), {
+      DESKMATE_PLUGINS_DIR: root,
+    });
+    expect(tapped.code).toBe(1);
+    expect(tapped.err).toContain("handles taps through render");
+  },
+  BROKEN_PLUGIN_FOLDER_TEST_TIMEOUT_MS,
+);
+
+
+test("a face without onTap falls back to rendering instead of selecting its resting frame", () => {
+  expect(() => tapRequest({ kind: "probe", event: { taps: 1, point: null } }, {
+    kind: "probe", label: "Probe", fields: [], tap: "Refresh",
+    render: () => SQUARE_SVG,
+  })).toThrow("this face handles taps through render");
 });

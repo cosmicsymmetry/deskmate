@@ -105,7 +105,7 @@ desk.example.org {
 }
 ```
 
-Caddy handles WebSocket upgrades and automatic HTTPS. Set
+Caddy handles WebSocket upgrades and [automatic HTTPS](https://caddyserver.com/docs/automatic-https). Set
 `DESKMATE_PUBLIC_URL=https://desk.example.org` in your private `server.env`, restart
 Deskmate, validate/reload your Caddy configuration, and open that HTTPS address.
 Keep the backend on loopback. Do not add a host-wide Basic-auth gate: panel and image
@@ -240,6 +240,31 @@ for its usage. No hardware or OTA verification is implied by a successful server
 
 ## Verification record
 
-Pending execution for this change: clean checkout build, real-server setup in Chrome,
-restart persistence, and full companion gates. This section must be replaced with
-observed results before the packaging task is complete.
+Observed 2026-09-29 on macOS arm64, Rust 1.98.0, Bun 1.3.8, Python 3.14.7,
+headless system Google Chrome. A new local Git clone at `6473074` had no managed
+components, node_modules, target directory or private dependencies. The initial build
+at `44784ae` downloaded/verified public components and built all artifacts; review then
+added the missing face fonts. The clean checkout fast-forwarded to `6473074` and the
+corrected bundle build passed, reusing its verified public downloads/build cache.
+
+- Real server: `/v1/app/instance` reported self-hosted, setup required, Google disabled,
+  signups closed. Chrome showed “Set up this server,” accepted the logged setup code,
+  and showed “Add your panel.” No browser JavaScript errors.
+- Graceful stop/restart preserved the owner and session. A separate browser signed in
+  successfully using a link from the log. No SMTP, Google or physical panel used.
+- Instance/config permissions were 0700/0600. Reinitialization refused without changing
+  credentials; permissive environment-file permissions were refused before startup.
+  A deliberately changed preview header was refused without overwriting its bytes.
+- Bundled `github-stats` rendered a 10,765-byte PNG using one offline fixture response,
+  zero external requests, QuickJS, Satori, resvg and the shipped Inter fonts. Visually
+  inspected the PNG and the setup screenshot.
+- Gates: fmt and Clippy passed; Rust all-targets 829 passed, 0 failed, 1 intentionally
+  ignored fixture printer; doctest command passed (0 tests). Web 216 passed, with
+  typecheck, format and production build passing. Faces 425 passed, with typecheck,
+  lint and format passing. Local documentation links and `git diff --check` passed.
+
+This verifies a clean source checkout on an existing toolchain host, not a freshly
+installed operating system. Debian/systemd/Caddy installation, public HTTPS, actual
+provider delivery, panel provisioning and OTA were not exercised. GitHub repository
+lookup returned 404 and `gh run list` could not authenticate, so PR/CI/merge remain
+blocked; no CI success is claimed.

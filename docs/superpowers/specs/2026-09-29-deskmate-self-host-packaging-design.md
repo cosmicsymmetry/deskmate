@@ -38,13 +38,13 @@ directory and paid surfaces are absent. Frozen contracts remain unchanged.
 
 ## Acceptance checks
 
-- [ ] Clean checkout: public preview downloads, locked Rust build, locked web/faces
+- [x] Clean checkout: public preview downloads, locked Rust build, locked web/faces
   installation and complete bundle with fonts; no pre-existing managed components.
-- [ ] Initialize private state, run real server, Chrome displays first-run setup and
+- [x] Initialize private state, run real server, Chrome displays first-run setup and
   accepts setup code, then shows Add your panel without external credentials.
-- [ ] Restart preserves the owner and does not return to setup; reinitialization refuses.
-- [ ] Bundled local plugin renders an offline fixture, exercising native raster/fonts.
-- [ ] Full Rust/web/faces gates, docs/link review and diff checks pass.
+- [x] Restart preserves the owner and does not return to setup; reinitialization refuses.
+- [x] Bundled local plugin renders an offline fixture, exercising native raster/fonts.
+- [x] Full Rust/web/faces gates, docs/link review and diff checks pass.
 - [ ] PR created, CI confirmed green, merge through PR.
 
 Exact evidence and deviations belong below as checks run. A local setup check proves
@@ -62,3 +62,17 @@ required or authorized for this packaging validation.
   ordinary operator shell and use the documented PATH setup.
 - GitHub connection reports ready but repository lookup returns 404. Managed Git wrapper
   also reports incomplete identity. PR/CI steps remain outstanding pending access.
+
+- Verification complete locally: see the exact [guide record](../../self-host.md#verification-record).
+  829 Rust tests passed / one ignored fixture printer; doctest command passed (zero
+  tests); web 216 and faces 425 passed. All specified format/type/lint/build gates passed.
+  First-run setup, restart persistence and log-mail sign-in passed in real Chrome;
+  PNG fixture rendered through the installed bundle and was visually inspected.
+- Initial web typecheck could not find `tsc` because the agent runtime's Bash startup
+  hook replaced Bun's PATH; rerun without that hook passed. No source change was made
+  to hide the environment failure. Initial bundle omitted fonts; corrected before
+  acceptance in `6473074`. No schema, wire, firmware or production service mutation.
+- Outstanding: restore repository access, fetch/reconcile current main, create PR,
+  confirm CI and merge. `gh run list` exited 4 (no managed credentials); connected
+  GitHub repository lookup returned 404. Unblock owner: Chief Claude must restore
+  Vault's repository scope and managed Git identity. Local branch remains intact.

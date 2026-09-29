@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,11 +14,15 @@ use crate::image_sources::AcceptOutcome;
 use crate::{ImageNotificationOrigin, ServerState};
 
 /// A refresh no faster than this, whatever a spec asks for, for every face.
-const MIN_REFRESH: Duration = Duration::from_secs(60);
+///
+/// `pub(super)`: `cadence_for_new_spec` in the parent module clamps a NEW
+/// spec's stored cadence to this same range, so the persisted file never
+/// claims a cadence this scheduler would silently override at run time.
+pub(super) const MIN_REFRESH: Duration = Duration::from_secs(60);
 /// An unreachable source is retried on its own interval, but never slower than
 /// this, so a card that failed once during a network blip does not sit stale
-/// for a day.
-const MAX_REFRESH: Duration = Duration::from_hours(6);
+/// for a day. See [`MIN_REFRESH`] for why this is `pub(super)`.
+pub(super) const MAX_REFRESH: Duration = Duration::from_hours(6);
 
 pub(super) fn spawn_refresher(
     runtime: &tokio::runtime::Handle,
@@ -122,8 +127,13 @@ struct RenderedFrame {
 /// `spawn_blocking`. The PNG goes through the same ingest function an external
 /// producer's POST does, which is what makes "the server is just another
 /// producer" true rather than merely intended.
+///
+/// `account_dir` is this refresh's account's own directory (`AccountSpace::root`),
+/// forwarded to the child as `DESKMATE_CONFIG_DIR` so a plugin can read its own
+/// stored credential and never another account's.
 fn render_frame(
     faces: &FaceCommand,
+    account_dir: &Path,
     spec: &DataCardSpec,
     state: Option<&serde_json::Value>,
     taps: u32,
@@ -136,6 +146,7 @@ fn render_frame(
             state,
             taps,
         },
+        account_dir,
     )
     .map_err(|error| match error {
         FaceRenderError::Configuration(message) => RefreshFailure::Configuration(message),
@@ -184,8 +195,15 @@ async fn refresh_once(
     let previous_state = face_state.get(source_id);
     let render_faces = faces.clone();
     let render_spec = spec.clone();
+    let render_account_dir = space.root.clone();
     let rendered = tokio::task::spawn_blocking(move || {
-        render_frame(&render_faces, &render_spec, previous_state.as_ref(), taps)
+        render_frame(
+            &render_faces,
+            &render_account_dir,
+            &render_spec,
+            previous_state.as_ref(),
+            taps,
+        )
     })
     .await;
     let rendered = match rendered {
@@ -338,10 +356,23 @@ mod tests {
         }
     }
 
+    /// A stand-in for the calling refresher's `AccountSpace::root`, for tests that
+    /// do not care which account it is, only that some directory is threaded
+    /// through. The fake package only ever echoes it; it need not exist on disk.
+    fn test_account_dir() -> &'static Path {
+        Path::new("/test-account")
+    }
+
     #[test]
     fn a_rendered_png_becomes_the_frame_a_producers_post_would() {
-        let rendered =
-            render_frame(&faces_package::fake(), &spec("Dubai"), None, 0).expect("a frame");
+        let rendered = render_frame(
+            &faces_package::fake(),
+            test_account_dir(),
+            &spec("Dubai"),
+            None,
+            0,
+        )
+        .expect("a frame");
         let posted = canonical_frame_from_png(
             &std::fs::read(concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -357,7 +388,13 @@ mod tests {
     fn output_the_asset_path_would_refuse_is_our_bug_not_the_feeds() {
         for steer in ["answer-with-garbage", "answer-with-wrong-size"] {
             assert!(matches!(
-                render_frame(&faces_package::fake(), &spec(steer), None, 0),
+                render_frame(
+                    &faces_package::fake(),
+                    test_account_dir(),
+                    &spec(steer),
+                    None,
+                    0,
+                ),
                 Err(RefreshFailure::NotAFrame(_))
             ));
         }
@@ -368,6 +405,7 @@ mod tests {
         assert!(matches!(
             render_frame(
                 &faces_package::fake(),
+                test_account_dir(),
                 &spec("refuse-as-configuration"),
                 None,
                 0,
@@ -377,12 +415,134 @@ mod tests {
         assert!(matches!(
             render_frame(
                 &faces_package::fake(),
+                test_account_dir(),
                 &spec("refuse-as-transient"),
                 None,
                 0,
             ),
             Err(RefreshFailure::Transient(_))
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refresh_scopes_the_child_to_this_accounts_own_directory() {
+        // End-to-end regression for the dropped `DESKMATE_CONFIG_DIR`: the server
+        // clears the child's environment, and a plugin reads its stored credential
+        // from `$DESKMATE_CONFIG_DIR/plugin-secrets.json` inside the child itself.
+        // If `refresh_once` ever stops threading `space.root` through to the
+        // subprocess, this fails -- it does not stop at "some path was passed" the
+        // way the faces_package-level tests do, it pins the REAL account directory
+        // this refresher was created for.
+        let directory = tempfile::tempdir().expect("temp directory");
+        let face_state = Arc::new(FaceStateStore::load(
+            directory.path().join("face-state.json"),
+        ));
+        let state = ServerState::in_memory();
+        let space = test_space(&state);
+
+        let outcome = refresh_once(
+            &state,
+            &space,
+            &faces_package::fake(),
+            &face_state,
+            &spec("echo-the-config-dir"),
+            0,
+        )
+        .await
+        .expect("the refresh task did not panic");
+        let RefreshOutcome::Retrying(message) = outcome else {
+            panic!("the fake package refuses this request on purpose");
+        };
+        assert_eq!(
+            message,
+            format!("DESKMATE_CONFIG_DIR={}", space.root.display())
+        );
+        state.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_accounts_render_never_sees_another_accounts_secrets_file() {
+        // The directory-passing tests above prove the right STRING reaches the
+        // child. They do not prove the property that actually matters: with two
+        // real accounts' `plugin-secrets.json` sitting on disk at once, an
+        // account's render reads only its own file and never the other's, in the
+        // request, the answer, or an error. `echo-the-secrets-file` in
+        // fake-faces.sh stands in for a plugin's own `readPluginSecrets` call --
+        // it reads `$DESKMATE_CONFIG_DIR/plugin-secrets.json` and reports the raw
+        // bytes -- so this exercises the same isolation a real plugin gets.
+        const SECRET_A: &str = "unique-secret-for-account-A-jsw8x2";
+        const SECRET_B: &str = "unique-secret-for-account-B-r7fqe9";
+
+        let directory = tempfile::tempdir().expect("temp directory");
+        let face_state = Arc::new(FaceStateStore::load(
+            directory.path().join("face-state.json"),
+        ));
+        let state = ServerState::in_memory();
+        let space_a = test_space(&state);
+        let account_b = state
+            .identity()
+            .create_account("other-owner@example.com", true, true, Utc::now())
+            .expect("create a second account");
+        let space_b = state.account_space(&account_b.id);
+        assert_ne!(
+            space_a.root, space_b.root,
+            "two distinct on-disk directories"
+        );
+
+        std::fs::write(
+            space_a.root.join("plugin-secrets.json"),
+            format!(r#"{{"acct-marker":{{"token":"{SECRET_A}"}}}}"#),
+        )
+        .expect("write account A's secrets file");
+        std::fs::write(
+            space_b.root.join("plugin-secrets.json"),
+            format!(r#"{{"acct-marker":{{"token":"{SECRET_B}"}}}}"#),
+        )
+        .expect("write account B's secrets file");
+
+        // Nothing about the request Rust builds ever carries a secret -- it is
+        // `{kind, settings, state?, event?}` -- so checking the message below
+        // also stands for "not in the request", the third place the task asked
+        // to check alongside the answer and the error.
+        let message_a = render_secrets_message(&state, &space_a, &face_state).await;
+        assert!(message_a.contains(SECRET_A), "{message_a}");
+        assert!(
+            !message_a.contains(SECRET_B),
+            "account A's render must never see account B's secret: {message_a}"
+        );
+
+        let message_b = render_secrets_message(&state, &space_b, &face_state).await;
+        assert!(message_b.contains(SECRET_B), "{message_b}");
+        assert!(
+            !message_b.contains(SECRET_A),
+            "account B's render must never see account A's secret: {message_b}"
+        );
+
+        state.shutdown();
+    }
+
+    /// Runs `echo-the-secrets-file` for one account and returns the fake's
+    /// message: whatever `$DESKMATE_CONFIG_DIR/plugin-secrets.json` held in
+    /// that account's own directory, or `SECRETS=<none>` if it had none.
+    async fn render_secrets_message(
+        state: &ServerState,
+        space: &Arc<AccountSpace>,
+        face_state: &Arc<FaceStateStore>,
+    ) -> String {
+        let outcome = refresh_once(
+            state,
+            space,
+            &faces_package::fake(),
+            face_state,
+            &spec("echo-the-secrets-file"),
+            0,
+        )
+        .await
+        .expect("the refresh task did not panic");
+        let RefreshOutcome::Retrying(message) = outcome else {
+            panic!("the fake package refuses this request on purpose");
+        };
+        message
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -507,7 +667,14 @@ mod tests {
         let at = |seconds: i64| Utc.timestamp_opt(1_700_000_000 + seconds, 0).unwrap();
         // What the refresh loop does with one tick: render, and accept only a frame.
         let publish = |steer: &str, now| {
-            render_frame(&faces_package::fake(), &spec(steer), None, 0).map(|rendered| {
+            render_frame(
+                &faces_package::fake(),
+                test_account_dir(),
+                &spec(steer),
+                None,
+                0,
+            )
+            .map(|rendered| {
                 store
                     .accept(&source.id, rendered.frame, now)
                     .expect("accept")

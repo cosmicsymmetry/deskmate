@@ -17,6 +17,24 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { ConfigurationError, TransientError } from "../face";
+import { INGEST_CAP_BYTES } from "./limits";
+
+/**
+ * A response refused for exceeding the ingest cap, carrying how many bytes were read
+ * before the read was cancelled. Those bytes crossed the wire and a caller metering a
+ * byte budget has to charge for them -- without this, a request that pulls a megabyte
+ * and is then refused looks exactly as cheap as one that failed to resolve. Transient,
+ * exactly as the untyped refusal it replaces was.
+ */
+export class ResponseTooLargeError extends TransientError {
+  override name = "ResponseTooLargeError";
+  readonly bytesRead: number;
+
+  constructor(bytesRead: number) {
+    super("the response is too large");
+    this.bytesRead = bytesRead;
+  }
+}
 
 /**
  * `fetch` sends no useful User-Agent by default, and a Cloudflare-fronted API answers
@@ -24,7 +42,8 @@ import { ConfigurationError, TransientError } from "../face";
  */
 export const USER_AGENT = "deskmate-faces/1";
 
-const MAX_BODY_BYTES = 1_048_576;
+// The ingest cap, shared with the card and budget caps -- see `./limits`.
+const MAX_BODY_BYTES = INGEST_CAP_BYTES;
 const TIMEOUT_MS = 15_000;
 const MAX_REDIRECTS = 4;
 
@@ -96,35 +115,122 @@ export async function pinnedAddress(url: URL, resolve: Resolve = systemResolve):
   return addresses.find((address) => isIP(address) === 4) ?? addresses[0] ?? host;
 }
 
+/** A request URL that fails to parse is always the owner's mistake, never transient. */
+function parseUrl(address: string): URL {
+  try {
+    return new URL(address);
+  } catch {
+    throw new ConfigurationError(`${address} is not a URL`);
+  }
+}
+
+/** The extra request shape `dial` accepts on top of the address it is told to hit. */
+export type DialInit = { method?: string; headers?: Record<string, string>; body?: string };
+
+/**
+ * `Host` is reserved outright, matched case-insensitively: address pinning validates the
+ * IP and TLS SNI is computed from `url.hostname`, so a caller-supplied `Host` cannot
+ * redirect the socket or defeat certificate checking -- but it CAN reach a validated,
+ * pinned public IP while claiming to be an arbitrary internal hostname, which is exactly
+ * the primitive a Host-routed internal service is vulnerable to. A caller-supplied `Host`
+ * is dropped before anything else, in every casing, no exceptions.
+ */
+const RESERVED_HEADER = "host";
+
+/**
+ * `User-Agent` and `Accept` are DEFAULTS, not reservations: a plugin may need its own
+ * `User-Agent` (this package's own default exists only because an HTTP client's blank
+ * one gets a 403 from a Cloudflare-fronted API before it reads the path -- a plugin that
+ * clears it is making its own mistake to make), and its own `Accept`. A caller-supplied
+ * value must REPLACE the default, never join it: naive case-sensitive merging lets
+ * `user-agent` and `User-Agent` survive as two distinct object keys, which the outbound
+ * `Headers` then comma-joins into `"caller-value, deskmate-faces/1"`, silently corrupting
+ * both. Matched case-insensitively, exactly like `Host`, so the replacement happens
+ * however the caller capitalised it.
+ */
+const DEFAULTED_HEADERS = new Set(["user-agent", "accept"]);
+
+/**
+ * Splits caller headers into what reaches the wire untouched (`passthrough`, e.g.
+ * `Authorization`) and what the guard resolves itself: `Host` is simply gone: an
+ * override the caller can never supply. `overrides` carries a caller's `User-Agent`/
+ * `Accept`, keyed by lowercase name, so the merge below can ask "did the caller set
+ * this?" once instead of re-scanning the original casing.
+ */
+function splitHeaders(headers: Record<string, string> | undefined): {
+  passthrough: Record<string, string>;
+  overrides: Map<string, string>;
+} {
+  const passthrough: Record<string, string> = {};
+  const overrides = new Map<string, string>();
+  for (const [name, value] of Object.entries(headers ?? {})) {
+    const lower = name.toLowerCase();
+    if (lower === RESERVED_HEADER) {
+      continue;
+    }
+    if (DEFAULTED_HEADERS.has(lower)) {
+      overrides.set(lower, value);
+      continue;
+    }
+    passthrough[name] = value;
+  }
+  return { passthrough, overrides };
+}
+
 /**
  * One request to `address`, speaking for `url`'s host. The URL handed to `fetch`
  * carries the IP literal, so nothing resolves the name again; the name travels in
  * `Host` and as the TLS server name, which is what the certificate is checked against.
  */
-export function dial(url: URL, address: string, signal: AbortSignal): Promise<Response> {
+export function dial(
+  url: URL,
+  address: string,
+  signal: AbortSignal,
+  init?: DialInit,
+): Promise<Response> {
   const target = new URL(url);
   target.hostname = isIP(address) === 6 ? `[${address}]` : address;
   const named = isIP(url.hostname.replace(/^\[|\]$/g, "")) === 0;
+  const { passthrough, overrides } = splitHeaders(init?.headers);
   return fetch(target, {
+    method: init?.method,
+    body: init?.body,
     redirect: "manual",
     signal,
-    headers: { Host: url.host, "User-Agent": USER_AGENT, Accept: "*/*" },
+    headers: {
+      ...passthrough,
+      // `Host` is the guard's absolutely -- no caller value ever reaches this key.
+      // `User-Agent`/`Accept` use the caller's replacement when they sent one, and
+      // the package default otherwise; either way there is exactly one of each key
+      // here, so nothing downstream can comma-join a default onto a caller's value.
+      Host: url.host,
+      "User-Agent": overrides.get("user-agent") ?? USER_AGENT,
+      Accept: overrides.get("accept") ?? "*/*",
+    },
     // An IP literal has no server name to present; a name always does.
     ...(url.protocol === "https:" && named ? { tls: { serverName: url.hostname } } : {}),
   } as RequestInit);
 }
+
+/**
+ * `dial`'s shape, injectable the same way `Resolve` already is: `createRequest` takes one
+ * as an optional second argument, defaulting to the real `dial`, so a test can prove the
+ * guard runs (or is bypassed by a private address) before the transport is ever reached --
+ * without a production flag that could be set outside a test.
+ */
+export type DialFn = (
+  url: URL,
+  address: string,
+  signal: AbortSignal,
+  init?: DialInit,
+) => Promise<Response>;
 
 /** For tests: a face takes its fetcher as a parameter, and `fetchText` is the real one. */
 export type FetchText = (url: string) => Promise<string>;
 
 export function createFetchText(resolve: Resolve = systemResolve): FetchText {
   return async (address) => {
-    let url: URL;
-    try {
-      url = new URL(address);
-    } catch {
-      throw new ConfigurationError(`${address} is not a URL`);
-    }
+    let url: URL = parseUrl(address);
     const deadline = AbortSignal.timeout(TIMEOUT_MS);
     try {
       for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
@@ -163,10 +269,11 @@ export function createFetchText(resolve: Resolve = systemResolve): FetchText {
 
 export const fetchText: FetchText = createFetchText();
 
-async function cappedText(response: Response): Promise<string> {
+/** The response body, read up to `max` bytes; over that, the owner never sees the rest. */
+async function readCapped(response: Response, max: number): Promise<Uint8Array> {
   const reader = response.body?.getReader();
   if (reader === undefined) {
-    return "";
+    return new Uint8Array(0);
   }
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -176,11 +283,92 @@ async function cappedText(response: Response): Promise<string> {
       break;
     }
     total += value.length;
-    if (total > MAX_BODY_BYTES) {
+    if (total > max) {
       await reader.cancel();
-      throw new TransientError("the response is too large");
+      throw new ResponseTooLargeError(total);
     }
     chunks.push(value);
   }
-  return new TextDecoder("utf-8").decode(Buffer.concat(chunks));
+  return Buffer.concat(chunks);
 }
+
+async function cappedText(response: Response): Promise<string> {
+  return new TextDecoder("utf-8").decode(await readCapped(response, MAX_BODY_BYTES));
+}
+
+export interface HttpReply {
+  status: number;
+  body: string | Uint8Array;
+  json?: unknown;
+}
+
+export interface HttpRequest {
+  url: string;
+  method?: "GET" | "POST";
+  headers?: Record<string, string>;
+  body?: string;
+  as: "json" | "text" | "bytes";
+}
+
+export type RequestFn = (input: HttpRequest) => Promise<HttpReply>;
+
+/**
+ * `dial`'s response, decoded the way `as` asked. Exported alongside `dial` for tests: a
+ * request that must actually complete against a real server cannot be driven through
+ * `createRequest` itself, because that would mean pinning a loopback address, which the
+ * guard exists to refuse -- exactly like this file's existing `dial`-level tests, which
+ * hit a real local server without going through `pinnedAddress`.
+ */
+export async function replyFrom(response: Response, as: HttpRequest["as"]): Promise<HttpReply> {
+  const bytes = await readCapped(response, MAX_BODY_BYTES);
+  if (as === "bytes") {
+    return { status: response.status, body: bytes };
+  }
+  const text = new TextDecoder("utf-8").decode(bytes);
+  if (as === "text") {
+    return { status: response.status, body: text };
+  }
+  try {
+    return { status: response.status, body: text, json: JSON.parse(text) };
+  } catch {
+    return { status: response.status, body: text };
+  }
+}
+
+/**
+ * A single request behind the same guard as `fetchText`: address pinning, the
+ * `Host`/TLS-name split and the body cap are all `pinnedAddress`/`dial`/`readCapped`,
+ * unchanged. Unlike `fetchText` this does not follow redirects and does not throw on a
+ * non-ok status -- a plugin's 404 or redirect is the plugin's business to interpret.
+ *
+ * `dialFn` defaults to the real `dial`; only a test passes anything else, which is what
+ * makes it safe to inject -- there is no flag to misconfigure in production.
+ */
+export function createRequest(resolve: Resolve = systemResolve, dialFn: DialFn = dial): RequestFn {
+  return async ({ url, method = "GET", headers = {}, body, as }) => {
+    const target = parseUrl(url);
+    try {
+      const address = await pinnedAddress(target, resolve);
+      const response = await dialFn(target, address, AbortSignal.timeout(TIMEOUT_MS), {
+        method,
+        headers,
+        body,
+      });
+      return await replyFrom(response, as);
+    } catch (error) {
+      if (error instanceof ConfigurationError || error instanceof TransientError) {
+        throw error;
+      }
+      if (
+        error instanceof Error &&
+        (error.name === "TimeoutError" || error.name === "AbortError")
+      ) {
+        throw new TransientError(`${target.host} timed out`);
+      }
+      // The message, never the URL: a query string can carry an API key.
+      throw new TransientError(`${target.host} could not be fetched`);
+    }
+  };
+}
+
+export const request: RequestFn = createRequest();

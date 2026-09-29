@@ -16,16 +16,29 @@
 
 import { ConfigurationError, type FaceDefinition, type RenderContext, type Settings } from "./face";
 import { pngFromSvg } from "./kit/raster";
-import { FACES, faceOfKind } from "./registry";
+import { warmSandbox } from "./plugins/sandbox";
+import { FACES, allFaces, faceOfKind } from "./registry";
 
 const EXIT_CONFIGURATION = 2;
 const EXIT_TRANSIENT = 1;
 
 export function describeCatalog(faces: readonly FaceDefinition[] = FACES): string {
   return JSON.stringify(
-    faces.map(({ kind, label, fields, tap }) =>
-      tap === undefined ? { kind, label, fields } : { kind, label, fields, tap },
-    ),
+    faces.map(({ kind, label, fields, tap, refreshSeconds }) => ({
+      kind,
+      label,
+      fields,
+      ...(tap === undefined ? {} : { tap }),
+      // snake_case on the wire, deliberately: this JSON is read by
+      // `crates/server/src/data_cards/faces_package.rs`'s `CatalogFace`, which has no
+      // `#[serde(rename)]` and no `deny_unknown_fields` -- a camelCase key here is
+      // silently ignored, not refused, and the field quietly deserializes to `None`.
+      // `kind`/`label`/`fields`/`tap` are single words so this was invisible until a
+      // compound-word field arrived. `FaceDefinition.refreshSeconds` and the
+      // manifest's own `refreshSeconds` (author-facing) are unaffected -- only this
+      // wire-facing key changes shape.
+      ...(refreshSeconds === undefined ? {} : { refresh_seconds: refreshSeconds }),
+    })),
     null,
     2,
   );
@@ -61,7 +74,13 @@ function tapEvent(value: unknown): RenderContext["event"] {
 }
 
 export async function renderRequest(
-  request: { kind?: unknown; settings?: unknown; state?: unknown; event?: unknown },
+  request: {
+    kind?: unknown;
+    settings?: unknown;
+    state?: unknown;
+    event?: unknown;
+    timezone?: unknown;
+  },
   face?: FaceDefinition,
   now: Date = new Date(),
 ): Promise<{ png: string; state?: unknown }> {
@@ -79,6 +98,9 @@ export async function renderRequest(
   const result = await definition.render(values, now, {
     state: request.state,
     event: tapEvent(request.event),
+    // Additive: an older server simply omits this, and a plugin that needs a zone
+    // falls back to the host process's own (see `plugins/discovery.ts`).
+    ...(typeof request.timezone === "string" ? { timezone: request.timezone } : {}),
   });
   const svg = typeof result === "string" ? result : result.svg;
   const png = Buffer.from(pngFromSvg(svg)).toString("base64");
@@ -88,8 +110,8 @@ export async function renderRequest(
     : { png, state: result.state };
 }
 
-function describe(): string {
-  return describeCatalog();
+async function describe(): Promise<string> {
+  return describeCatalog(await allFaces());
 }
 
 async function render(input: string, now: Date): Promise<string> {
@@ -99,24 +121,32 @@ async function render(input: string, now: Date): Promise<string> {
   } catch {
     throw new Error("the render request on stdin is not JSON");
   }
-  return JSON.stringify(
-    await renderRequest(
-      (request ?? {}) as {
-        kind?: unknown;
-        settings?: unknown;
-        state?: unknown;
-        event?: unknown;
-      },
-      undefined,
-      now,
-    ),
-  );
+  const req = (request ?? {}) as {
+    kind?: unknown;
+    settings?: unknown;
+    state?: unknown;
+    event?: unknown;
+    timezone?: unknown;
+  };
+  // Discovered fresh for this render, so a plugin folder added, fixed or removed
+  // since the last invocation is picked up without restarting anything (the built-in
+  // faces are unaffected either way -- `allFaces()` always returns them).
+  const faces = await allFaces();
+  const definition =
+    typeof req.kind === "string" ? faces.find((face) => face.kind === req.kind) : undefined;
+  return JSON.stringify(await renderRequest(req, definition, now));
 }
 
 async function main(): Promise<number> {
   const verb = process.argv[2];
+  if (verb === "describe" || verb === "render") {
+    // Discovery verifies each plugin folder by running its `plan()` in the sandbox
+    // (`plugins/discovery.ts`), and a render that resolves to a plugin runs its
+    // `plan`/`render` there too -- both need the WASM runtime loaded first.
+    await warmSandbox();
+  }
   if (verb === "describe") {
-    process.stdout.write(`${describe()}\n`);
+    process.stdout.write(`${await describe()}\n`);
     return 0;
   }
   if (verb === "render") {

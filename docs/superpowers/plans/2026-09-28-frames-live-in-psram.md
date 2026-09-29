@@ -17,7 +17,12 @@
 > Integrated local gates PASS on `6d06181`: firmware host + sanitizer,
 > Rust fmt/clippy/all-targets/doctests, web 216 tests + check/lint/format/build,
 > faces 429 tests + check/lint/format. Exact logs and Rust counts are saved in
-> ROD-3's verification document. CI is pending; no merge/deploy is claimed.
+> ROD-3's verification document. CI found Track B's allocation-loop test racing
+> Bun's 5s timeout on Linux (run 36618454766). Replaced that loop with one
+> bounded allocation: OOM at 8 MiB, success at 32 MiB. Production code is unchanged;
+> disabling the cap fails this test (observed). All faces gates pass again,
+> including 429 tests; the final-head CI result is still required.
+> No merge/deploy is claimed.
 > The newer lab entry records a prior migration and views deploy; the older
 > status below is historical. Glass latency is still unmeasured.
 >

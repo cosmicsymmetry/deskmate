@@ -180,7 +180,10 @@ async function requestedFace(request: FaceRequest): Promise<FaceDefinition> {
   if (builtin !== undefined) return builtin;
   await warmSandbox();
   const faces = await allFaces();
-  return definitionFor(request, faces.find((face) => face.kind === request.kind));
+  return definitionFor(
+    request,
+    faces.find((face) => face.kind === request.kind),
+  );
 }
 
 async function render(input: string, now: Date): Promise<string> {

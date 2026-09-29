@@ -345,19 +345,30 @@ test(
     });
     expect(planned.code).toBe(0);
     expect(JSON.parse(new TextDecoder().decode(planned.out))).toEqual({ views: [""] });
-    const tapped = await run("tap", JSON.stringify({ kind: "sound-plugin", event: { taps: 1, point: null } }), {
-      DESKMATE_PLUGINS_DIR: root,
-    });
+    const tapped = await run(
+      "tap",
+      JSON.stringify({ kind: "sound-plugin", event: { taps: 1, point: null } }),
+      {
+        DESKMATE_PLUGINS_DIR: root,
+      },
+    );
     expect(tapped.code).toBe(1);
     expect(tapped.err).toContain("handles taps through render");
   },
   BROKEN_PLUGIN_FOLDER_TEST_TIMEOUT_MS,
 );
 
-
 test("a face without onTap falls back to rendering instead of selecting its resting frame", () => {
-  expect(() => tapRequest({ kind: "probe", event: { taps: 1, point: null } }, {
-    kind: "probe", label: "Probe", fields: [], tap: "Refresh",
-    render: () => SQUARE_SVG,
-  })).toThrow("this face handles taps through render");
+  expect(() =>
+    tapRequest(
+      { kind: "probe", event: { taps: 1, point: null } },
+      {
+        kind: "probe",
+        label: "Probe",
+        fields: [],
+        tap: "Refresh",
+        render: () => SQUARE_SVG,
+      },
+    ),
+  ).toThrow("this face handles taps through render");
 });

@@ -409,6 +409,7 @@ pub(crate) fn views(
         body.to_string().as_bytes(),
         MAX_PLAN_BYTES,
         PLAN_TIMEOUT,
+        None,
     )
     .map_err(FaceRenderError::Transient)?;
     match finished.code {
@@ -452,6 +453,7 @@ pub(crate) fn tap(
         body.to_string().as_bytes(),
         MAX_PLAN_BYTES,
         PLAN_TIMEOUT,
+        None,
     )
     .map_err(FaceRenderError::Transient)?;
     match finished.code {

@@ -11,9 +11,14 @@
 > both tracks' board observations, and account-scoped rendering for staged views.
 > A plugin without onTap must fall back to render, never select its old resting
 > frame; regression coverage exercises this at the real subprocess boundary.
-> Chief Claude's 2026-09-29 direction supersedes the earlier deploy hold:
-> after integrated local gates and CI pass, merge then deploy using the ROD-3
-> deploy-runbook. No flash or new schema/wire change is part of this integration.
+> **Execution hold:** the automated merge/deploy continuation was rejected by
+> automatic approval review: relayed agent authorization does not override the
+> direct assignment's deploy prohibition. Deployment needs direct owner confirmation.
+> No flash or new schema/wire change is part of this integration.
+> CI run 36619465888 passed all four required jobs on 25d572e, including sanitizer
+> and doctests. Before release, main advanced to 8f105ea (packaging PR #10).
+> This follow-up merges that additive packaging/docs change; fresh gates and CI
+> are required for the resulting head. No merge to main or deploy is claimed.
 > Integrated local gates PASS on `6d06181`: firmware host + sanitizer,
 > Rust fmt/clippy/all-targets/doctests, web 216 tests + check/lint/format/build,
 > faces 429 tests + check/lint/format. Exact logs and Rust counts are saved in

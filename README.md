@@ -14,6 +14,11 @@ picture frames use durable device assets. What comes next is the
 [roadmap](docs/roadmap.md); what came before is the [project history](docs/history.md). Hardware observations and unresolved board gates are
 recorded in [board notes](docs/hardware/board-notes.md).
 
+## Self-hosting
+
+[Build and run your own server](docs/self-host.md), including first-run setup, keys,
+HTTPS and backups. No owner-specific tunnel or private crate is required.
+
 ## Web companion
 
 For UI work without a server or device, run the browser harness:

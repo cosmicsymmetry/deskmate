@@ -566,10 +566,22 @@ exercises for `github-stats` and for the hostile-input fixtures under
    assert on the resulting SVG or thrown error -- no network needed, which is the
    point of the pure-function shape. Run the package's own gates before trusting a
    change: `bun test`, `bun run check`, `bun run lint`, `bun run format:check`.
-5. **Configure a secret**, if your plugin declares one: create (or edit)
-   `plugin-secrets.json` in the *owning account's own directory* --
-   `DESKMATE_CONFIG_DIR/accounts/<account-id>/plugin-secrets.json`, not the
-   top-level config root -- shaped (`companion/faces/src/plugins/secrets.ts:1-16`):
+5. **Configure a secret**, if your plugin declares one. `DESKMATE_CONFIG_DIR` names
+   two different directories depending which process reads it, and this is the one
+   place that distinction matters:
+   - On the **server process** (what `server.env` sets), it is the top-level config
+     root, and the owner's file physically lives one level under it, per account:
+     `$DESKMATE_CONFIG_DIR/accounts/<account-id>/plugin-secrets.json` -- the same
+     place `data-cards.json` lives for that account.
+   - On the **render child** -- what your plugin's code would see as
+     `process.env.DESKMATE_CONFIG_DIR`, though `readPluginSecrets` already reads it
+     for you -- the server has *rebound* the variable, per render, to already BE
+     that one account's directory. So inside `secrets.ts` the path is just
+     `${DESKMATE_CONFIG_DIR}/plugin-secrets.json`, with no `accounts/<id>` segment
+     to add; adding one there would look in the wrong place.
+
+   Create (or edit) the file at the first (operator-facing) path, shaped
+   (`companion/faces/src/plugins/secrets.ts:1-23`):
 
    ```json
    { "github-stats": { "github_token": "ghp_..." } }
@@ -577,7 +589,7 @@ exercises for `github-stats` and for the hostile-input fixtures under
 
    The top-level key is your plugin's `id`; a plugin only ever sees its own entry,
    and only for the account whose card is being rendered: on every `render` (never
-   on `describe`) the server points the child's `DESKMATE_CONFIG_DIR` at that one
+   on `describe`) the server rebinds the child's `DESKMATE_CONFIG_DIR` to that one
    account's directory, so a secret filed for account A's card is never visible to
    account B's render of the same plugin
    (`companion/crates/server/src/data_cards/faces_package.rs`). No file, no

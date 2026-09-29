@@ -461,6 +461,91 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn one_accounts_render_never_sees_another_accounts_secrets_file() {
+        // The directory-passing tests above prove the right STRING reaches the
+        // child. They do not prove the property that actually matters: with two
+        // real accounts' `plugin-secrets.json` sitting on disk at once, an
+        // account's render reads only its own file and never the other's, in the
+        // request, the answer, or an error. `echo-the-secrets-file` in
+        // fake-faces.sh stands in for a plugin's own `readPluginSecrets` call --
+        // it reads `$DESKMATE_CONFIG_DIR/plugin-secrets.json` and reports the raw
+        // bytes -- so this exercises the same isolation a real plugin gets.
+        const SECRET_A: &str = "unique-secret-for-account-A-jsw8x2";
+        const SECRET_B: &str = "unique-secret-for-account-B-r7fqe9";
+
+        let directory = tempfile::tempdir().expect("temp directory");
+        let face_state = Arc::new(FaceStateStore::load(
+            directory.path().join("face-state.json"),
+        ));
+        let state = ServerState::in_memory();
+        let space_a = test_space(&state);
+        let account_b = state
+            .identity()
+            .create_account("other-owner@example.com", true, true, Utc::now())
+            .expect("create a second account");
+        let space_b = state.account_space(&account_b.id);
+        assert_ne!(
+            space_a.root, space_b.root,
+            "two distinct on-disk directories"
+        );
+
+        std::fs::write(
+            space_a.root.join("plugin-secrets.json"),
+            format!(r#"{{"acct-marker":{{"token":"{SECRET_A}"}}}}"#),
+        )
+        .expect("write account A's secrets file");
+        std::fs::write(
+            space_b.root.join("plugin-secrets.json"),
+            format!(r#"{{"acct-marker":{{"token":"{SECRET_B}"}}}}"#),
+        )
+        .expect("write account B's secrets file");
+
+        // Nothing about the request Rust builds ever carries a secret -- it is
+        // `{kind, settings, state?, event?}` -- so checking the message below
+        // also stands for "not in the request", the third place the task asked
+        // to check alongside the answer and the error.
+        let message_a = render_secrets_message(&state, &space_a, &face_state).await;
+        assert!(message_a.contains(SECRET_A), "{message_a}");
+        assert!(
+            !message_a.contains(SECRET_B),
+            "account A's render must never see account B's secret: {message_a}"
+        );
+
+        let message_b = render_secrets_message(&state, &space_b, &face_state).await;
+        assert!(message_b.contains(SECRET_B), "{message_b}");
+        assert!(
+            !message_b.contains(SECRET_A),
+            "account B's render must never see account A's secret: {message_b}"
+        );
+
+        state.shutdown();
+    }
+
+    /// Runs `echo-the-secrets-file` for one account and returns the fake's
+    /// message: whatever `$DESKMATE_CONFIG_DIR/plugin-secrets.json` held in
+    /// that account's own directory, or `SECRETS=<none>` if it had none.
+    async fn render_secrets_message(
+        state: &ServerState,
+        space: &Arc<AccountSpace>,
+        face_state: &Arc<FaceStateStore>,
+    ) -> String {
+        let outcome = refresh_once(
+            state,
+            space,
+            &faces_package::fake(),
+            face_state,
+            &spec("echo-the-secrets-file"),
+            0,
+        )
+        .await
+        .expect("the refresh task did not panic");
+        let RefreshOutcome::Retrying(message) = outcome else {
+            panic!("the fake package refuses this request on purpose");
+        };
+        message
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_refresh_passes_stored_state_to_the_faces_package() {
         let directory = tempfile::tempdir().expect("temp directory");
         let face_state = Arc::new(FaceStateStore::load(

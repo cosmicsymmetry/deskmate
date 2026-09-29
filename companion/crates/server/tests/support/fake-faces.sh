@@ -58,6 +58,19 @@ render)
 	*never-answer*) exec sleep 600 ;;
 	*echo-the-environment*) env >&2; exit 1 ;;
 	*echo-the-config-dir*) printf 'DESKMATE_CONFIG_DIR=%s\n' "${DESKMATE_CONFIG_DIR:-<unset>}" >&2; exit 1 ;;
+	*echo-the-secrets-file*)
+		# Stands in for a plugin reading its own credential via `readPluginSecrets`
+		# (`companion/faces/src/plugins/secrets.ts`): read
+		# `$DESKMATE_CONFIG_DIR/plugin-secrets.json` and report its raw bytes. Used
+		# to prove two accounts' renders never see each other's file, not just that
+		# some directory reached the child.
+		if [ -n "${DESKMATE_CONFIG_DIR:-}" ] && [ -f "$DESKMATE_CONFIG_DIR/plugin-secrets.json" ]; then
+			printf 'SECRETS=%s\n' "$(cat "$DESKMATE_CONFIG_DIR/plugin-secrets.json")" >&2
+		else
+			printf 'SECRETS=<none>\n' >&2
+		fi
+		exit 1
+		;;
 	*alternate-frame*) cat "$here/fake-face-alt.png" ;;
 	*'"event":'*) printf '{"png":"%s","state":{"page":3}}' "$(base64 < "$here/fake-face.png" | tr -d '\n')" ;;
 	*) cat "$here/fake-face.png" ;;

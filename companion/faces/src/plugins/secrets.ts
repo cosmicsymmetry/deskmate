@@ -3,6 +3,15 @@
 // anything but the one plugin's own entry -- not the other plugins', and not the
 // file's shape.
 //
+// `DESKMATE_CONFIG_DIR` here is NOT the server's own config root -- the server
+// rebinds it per `render` (never per `describe`) to the one account's directory
+// whose card is being drawn (`companion/crates/server/src/data_cards/faces_package.rs`).
+// So the path below has no `accounts/<id>` segment to add: from this process, the
+// variable already points at that one account's own directory. See
+// `docs/plugins/contract-v1.md` ("Configure a secret") for the operator-facing path,
+// which does have that segment, because it is read relative to the SERVER's own
+// `DESKMATE_CONFIG_DIR`.
+//
 // Shape on disk, `plugin-secrets.json`:
 //
 //   {

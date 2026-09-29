@@ -73,7 +73,7 @@ the batch merges. Release preparation has not merged; the lock remains held and 
 | B | Not started | -- | -- |
 | C1 | Frames-in-PSRAM implementation complete; **release preparation blocked on managed GitHub access** (ROD-3, 2026-09-29). Firmware `v2.2.0-psram` was OTA-verified previously. The newer 2026-09-29 board entry records an account migration and staged views on the live server; no new hardware observation is claimed. Release runbook and warm weather-tap measurement are on the issue. Integration with Track B and the local Track D commits, final gates, and CI are still required | `track-c1-frames-in-psram` (existing PR #7, remote state unverified) | Restore managed GitHub identity/credentials; merge and verify the release. Owner separately authorizes any deploy; staged-view tap latency on the glass remains unmeasured |
 | C2 | Not started | -- | C1 |
-| D | **Live** at deskmate-site.pages.dev (2026-09-25) | `deskmate-site`, own repo | A domain before E launches; real photographs; A for sign-up |
+| D | **Live** at deskmate-site.pages.dev (2026-09-25). The dev-only frame exporter (`app-core/examples/frame_export.rs`) merged to `main` 2026-09-28, so the pack regenerates from a clean checkout; it was re-run and its frames re-checked against the post-A, post-C1 workspace | `deskmate-site`, own repo | A domain before E launches; real photographs; A's **deploy** before the page can offer sign-up |
 | E | Not started | -- | -- |
 | F | Not started | -- | A |
 | G | Not started | -- | C1 phase 2, A |

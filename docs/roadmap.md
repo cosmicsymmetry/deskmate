@@ -65,13 +65,13 @@ can write a plugin and either self-host it or submit it to run on ours.
 frame pool: `VOLATILE_ASSET_SLOT_COUNT` 2 -> 16, a new `StatusResponse` key, and the
 `docs/protocol/v2.md` amendment). `CURRENT_SCHEMA_VERSION` is untouched and stays free.
 Phase 1 needed no lock -- tap-to-face crossed no boundary -- and C1 releases this one when
-the batch merges.
+the batch merges. Release preparation has not merged; the lock remains held and its scope is unchanged.
 
 | Track | Status | Branch | Waiting on |
 |---|---|---|---|
 | A | **Accounts + claiming merged** (PR #5, 2026-09-28). Not deployed yet: on the owner's direction **C1's next deploy carries it** -- C1 merges main, and the first start of that build migrates the live config into re.aleksandrov1@gmail.com's account (`DESKMATE_PUBLIC_URL` and `DESKMATE_OWNER_EMAIL` are already in the live `server.env`). After it, sign-in is an email link from the server log. Next: plan limits and billing, and self-host packaging | -- | The Web Serial spike at the board (plan Task 1) |
 | B | Not started | -- | -- |
-| C1 | The frames-in-PSRAM spec is **implemented in full**: `dev-0005` runs `v2.2.0-psram` with the 16-slot pool (flashed and verified by OTA 2026-09-28), every picture frame is volatile with pool-pressure reclamation, faces declare `views()`/`onTap()`, and the server stages views so a tap on one is a single `PushScene`. Not deployed: the next deploy also carries Track A's migration | `track-c1-frames-in-psram` (PR #7) | The owner's go-ahead for the deploy, then a tap on the glass and its redraw time |
+| C1 | Frames-in-PSRAM implementation complete; **release preparation blocked on managed GitHub access** (ROD-3, 2026-09-29). Firmware `v2.2.0-psram` was OTA-verified previously. The newer 2026-09-29 board entry records an account migration and staged views on the live server; no new hardware observation is claimed. Release runbook and warm weather-tap measurement are on the issue. Integration with Track B and the local Track D commits, final gates, and CI are still required | `track-c1-frames-in-psram` (existing PR #7, remote state unverified) | Restore managed GitHub identity/credentials; merge and verify the release. Owner separately authorizes any deploy; staged-view tap latency on the glass remains unmeasured |
 | C2 | Not started | -- | C1 |
 | D | **Live** at deskmate-site.pages.dev (2026-09-25) | `deskmate-site`, own repo | A domain before E launches; real photographs; A for sign-up |
 | E | Not started | -- | -- |

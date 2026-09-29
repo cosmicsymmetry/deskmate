@@ -265,6 +265,6 @@ corrected bundle build passed, reusing its verified public downloads/build cache
 
 This verifies a clean source checkout on an existing toolchain host, not a freshly
 installed operating system. Debian/systemd/Caddy installation, public HTTPS, actual
-provider delivery, panel provisioning and OTA were not exercised. GitHub repository
-lookup returned 404 and `gh run list` could not authenticate, so PR/CI/merge remain
-blocked; no CI success is claimed.
+provider delivery, panel provisioning and OTA were not exercised. Repository access was restored later on 2026-09-29: authenticated `git fetch origin`
+and `gh run list` succeeded. Current main is already contained in this branch.
+Branch PR/CI verification and merge are tracked in the packaging work record.

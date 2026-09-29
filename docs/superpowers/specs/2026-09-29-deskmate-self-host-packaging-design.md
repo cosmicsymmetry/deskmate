@@ -76,3 +76,10 @@ required or authorized for this packaging validation.
   confirm CI and merge. `gh run list` exited 4 (no managed credentials); connected
   GitHub repository lookup returned 404. Unblock owner: Chief Claude must restore
   Vault's repository scope and managed Git identity. Local branch remains intact.
+
+- Continuation 2026-09-29: repository access repair verified outside the network
+  sandbox using the runtime-provided GitHub CLI credential. `git fetch origin`
+  succeeded; `HEAD..origin/main` is empty, so no integration change is needed.
+  The branch is clean at `1d0816b` before these status-only documentation edits;
+  prior full local gates and clean-checkout/browser evidence still apply.
+  Historical access-blocker notes above are resolved; next is branch CI and PR merge.

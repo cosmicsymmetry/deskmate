@@ -5839,3 +5839,118 @@ because the tests set that variable in their own process. Fixed by passing the r
 account's own directory (accounts are per-account since Track A) on the `render` verb only.
 **The fix is not yet observed on the board**: it needs a real credential in a real
 `plugin-secrets.json`, which the owner has not yet provided.
+
+## 2026-09-30 -- the tap, timed on the glass; and a 24-hour silent C1 rollback
+
+Sources are labelled throughout, because they are not interchangeable: **log** = the live
+journal, **snapshot** = `GET /v1/devices/dev-0005`, **video** = the owner's recording
+`2026-09-30 14.14.39.mp4` (30 fps, 29.9 s, 270 degrees), **repro** = a local run of the
+faces package against the live state.
+
+### The live server had not been running C1's server half for a day
+
+**Finding (log + binary).** From 2026-09-29 10:12:24 UTC to 2026-09-30 09:59:24 the
+deployed binary contained none of C1's strings. Track B's deploy (`96bed8c`, from a branch
+that did not contain C1) replaced it, silently and with no warning from `deploy.sh`. The
+binary it overwrote is still on the VM as `deskmate-server.bak-20260929T101224Z` and does
+contain them.
+
+What that cost, all observed this morning before the redeploy:
+
+- no `staged a view` line since 2026-09-29 10:02 -- the staging seam was simply absent;
+- commits back on flash at **1,564-1,620 ms**, and one release of **15,206 ms**;
+- key 31 regrown to **2,308,180 B / 7 records**, from 329,740 / 1 on 09-28;
+- key 32 **absent** from the snapshot.
+
+So **every C1 claim made on 09-29 after 10:12 UTC was measured against the old path.** The
+2026-09-29 entries above predate the rollback and stand; anything asserted after it does
+not.
+
+Redeployed by the owner from `track-c1-frames-in-psram` @ `865e83c` -- binary, web and
+faces, all three confirmed by `--status`. That branch contains `origin/main` and Track B,
+so B was not rolled back in turn.
+
+**After the redeploy (log + snapshot):** the link re-established 2 s after the restart
+(09:59:26) and staging resumed at once (weather `days`, rss `page-2`/`page-3`, token
+`line`). Commits **106-232 ms**. `firmware_version v2.2.0-psram`; the board did not reboot
+for the server restart, so the last `firmware check ... current=v2.2.0-psram` is still the
+09:48:26 boot.
+
+| key | reading |
+|---|---|
+| 32 | committed 9 / capacity 16, used 2,967,660 B (= 9 x 329,740 exactly) |
+| 31 | 1,318,960 B / 4 records, draining (one 9-digest release took 10,866 ms) |
+| psram | free 5,298,008, low water 3,954,336 |
+
+### The tap, timed -- the fast path works on the glass
+
+The firmware classifies a gesture **on release** (`ui/carousel.c`), so contact-to-stable
+includes the owner's finger dwell and release-to-stable is the system's share. Both are
+given. Times are video-relative: contact and release +-2 frames, face change +-1 frame
+(33 ms).
+
+| # | card | change | contact | release | first new pixels | stable | contact->stable | release->stable | server `face-state` write |
+|---|---|---|---|---|---|---|---|---|---|
+| W1 | weather | now->days | 0.23 | 0.90 | 1.33 | 1.37 | 1.13 s | 0.47 s | 10:10:43.241 |
+| W2 | weather | days->now | 2.57 | 3.07 | 3.57 | 3.63 | 1.07 s | 0.57 s | 10:10:45.314 |
+| W3 | weather | now->days | 4.57 | 5.07 | 5.53 | 5.57 | 1.00 s | 0.50 s | 10:10:47.416 |
+| W4 | weather | days->now | 6.53 | 7.07 | 7.37 | 7.43 | 0.90 s | 0.37 s | 10:10:49.214 |
+| H1 | rss | p1->p2 (staged) | 10.23 | 10.73 | 11.03 | 11.10 | 0.87 s | 0.37 s | 10:10:52.902 |
+| H2 | rss | p2->p3 (staged) | 11.90 | 12.47 | 12.90 | 12.93 | 1.03 s | 0.47 s | 10:10:54.708 |
+| H3 | rss | p3->p4 (fallback) | -- | ~14.3 | **none** | -- | -- | -- | render 10:10:56.683 "face is unchanged" |
+| H4 | rss | again | -- | ~16.6 | **none** | -- | -- | -- | render 10:10:59.136 "face is unchanged" |
+| H5 | rss | again | -- | ~21.4 | **none** | -- | -- | -- | render 10:11:03.524 "face is unchanged" |
+| T1 | token | candles->line | 25.93 | 26.50 | 26.83 | 26.87 | 0.93 s | 0.37 s | 10:11:08.683 |
+| T2 | token | line->candles | 27.90 | 28.50 | 28.77 | 28.80 | 0.90 s | 0.30 s | 10:11:10.634 |
+
+**Eight fast-path taps: contact->stable 0.87-1.13 s (median ~0.97 s); release->stable
+0.30-0.57 s (median ~0.42 s).** Against the 13.3 s of 2026-09-26, on that entry's own
+definition, that is roughly **13x**. It **misses the <= 250 ms figure the track proposed**,
+on either definition, and that gap is now a measured fact rather than an estimate.
+
+- **The correlation holds.** Server write time minus video first-new-pixel time is
+  41.75-41.91 s across all 8 taps (+-80 ms).
+- **Where the time goes cannot be split.** Nothing in the frame carries sub-second absolute
+  time, so device->server and server->panel are not separable from this video. The panel
+  clock shows minutes only (10:10 at t 8.6, 10:11 at t 24.4).
+- **The wire was quiet.** No asset transfer between 10:10:09 and 10:14:28, so no tap moved a
+  frame -- as staging intends. The journal logs neither a tap's arrival nor a `PushScene`,
+  so "one PushScene per tap" remains the code's claim, not an observation.
+- Every face change shows 1-2 video frames with old and new faces blended.
+
+**Two swipes** were classified NEXT, not tap: weather->HN (release ~8.47) and HN->token
+(release ~24.3). Each showed the **clock face for ~0.1-0.2 s** between the two cards;
+release->stable was 0.37 s and 0.23 s.
+
+### Defect -- the rendered fallback turns no page (log + video + repro)
+
+The third rss tap needs `page-4`, which is not staged
+(`MAX_STAGED_FRAMES_PER_SOURCE = 3`), so it takes the slow path.
+`data_cards/worker.rs::render_frame` sends `taps` with `view: None`;
+`rss.ts::renderRssRequest` receives the event plus stored state, draws
+`pageForView(undefined)` = page 1, and returns the previous state. The frame is
+byte-identical to the stored resting frame, so `accept_server_rendered` reports it
+unchanged and **nothing is pushed**. `face-state` stays at `page: 2`, so every later tap
+repeats the same path forever. The panel sat on staged page 3 while the server's stored
+frame was page 1. Repro against the live state: `view:""` and a tap-without-view both hash
+`dc08706d...`, while `view:"page-4"` hashes `21576e70...`. `hackernews.ts` has the same
+shape. Weather and token never reach the fallback -- their only other view is staged.
+
+**So the staged-vs-rendered comparison this session was for could not be made: the rendered
+tap produced no face at all.** Tracked as ROD-13; the fix is not deployed, and deploying it
+needs the owner.
+
+### Still owed
+
+- **The rendered-tap time.** Blocked on the defect above; runnable as soon as the fix is
+  deployed.
+- **Both mountings.** The video is **270 degrees only**. Weather, rss and token at 90
+  degrees, with the owner judging letter-spacing overhang and legibility from a chair, is
+  not started.
+- **The `hackernews` face has still never crossed the tunnel.** The card named "Hacker
+  News" is the **rss** face; no card uses the `hackernews` kind, so its 61 KB / 33 chunks is
+  untested. The largest frame that crossed today was 30 chunks / 55,824 B. A
+  `hackernews`-kind card has to be added to the live config first.
+- **A timed release with an empty durable store.** Key 31 still holds 4 records.
+- **A full USB flash** for a rollback baseline OTA cannot produce. Optional, cable only.
+- **The framebuffer matrix**, deliberately not in this session.

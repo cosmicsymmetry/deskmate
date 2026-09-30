@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { storyFromItem } from "../src/faces/hackernews";
 import { describeCatalog, renderRequest, tapRequest } from "../src/main";
 
 const MAIN = `${import.meta.dir}/../src/main.ts`;
@@ -372,3 +373,56 @@ test("a face without onTap falls back to rendering instead of selecting its rest
     ),
   ).toThrow("this face handles taps through render");
 });
+
+// The server's unstaged fallback sends the OLD state and an event, with no view.
+// Exercise its real subprocess envelope, not just the staged onTap -> view path.
+for (const kind of ["rss", "hackernews"] as const) {
+  test(`${kind}: an unstaged tap renders page four and subsequent taps keep moving`, async () => {
+    const now = new Date("2026-09-23T05:00:00Z");
+    const items: unknown[] = await Bun.file(
+      new URL("./hn-front-page.captured.json", import.meta.url),
+    ).json();
+    const stories = items.flatMap((item, index) => {
+      const story = storyFromItem(item, index + 1, now);
+      return story === undefined ? [] : [story];
+    });
+    const initial = {
+      page: 2,
+      tappedAt: null as string | null,
+      ...(kind === "rss"
+        ? { feedTitle: "Captured headlines", entries: stories.slice(0, 16) }
+        : { stories: stories.slice(0, 20) }),
+    };
+    const request = async (state: unknown, extra: object) => {
+      const result = await run("render", JSON.stringify({ kind, settings: {}, state, ...extra }));
+      expect(result.err).toBe("");
+      expect(result.code).toBe(0);
+      return JSON.parse(new TextDecoder().decode(result.out)) as {
+        png: string;
+        state: typeof initial;
+      };
+    };
+    const third = await request(initial, { view: "page-3" });
+    const first = await request(initial, { view: "" });
+    let state = initial;
+    let lastPng = third.png;
+    for (const page of kind === "rss" ? [3, 0, 1] : [3, 4, 0, 1]) {
+      const before = Date.now();
+      const tapped = await request(state, { event: { taps: 1, point: null } });
+      const expected = await request(state, { view: page === 0 ? "" : `page-${page + 1}` });
+      expect(tapped.state.page).toBe(page);
+      expect(Date.parse(tapped.state.tappedAt ?? "")).toBeGreaterThanOrEqual(before);
+      expect(tapped.png).not.toBe(lastPng);
+      expect(tapped.png).toBe(expected.png);
+      if (page === 3) expect(tapped.png).not.toBe(first.png);
+      state = tapped.state;
+      lastPng = tapped.png;
+    }
+    const coalesced = await request(initial, { event: { taps: 3, point: null } });
+    expect(coalesced.state.page).toBe(kind === "rss" ? 1 : 0);
+    // An explicit view is a draw instruction, even if an event accompanies it.
+    const explicit = await request(initial, { view: "page-4", event: { taps: 3, point: null } });
+    expect(explicit.state).toEqual(initial);
+    expect(explicit.png).toBe((await request(initial, { view: "page-4" })).png);
+  });
+}

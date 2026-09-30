@@ -3,6 +3,27 @@
 **Spec:** `docs/superpowers/specs/2026-09-28-deskmate-frames-live-in-psram-design.md`
 **Track:** C1 (branch `track-c1-tap-to-face`, PR #4)
 
+> **2026-09-30 — ROD-13 rendered tap fallback correction.** The ROD-12 bench
+> report supersedes the older claim below that no tap has been observed: staged RSS
+> pages turned, but the unstaged page-four fallback returned page one and unchanged
+> state. RSS and Hacker News now share their per-face tap transition between `onTap`
+> and a render carrying an event without a view. Explicit view renders still leave
+> state unchanged. This is a faces-only correction: `deploy.sh --faces-only`, no
+> Rust restart, wire/schema change or firmware work.
+>
+> Regression evidence: both real `render` subprocess tests failed before the fix
+> (`page: 2`, expected `3`). Afterward they verify different PNGs, equality to the
+> requested page-four PNG, advanced state/tap time, repeated taps, wraparound,
+> coalesced taps and explicit-view precedence. All 431 faces tests pass; check,
+> lint and format:check exit 0 (lint retains the pre-existing unused RenderContext
+> import warning in main.ts). `bun run dump out/` generated 38 review cases;
+> additional fallback page-four PNGs from captured headlines were inspected at
+> full and 0.4x size. RSS shows entries 13–16; Hacker News shows page 4/5 with
+> story 13 leading, using the existing layout. No goldens changed.
+>
+> This fix has not been deployed or verified on the glass. PR #7 must remain open;
+> the owner decides merge and deployment, then owns the next physical tap check.
+>
 > **RELEASE INTEGRATION 2026-09-29 (ROD-3).** Managed GitHub CLI access is
 > restored (ROD-7). Local main's three Track D commits are preserved by merging
 > main into C1, followed by origin/main (`4253521`, including Tracks A and B).

@@ -702,6 +702,15 @@ function normalizedPage(page: number, stories: Story[]): number {
   return page % pageCount(stories);
 }
 
+/** Shared by staged selection and the server's render-only tap fallback. */
+function tappedState(previous: HackerNewsState, taps: number, now: Date): HackerNewsState {
+  return {
+    ...previous,
+    page: normalizedPage(previous.page + taps, previous.stories),
+    tappedAt: now.toISOString(),
+  };
+}
+
 function pageViews(stories: Story[]): ViewId[] {
   return Array.from({ length: pageCount(stories) }, (_, page) =>
     page === 0 ? "" : `page-${page + 1}`,
@@ -737,12 +746,13 @@ export async function renderHackerNewsRequest(
   get: FetchText = fetchText,
 ): Promise<{ svg: string; state: HackerNewsState }> {
   const previous = storedState(context.state);
-  // A render that is TOLD which view to draw must not fetch: answering a tap
-  // from what is already in hand is the entire point of the views split. The
-  // event is still honoured beside it, because the server and this package
-  // deploy independently and a server that sends a tap without a view is the
-  // one running right now.
-  if ((context.view !== undefined || context.event !== undefined) && previous !== undefined) {
+  // Explicit views only draw; an unstaged tap arrives without a view and must
+  // advance the stored state, using the same transition as onTap.
+  if (context.view === undefined && context.event !== undefined && previous !== undefined) {
+    const state = tappedState(previous, context.event.taps, now);
+    return { svg: drawState(state), state };
+  }
+  if (context.view !== undefined && previous !== undefined) {
     return {
       svg: drawState({ ...previous, page: pageForView(context.view, previous.stories) }),
       state: previous,
@@ -791,13 +801,8 @@ export const hackernews: FaceDefinition = {
     if (previous === undefined) {
       return { view: "" };
     }
-    const page = normalizedPage(previous.page + event.taps, previous.stories);
-    const state: HackerNewsState = {
-      ...previous,
-      page,
-      tappedAt: now.toISOString(),
-    };
-    return { view: pageViews(state.stories)[page] ?? "", state };
+    const state = tappedState(previous, event.taps, now);
+    return { view: pageViews(state.stories)[state.page] ?? "", state };
   },
   render(settings, now, context) {
     return renderHackerNewsRequest(settings, now, context);

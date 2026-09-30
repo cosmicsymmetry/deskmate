@@ -354,6 +354,15 @@ function normalizedPage(page: number, entries: FeedEntry[]): number {
   return ((page % pages) + pages) % pages;
 }
 
+/** Shared by staged selection and the server's render-only tap fallback. */
+function tappedState(previous: RssState, taps: number, now: Date): RssState {
+  return {
+    ...previous,
+    page: normalizedPage(previous.page + taps, previous.entries),
+    tappedAt: now.toISOString(),
+  };
+}
+
 function pageViews(entries: FeedEntry[]): ViewId[] {
   return Array.from({ length: pageCount(entries) }, (_, page) =>
     page === 0 ? "" : `page-${page + 1}`,
@@ -393,12 +402,13 @@ export async function renderRssRequest(
   get: FetchText = fetchText,
 ): Promise<{ svg: string; state: RssState }> {
   const previous = storedState(context.state);
-  // A render that is TOLD which view to draw must not fetch: answering a tap
-  // from what is already in hand is the entire point of the views split. The
-  // event is still honoured beside it, because the server and this package
-  // deploy independently and a server that sends a tap without a view is the
-  // one running right now.
-  if ((context.view !== undefined || context.event !== undefined) && previous !== undefined) {
+  // Explicit views only draw; an unstaged tap arrives without a view and must
+  // advance the stored state, using the same transition as onTap.
+  if (context.view === undefined && context.event !== undefined && previous !== undefined) {
+    const state = tappedState(previous, context.event.taps, now);
+    return { svg: renderRss(faceForPage(state)), state };
+  }
+  if (context.view !== undefined && previous !== undefined) {
     return {
       svg: renderRss(
         faceForPage({ ...previous, page: pageForView(context.view, previous.entries) }),
@@ -445,13 +455,8 @@ export const rss: FaceDefinition = {
     if (previous === undefined) {
       return { view: "" };
     }
-    const page = normalizedPage(previous.page + event.taps, previous.entries);
-    const state: RssState = {
-      ...previous,
-      page,
-      tappedAt: now.toISOString(),
-    };
-    return { view: pageViews(state.entries)[page] ?? "", state };
+    const state = tappedState(previous, event.taps, now);
+    return { view: pageViews(state.entries)[state.page] ?? "", state };
   },
   async render(settings, now, context) {
     return renderRssRequest(settings, now, context);

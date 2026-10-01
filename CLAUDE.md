@@ -72,7 +72,8 @@ default. This section states only what is true now.
   selects a view/state and `views` lists stageable views. Private `tap-worker` IPC keeps
   only selection warm (never renders), with 64 KiB requests, 16 KiB replies, a 5 s
   exchange deadline, 256 requests / 60 s lifetime and 128 MiB RSS retirement between
-  requests. Crash falls back to one-shot `tap`; faces-only updates need no restart. Exit 2
+  requests. Idle exits are reaped without another tap. Crash falls back to one-shot
+  `tap`; faces-only updates need no restart. Exit 2
   means "the owner must change a setting", anything else non-zero is transient, and
   either keeps the stored frame. The child's environment is cleared -- the server's holds
   the admin token. **Adding a face is a file in `faces/src/faces/` plus

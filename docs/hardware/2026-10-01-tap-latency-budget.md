@@ -14,7 +14,7 @@ Video is 30 fps, with release uncertainty ±2 frames and face-change uncertainty
 frame. First new pixels to stable took approximately 30–70 ms (one or two frames).
 The historical median gap to 250 ms is about **170 ms**.
 
-These measurements predate this branch. Neither the new local 6.7 ms median nor the
+These measurements predate this branch. Neither the new local 5.0 ms median nor the
 local saving can be subtracted from that old 420 ms glass median. There is still no
 successful live tap with which to allocate the complete deployed budget, and no
 measurement proving that the 250 ms target has been reached.
@@ -46,6 +46,44 @@ monotonic `queue_us=4776` starts before the dispatched trace and includes tracin
 callback work. It is not the 0.723 ms wall-clock difference between the dispatched
 and routing-start trace sites. This sample supports investigating the idle runtime
 wait; it supplies **no live selector, persistence, scene or ACK duration**.
+
+## Review corrections after `b45332e`
+
+Independent review reproduced reboot residency loss, a full-pool replacement wedge,
+and an orphan runtime after handle drop. The initial tests did not cover these cases.
+All six findings are addressed in `61ab3de`, `bc6b293` and `544dd69`; this section supersedes the original claim
+that discarding every superseded render preserved tap counts.
+
+1. **Connection residency:** discard every confirmed digest on link loss and before
+   connecting again. Tests reboot an asset-tracking peer and require recovery both
+   through the ordinary visible-scene path and an off-screen staged update. No scene
+   may reference a missing digest.
+2. **Replacement room:** before uploading under pool pressure, release obsolete
+   frames using the complete desired set plus the last accepted scene's digests.
+   Updating residency after release removes known dead digests; it never treats a
+   requested keep-set as proof of an upload. Full sync, scene repair and individual
+   updates use this rule. The exact reviewer sequence starts with fifteen residents,
+   replaces a staged frame and the resting frame before reconciliation, then selects
+   the replacement: no Busy response, no live-digest eviction. Fourteen is also tested.
+   A release may now precede a nonresident update under pressure; any flash-compaction
+   cost on the deployed device is unmeasured. Already-resident staged taps still skip
+   upload and release entirely.
+3. **Consumed taps:** a superseded fallback retries its consumed batch against the
+   latest durable state, instead of discarding that count. Its successful result
+   selects the resting slot, including an unchanged-pixels result. The competing
+   staged tap finishes while the first render is blocked; two taps ultimately persist
+   page two and show its matching frame. Superseded background renders have no taps
+   to replay and are discarded. Continuous taps may force more than one render retry.
+4. **Worker lifetime:** the event callback holds a weak sender. The test blocks device
+   I/O, fills a one-entry command queue with a wake, drops the handle, then releases
+   I/O and requires the device/worker to be dropped.
+5. **Idle reaping:** a weak child monitor polls exit every 100 ms, reaps the child and
+   signals the idle I/O loop to exit. The test keeps the Worker object alive, sends no
+   subsequent request, and waits for both cleanup events. Pipe readers are still
+   never joined, preserving inherited-writer protection.
+6. **Staging ceiling:** a six-view fixture must stage page four but neither page five
+   nor six. Deleting the `.take(...)` limit must fail this test; the old four-view
+   fixture could only prove availability, not the upper bound.
 
 ## Reproducible local bench
 
@@ -88,22 +126,29 @@ are sequential diagnostic runs, not controlled claims about production savings.
 | Add event wake (before resident shortcut) | 8.726 / 15.060 | 198.570 / 267.409 | Unstaged |
 | Add resident shortcut and ordering guards (`bbcb8d7`) | 6.410 / 8.927 | 196.622 / 236.864 | Unstaged |
 | Add bounded fourth-page staging (`bbdad23`) | 4.953 / 6.181 | 188.984 / 207.389 | 5.919 / 76.651 |
-| Final, including graceful selector retirement (`6259c03`) | **6.740 / 20.698** | **193.858 / 475.995** | **5.232 / 61.545** |
+| Pre-review, including selector retirement (`6259c03`) | 6.740 / 20.698 | 193.858 / 475.995 | 5.232 / 61.545 |
+| After all six review fixes (`3cf03f8`) | **5.025 / 6.768** | **193.749 / 237.121** | **5.580 / 6.369** |
 
 Baseline was explicitly rerun using the pinned Rust toolchain. The initial diagnostic
 run from the repository root selected a different compiler and is excluded above.
 The event-wake row was captured before adding the resident shortcut; both landed in
-`a142aeb`. The final row includes all outliers: first staged tap 193.553 ms; first
+`a142aeb`. The pre-review run includes all outliers: first staged tap 193.553 ms; first
 fallback 822.858 ms and second 475.995 ms. Several page-four taps took 47–66 ms while
-the selector itself was about 0.3 ms. Host scheduling, syncs and cold setup remain in
-the distribution; the final fallback p95 regressed and is not hidden. No isolated
+the selector itself was about 0.3 ms. These outliers remain in the distribution. The 475.995 ms fallback trace contains
+about 435 ms rendering, 32 ms commit-to-notification and 1.9 ms selection; the cause
+of the render slowdown is unproven. Scheduling and inherited-pipe delay were not
+isolated, so this is not a causal regression measurement. No isolated
 latency saving is attributed to the graceful-retirement fix.
 
-The final staged median is **72.744 ms lower (91.5%)** than baseline locally. Final
-fallback median is 75.065 ms lower, but its p95 is worse. Once page four is staged
-and resident, its median is 5.232 ms versus 193.858 ms for a forced miss in the same
-final run, a 188.626 ms difference. Pre-rendering and residency do the work ahead of
-the tap; this does not promise every page is staged when capacity is exhausted.
+The rerun after review used the same bench, without concurrent builds, and completed
+in 37.81 seconds. Its cold first staged tap was 140.968 ms, first fallback 290.703 ms;
+these remain included. Slowest page-four tap was 6.641 ms. Relative to baseline, the
+latest staged median is **74.459 ms lower (93.7%)**; fallback median is 75.174 ms lower.
+Resident page four is 5.580 ms versus forced fallback 193.749 ms, a 188.169 ms local
+difference. The lower p95 in this run does not isolate the cause of the earlier render
+slowdown or prove a production regression was repaired by these correctness fixes.
+Pre-rendering and residency move work ahead of the tap; capacity exhaustion still
+uses fallback. No new glass measurement was made.
 
 ### Local segment medians and decisions
 
@@ -111,16 +156,16 @@ Segment medians below are calculated independently and do not necessarily sum to
 end-to-end medians. The bench endpoint is peer receipt; the trace endpoint below is
 server `send_start`.
 
-| Staged segment | Baseline | Retained selector | Final |
-|---|---:|---:|---:|
-| Receive → dispatched | 14.278 ms | 15.464 ms | 0.101 ms |
-| Dispatched → routing started | 0.041 ms | — | 0.047 ms |
-| Selector | 59.975 ms | 0.345 ms | 0.517 ms |
-| Staged lookup itself | 0.003 ms | — | 0.003 ms |
-| Lookup → decision (includes synchronous persistence) | 4.455 ms | 4.624 ms | 5.027 ms |
-| Decision → queued notification | 0.100 ms | — | 0.062 ms |
-| Queued → PushScene send_start | 1.525 ms | 1.451 ms | 0.198 ms |
-| Receive → PushScene send_start | 79.351 ms | 23.298 ms | 6.457 ms |
+| Staged segment | Baseline | Retained selector | Pre-review | After review |
+|---|---:|---:|---:| ---: |
+| Receive → dispatched | 14.278 ms | 15.464 ms | 0.101 ms | 0.053 ms |
+| Dispatched → routing started | 0.041 ms | — | 0.047 ms | 0.029 ms |
+| Selector | 59.975 ms | 0.345 ms | 0.517 ms | 0.323 ms |
+| Staged lookup itself | 0.003 ms | — | 0.003 ms | 0.001 ms |
+| Lookup → decision (includes synchronous persistence) | 4.455 ms | 4.624 ms | 5.027 ms | 4.365 ms |
+| Decision → queued notification | 0.100 ms | — | 0.062 ms | 0.034 ms |
+| Queued → PushScene send_start | 1.525 ms | 1.451 ms | 0.198 ms | 0.089 ms |
+| Receive → PushScene send_start | 79.351 ms | 23.298 ms | 6.457 ms | 4.871 ms |
 
 - **Retain only the selector.** Largest baseline cost: 59.975 ms selector → 0.345 ms
   in the first warm run; staged end-to-end median improved 56.075 ms. `tap-worker`
@@ -134,21 +179,22 @@ server `send_start`.
   a three-second idle poll and requires the socket tap to finish within one second.
 - **Send a resident selection directly.** Retain authoritative source/digest checks,
   then skip redundant AssetBegin/ACK for a digest confirmed on that connection.
-  Notification → send fell to 0.182 ms in the first shortcut run (0.198 ms final).
+  Notification → send fell to 0.182 ms in the first shortcut run (0.089 ms after review).
   The socket test requires zero AssetBegin and zero chunks for this selection.
   This also removes one device request/response exchange, whose live cost is unknown.
 - **Keep state durable and ordered.** Lookup → decision costs roughly 4–5 ms. Moving
   persistence off the path would risk acknowledging a tap whose state was not saved;
   that tradeoff is not justified here. Keep atomic writes and fsync. A per-source
   transition lock serializes read/select/commit/notify, while a generation check drops
-  older renders completed after a newer staged selection. Eight simultaneous taps
+  older background renders completed after a newer staged selection; superseded tap
+  renders rebase their consumed count against the new state. Eight simultaneous taps
   must advance through eight states, and reload must recover the eighth. Renders
   release the transition lock while drawing and cannot hold a tap behind a 45 s job.
-- **Keep notification fanout synchronous.** The final single-device decision → queue
-  median is 0.062 ms. No measured multi-device fanout saving justifies changing it.
+- **Keep notification fanout synchronous.** The latest single-device decision → queue
+  median is 0.034 ms. No measured multi-device fanout saving justifies changing it.
 - **Keep the one-shot exit/EOF protection.** Retained selection no longer polls child
   exit. Fallback rendering still uses the established 10 ms exit poll and 250 ms EOF
-  grace; its final median render duration is 172.241 ms. Reducing at most one healthy
+  grace; its latest median render duration is 171.046 ms. Reducing at most one healthy
   poll interval is lower value than removing the render entirely for staged page four.
   An inherited-writer test proves the caller does not wait five seconds for EOF.
 - **Stage page four within fifteen frames.** Admission under the image-store mutex
@@ -164,7 +210,8 @@ The worker inherits the same cleared environment as one-shot faces; it receives 
 account directory or server credentials. Request state is passed explicitly, not
 retained between calls. Limits are **64 KiB per request, 16 KiB per reply, five seconds
 per exchange, 256 requests or 60 seconds per process**. The package also exits at
-60 seconds while idle and retires after a reply when RSS reaches **128 MiB**. RSS is
+60 seconds while idle; Rust independently reaps that exit and stops its idle I/O
+thread. The package retires after a reply when RSS reaches **128 MiB**. RSS is
 a between-request retirement threshold, not an OS limit on transient allocation in
 one request. Bounded input/output, the exchange deadline and process retirement bound
 reuse; the pure built-in selector still shares the existing trust boundary of faces.
@@ -265,10 +312,10 @@ part of this branch. The owner retains those decisions and the next panel sittin
 
 ## Verification
 
-All required local gates passed on the pinned toolchain:
+All required local gates passed again after review on the pinned toolchain:
 
 - `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings`.
-- `cargo test --workspace --all-targets`: **850 passed**, zero failures; includes the
+- `cargo test --workspace --all-targets`: **854 passed**, zero failures; includes the
   server integration targets. Two intentional ignores: the existing contract-fixture
   printer and this opt-in benchmark (run separately for the measurements above).
 - `cargo test --workspace --doc`: passed; no doctests defined.
@@ -277,7 +324,7 @@ All required local gates passed on the pinned toolchain:
 - `git diff --check` passed. No firmware or protocol source changed; no local firmware
   flash, OTA or panel test was run.
 
-**25 mutation probes were caught by test failures**, then restored. Compile errors
+**Initial implementation: 25 mutation probes were caught by test failures**, then restored. Compile errors
 were not counted. Each row groups independently removed/bypassed guards:
 
 | Guard mutations | Regression proving the failure |
@@ -295,6 +342,24 @@ requires the actual framing refusal after EOF and catches that mutation. The res
 full suites passed afterward. The selector/render separation also has a direct test
 that warms a selector, blocks a render using the same command, and receives another
 selection before releasing the render.
+
+**Review rework: ten additional mutations were caught**, with restored source:
+
+| Removed behavior | Required regression failure |
+|---|---|
+| Clear residency on disconnect/connect | Rebooted peer cannot recover its visible scene or off-screen staged update |
+| Reclaim before upload | Exact fifteen-frame replacement sequence returns Busy |
+| Preserve live digests in release; record the accepted scene (two probes) | Pool test detects eviction of the live frame |
+| Retry superseded consumed taps; select the fallback's frame (two probes) | Two-tap test retains page one, or persists page two while displaying page one's digest |
+| Weak ownership of the wake sender | Full wake queue keeps the worker alive after handle drop |
+| Reap idle child; stop idle I/O on exit (two probes) | Worker retained without further taps still owns the exited child or I/O thread |
+| Four-frame `.take(...)` | Six-view fixture stages page five/six |
+
+The full-suite run exposed an existing ownership test's 1.5-second detached check
+racing the production two-second status poll (502 on config reapply). It passed in
+isolation. The test now uses 20 ms status / 10 ms reconnect pacing; production timing
+is unchanged. Existing pressed-pool and resume assertions were updated to enforce
+the owner's pre-upload reclaim and live-frame preservation decisions.
 
 GitHub CI for this branch is separate from these local results; inspect the PR checks
 before merge. No deployment or new hardware verification is claimed.

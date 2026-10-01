@@ -64,6 +64,8 @@ export interface RunPluginInput {
   /** Absent only when a plugin is known to make no network request at all -- a
    * request declared with none supplied fails that one request, not the whole run. */
   request?: RequestFn;
+  /** Host diagnostics, including notices before a later render failure. */
+  onNotice?: (message: string) => void;
 }
 
 export interface RunPluginResult {
@@ -188,6 +190,11 @@ export async function runPlugin(input: RunPluginInput): Promise<RunPluginResult>
   let remainingRequests = MAX_REQUESTS;
   let remainingBytes = MAX_BYTES;
   let remainingMeasurements = MAX_MEASUREMENTS;
+  const notices: string[] = [];
+  const notice = (line: string) => {
+    notices.push(line);
+    input.onNotice?.(line);
+  };
 
   for (let round = 0; round < MAX_ROUNDS; round += 1) {
     const planContext: PlanContext = {
@@ -210,6 +217,11 @@ export async function runPlugin(input: RunPluginInput): Promise<RunPluginResult>
     // does not need to reclassify.
     const validated = validateRequests(planned, input.manifest, budget);
     if (validated.length === 0) break;
+    if (round === MAX_ROUNDS - 1) {
+      notice(
+        `Planning stopped at the ${MAX_ROUNDS}-round limit; return [] as soon as all answers are available.`,
+      );
+    }
 
     const performed = await performRequests(
       validated,
@@ -217,6 +229,7 @@ export async function runPlugin(input: RunPluginInput): Promise<RunPluginResult>
       input.secrets,
       requestFn,
       budget,
+      notice,
     );
     answers.push(...performed.answers);
 
@@ -261,6 +274,18 @@ export async function runPlugin(input: RunPluginInput): Promise<RunPluginResult>
   }
 
   const log = capLog(record.log);
+  if (Array.isArray(record.log)) {
+    const lines = record.log.filter((line): line is string => typeof line === "string");
+    if (lines.length > LOG_MAX_LINES) notice(`Plugin log was limited to ${LOG_MAX_LINES} lines.`);
+    if (
+      lines.some(
+        (line) => line.replace(ANSI, "").replace(CONTROL, " ").trim().length > LOG_MAX_CHARS,
+      )
+    ) {
+      notice(`Plugin log lines were shortened to ${LOG_MAX_CHARS} characters.`);
+    }
+  }
+  log.push(...notices);
   let state: unknown = record.state;
   if (state !== undefined) {
     const encoded = Buffer.byteLength(JSON.stringify(state), "utf8");

@@ -32,6 +32,7 @@ use crate::ImageNotificationOrigin;
 use crate::ServerState;
 use crate::accounts::AccountSpace;
 
+mod clock;
 mod face_state;
 mod faces_package;
 #[cfg(test)]
@@ -1420,6 +1421,39 @@ mod tests {
                 .collect()
         }
 
+        fn enable_warm_selector(&self) {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            // Exercise the production Rust Selector transport without requiring
+            // Bun in the Rust suite. The faces suite covers the real TS worker.
+            let wrapper = self.directory.path().join("warm-faces");
+            let fake = shell_word(&self.directory.path().join("fake-faces"));
+            let pids = shell_word(&self.directory.path().join("selector-pids"));
+            let cold = shell_word(&self.directory.path().join("cold-taps"));
+            std::fs::write(
+                &wrapper,
+                format!(
+                    "#!/bin/sh\nshift 2\n\
+                     if [ \"$1\" = tap-worker ]; then\n\
+                       while IFS= read -r request; do\n\
+                         printf '%s\\n' \"$$\" >> {pids}\n\
+                         answer=$(printf '%s' \"$request\" | {fake} tap) || exit 1\n\
+                         printf '{{\"code\":0,\"result\":%s,\"retire\":false}}\\n' \"$answer\"\n\
+                       done\n\
+                     else\n\
+                       if [ \"$1\" = tap ]; then : > {cold}; fi\n\
+                       exec {fake} \"$@\"\n\
+                     fi\n"
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+            set_faces(
+                &self.state,
+                FaceCommand::bun(wrapper, self.directory.path()),
+            );
+        }
+
         /// The `views` and `tap` calls, which are logged apart from renders so a
         /// render assertion keeps counting renders.
         fn plans(&self) -> Vec<serde_json::Value> {
@@ -1938,6 +1972,98 @@ mod tests {
                 .is_err(),
             "coalescing the second tap must not queue a phantom render"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scheduled_and_staged_views_share_the_owners_timezone() {
+        let server = FaceTestServer::new("headlines", false, false).await;
+        server.wait_for_staged_view("page-1").await;
+        clock::tests::save_device(
+            &server.state,
+            &server.space,
+            "dev-0001",
+            "Asia/Tokyo",
+            Some(&server.source_id),
+        );
+        let baseline = server.requests().len();
+        server.restart_with_refresh(Duration::from_hours(6)).await;
+        let requests = server.wait_for_requests(baseline + 2).await;
+        let new_requests = &requests[baseline..];
+        assert!(
+            new_requests
+                .iter()
+                .any(|request| request.get("view").is_some())
+        );
+        assert!(
+            new_requests
+                .iter()
+                .all(|request| request["timezone"] == "Asia/Tokyo")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn warm_selector_hits_and_render_fallbacks_keep_the_owners_timezone() {
+        let server = FaceTestServer::new("headlines", false, false).await;
+        server.wait_for_staged_view("page-1").await;
+        server.enable_warm_selector();
+        clock::tests::save_device(
+            &server.state,
+            &server.space,
+            "dev-0001",
+            "Asia/Tokyo",
+            Some(&server.source_id),
+        );
+        let baseline = server.requests().len();
+        server.restart_with_refresh(Duration::from_hours(6)).await;
+        let requests = server.wait_for_requests(baseline + 2).await;
+        assert_eq!(requests[baseline].get("view"), None);
+        assert_eq!(requests[baseline + 1]["view"], "page-1");
+        assert!(
+            requests[baseline..]
+                .iter()
+                .all(|r| r["timezone"] == "Asia/Tokyo")
+        );
+
+        let renders = requests.len();
+        tapped(&server.state, &server.space, &server.source_id);
+        server
+            .wait_for_face_state(serde_json::json!({"page": 1}))
+            .await;
+        assert_eq!(
+            server.requests().len(),
+            renders,
+            "a staged hit does not render"
+        );
+
+        // Keep the same warm selector alive while the owner changes zone, then
+        // force its selected view to miss. The fallback must sample the owner
+        // again; it cannot inherit a zone from selector startup or staging.
+        clock::tests::save_device(
+            &server.state,
+            &server.space,
+            "dev-0001",
+            "America/Los_Angeles",
+            Some(&server.source_id),
+        );
+        server
+            .space
+            .image_sources
+            .forget_staged_view_for_test(&server.source_id, "page-1");
+        tapped(&server.state, &server.space, &server.source_id);
+        assert_eq!(server.wait_for_tap_renders(1).await, [1]);
+        let requests = server.wait_for_requests(renders + 2).await;
+        assert_eq!(requests[renders]["event"]["taps"], 1);
+        assert_eq!(requests[renders + 1]["view"], "page-1");
+        assert!(
+            requests[renders..]
+                .iter()
+                .all(|r| r["timezone"] == "America/Los_Angeles")
+        );
+        let pids = std::fs::read_to_string(server.directory.path().join("selector-pids")).unwrap();
+        let pids: Vec<_> = pids.lines().collect();
+        assert_eq!(pids.len(), 2, "both taps used the warm transport");
+        assert_eq!(pids[0], pids[1], "the same selector handled both taps");
+        assert!(!server.directory.path().join("cold-taps").exists());
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -168,3 +168,30 @@ describe("Days Left This Year", () => {
     },
   );
 });
+
+// This crosses discovery -> FaceDefinition -> main's render entrypoint, not only runPlugin.
+test.each([
+  ["Asia/Tokyo", "2027-12-31T15:00:00Z", "2028-01-01T00:00:00Z"],
+  ["America/Los_Angeles", "2028-01-01T07:59:59Z", "2027-12-31T23:59:59Z"],
+])("entrypoint honors the owner's %s calendar date", async (timezone, instant, localAsUtc) => {
+  const { faces } = await discoverPlugins(plugins);
+  const face = faces.find((entry) => entry.kind === manifest.id);
+  if (!face) throw new Error("Days Left This Year was not discovered");
+  const actual = await renderRequest(
+    { kind: manifest.id, settings: {}, timezone },
+    face,
+    new Date(instant),
+  );
+  const expected = await renderRequest(
+    { kind: manifest.id, settings: {}, timezone: "UTC" },
+    face,
+    new Date(localAsUtc),
+  );
+  const wrong = await renderRequest(
+    { kind: manifest.id, settings: {}, timezone: "UTC" },
+    face,
+    new Date(instant),
+  );
+  expect(actual.png).toBe(expected.png);
+  expect(actual.png).not.toBe(wrong.png);
+});

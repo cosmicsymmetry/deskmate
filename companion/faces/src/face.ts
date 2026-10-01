@@ -47,11 +47,9 @@ export interface RenderContext {
   /** Which view to draw. Absent means the resting view, which is views()[0]. */
   view?: ViewId;
   /**
-   * The owner's IANA zone, when the caller has one to send. Absent for an older
-   * caller (additive) or when the caller has none configured; a face that needs a
-   * zone -- currently only a plugin, via `runPlugin` -- falls back to the host
-   * process's own zone and then to UTC. The server sending the owner's configured
-   * zone here, rather than the host's, is still owed.
+   * The owner's IANA zone, supplied for scheduled, tap and staged renders.
+   * Older/direct callers can omit it: plugins fall back to the host zone, while
+   * weather asks the forecast service for the selected location's zone.
    */
   timezone?: string;
 }

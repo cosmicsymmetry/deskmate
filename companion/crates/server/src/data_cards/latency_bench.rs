@@ -174,6 +174,7 @@ fn draw(command: &FaceCommand, space: &AccountSpace, view: &str) -> CanonicalFra
         command,
         faces_package::RenderRequest {
             kind: "rss",
+            timezone: "UTC",
             settings: &BTreeMap::new(),
             state: Some(&rss_state(0)),
             taps: 0,

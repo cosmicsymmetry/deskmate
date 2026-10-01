@@ -189,6 +189,7 @@ pub(crate) enum FaceRenderError {
 #[derive(Clone, Copy)]
 pub(crate) struct RenderRequest<'a> {
     pub(crate) kind: &'a str,
+    pub(crate) timezone: &'a str,
     pub(crate) settings: &'a std::collections::BTreeMap<String, serde_json::Value>,
     pub(crate) state: Option<&'a serde_json::Value>,
     /// Zero means this is a scheduled refresh rather than a response to taps.
@@ -503,6 +504,7 @@ pub(crate) fn render(
 ) -> Result<Rendered, FaceRenderError> {
     let mut body = serde_json::json!({
         "kind": request.kind,
+        "timezone": request.timezone,
         "settings": request.settings,
     });
     if let Some(state) = request.state {
@@ -606,6 +608,7 @@ mod tests {
     ) -> RenderRequest<'a> {
         RenderRequest {
             kind,
+            timezone: "UTC",
             settings,
             state,
             taps,

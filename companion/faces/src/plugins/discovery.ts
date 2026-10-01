@@ -12,7 +12,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { FaceDefinition, RenderContext as FaceRenderContext, Settings } from "../face";
-import { request as httpRequest } from "../kit/http";
+import { type RequestFn, request as httpRequest } from "../kit/http";
 import { FORMAT_SOURCE } from "./context";
 import { type PluginManifest, parseManifest } from "./manifest";
 import type { TapEvent } from "./run";
@@ -127,7 +127,18 @@ function loadFolder(directory: string, folder: string): LoadedPlugin {
   return { manifest, source };
 }
 
-function toFaceDefinition(manifest: PluginManifest, source: string): FaceDefinition {
+/** Host-only dependencies for offline author checks. Never exposed to plugin code. */
+export interface PluginHost {
+  request?: RequestFn;
+  readSecrets?: typeof readPluginSecrets;
+  onLog?: (line: string) => void;
+}
+
+function toFaceDefinition(
+  manifest: PluginManifest,
+  source: string,
+  host: PluginHost,
+): FaceDefinition {
   return {
     kind: manifest.id,
     label: manifest.label,
@@ -135,12 +146,13 @@ function toFaceDefinition(manifest: PluginManifest, source: string): FaceDefinit
     ...(manifest.tap === undefined ? {} : { tap: manifest.tap }),
     ...(manifest.refreshSeconds === undefined ? {} : { refreshSeconds: manifest.refreshSeconds }),
     async render(settings: Settings, now: Date, context: FaceRenderContext = {}) {
-      const secrets = await readPluginSecrets(manifest.id);
+      const secrets = await (host.readSecrets ?? readPluginSecrets)(manifest.id);
       const timezone =
         context.timezone !== undefined && context.timezone.trim() !== ""
           ? context.timezone
           : hostTimezone();
       const event: TapEvent | undefined = context.event;
+      const emitted = new Set<string>();
       const result = await runPlugin({
         manifest,
         source,
@@ -150,8 +162,15 @@ function toFaceDefinition(manifest: PluginManifest, source: string): FaceDefinit
         ...(context.state === undefined ? {} : { state: context.state }),
         ...(event === undefined ? {} : { event }),
         secrets,
-        request: httpRequest,
+        request: host.request ?? httpRequest,
+        onNotice: (line) => {
+          emitted.add(line);
+          host.onLog?.(line);
+        },
       });
+      for (const line of result.log) {
+        if (!emitted.has(line)) host.onLog?.(line);
+      }
       return { svg: result.svg, ...(result.state === undefined ? {} : { state: result.state }) };
     },
   };
@@ -167,13 +186,19 @@ function toFaceDefinition(manifest: PluginManifest, source: string): FaceDefinit
  * folder's result. A directory that does not exist at all is zero plugins, not an
  * error: the plugins feature is opt-in.
  */
-export async function discoverPlugins(directory?: string): Promise<DiscoverPluginsResult> {
+export async function discoverPlugins(
+  directory?: string,
+  host: PluginHost = {},
+  folders?: readonly string[],
+): Promise<DiscoverPluginsResult> {
   const root = directory ?? defaultPluginsDir();
 
   let entries: string[];
   try {
     entries = readdirSync(root, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
+      .filter(
+        (entry) => entry.isDirectory() && (folders === undefined || folders.includes(entry.name)),
+      )
       .map((entry) => entry.name)
       .sort();
   } catch {
@@ -191,7 +216,7 @@ export async function discoverPlugins(directory?: string): Promise<DiscoverPlugi
         throw new Error(`duplicate id ${JSON.stringify(manifest.id)}`);
       }
       seenIds.add(manifest.id);
-      faces.push(toFaceDefinition(manifest, source));
+      faces.push(toFaceDefinition(manifest, source, host));
     } catch (error) {
       const reason =
         error instanceof SandboxError ? `failed to load: ${error.message}` : reasonFor(error);

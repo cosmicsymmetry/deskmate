@@ -504,6 +504,7 @@ export async function performRequests(
   secrets: Record<string, string>,
   request: RequestFn,
   budget: Budget,
+  onNotice?: (message: string) => void,
 ): Promise<PerformedRequests> {
   const answers: Answer[] = [];
   let bytesLeft = budget.bytes;
@@ -519,6 +520,7 @@ export async function performRequests(
       continue;
     }
     if (bytesLeft <= 0) {
+      onNotice?.("The response byte budget for this render is spent; a request was skipped.");
       answers.push({
         ok: false,
         error: redactSecrets("the byte budget for this refresh is spent", secrets),
@@ -550,7 +552,11 @@ export async function performRequests(
         bytesLeft -= error.bytesRead;
       }
       const message = error instanceof Error ? error.message : String(error);
-      answers.push({ ok: false, error: redactSecrets(message, secrets) });
+      const safeMessage = redactSecrets(message, secrets);
+      onNotice?.(
+        `Request failed: ${safeMessage}${error instanceof ResponseTooLargeError ? ` (HTTP response limit: ${error.bytesRead} bytes read)` : ""}`,
+      );
+      answers.push({ ok: false, error: safeMessage });
     }
   }
   return { answers, bytesSpent: budget.bytes - bytesLeft };

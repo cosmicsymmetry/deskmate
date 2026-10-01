@@ -36,22 +36,26 @@ Calendar arithmetic avoids assuming every day lasts 24 hours.
 
 ## Timezone and freshness limitations
 
-The plugin uses `context.now.local`, supplied by the host. **The current server does
-not forward the owner's configured timezone.** Its render child therefore uses the
-server process's timezone, falling back to UTC. Changing the panel's timezone setting
-will not currently change this face's date. An explicit `timezone` in a direct faces
-request is honored by the existing runtime; that is how the UTC fixtures below are
-made. This plugin does not change the host's timezone contract.
+The plugin uses `context.now.local`, computed by the host in the owner's configured
+IANA timezone. Config v10 stores that preference **per device**, while a source has
+one shared image per account. The server therefore uses the first active device
+whose saved picture card displays the source, ordered by device id. Before a new
+source is attached, it uses the first active device's saved timezone; without one,
+it uses UTC. Accounts never borrow each other's settings. If devices sharing a
+source need different dates, create separate sources for them.
 
-The requested refresh cadence is **900 seconds (15 minutes)**, applied when a new
-card is created. In normal operation the date can remain on the previous day until
-the next scheduled render, up to roughly that interval plus rendering/delivery time.
-There is no exact-midnight wakeup and no ticking on the device. An owner can change
-the cadence, and existing cards keep their stored cadence across plugin updates.
-When refresh or delivery fails, the existing stored frame remains and can be stale
-for longer. Missing or invalid host dates fail the render rather than inventing a
-count; the host's normal transient-error handling applies. No API can fail because
-no API is called.
+The requested cadence is **900 seconds (15 minutes)** for newly created cards;
+existing cards retain their stored cadence. Successful faces also refresh after a
+local date change: the server checks once a minute, so rollover normally reaches
+the frame store within **roughly 60 seconds plus rendering time**, followed by
+delivery. Saved timezone changes are picked up by the same check. This is not an
+exact-midnight wakeup or on-device ticking. The check applies to all successful
+server faces because contract v1 has no date-sensitive flag, adding at most one
+extra scheduled render per local day when the timezone stays unchanged.
+
+Failures keep the previous frame and the existing retry policy, so an unavailable
+server, failed render or failed delivery can leave it stale longer. Missing or
+invalid host dates fail the render. This plugin calls no API.
 
 ## Reproduce and inspect
 
@@ -59,6 +63,7 @@ From `companion/faces/`:
 
 ```sh
 bun install --frozen-lockfile
+bun run plugin:check days-left-this-year
 bun run src/main.ts describe
 printf '%s' '{"kind":"days-left-this-year","settings":{}}' \
   | bun run src/main.ts render > /tmp/days-left-this-year.json

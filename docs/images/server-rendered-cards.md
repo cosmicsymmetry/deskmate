@@ -173,6 +173,25 @@ outside.
 | `chart` | token | `line` (default): a day of closes, averaged into 40 points and drawn as a smooth curve. `candles`: 48 half-hour candles from CoinGecko's `ohlc`, each coloured by its own half hour. `none`: the simple face -- a black panel, the price in its exact centre (by ink, both axes) coloured green or red by the day, the ticker slightly above it; no chart, no change, no range, and one request per refresh instead of two. A refused chart request leaves a true price over an empty chart. |
 | `api_key` | token | Optional CoinGecko demo key. |
 
+## Owner timezone and date refresh
+
+Every render receives the owner's saved IANA timezone, including staged views and
+renders answering taps. Weather uses it for the forecast's hour/day boundaries;
+plugins receive it as `now.timezone` and the matching `now.local` date. Direct faces
+callers that omit a zone keep the previous fallback behavior.
+
+Config v10 stores the preference per device, while one image source is shared by an
+account. The first active device displaying that source, ordered by device id,
+supplies its zone. Before attachment, the first active saved device config supplies
+it; without saved settings the fallback is UTC. Use separate sources for devices
+that need different local dates. No configuration is rewritten by this selection.
+
+Successful sources are checked once a minute for a local date or saved-zone change,
+so midnight starts a new render within roughly 60 seconds plus any ongoing render
+or staging work. Delivery adds its own time. This applies to every face because the
+current contract has no date-sensitive marker; ordinary cadence and failure backoff
+are unchanged. Failed renders keep the last frame, which can be stale longer.
+
 ## Where the data comes from
 
 | Card | Endpoint | Key needed |

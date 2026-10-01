@@ -17,12 +17,12 @@ const manifest = parseManifest(
 
 beforeAll(warmSandbox);
 
-async function draw(instant: string, timezone = "UTC") {
+async function draw(instant: string, timezone = "UTC", settings = {}) {
   let calls = 0;
   const result = await runPlugin({
     manifest,
     source,
-    settings: {},
+    settings,
     now: new Date(instant),
     timezone,
     secrets: {},
@@ -49,9 +49,55 @@ describe("Days Left This Year", () => {
     expect(runInSandbox<unknown[]>(source, "plan", {})).toEqual([]);
     expect(manifest.hosts).toEqual([]);
     expect(manifest.secrets).toEqual([]);
-    expect(manifest.fields).toEqual([]);
     expect(manifest.refreshSeconds).toBe(900);
   });
+
+  test("the catalog exposes the three faces with the original as default", async () => {
+    const { faces } = await discoverPlugins(plugins);
+    expect(faces.find((entry) => entry.kind === manifest.id)?.fields).toEqual([
+      {
+        type: "enum",
+        key: "face",
+        label: "Face",
+        default: "bar",
+        options: [
+          { value: "bar", label: "Progress bar" },
+          { value: "squares", label: "Squares" },
+          { value: "dots", label: "Dots" },
+        ],
+      },
+    ]);
+  });
+
+  test("existing and unknown settings retain the original progress-bar face", async () => {
+    const instant = "2026-10-02T12:00:00Z";
+    const original = await draw(instant);
+    expect(await draw(instant, "UTC", { face: "bar" })).toBe(original);
+    expect(await draw(instant, "UTC", { face: "unknown" })).toBe(original);
+  });
+
+  for (const face of ["squares", "dots"]) {
+    test.each([
+      ["2026-01-01T00:00:00Z", 365, 0],
+      ["2026-10-02T12:00:00Z", 365, 274],
+      ["2026-12-31T23:59:59Z", 365, 364],
+      ["2028-01-01T00:00:00Z", 366, 0],
+      ["2028-02-29T12:00:00Z", 366, 59],
+      ["2028-12-31T23:59:59Z", 366, 365],
+    ])(`${face}: one mark per day at %s`, async (instant, total, completed) => {
+      const svg = await draw(instant, "UTC", { face });
+      const marks = svg.match(/<(?:rect|circle)\b[^>]*fill="#(?:f5f5f7|37373d)"[^>]*\/>/g) ?? [];
+      expect(marks).toHaveLength(total);
+      expect(marks.filter((mark) => mark.includes('fill="#f5f5f7"'))).toHaveLength(completed);
+      expect(marks.filter((mark) => mark.includes('fill="#37373d"'))).toHaveLength(
+        total - completed,
+      );
+      expect(marks.every((mark) => mark.startsWith(face === "dots" ? "<circle" : "<rect"))).toBe(
+        true,
+      );
+      expect(svg).toContain(`>${total - completed}</text>`);
+    });
+  }
 
   test.each([
     ["2026-01-01T00:00:00Z", 365, 2026, "0.0"],
@@ -100,22 +146,25 @@ describe("Days Left This Year", () => {
     }
   });
 
-  test("discovery and the real render entrypoint produce a 448x368 PNG", async () => {
-    const { faces, skipped } = await discoverPlugins(plugins);
-    expect(skipped).toEqual([]);
-    const face = faces.find((entry) => entry.kind === manifest.id);
-    expect(face).toBeDefined();
-    if (!face) throw new Error("Days Left This Year was not discovered");
-    const result = await renderRequest(
-      { kind: manifest.id, settings: {}, timezone: "UTC" },
-      face,
-      new Date("2026-10-01T00:00:00Z"),
-    );
-    const png = Buffer.from(result.png, "base64");
-    expect(png.subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
-    expect(png.readUInt32BE(16)).toBe(448);
-    expect(png.readUInt32BE(20)).toBe(368);
-    expect(png.length).toBeLessThan(1_048_576);
-    expect(result.state).toBeUndefined();
-  });
+  test.each(["bar", "squares", "dots"])(
+    "%s: discovery and real entrypoint produce a 448x368 PNG",
+    async (style) => {
+      const { faces, skipped } = await discoverPlugins(plugins);
+      expect(skipped).toEqual([]);
+      const face = faces.find((entry) => entry.kind === manifest.id);
+      expect(face).toBeDefined();
+      if (!face) throw new Error("Days Left This Year was not discovered");
+      const result = await renderRequest(
+        { kind: manifest.id, settings: { face: style }, timezone: "UTC" },
+        face,
+        new Date("2026-10-01T00:00:00Z"),
+      );
+      const png = Buffer.from(result.png, "base64");
+      expect(png.subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+      expect(png.readUInt32BE(16)).toBe(448);
+      expect(png.readUInt32BE(20)).toBe(368);
+      expect(png.length).toBeLessThan(1_048_576);
+      expect(result.state).toBeUndefined();
+    },
+  );
 });

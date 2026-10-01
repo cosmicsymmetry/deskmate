@@ -39,6 +39,12 @@ ordinary non-plugin PRs retain their existing workflow.
   It produces an ordinary picture card, never a new card kind.
 - A large remaining-days count, the year, and a proportional year-progress graphic
   on the existing 448×368 canvas. Detailed visual treatment is the author's work.
+- **Owner-approved addition, 2026-10-02:** a per-card **Face** setting offers
+  **Progress bar**, **Squares**, and **Dots**. Progress bar preserves the original
+  face and is the default for existing cards. Both grid alternatives use exactly
+  one mark per calendar day (365 or 366), with completed days bright and remaining
+  days dim, in row-major order. This uses the existing manifest enum field and
+  automatic settings save; no new browser form, schema or protocol is needed.
 - No outbound requests, secrets, account credentials or tap behavior are required.
 - The author must state whether today is included and test that exact convention
   on January 1, December 31, the year rollover, and leap-year boundaries.

@@ -1,12 +1,24 @@
 {
   "api": 1,
   "id": "days-left-this-year",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "label": "Days Left This Year",
   "description": "Calendar days remaining, including today, and year progress. Uses the server timezone.",
   "author": "Deskmate contributors",
   "hosts": [],
   "secrets": [],
-  "fields": [],
+  "fields": [
+    {
+      "type": "enum",
+      "key": "face",
+      "label": "Face",
+      "default": "bar",
+      "options": [
+        { "value": "bar", "label": "Progress bar" },
+        { "value": "squares", "label": "Squares" },
+        { "value": "dots", "label": "Dots" }
+      ]
+    }
+  ],
   "refreshSeconds": 900
 }

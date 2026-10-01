@@ -377,6 +377,10 @@ test("a face without onTap falls back to rendering instead of selecting its rest
 
 // The server's unstaged fallback sends the OLD state and an event, with no view.
 // Exercise its real subprocess envelope, not just the staged onTap -> view path.
+// Each case launches 11 (RSS) or 13 (HN) real Bun children, including cold font
+// measurement and PNG rendering. The default 5s budget timed out on Linux CI
+// near the end of the HN sequence; give this integration sequence 15s in total.
+// Built-in renders bypass plugin discovery. This is not a per-render latency gate.
 for (const kind of ["rss", "hackernews"] as const) {
   test(`${kind}: an unstaged tap renders page four and subsequent taps keep moving`, async () => {
     const now = new Date("2026-09-23T05:00:00Z");
@@ -425,5 +429,5 @@ for (const kind of ["rss", "hackernews"] as const) {
     const explicit = await request(initial, { view: "page-4", event: { taps: 3, point: null } });
     expect(explicit.state).toEqual(initial);
     expect(explicit.png).toBe((await request(initial, { view: "page-4" })).png);
-  });
+  }, 15_000);
 }

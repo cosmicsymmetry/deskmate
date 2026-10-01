@@ -22,15 +22,21 @@ async function run(input: string, code?: string) {
 }
 
 test("one selector handles independent states and preserves the error taxonomy", async () => {
+  // Resolving an absent kind loads QuickJS/plugin discovery and can legitimately
+  // retire the worker at its RSS limit on Linux. Keep that request last: the
+  // protocol promises its reply, not service of later requests after retirement.
   const result = await run(
-    `${[tap(), tap({ view: "days" }), "{", '{"kind":"absent"}', tap()].join("\n")}\n`,
+    `${[tap(), tap({ view: "days" }), "{", tap(), '{"kind":"absent"}'].join("\n")}\n`,
   );
   expect(result.status).toBe(0);
   const rows = result.output
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line));
-  expect(rows.map((row) => row.code)).toEqual([0, 0, 1, 2, 0]);
+  expect(
+    rows.map((row) => row.code),
+    result.output,
+  ).toEqual([0, 0, 1, 0, 2]);
   expect(rows.filter((row) => row.code === 0).map((row) => row.result.view)).toEqual([
     "days",
     "",

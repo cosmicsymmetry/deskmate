@@ -70,6 +70,7 @@ pub(super) async fn sample(
     state: &ServerState,
     space: &Arc<AccountSpace>,
     source: &str,
+    now: &(dyn Fn() -> DateTime<Utc> + Send + Sync),
 ) -> Calendar {
     let state = state.clone();
     let space = Arc::clone(space);
@@ -77,7 +78,7 @@ pub(super) async fn sample(
     let zone = tokio::task::spawn_blocking(move || source_timezone(&state, &space, &source))
         .await
         .unwrap_or_else(|_| "UTC".into());
-    Calendar::at(zone, Utc::now())
+    Calendar::at(zone, now())
 }
 
 #[cfg(test)]

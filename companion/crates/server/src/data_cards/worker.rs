@@ -49,6 +49,9 @@ pub(super) struct RefresherJob {
     face_state: Arc<FaceStateStore>,
     taps: Arc<TapSignal>,
     spec: DataCardSpec,
+    /// Wall time is separate from Tokio's elapsed-time scheduler. Tests drive
+    /// both clocks together while exercising the real refresh loop.
+    now: Arc<dyn Fn() -> chrono::DateTime<Utc> + Send + Sync>,
 }
 
 impl RefresherJob {
@@ -67,6 +70,7 @@ impl RefresherJob {
             face_state,
             taps,
             spec,
+            now: Arc::new(Utc::now),
         }
     }
 }
@@ -76,18 +80,7 @@ fn spawn_refresher_with_refresh(
     job: RefresherJob,
     refresh: Duration,
 ) -> JoinHandle<()> {
-    runtime.spawn(async move {
-        refresh_loop(
-            job.state,
-            job.space,
-            job.faces,
-            job.face_state,
-            job.taps,
-            job.spec,
-            refresh,
-        )
-        .await;
-    })
+    runtime.spawn(refresh_loop(job, refresh))
 }
 
 #[cfg(test)]
@@ -441,15 +434,16 @@ async fn stage_other_views(
     }
 }
 
-async fn refresh_loop(
-    state: ServerState,
-    space: std::sync::Arc<AccountSpace>,
-    faces: FaceCommand,
-    face_state: Arc<FaceStateStore>,
-    taps: Arc<TapSignal>,
-    spec: DataCardSpec,
-    refresh: Duration,
-) {
+async fn refresh_loop(job: RefresherJob, refresh: Duration) {
+    let RefresherJob {
+        state,
+        space,
+        faces,
+        face_state,
+        taps,
+        spec,
+        now,
+    } = job;
     tracing::info!(target: "server::data_cards",
         source_id = %spec.source_id,
         kind = %spec.face.kind,
@@ -465,7 +459,7 @@ async fn refresh_loop(
     // panels instead of leaving them blank for fifteen minutes.
     loop {
         let started = tokio::time::Instant::now();
-        let calendar = clock::sample(&state, &space, &spec.source_id).await;
+        let calendar = clock::sample(&state, &space, &spec.source_id, now.as_ref()).await;
         let Some(outcome) =
             refresh_once(&state, &space, &faces, &face_state, &spec, tap_count).await
         else {
@@ -494,7 +488,7 @@ async fn refresh_loop(
                 drawn,
                 started.elapsed(),
                 &calendar,
-                &clock::sample(&state, &space, &spec.source_id).await,
+                &clock::sample(&state, &space, &spec.source_id, now.as_ref()).await,
             ) {
                 break;
             }
@@ -525,6 +519,7 @@ fn notify_image_source_outcome(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
     use crate::data_cards::FaceSpec;
@@ -553,6 +548,181 @@ mod tests {
     /// through. The fake package only ever echoes it; it need not exist on disk.
     fn test_account_dir() -> &'static Path {
         Path::new("/test-account")
+    }
+
+    struct CalendarWorker {
+        state: ServerState,
+        space: Arc<AccountSpace>,
+        directory: tempfile::TempDir,
+        source: String,
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl CalendarWorker {
+        async fn start(zone: &str, instant: &str) -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let directory = tempfile::tempdir().unwrap();
+            let wrapper = directory.path().join("faces");
+            let quote =
+                |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
+            let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake-faces.sh");
+            std::fs::write(
+                &wrapper,
+                format!(
+                    "#!/bin/sh\nexport DESKMATE_FAKE_FACES_REQUEST_DIR={}\nexec {} \"$@\"\n",
+                    quote(directory.path()),
+                    quote(&fake),
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let state = ServerState::in_memory();
+            let space = test_space(&state);
+            let source = space.image_sources.mint("Calendar").unwrap().id;
+            clock::tests::save_device(&state, &space, "dev-0001", zone, Some(&source));
+            let face_state = Arc::new(FaceStateStore::load(directory.path().join("state.json")));
+            let taps = Arc::new(TapSignal::default());
+            let mut spec = spec("Dubai");
+            spec.source_id.clone_from(&source);
+            spec.refresh_seconds = MAX_REFRESH.as_secs();
+            let mut job = RefresherJob::new(
+                state.clone(),
+                Arc::clone(&space),
+                FaceCommand::program(wrapper),
+                face_state,
+                Arc::clone(&taps),
+                spec,
+            );
+            let wall: chrono::DateTime<Utc> = instant.parse().unwrap();
+            let elapsed = tokio::time::Instant::now();
+            let polls = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::clone(&polls);
+            job.now = Arc::new(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                wall + chrono::Duration::from_std(elapsed.elapsed()).unwrap()
+            });
+            let task =
+                spawn_refresher_with_refresh(&tokio::runtime::Handle::current(), job, MAX_REFRESH);
+            space.data_cards.lock().unwrap().tasks.insert(
+                source.clone(),
+                crate::data_cards::Refresher::new(task, taps),
+            );
+            let worker = Self {
+                state,
+                space,
+                directory,
+                source,
+                polls,
+            };
+            worker.wait_for_draws(1).await;
+            worker
+        }
+
+        fn requests(&self) -> Vec<serde_json::Value> {
+            std::fs::read_to_string(self.directory.path().join("requests.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect()
+        }
+
+        async fn wait_for_draws(&self, count: usize) {
+            Self::until(|| {
+                self.requests().len() == count
+                    && self
+                        .space
+                        .data_cards
+                        .lock()
+                        .unwrap()
+                        .outcomes
+                        .get(&self.source)
+                        .is_some_and(|(outcome, _)| *outcome == RefreshOutcome::Drawn)
+            })
+            .await;
+            self.space
+                .data_cards
+                .lock()
+                .unwrap()
+                .outcomes
+                .remove(&self.source);
+        }
+
+        async fn until(ready: impl Fn() -> bool) {
+            // Keep a task runnable so Tokio cannot auto-advance through the
+            // six-hour timer while the real subprocess is doing blocking I/O.
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            while !ready() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the running calendar worker did not reach the expected render/poll"
+                );
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+
+    impl Drop for CalendarWorker {
+        fn drop(&mut self) {
+            self.state.shutdown();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn running_worker_refreshes_at_local_midnight_and_saved_zone_change() {
+        // Ahead of UTC and behind UTC, including New Year into a leap year.
+        // The replacement zones share the same local date/offset: that second
+        // refresh must be caused by the saved zone changing, not midnight.
+        for (zone, replacement, instant) in [
+            ("Asia/Tokyo", "Asia/Seoul", "2027-12-31T14:59:30Z"),
+            (
+                "America/Los_Angeles",
+                "America/Vancouver",
+                "2028-01-01T07:59:30Z",
+            ),
+        ] {
+            let worker = CalendarWorker::start(zone, instant).await;
+            tokio::time::advance(Duration::from_secs(29)).await;
+            assert_eq!(
+                worker.requests().len(),
+                1,
+                "no render before midnight or the minimum interval"
+            );
+            tokio::time::advance(Duration::from_secs(31)).await;
+            worker.wait_for_draws(2).await;
+            assert_eq!(worker.requests()[1]["timezone"], zone);
+
+            tokio::time::advance(MIN_REFRESH).await;
+            CalendarWorker::until(|| worker.polls.load(Ordering::SeqCst) >= 4).await;
+            assert_eq!(
+                worker.requests().len(),
+                2,
+                "an unchanged date must not refresh every minute"
+            );
+
+            clock::tests::save_device(
+                &worker.state,
+                &worker.space,
+                "dev-0001",
+                replacement,
+                Some(&worker.source),
+            );
+            tokio::time::advance(Duration::from_secs(59)).await;
+            assert_eq!(worker.requests().len(), 2);
+            tokio::time::advance(Duration::from_secs(1)).await;
+            worker.wait_for_draws(3).await;
+            assert_eq!(worker.requests()[2]["timezone"], replacement);
+            assert!(
+                worker
+                    .requests()
+                    .iter()
+                    .all(|request| request.get("event").is_none()),
+                "no tap caused these refreshes"
+            );
+            tokio::time::advance(MIN_REFRESH).await;
+            CalendarWorker::until(|| worker.polls.load(Ordering::SeqCst) >= 7).await;
+            assert_eq!(worker.requests().len(), 3);
+        }
     }
 
     #[test]

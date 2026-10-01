@@ -28,6 +28,7 @@ struct Worker {
     responses: mpsc::Receiver<Result<Vec<u8>, String>>,
     started: Instant,
     used: usize,
+    retiring: bool,
 }
 
 #[derive(Deserialize)]
@@ -35,6 +36,8 @@ struct Answer {
     code: i32,
     result: Option<TapSelection>,
     error: Option<String>,
+    #[serde(default)]
+    retire: bool,
 }
 
 impl Selector {
@@ -56,7 +59,7 @@ impl Selector {
             return None;
         }
         if retained.worker.as_ref().is_some_and(|worker| {
-            worker.started.elapsed() >= MAX_AGE || worker.used >= MAX_REQUESTS
+            worker.started.elapsed() >= MAX_AGE || worker.used >= MAX_REQUESTS || worker.retiring
         }) {
             retained.worker = None;
         }
@@ -118,6 +121,7 @@ impl Worker {
             responses,
             started: Instant::now(),
             used: 0,
+            retiring: false,
         })
     }
 
@@ -142,6 +146,7 @@ impl Worker {
         }
         let answer: Answer = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
         self.used += 1;
+        self.retiring = answer.retire;
         if answer.code == 0 {
             Ok(Ok(answer.result.ok_or("selector omitted its result")?))
         } else {
@@ -325,6 +330,43 @@ fi
         let (_dir, command) = command(&format!("read line; printf '%s' '{output}'"));
         let mut worker = Worker::start(&command).unwrap();
         assert!(worker.exchange(b"{}").is_err());
+    }
+
+    #[test]
+    fn worker_refusals_preserve_configuration_and_transient_errors() {
+        for (code, expected) in [
+            (2, FaceRenderError::Configuration("refused".into())),
+            (1, FaceRenderError::Transient("refused".into())),
+        ] {
+            let (_dir, command) = command(&format!(
+                "while IFS= read -r line; do printf '{{\"code\":{code},\"error\":\"refused\"}}\\n'; done"
+            ));
+            assert_eq!(
+                super::super::tap(&command, "rss", &BTreeMap::new(), None, 1),
+                Err(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn a_worker_retiring_at_its_memory_budget_is_replaced_without_a_cooldown() {
+        let (_dir, command) = command(
+            "read line; printf '{\"code\":0,\"result\":{\"view\":\"%s\"},\"retire\":true}\\n' \"$$\"",
+        );
+        let first = select(&command);
+        let second = select(&command);
+        assert_ne!(first, second);
+        assert!(
+            command
+                .selector
+                .as_ref()
+                .unwrap()
+                .retained
+                .lock()
+                .unwrap()
+                .retry_after
+                .is_none()
+        );
     }
 
     #[test]

@@ -26,21 +26,23 @@ export async function serveTapWorker(
         if (newline > MAX_REQUEST_BYTES) throw new Error("selector request too large");
         const input = pending.subarray(0, newline).toString("utf8");
         pending = pending.subarray(newline + 1);
-        let answer: string;
+        let result: unknown;
+        let code = 0;
+        let message: string | undefined;
         try {
-          answer = `{"code":0,"result":${await select(input)}}\n`;
+          result = JSON.parse(await select(input));
         } catch (error) {
-          answer = `${JSON.stringify({
-            code: error instanceof ConfigurationError ? 2 : 1,
-            error: (error instanceof Error ? error.message : String(error)).slice(0, 200),
-          })}\n`;
+          code = error instanceof ConfigurationError ? 2 : 1;
+          message = (error instanceof Error ? error.message : String(error)).slice(0, 200);
         }
+        requests += 1;
+        const retire = requests >= limits.requests || process.memoryUsage().rss >= limits.rssBytes;
+        const answer = `${JSON.stringify({ code, result, error: message, retire })}\n`;
         if (Buffer.byteLength(answer) > MAX_RESPONSE_BYTES) {
           throw new Error("selector response too large");
         }
         await Bun.write(Bun.stdout, answer);
-        requests += 1;
-        if (requests >= limits.requests || process.memoryUsage().rss >= limits.rssBytes) return;
+        if (retire) return;
       }
       if (pending.length > MAX_REQUEST_BYTES) throw new Error("selector request too large");
     }

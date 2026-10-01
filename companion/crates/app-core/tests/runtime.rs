@@ -27,6 +27,8 @@ mod loop_and_events;
 mod picture_sources;
 #[path = "runtime/scene_delivery.rs"]
 mod scene_delivery;
+#[path = "runtime/tap_regressions.rs"]
+mod tap_regressions;
 
 const FULL_JSON: &str = include_str!("fixtures/full.json");
 
@@ -77,12 +79,21 @@ enum InjectedDisconnect {
 }
 
 #[derive(Default)]
+#[allow(clippy::struct_excessive_bools)] // Independent fault switches and observed lifecycle state.
 struct MockState {
     connected: bool,
     power: MockPower,
     connection_count: u64,
     injected_disconnect: Option<InjectedDisconnect>,
     reset_on_connect: bool,
+    enforce_residency: bool,
+    resident: BTreeSet<[u8; 32]>,
+    live_assets: BTreeSet<[u8; 32]>,
+    busy_begins: usize,
+    evicted_live: usize,
+    missing_scenes: usize,
+    event_wake: Option<std::sync::Weak<dyn Fn() + Send + Sync>>,
+    device_dropped: bool,
     operations: Vec<Operation>,
     events: VecDeque<ReceivedEvent>,
     replay: ReplayCache,
@@ -337,6 +348,7 @@ impl CardTapSink for RecordingTapSink {
 }
 
 struct MockDevice {
+    wake: Option<Arc<dyn Fn() + Send + Sync>>,
     control: MockDeviceControl,
     drop_gate: Option<Arc<PushGate>>,
     panic_on_drop: bool,
@@ -346,6 +358,7 @@ impl MockDevice {
     fn new(control: MockDeviceControl) -> Self {
         Self {
             control,
+            wake: None,
             drop_gate: None,
             panic_on_drop: false,
         }
@@ -354,6 +367,7 @@ impl MockDevice {
     fn with_drop_gate(control: MockDeviceControl, drop_gate: Arc<PushGate>) -> Self {
         Self {
             control,
+            wake: None,
             drop_gate: Some(drop_gate),
             panic_on_drop: false,
         }
@@ -362,6 +376,7 @@ impl MockDevice {
     fn panics_on_drop(control: MockDeviceControl) -> Self {
         Self {
             control,
+            wake: None,
             drop_gate: None,
             panic_on_drop: true,
         }
@@ -381,6 +396,7 @@ impl MockDevice {
 
 impl Drop for MockDevice {
     fn drop(&mut self) {
+        self.control.state.lock().unwrap().device_dropped = true;
         if let Some(gate) = &self.drop_gate {
             gate.enter_and_wait();
         }
@@ -392,6 +408,10 @@ impl Drop for MockDevice {
 }
 
 impl RuntimeDevice for MockDevice {
+    fn set_event_waker(&mut self, wake: Arc<dyn Fn() + Send + Sync>) {
+        self.control.state.lock().unwrap().event_wake = Some(Arc::downgrade(&wake));
+        self.wake = Some(wake);
+    }
     fn connect(&mut self) -> Result<DeviceConnection, DeviceError> {
         let mut state = self.control.state.lock().unwrap();
         if state.power == MockPower::Unpowered {
@@ -400,6 +420,10 @@ impl RuntimeDevice for MockDevice {
         let reconnect = state.connection_count != 0;
         let reset = state.reset_on_connect;
         state.reset_on_connect = false;
+        if reset {
+            state.resident.clear();
+            state.live_assets.clear();
+        }
         state.connected = true;
         state.connection_count += 1;
         if reconnect {
@@ -541,6 +565,17 @@ impl RuntimeDevice for MockDevice {
         }
         self.with_connected(|state| {
             state.operations.push(Operation::PushScene(push.clone()));
+            if state.enforce_residency
+                && push.scene.nodes.iter().any(
+                    |n| matches!(n, SceneNode::Image(i) if !state.resident.contains(&i.digest)),
+                )
+            {
+                state.missing_scenes += 1;
+                return Err(DeviceError::Rejected(ErrorResponse {
+                    code: ErrorCode::InvalidPayload,
+                    diagnostic: "scene could not be rendered".into(),
+                }));
+            }
             if let Some(error) = state.scene_errors.pop_front() {
                 return Err(error);
             }
@@ -550,6 +585,15 @@ impl RuntimeDevice for MockDevice {
                     diagnostic: "scene could not be rendered".into(),
                 }));
             }
+            state.live_assets = push
+                .scene
+                .nodes
+                .iter()
+                .filter_map(|node| match node {
+                    SceneNode::Image(image) => Some(image.digest),
+                    _ => None,
+                })
+                .collect();
             Ok(())
         })?
     }
@@ -567,17 +611,29 @@ impl RuntimeDevice for MockDevice {
 
     fn send_asset_begin(&mut self, begin: AssetBegin) -> Result<Ack, DeviceError> {
         self.with_connected(|state| {
+            if state.enforce_residency
+                && !state.resident.contains(&begin.digest)
+                && state.resident.len() >= 16
+            {
+                state.busy_begins += 1;
+                return Err(DeviceError::Rejected(ErrorResponse {
+                    code: ErrorCode::Busy,
+                    diagnostic: "volatile asset pool full".into(),
+                }));
+            }
             state.operations.push(if begin.volatile {
                 Operation::VolatileAssetBegin(begin.digest)
             } else {
                 Operation::AssetBegin(begin.digest)
             });
-            Ack {
+            Ok(Ack {
                 acknowledged_type: protocol::TYPE_ASSET_BEGIN,
                 revision: None,
-                already_present: Some(false),
-            }
-        })
+                already_present: Some(
+                    state.enforce_residency && state.resident.contains(&begin.digest),
+                ),
+            })
+        })?
     }
 
     fn send_asset_chunk(&mut self, chunk: AssetChunk) -> Result<(), DeviceError> {
@@ -597,12 +653,22 @@ impl RuntimeDevice for MockDevice {
 
     fn send_asset_commit(&mut self, commit: AssetCommit) -> Result<(), DeviceError> {
         self.with_connected(|state| {
+            state.resident.insert(commit.digest);
             state.operations.push(Operation::AssetCommit(commit.digest));
         })
     }
 
     fn send_asset_release(&mut self, release: AssetRelease) -> Result<(), DeviceError> {
         self.with_connected(|state| {
+            if state.enforce_residency
+                && !state
+                    .live_assets
+                    .iter()
+                    .all(|d| release.digests.contains(d))
+            {
+                state.evicted_live += 1;
+            }
+            state.resident.retain(|d| release.digests.contains(d));
             state
                 .operations
                 .push(Operation::AssetRelease(release.digests));

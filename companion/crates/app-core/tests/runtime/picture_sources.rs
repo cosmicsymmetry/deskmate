@@ -214,7 +214,7 @@ fn an_image_source_update_for_a_card_that_is_not_on_screen_costs_no_flash_and_no
 }
 
 #[test]
-fn a_pressed_frame_pool_is_reclaimed_after_the_frame_lands_and_a_roomy_one_is_not() {
+fn a_pressed_frame_pool_is_reclaimed_before_upload_and_a_roomy_one_is_not() {
     // Every refresh yields a new digest and a committed volatile frame is freed
     // only when an AssetRelease keep-set omits it, so a pool nobody reclaims
     // fills up and starts refusing reservations. The host watches the device's
@@ -283,8 +283,8 @@ fn a_pressed_frame_pool_is_reclaimed_after_the_frame_lands_and_a_roomy_one_is_no
         );
         if let Some(release_at) = release_at {
             assert!(
-                commit_at < release_at,
-                "{label}: reclaiming must follow the frame, never precede it: {after:?}"
+                release_at < commit_at,
+                "{label}: make replacement room before uploading: {after:?}"
             );
         }
     }

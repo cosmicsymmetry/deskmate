@@ -1,5 +1,20 @@
 # Frames live in PSRAM — implementation plan
 
+> **2026-10-02 — Owner-approved C1 review corrections (server only).**
+> Residency is proven per connection and is cleared on disconnect/reconnect. At
+> replacement pressure, reclaim obsolete assets **before** uploading while keeping
+> the last accepted scene's digests; fifteen desired frames alone do not guarantee
+> room for two replacements. This overrides any earlier after-upload-only release
+> ordering below. Staging reserves eight resting frames and seven shared extras,
+> with at most four declared views rendered per source per staging pass. Superseded
+> fallback renders retry their consumed tap batch against the newer committed state,
+> and select that rendered result even if its resting pixels were unchanged. Staged
+> selection still never queues behind rendering. Runtime wake callbacks do not own
+> a command sender; idle selector exits are reaped independently of another tap.
+> No schema, wire or firmware change, deployment or new panel observation. Local
+> regression/mutation evidence and timings are in the
+> [latency budget](../../hardware/2026-10-01-tap-latency-budget.md).
+
 **Spec:** `docs/superpowers/specs/2026-09-28-deskmate-frames-live-in-psram-design.md`
 **Track:** C1 (branch `track-c1-tap-to-face`, PR #4)
 

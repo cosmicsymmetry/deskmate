@@ -43,6 +43,11 @@ const MAX_VIEW_ID_LEN: usize = 32;
 /// 32-digest `AssetRelease`, which the staged total has to fit; this bounds
 /// what a single misbehaving face can do to the store on its own.
 const MAX_VIEWS_PER_SOURCE: usize = 16;
+/// Reserve a resting frame for every source the config can contain, including
+/// sources minted later. The remaining seven slots are shared staged views.
+/// This bounds the complete account set even when refreshers run concurrently.
+const RESIDENT_FRAME_BUDGET: usize = 15;
+const STAGED_VIEW_BUDGET: usize = RESIDENT_FRAME_BUDGET - MAX_IMAGE_SOURCES;
 const _: () = assert!(MAX_IMAGE_SOURCES <= protocol::MAX_ASSET_DIGESTS);
 
 pub(crate) struct ImageSourceStore {
@@ -170,6 +175,8 @@ pub(crate) enum ImageSourceError {
     InvalidView,
     #[error("the image source already holds {MAX_VIEWS_PER_SOURCE} views")]
     TooManyViews,
+    #[error("the account's resident-frame staging budget has been reached")]
+    StagingCapacity,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -338,6 +345,17 @@ impl ImageSourceStore {
         if !source.frames.contains_key(view) && source.frames.len() >= MAX_VIEWS_PER_SOURCE {
             return Err(ImageSourceError::TooManyViews);
         }
+        if view != RESTING_VIEW
+            && !source.frames.contains_key(view)
+            && state
+                .sources
+                .iter()
+                .map(|source| source.frames.keys().filter(|view| !view.is_empty()).count())
+                .sum::<usize>()
+                >= STAGED_VIEW_BUDGET
+        {
+            return Err(ImageSourceError::StagingCapacity);
+        }
 
         let mut recent_push_times = source.recent_push_times.clone();
         recent_push_times.push(now);
@@ -453,6 +471,18 @@ impl ImageSourceStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+
+    #[cfg(test)]
+    pub(crate) fn forget_staged_view_for_test(&self, id: &str, view: &str) {
+        assert!(!view.is_empty());
+        self.lock()
+            .sources
+            .iter_mut()
+            .find(|source| source.id == id)
+            .unwrap()
+            .frames
+            .remove(view);
+    }
 }
 
 fn load_store(root: &Path) -> Result<ImageSourceState, ImageSourceError> {
@@ -527,6 +557,22 @@ fn load_store(root: &Path) -> Result<ImageSourceState, ImageSourceError> {
         });
     }
 
+    // Old servers used a per-source cap, which could exceed fifteen in a large
+    // loop. Load resting frames first and retain only the bounded extra cache.
+    // Excess cache files remain on disk; no user data or config is deleted.
+    let mut remaining = STAGED_VIEW_BUDGET;
+    for source in &mut sources {
+        source.frames.retain(|view, _| {
+            if view.is_empty() {
+                return true;
+            }
+            if remaining == 0 {
+                return false;
+            }
+            remaining -= 1;
+            true
+        });
+    }
     Ok(ImageSourceState { sources })
 }
 
@@ -740,6 +786,97 @@ fn valid_source_id(id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn page_four_fits_but_concurrent_staging_reserves_all_eight_resting_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(ImageSourceStore::new(dir.path().to_path_buf()).unwrap());
+        let source = store.mint("Four pages").unwrap();
+        store
+            .accept_server_rendered(&source.id, canonical_frame(1), at(0))
+            .unwrap();
+        for page in 2..=4 {
+            store
+                .accept_staged_view(
+                    &source.id,
+                    &format!("page-{page}"),
+                    canonical_frame(page),
+                    at(0),
+                )
+                .unwrap();
+        }
+        assert!(store.select_view(&source.id, "page-4").is_some());
+        let mut tasks = Vec::new();
+        for index in 0..12 {
+            let store = store.clone();
+            let id = source.id.clone();
+            tasks.push(std::thread::spawn(move || {
+                store.accept_staged_view(
+                    &id,
+                    &format!("extra-{index}"),
+                    canonical_frame(10 + index),
+                    at(0),
+                )
+            }));
+        }
+        let accepted = tasks
+            .into_iter()
+            .filter_map(|task| task.join().unwrap().ok())
+            .count();
+        assert_eq!(accepted, STAGED_VIEW_BUDGET - 3);
+        // Staging cannot steal the resting slots of sources minted in the future.
+        for index in 1..MAX_IMAGE_SOURCES {
+            let source = store.mint(&format!("Future {index}")).unwrap();
+            store
+                .accept_server_rendered(
+                    &source.id,
+                    canonical_frame(u8::try_from(30 + index).unwrap()),
+                    at(0),
+                )
+                .unwrap();
+        }
+        assert_eq!(store.desired_assets().len(), RESIDENT_FRAME_BUDGET);
+        // Replacing an existing view consumes no new resident-cache allocation.
+        assert!(
+            store
+                .accept_staged_view(&source.id, "page-4", canonical_frame(90), at(1))
+                .is_ok()
+        );
+        let reloaded = ImageSourceStore::new(dir.path().to_path_buf()).unwrap();
+        assert_eq!(reloaded.desired_assets().len(), RESIDENT_FRAME_BUDGET);
+        assert!(reloaded.select_view(&source.id, "page-4").is_some());
+    }
+
+    #[test]
+    fn an_older_oversized_staging_cache_is_bounded_on_load_without_deleting_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ImageSourceStore::new(dir.path().to_path_buf()).unwrap();
+        let mut ids = Vec::new();
+        for index in 0..MAX_IMAGE_SOURCES {
+            let source = store.mint(&format!("Source {index}")).unwrap();
+            let frame = canonical_frame(u8::try_from(index).unwrap());
+            store
+                .accept_server_rendered(&source.id, frame, at(0))
+                .unwrap();
+            // Reproduce old on-disk files, independently of today's admission guard.
+            for page in 2..=4 {
+                write_frame(
+                    dir.path(),
+                    &source.id,
+                    &format!("page-{page}"),
+                    &canonical_frame(u8::try_from(20 + index * 4 + page).unwrap()).bytes,
+                )
+                .unwrap();
+            }
+            ids.push(source.id);
+        }
+        let reloaded = ImageSourceStore::new(dir.path().to_path_buf()).unwrap();
+        assert_eq!(reloaded.desired_assets().len(), RESIDENT_FRAME_BUDGET);
+        for id in &ids {
+            assert!(reloaded.frame(id, at(0)).is_some());
+            assert!(frame_path(dir.path(), id, "page-4").exists());
+        }
+    }
 
     #[test]
     fn a_server_rendered_frame_is_not_held_to_the_producer_rate_limit() {

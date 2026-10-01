@@ -21,6 +21,9 @@ pub struct DeviceConnection {
 /// Device boundary used by the background runtime. Implementations retain all
 /// successfully-issued replay state across `connect` calls.
 pub trait RuntimeDevice: Send + 'static {
+    /// Optional notification for transports with an independent event reader.
+    /// Poll-only transports keep the scheduler's bounded idle wait.
+    fn set_event_waker(&mut self, _wake: std::sync::Arc<dyn Fn() + Send + Sync>) {}
     fn connect(&mut self) -> Result<DeviceConnection, DeviceError>;
     fn status(&mut self) -> Result<StatusResponse, DeviceError>;
     fn time_sync(&mut self, sync: TimeSync) -> Result<(), DeviceError>;
@@ -138,6 +141,8 @@ pub(super) fn mark_disconnected(
     reconnect_interval: Duration,
 ) {
     state.connected = false;
+    // Residency is proven only for this attachment, never across a reboot/link.
+    state.confirmed_resident_assets.clear();
     // Capabilities belong to the new attachment, not the retained runtime. A
     // reconnect may follow an OTA in either direction, so force one render-policy
     // decision from the fresh StatusResponse even when all data is otherwise clean.

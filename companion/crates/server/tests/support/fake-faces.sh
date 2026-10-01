@@ -38,6 +38,15 @@ render)
 			fi
 			;;
 		esac
+		case "$request" in
+		*'"event":'*|*'"view":'*) ;;
+		*)
+			if [ -e "$DESKMATE_FAKE_FACES_REQUEST_DIR/block-refresh" ]; then
+				: > "$DESKMATE_FAKE_FACES_REQUEST_DIR/render-blocked"
+				while [ ! -e "$DESKMATE_FAKE_FACES_REQUEST_DIR/release" ]; do sleep 0.01; done
+			fi
+			;;
+		esac
 	fi
 	if [ "${DESKMATE_FAKE_FACES_FAIL_SCHEDULED:-}" = "1" ]; then
 		case "$request" in
@@ -71,6 +80,14 @@ render)
 		fi
 		exit 1
 		;;
+	*tap-counter*'"event":'*|*'"event":'*tap-counter*)
+        page=$(printf '%s' "$request" | sed -n 's/.*"page":\([0-9]*\).*/\1/p')
+        taps=$(printf '%s' "$request" | sed -n 's/.*"taps":\([0-9]*\).*/\1/p')
+        page=$(( ${page:-0} + ${taps:-0} ))
+        image=fake-face.png
+        if [ "$(( page % 2 ))" = "1" ]; then image=fake-face-alt.png; fi
+        printf '{"png":"%s","state":{"page":%s}}' "$(base64 < "$here/$image" | tr -d '\n')" "$page"
+        ;;
 	*alternate-frame*) cat "$here/fake-face-alt.png" ;;
 	*'"view":"page-1"'*) cat "$here/fake-face-alt.png" ;;
 	*'"event":'*) printf '{"png":"%s","state":{"page":3}}' "$(base64 < "$here/fake-face.png" | tr -d '\n')" ;;
@@ -83,6 +100,7 @@ views)
 		printf '%s\n' "$request" >> "$DESKMATE_FAKE_FACES_REQUEST_DIR/plans.jsonl"
 	fi
 	case "$request" in
+	*many-pages*) printf '{"views":["","page-2","page-3","page-4","page-5","page-6"]}' ;;
 	# Only the tappable face offers a second view, matching `describe` above.
 	*'"kind":"headlines"'*) printf '{"views":["","page-1"]}' ;;
 	*) printf '{"views":[""]}' ;;
@@ -95,11 +113,16 @@ tap)
 	fi
 	# The blocked-render fixture exists to exercise the render path, so a tap
 	# there must fall back to one rather than being answered from a staged view.
-	if [ "${DESKMATE_FAKE_FACES_BLOCK_TAPS:-}" = "1" ]; then
+	if [ "${DESKMATE_FAKE_FACES_BLOCK_TAPS:-}" = "1" ] && [ ! -e "$DESKMATE_FAKE_FACES_REQUEST_DIR/allow-staged" ]; then
 		echo "this fixture sends taps down the render path" >&2
 		exit 1
 	fi
 	case "$request" in
+	*tap-counter*)
+		page=$(printf '%s' "$request" | sed -n 's/.*"page":\([0-9]*\).*/\1/p')
+		sleep 0.02
+		printf '{"view":"page-1","state":{"page":%s}}' "$(( ${page:-0} + 1 ))"
+		;;
 	*refuse-the-tap*) echo "the tap could not be resolved" >&2; exit 1 ;;
 	*'"kind":"headlines"'*) printf '{"view":"page-1","state":{"page":1}}' ;;
 	*) printf '{"view":""}' ;;

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +11,7 @@ const FACE_STATE_VERSION: u8 = 1;
 pub(super) struct FaceStateStore {
     path: PathBuf,
     sources: Mutex<BTreeMap<String, serde_json::Value>>,
+    transitions: Mutex<BTreeMap<String, Arc<Mutex<u64>>>>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -50,7 +51,19 @@ impl FaceStateStore {
         Self {
             path,
             sources: Mutex::new(sources),
+            transitions: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Serializes selection/read/commit for one source, never its render. The
+    /// generation prevents a render started earlier from overwriting a tap.
+    pub(super) fn transition(&self, source_id: &str) -> Arc<Mutex<u64>> {
+        self.transitions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(source_id.to_owned())
+            .or_default()
+            .clone()
     }
 
     pub(super) fn get(&self, source_id: &str) -> Option<serde_json::Value> {

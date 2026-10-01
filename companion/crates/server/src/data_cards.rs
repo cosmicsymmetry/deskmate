@@ -34,6 +34,8 @@ use crate::accounts::AccountSpace;
 
 mod face_state;
 mod faces_package;
+#[cfg(test)]
+mod latency_bench;
 mod worker;
 
 use face_state::FaceStateStore;
@@ -903,6 +905,10 @@ fn select_staged_view(state: &ServerState, space: &AccountSpace, source_id: &str
     let Some(faces) = faces else {
         return false;
     };
+    let transition = face_state.transition(source_id);
+    let mut generation = transition
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let stored = face_state.get(source_id);
     let selection_started = std::time::Instant::now();
     let selection = faces_package::tap(
@@ -935,6 +941,7 @@ fn select_staged_view(state: &ServerState, space: &AccountSpace, source_id: &str
     if let Some(next) = selection.state {
         face_state.put(source_id, next);
     }
+    *generation = generation.wrapping_add(1);
     tracing::info!(target: "server::tap_latency", source_id,
         unix_us = chrono::Utc::now().timestamp_micros(),
         decision = "staged_hit", view = %selection.view,
@@ -1996,6 +2003,197 @@ mod tests {
             "every tap is answered in at most two renders: {counts:?}"
         );
         assert_eq!(counts, [1, 2]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn staged_taps_bypass_background_and_fallback_renders_and_keep_their_newer_state() {
+        for fallback in [false, true] {
+            let server = FaceTestServer::new("headlines", fallback, false).await;
+            server.wait_for_staged_view("page-1").await;
+            server.space.data_cards.lock().unwrap().specs[0]
+                .face
+                .settings
+                .insert("counter".into(), "tap-counter".into());
+            // Wait for the new worker's completed staging pass, not an arbitrary sleep.
+            server.restart_with_refresh(Duration::from_mins(15)).await;
+            let before = server.space.data_cards.lock().unwrap().outcomes[&server.source_id].1;
+            if fallback {
+                tapped(&server.state, &server.space, &server.source_id);
+            } else {
+                std::fs::write(server.directory.path().join("block-refresh"), b"").unwrap();
+                let mut cards = server.space.data_cards.lock().unwrap();
+                cards.tasks.remove(&server.source_id).unwrap().abort();
+                let spec = cards.specs[0].clone();
+                cards.start_if_complete(
+                    &tokio::runtime::Handle::current(),
+                    &server.state,
+                    server.space.clone(),
+                    &spec,
+                );
+            }
+            server.wait_for_file("render-blocked").await;
+            std::fs::write(server.directory.path().join("allow-staged"), b"").unwrap();
+            let state = server.state.clone();
+            let space = server.space.clone();
+            let source = server.source_id.clone();
+            let selected = tokio::time::timeout(
+                Duration::from_secs(1),
+                tokio::task::spawn_blocking(move || {
+                    tapped(&state, &space, &source);
+                }),
+            )
+            .await;
+            // Release before asserting, so a broken selector cannot strand a child.
+            std::fs::write(server.directory.path().join("release"), b"").unwrap();
+            assert!(selected.is_ok(), "staged tap queued behind a render");
+            let staged_digest = server
+                .space
+                .image_sources
+                .frame(&server.source_id, chrono::Utc::now())
+                .unwrap()
+                .digest;
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if server.space.data_cards.lock().unwrap().outcomes[&server.source_id].1
+                        > before
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            server
+                .wait_for_face_state(serde_json::json!({"page": if fallback { 2 } else { 1 }}))
+                .await;
+            let face_state = server.space.data_cards.lock().unwrap().face_state.clone();
+            assert_eq!(
+                face_state.get(&server.source_id),
+                Some(serde_json::json!({"page": if fallback { 2 } else { 1 }}))
+            );
+            assert_eq!(
+                FaceStateStore::load(server.space.root.join("face-state.json"))
+                    .get(&server.source_id),
+                Some(serde_json::json!({"page": if fallback { 2 } else { 1 }})),
+                "the newer tap is durable"
+            );
+            assert_eq!(
+                server
+                    .space
+                    .image_sources
+                    .frame(&server.source_id, chrono::Utc::now())
+                    .unwrap()
+                    .digest,
+                if fallback {
+                    crate::image_ingest::canonical_frame_from_png(
+                        &std::fs::read(
+                            Path::new(env!("CARGO_MANIFEST_DIR"))
+                                .join("tests/support/fake-face.png"),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap()
+                    .digest
+                } else {
+                    staged_digest
+                },
+                "superseded tap batch must rebase on the newer state, never rewind it"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn simultaneous_staged_taps_advance_durable_state_once_each() {
+        let server = FaceTestServer::new("headlines", false, false).await;
+        server.wait_for_staged_view("page-1").await;
+        server.space.data_cards.lock().unwrap().specs[0]
+            .face
+            .settings
+            .insert("counter".into(), "tap-counter".into());
+        let mut tasks = Vec::new();
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        for _ in 0..8 {
+            let state = server.state.clone();
+            let space = server.space.clone();
+            let source = server.source_id.clone();
+            let barrier = barrier.clone();
+            tasks.push(tokio::task::spawn_blocking(move || {
+                barrier.wait();
+                tapped(&state, &space, &source);
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert_eq!(
+            FaceStateStore::load(server.space.root.join("face-state.json")).get(&server.source_id),
+            Some(serde_json::json!({"page":8}))
+        );
+        let pages: Vec<_> = server
+            .plans()
+            .into_iter()
+            .filter(|plan| plan.get("event").is_some())
+            .map(|plan| plan["state"]["page"].as_u64().unwrap_or(0))
+            .collect();
+        assert_eq!(
+            pages,
+            (0..8).collect::<Vec<_>>(),
+            "each selector sees the preceding tap's committed state"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_refresher_stages_four_frames_even_when_the_face_declares_more() {
+        let server = FaceTestServer::new("headlines", false, false).await;
+        server.wait_for_staged_view("page-1").await;
+        server
+            .space
+            .image_sources
+            .forget_staged_view_for_test(&server.source_id, "page-1");
+        let before = server.space.data_cards.lock().unwrap().outcomes[&server.source_id].1;
+        {
+            let mut cards = server.space.data_cards.lock().unwrap();
+            cards.specs[0]
+                .face
+                .settings
+                .insert("list".into(), "many-pages".into());
+            let spec = cards.specs[0].clone();
+            cards.tasks.remove(&server.source_id).unwrap().abort();
+            cards.start_if_complete(
+                &tokio::runtime::Handle::current(),
+                &server.state,
+                server.space.clone(),
+                &spec,
+            );
+        }
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if server
+                    .space
+                    .image_sources
+                    .select_view(&server.source_id, "page-4")
+                    .is_some()
+                    && server.space.data_cards.lock().unwrap().outcomes[&server.source_id].1
+                        > before
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("page four was not staged");
+        for view in ["page-5", "page-6"] {
+            assert!(
+                server
+                    .space
+                    .image_sources
+                    .select_view(&server.source_id, view)
+                    .is_none(),
+                "{view} exceeds the four-frame per-source ceiling"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

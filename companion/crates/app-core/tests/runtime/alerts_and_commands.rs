@@ -443,9 +443,9 @@ fn paused_config_defers_picture_assets_and_scene_until_a_resumed_config_is_appli
     let release = resumed
         .iter()
         .position(|operation| {
-            matches!(operation, Operation::AssetRelease(digests) if digests == &vec![updated_digest])
+            matches!(operation, Operation::AssetRelease(digests) if digests == &vec![initial_digest, updated_digest])
         })
-        .expect("resume sends the complete latest keep-set");
+        .expect("resume keeps the live frame until the replacement scene lands");
     let scene = resumed
         .iter()
         .position(|operation| {

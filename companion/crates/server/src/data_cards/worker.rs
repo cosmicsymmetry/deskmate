@@ -5,6 +5,7 @@ use std::time::Duration;
 use chrono::Utc;
 use tokio::task::JoinHandle;
 
+use super::clock;
 use super::face_state::FaceStateStore;
 use super::faces_package::{self, FaceCommand, FaceRenderError, RenderRequest};
 use super::{DataCardSpec, RefreshOutcome, TapSignal, record_outcome};
@@ -134,6 +135,7 @@ struct RenderedFrame {
 fn render_frame(
     faces: &FaceCommand,
     account_dir: &Path,
+    timezone: &str,
     spec: &DataCardSpec,
     state: Option<&serde_json::Value>,
     taps: u32,
@@ -142,6 +144,7 @@ fn render_frame(
         faces,
         RenderRequest {
             kind: &spec.face.kind,
+            timezone,
             settings: &spec.face.settings,
             state,
             taps,
@@ -168,6 +171,7 @@ fn render_frame(
 fn render_view_frame(
     faces: &FaceCommand,
     account_dir: &Path,
+    timezone: &str,
     spec: &DataCardSpec,
     state: Option<&serde_json::Value>,
     view: &str,
@@ -176,6 +180,7 @@ fn render_view_frame(
         faces,
         RenderRequest {
             kind: &spec.face.kind,
+            timezone,
             settings: &spec.face.settings,
             state,
             taps: 0,
@@ -237,10 +242,14 @@ async fn refresh_once(
     let render_faces = faces.clone();
     let render_spec = spec.clone();
     let render_account_dir = space.root.clone();
+    let clock_state = state.clone();
+    let clock_space = Arc::clone(space);
     let rendered = tokio::task::spawn_blocking(move || {
+        let timezone = clock::source_timezone(&clock_state, &clock_space, &render_spec.source_id);
         render_frame(
             &render_faces,
             &render_account_dir,
+            &timezone,
             &render_spec,
             previous_state.as_ref(),
             taps,
@@ -302,7 +311,7 @@ async fn refresh_once(
             if !notify_image_source_outcome(state, space, source_id, &outcome) {
                 tracing::debug!(target: "server::data_cards", source_id = %source_id, kind, "the face is unchanged");
             }
-            stage_other_views(space, faces, face_state_for_staging, spec).await;
+            stage_other_views(state, space, faces, face_state_for_staging, spec).await;
             Some(RefreshOutcome::Drawn)
         }
         Ok(Err(error)) => {
@@ -340,6 +349,7 @@ const MAX_STAGED_FRAMES_PER_SOURCE: usize = 3;
 /// that is not staged is simply rendered on the tap that asks for it, which is
 /// what happened before any of this existed.
 async fn stage_other_views(
+    state: &ServerState,
     space: &Arc<AccountSpace>,
     faces: &FaceCommand,
     face_state: Arc<FaceStateStore>,
@@ -375,10 +385,15 @@ async fn stage_other_views(
         let render_state = stored.clone();
         let render_view = view.clone();
         let render_account_dir = space.root.clone();
+        let clock_state = state.clone();
+        let clock_space = Arc::clone(space);
         let drawn = tokio::task::spawn_blocking(move || {
+            let timezone =
+                clock::source_timezone(&clock_state, &clock_space, &render_spec.source_id);
             render_view_frame(
                 &render_faces,
                 &render_account_dir,
+                &timezone,
                 &render_spec,
                 render_state.as_ref(),
                 &render_view,
@@ -449,6 +464,8 @@ async fn refresh_loop(
     // The first attempt is immediate, which is what fills a freshly started server's
     // panels instead of leaving them blank for fifteen minutes.
     loop {
+        let started = tokio::time::Instant::now();
+        let calendar = clock::sample(&state, &space, &spec.source_id).await;
         let Some(outcome) =
             refresh_once(&state, &space, &faces, &face_state, &spec, tap_count).await
         else {
@@ -459,11 +476,29 @@ async fn refresh_loop(
             RefreshOutcome::Drawn | RefreshOutcome::NeedsAttention(_) => 0,
         };
         let wait = next_attempt(refresh, &outcome, consecutive_failures);
+        let drawn = matches!(outcome, RefreshOutcome::Drawn);
         record_outcome(&space, &spec.source_id, task, outcome);
-        tap_count = tokio::select! {
-            () = tokio::time::sleep(wait) => 0,
-            () = taps.notify.notified() => taps.take().max(1),
-        };
+        let due = tokio::time::Instant::now() + wait;
+        loop {
+            tap_count = tokio::select! {
+                () = tokio::time::sleep_until(due.min(tokio::time::Instant::now() + MIN_REFRESH)) => 0,
+                () = taps.notify.notified() => taps.take().max(1),
+            };
+            if tap_count > 0 || tokio::time::Instant::now() >= due {
+                break;
+            }
+            // No date-face flag exists in contract v1. Check every drawn source;
+            // at most one extra scheduled render per local date (or zone change).
+            // Keep failures on their existing backoff and never spin at midnight.
+            if clock::should_refresh(
+                drawn,
+                started.elapsed(),
+                &calendar,
+                &clock::sample(&state, &space, &spec.source_id).await,
+            ) {
+                break;
+            }
+        }
     }
 }
 
@@ -525,6 +560,7 @@ mod tests {
         let rendered = render_frame(
             &faces_package::fake(),
             test_account_dir(),
+            "UTC",
             &spec("Dubai"),
             None,
             0,
@@ -548,6 +584,7 @@ mod tests {
                 render_frame(
                     &faces_package::fake(),
                     test_account_dir(),
+                    "UTC",
                     &spec(steer),
                     None,
                     0,
@@ -563,6 +600,7 @@ mod tests {
             render_frame(
                 &faces_package::fake(),
                 test_account_dir(),
+                "UTC",
                 &spec("refuse-as-configuration"),
                 None,
                 0,
@@ -573,12 +611,58 @@ mod tests {
             render_frame(
                 &faces_package::fake(),
                 test_account_dir(),
+                "UTC",
                 &spec("refuse-as-transient"),
                 None,
                 0,
             ),
             Err(RefreshFailure::Transient(_))
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn owner_timezone_reaches_scheduled_tap_and_staged_renders() {
+        let directory = tempfile::tempdir().unwrap();
+        let face_state = Arc::new(FaceStateStore::load(directory.path().join("state.json")));
+        let state = ServerState::in_memory();
+        let space = test_space(&state);
+        for zone in ["Asia/Tokyo", "America/Los_Angeles"] {
+            clock::tests::save_device(&state, &space, "dev-0001", zone, None);
+            for taps in [0, 2] {
+                let outcome = refresh_once(
+                    &state,
+                    &space,
+                    &faces_package::fake(),
+                    &face_state,
+                    &spec("echo-the-request"),
+                    taps,
+                )
+                .await
+                .unwrap();
+                let RefreshOutcome::Retrying(message) = outcome else {
+                    panic!("echo request")
+                };
+                let request: serde_json::Value = serde_json::from_str(&message).unwrap();
+                assert_eq!(request["timezone"], zone);
+            }
+            let error = render_view_frame(
+                &faces_package::fake(),
+                &space.root,
+                &clock::source_timezone(&state, &space, "source"),
+                &spec("echo-the-request"),
+                None,
+                "page-1",
+            )
+            .err()
+            .unwrap();
+            let RefreshFailure::Transient(message) = error else {
+                panic!("echo request")
+            };
+            let request: serde_json::Value = serde_json::from_str(&message).unwrap();
+            assert_eq!(request["timezone"], zone);
+            assert_eq!(request["view"], "page-1");
+        }
+        state.shutdown();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -827,6 +911,7 @@ mod tests {
             render_frame(
                 &faces_package::fake(),
                 test_account_dir(),
+                "UTC",
                 &spec(steer),
                 None,
                 0,

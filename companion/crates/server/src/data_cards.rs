@@ -32,6 +32,7 @@ use crate::ImageNotificationOrigin;
 use crate::ServerState;
 use crate::accounts::AccountSpace;
 
+mod clock;
 mod face_state;
 mod faces_package;
 mod worker;
@@ -1930,6 +1931,33 @@ mod tests {
                 .await
                 .is_err(),
             "coalescing the second tap must not queue a phantom render"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scheduled_and_staged_views_share_the_owners_timezone() {
+        let server = FaceTestServer::new("headlines", false, false).await;
+        server.wait_for_staged_view("page-1").await;
+        clock::tests::save_device(
+            &server.state,
+            &server.space,
+            "dev-0001",
+            "Asia/Tokyo",
+            Some(&server.source_id),
+        );
+        let baseline = server.requests().len();
+        server.restart_with_refresh(Duration::from_hours(6)).await;
+        let requests = server.wait_for_requests(baseline + 2).await;
+        let new_requests = &requests[baseline..];
+        assert!(
+            new_requests
+                .iter()
+                .any(|request| request.get("view").is_some())
+        );
+        assert!(
+            new_requests
+                .iter()
+                .all(|request| request["timezone"] == "Asia/Tokyo")
         );
     }
 

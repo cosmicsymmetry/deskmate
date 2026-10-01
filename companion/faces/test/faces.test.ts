@@ -511,6 +511,20 @@ describe("weather", () => {
     expect(get.asked[1]).not.toContain("temperature_unit");
   });
 
+  test.each(["Asia/Tokyo", "America/Los_Angeles"])(
+    "weather forwards owner timezone %s",
+    async (timezone) => {
+      const get = fake({ "geocoding-api": GEOCODING, "/v1/forecast": forecast({}) });
+      await renderWeatherRequest(
+        { location: "Dubai" },
+        new Date("2028-01-01T00:00:00Z"),
+        { timezone },
+        get,
+      );
+      expect(new URL(get.asked[1] ?? "").searchParams.get("timezone")).toBe(timezone);
+    },
+  );
+
   test("a tap redraws from the forecast already in hand", async () => {
     // Both views say the same reading about a different moment, so switching
     // between them has no reason to visit Open-Meteo. The round trip it saves is

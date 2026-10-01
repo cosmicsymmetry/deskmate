@@ -5993,3 +5993,75 @@ this says what is still wanted, and the two items the owner retired are retired
   deployed**, so the rendered-tap time is still blocked. The fix is faces-only, so
   `deploy.sh --faces-only` ships it: an rsync plus the suite on the VM, no Rust, no
   restart, no schema and no wire.
+
+## 2026-10-01 — PR #7 merged, and C1's two fixes reach the live server
+
+Sources: **gh** = `gh pr`/`gh run`, **status** = `deploy.sh --status`, **vm** = read on the
+VM over SSH, **log** = live journal. **No part of this entry was observed on the panel:
+dev-0005 was off throughout, having last linked 2026-09-30 13:48 UTC.**
+
+### The merge (gh)
+
+The owner chose "merge PR #7, then deploy from `main`". PR #7 was `CLEAN`/`MERGEABLE` and
+its last CI run on the head commit `d74fb4e` was green on **all four jobs** --
+`firmware`, `firmware-host-tests`, `faces`, `companion` -- so nothing was skipped in the
+way the four-week `needs`-skip was. Merged as a merge commit, **`63633d2`**, keeping the
+24 commits rather than squashing them. `main` fast-forwarded to it.
+
+The schema/wire lock is **released**: that was PR #7's merge, per the board's lock line.
+
+### The deploy (status + vm + log)
+
+Full deploy -- faces, web and binary -- from `main` @ `63633d2`.
+
+- **No revert hazard, checked before the deploy rather than after:**
+  `git merge-base --is-ancestor 865e83c HEAD` passes, so what was live is contained in
+  what shipped. This is the check the 09-29 Track B deploy did not make.
+- **`--status` before:** `865e83c` for all three, recorded 2026-09-30 09:58-09:59.
+  **After:** `63633d2` for all three, recorded 2026-10-01 11:24:43-11:24:48.
+- The deploy's own health check passed (`GET /` 200, `GET /v1/app/...` 401 as designed).
+  The unit restarted at 11:24:46 and is `active`.
+- **The artifacts carry the fixes, verified by content and not by the recorded
+  revision** (vm): `tappedState` -- ROD-13's shared tap transition -- is present in both
+  `/var/lib/private/deskmate/faces/src/faces/rss.ts` and `.../hackernews.ts`, and
+  `/usr/local/bin/deskmate-server` contains `server::tap_latency`, `device tap received`
+  and `visual request acknowledged`. Binary mtime 11:24:46, 22,123,488 B.
+- **The tracing is not merely compiled in, it is emitting** (log). The VM's filter is
+  `RUST_LOG=info,server=debug`, and two `server::tap_latency` lines appeared within a
+  second of the restart ("image update queued for runtimes", with `devices=[]` because
+  the board is off). So the next bench session will not discover an empty target.
+- **Staging resumed at once** (log): weather `days`, rss `page-2` and `page-3`, token
+  `line`, within 1.4 s of the restart. A `github-stats` source refreshes beside them.
+
+### Two snags worth the next session's time
+
+- **`deploy.sh` refuses a dirty tree, and untracked files count.** Four untracked paths
+  in the owner's worktree (`.claude/`, `add-menu-with-plugin.png`, `plugin-card-live.png`,
+  `plugin-card-saved.png`) blocked the deploy. They were excluded through
+  `.git/info/exclude` for the duration and the file was restored afterwards, so the
+  worktree is as the owner left it -- and the next deploy will hit the same refusal.
+- **`bun` is not on a non-login shell's PATH** (`/Users/rodion/.bun/bin/bun`), and
+  `ship_faces` runs `bun install`/`check`/`test` locally before shipping. Without it the
+  deploy fails at the first step with "companion/faces does not pass its own gates",
+  which reads as a test failure and is not one.
+- **Track B's `96bed8c` is on `track-b/plugin-contract` only and has never reached
+  `main`.** It was live for 24 hours in the window above. It is not in `63633d2`, so it
+  is not live now -- but any future deploy from `main` also drops it, and the board's
+  integrate-first rule cannot catch what was never merged.
+
+### Still owed, unchanged by this entry
+
+Every item below needs the owner at the desk with the panel powered.
+
+- **The rendered-tap time.** Now unblocked -- the fix is live -- and still unmeasured.
+  A tap past the last staged page (a fourth tap on the rss card) should now draw the next
+  page; that it does so **on the glass** has not been seen.
+- **The split of `release->stable`.** The tracing is live, so the next filmed sitting can
+  produce it. Report the residual `release->stable - (server receive -> PushScene
+  send_start)` and nothing finer; do not halve an RTT and call it measured.
+- **A `hackernews`-kind card**, created in the owner's browser. Still 61 KB / 33 chunks
+  that have never crossed the tunnel.
+- **A face at 90 degrees.** Retired unobserved on 2026-10-01; see the entry above.
+- **A timed release with an empty durable store.** Key 31 held 4 records on 09-30 and the
+  board has not been up since to drain them.
+- **The framebuffer matrix**, still its own sitting.

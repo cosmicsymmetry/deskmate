@@ -352,6 +352,29 @@ void volatile_asset_store_destroy(volatile_asset_store_t *store)
     store->incoming_index = -1;
 }
 
+void volatile_asset_store_stats(const volatile_asset_store_t *store,
+                                volatile_asset_store_stats_t *out_stats)
+{
+    if (out_stats == NULL) {
+        return;
+    }
+    out_stats->committed_count = 0U;
+    out_stats->capacity = (uint32_t)VOLATILE_ASSET_SLOT_COUNT;
+    out_stats->used_bytes = 0U;
+    if (store == NULL) {
+        return;
+    }
+    /* An incoming allocation is deliberately not counted: no scene can name it
+     * until it commits, and a host reading occupancy is asking what the device
+     * is holding for it, not what is in flight. */
+    for (size_t i = 0U; i < VOLATILE_ASSET_SLOT_COUNT; ++i) {
+        if (store->slots[i].state == VOLATILE_ASSET_SLOT_COMMITTED) {
+            out_stats->committed_count += 1U;
+            out_stats->used_bytes += store->slots[i].length;
+        }
+    }
+}
+
 bool volatile_asset_store_release_must_teardown(
     const volatile_asset_store_t *store,
     const uint8_t *const *used_digests, size_t used_count,

@@ -332,6 +332,7 @@ fn base_status() -> StatusResponse {
         // their job is to prove a frame captured before an extension still
         // decodes after it.
         asset_store: None,
+        volatile_assets: None,
     }
 }
 

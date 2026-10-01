@@ -1108,30 +1108,3 @@ fn run_image_source_update_case(
     runtime.shutdown().unwrap();
     relevant
 }
-
-fn assert_image_update_asset_prefix(
-    operations: &[Operation],
-    existing_digest: [u8; protocol::ASSET_DIGEST_LEN],
-    picture_digest: [u8; protocol::ASSET_DIGEST_LEN],
-) {
-    // Both frames are re-sent and committed; no AssetRelease follows, because
-    // reclaiming is rate-limited now and the initial sync already spent this
-    // window's release.
-    assert_eq!(
-        &operations[..6],
-        &[
-            Operation::AssetBegin(existing_digest),
-            Operation::AssetChunk(existing_digest, 0),
-            Operation::AssetCommit(existing_digest),
-            Operation::AssetBegin(picture_digest),
-            Operation::AssetChunk(picture_digest, 0),
-            Operation::AssetCommit(picture_digest),
-        ]
-    );
-    assert!(
-        !operations
-            .iter()
-            .any(|operation| matches!(operation, Operation::AssetRelease(_))),
-        "reclaiming compacts flash and must not ride along with an ordinary frame: {operations:?}"
-    );
-}

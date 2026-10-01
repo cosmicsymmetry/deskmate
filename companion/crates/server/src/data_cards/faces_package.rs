@@ -35,6 +35,7 @@
 //! never joined: they collect into shared buffers the caller takes once the child
 //! has exited, so a stray process holding a pipe open cannot wedge the caller.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -57,6 +58,12 @@ const DESCRIBE_TIMEOUT: Duration = Duration::from_secs(15);
 /// 1.5 MB. The biggest face measured off-panel is 61 KB, so the headroom is real.
 const MAX_PNG_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CATALOG_BYTES: usize = 256 * 1024;
+/// `views` and `tap` neither fetch nor draw, so they are bounded far more
+/// tightly than `render`: they answer with a short list or a single view id,
+/// and a tap is on the interactive path where waiting is the thing being
+/// removed.
+const PLAN_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_PLAN_BYTES: usize = 16 * 1024;
 const MAX_STDERR_BYTES: usize = 8 * 1024;
 const MAX_MESSAGE_CHARS: usize = 200;
 const POLL: Duration = Duration::from_millis(10);
@@ -173,6 +180,9 @@ pub(crate) struct RenderRequest<'a> {
     pub(crate) state: Option<&'a serde_json::Value>,
     /// Zero means this is a scheduled refresh rather than a response to taps.
     pub(crate) taps: u32,
+    /// Which view to draw. `None` is the resting view, and is what a scheduled
+    /// refresh sends.
+    pub(crate) view: Option<&'a str>,
 }
 
 /// A rendered frame and the package's instruction for stored state.
@@ -181,6 +191,20 @@ pub(crate) struct RenderRequest<'a> {
 pub(crate) struct Rendered {
     pub(crate) png: Vec<u8>,
     /// `None` keeps state, `Some(None)` clears it, and `Some(Some(value))` replaces it.
+    pub(crate) state: Option<Option<serde_json::Value>>,
+}
+
+#[derive(Deserialize)]
+struct ViewsEnvelope {
+    views: Vec<String>,
+}
+
+/// What a tap resolved to: the view to show, and the state to store with it.
+#[allow(clippy::option_option)] // Preserve the envelope's absent/null/value distinction.
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+pub(crate) struct TapSelection {
+    pub(crate) view: String,
+    #[serde(default, deserialize_with = "deserialize_explicit_null")]
     pub(crate) state: Option<Option<serde_json::Value>>,
 }
 
@@ -363,6 +387,86 @@ pub(crate) fn describe(command: &FaceCommand) -> Result<Vec<CatalogFace>, String
     Ok(catalog)
 }
 
+/// The views a face offers for these settings, in priority order.
+///
+/// Pure on the package side: no fetch, no raster, so this is cheap enough to ask
+/// on every refresh. An older package that does not know the verb answers
+/// non-zero, and the caller reads that as "one resting view", which is exactly
+/// what that package can do.
+pub(crate) fn views(
+    command: &FaceCommand,
+    kind: &str,
+    settings: &BTreeMap<String, serde_json::Value>,
+    state: Option<&serde_json::Value>,
+) -> Result<Vec<String>, FaceRenderError> {
+    let mut body = serde_json::json!({ "kind": kind, "settings": settings });
+    if let Some(state) = state {
+        body["state"] = state.clone();
+    }
+    let finished = run(
+        command,
+        "views",
+        body.to_string().as_bytes(),
+        MAX_PLAN_BYTES,
+        PLAN_TIMEOUT,
+        None,
+    )
+    .map_err(FaceRenderError::Transient)?;
+    match finished.code {
+        Some(0) => {
+            let answer: ViewsEnvelope =
+                serde_json::from_slice(&finished.stdout).map_err(|error| {
+                    FaceRenderError::Malformed(format!(
+                        "the view list is not the expected JSON: {error}"
+                    ))
+                })?;
+            Ok(answer.views)
+        }
+        Some(EXIT_CONFIGURATION) => Err(FaceRenderError::Configuration(message_of(&finished))),
+        _ => Err(FaceRenderError::Transient(message_of(&finished))),
+    }
+}
+
+/// Which view a tap selects, and the state to store with it.
+///
+/// This is the whole point of the split: it answers without fetching and without
+/// drawing, so a tap on a staged view costs one `PushScene` rather than a render
+/// and a transfer.
+pub(crate) fn tap(
+    command: &FaceCommand,
+    kind: &str,
+    settings: &BTreeMap<String, serde_json::Value>,
+    state: Option<&serde_json::Value>,
+    taps: u32,
+) -> Result<TapSelection, FaceRenderError> {
+    let mut body = serde_json::json!({
+        "kind": kind,
+        "settings": settings,
+        "event": { "taps": taps, "point": serde_json::Value::Null },
+    });
+    if let Some(state) = state {
+        body["state"] = state.clone();
+    }
+    let finished = run(
+        command,
+        "tap",
+        body.to_string().as_bytes(),
+        MAX_PLAN_BYTES,
+        PLAN_TIMEOUT,
+        None,
+    )
+    .map_err(FaceRenderError::Transient)?;
+    match finished.code {
+        Some(0) => serde_json::from_slice(&finished.stdout).map_err(|error| {
+            FaceRenderError::Malformed(format!(
+                "the tap selection is not the expected JSON: {error}"
+            ))
+        }),
+        Some(EXIT_CONFIGURATION) => Err(FaceRenderError::Configuration(message_of(&finished))),
+        _ => Err(FaceRenderError::Transient(message_of(&finished))),
+    }
+}
+
 /// Fetches and draws one face, returning its PNG and state instruction.
 ///
 /// `account_dir` is the rendering account's own directory (`AccountSpace::root`),
@@ -380,6 +484,9 @@ pub(crate) fn render(
     });
     if let Some(state) = request.state {
         body["state"] = state.clone();
+    }
+    if let Some(view) = request.view {
+        body["view"] = serde_json::Value::String(view.to_owned());
     }
     if request.taps > 0 {
         // `point` is null until the wire carries one. Sending the key now means C2
@@ -479,6 +586,7 @@ mod tests {
             settings,
             state,
             taps,
+            view: None,
         }
     }
 

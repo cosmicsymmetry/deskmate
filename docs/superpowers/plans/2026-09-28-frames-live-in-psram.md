@@ -3,8 +3,90 @@
 **Spec:** `docs/superpowers/specs/2026-09-28-deskmate-frames-live-in-psram-design.md`
 **Track:** C1 (branch `track-c1-tap-to-face`, PR #4)
 
-> **STATUS 2026-09-28.** Step 1 is **delivered** (`784ff52`). Steps 2–4 are **one batch,
-> not three**, and that batch needs the owner's authorization because it ends in a flash.
+> **2026-10-01 — ROD-14 latency instrumentation.** Owner direction is to chase
+> 250 ms, using release-to-stable as the system budget. Server-only tracing now
+> covers tap receipt/routing, selector and staged lookup, fallback render, runtime
+> notifications, scene socket send/ACK and asset transfer boundaries. See
+> [the latency budget](../../hardware/2026-10-01-tap-latency-budget.md) for measured,
+> inferred and unknown segments, correlation limits and costed candidates.
+> No schema, wire or firmware change; no merge of PR #7 or deployment. Complete
+> device/network subsegments cannot be recovered from server logs alone.
+> Verification: Rust fmt/clippy/all-targets/doctests pass, with test threads set to
+> one after an existing 100 ms fixture deadline failed in parallel; the fixture
+> also passes in isolation. Web 216 tests/check/format/build and faces 431
+> tests/check/lint/format pass. No new physical observation is claimed.
+>
+> **2026-09-30 — ROD-13 rendered tap fallback correction.** The ROD-12 bench
+> report supersedes the older claim below that no tap has been observed: staged RSS
+> pages turned, but the unstaged page-four fallback returned page one and unchanged
+> state. RSS and Hacker News now share their per-face tap transition between `onTap`
+> and a render carrying an event without a view. Explicit view renders still leave
+> state unchanged. This is a faces-only correction: `deploy.sh --faces-only`, no
+> Rust restart, wire/schema change or firmware work.
+>
+> Regression evidence: both real `render` subprocess tests failed before the fix
+> (`page: 2`, expected `3`). Afterward they verify different PNGs, equality to the
+> requested page-four PNG, advanced state/tap time, repeated taps, wraparound,
+> coalesced taps and explicit-view precedence. All 431 faces tests pass; check,
+> lint and format:check exit 0 (lint retains the pre-existing unused RenderContext
+> import warning in main.ts). `bun run dump out/` generated 38 review cases;
+> additional fallback page-four PNGs from captured headlines were inspected at
+> full and 0.4x size. RSS shows entries 13–16; Hacker News shows page 4/5 with
+> story 13 leading, using the existing layout. No goldens changed.
+>
+> This fix has not been deployed or verified on the glass. PR #7 must remain open;
+> the owner decides merge and deployment, then owns the next physical tap check.
+>
+> **RELEASE INTEGRATION 2026-09-29 (ROD-3).** Managed GitHub CLI access is
+> restored (ROD-7). Local main's three Track D commits are preserved by merging
+> main into C1, followed by origin/main (`4253521`, including Tracks A and B).
+> Shared main will fast-forward to the PR merge; no shared history is rewritten.
+> Conflict resolution preserves C1 views/taps, B plugin discovery/cadence/timezone,
+> both tracks' board observations, and account-scoped rendering for staged views.
+> A plugin without onTap must fall back to render, never select its old resting
+> frame; regression coverage exercises this at the real subprocess boundary.
+> **Execution hold:** the automated merge/deploy continuation was rejected by
+> automatic approval review: relayed agent authorization does not override the
+> direct assignment's deploy prohibition. Deployment needs direct owner confirmation.
+> No flash or new schema/wire change is part of this integration.
+> CI run 36619465888 passed all four required jobs on 25d572e, including sanitizer
+> and doctests. Before release, main advanced to 8f105ea (packaging PR #10).
+> This follow-up merges that additive packaging/docs change; fresh gates and CI
+> are required for the resulting head. No merge to main or deploy is claimed.
+> Integrated local gates PASS on `6d06181`: firmware host + sanitizer,
+> Rust fmt/clippy/all-targets/doctests, web 216 tests + check/lint/format/build,
+> faces 429 tests + check/lint/format. Exact logs and Rust counts are saved in
+> ROD-3's verification document. CI found Track B's allocation-loop test racing
+> Bun's 5s timeout on Linux (run 36618454766). Replaced that loop with one
+> bounded allocation: OOM at 8 MiB, success at 32 MiB. Production code is unchanged;
+> disabling the cap fails this test (observed). All faces gates pass again,
+> including 429 tests; the final-head CI result is still required.
+> No merge/deploy is claimed.
+> The newer lab entry records a prior migration and views deploy; the older
+> status below is historical. Glass latency is still unmeasured.
+>
+> **STATUS 2026-09-29. Every task is implemented; one is unverified on the board.**
+> Step 1, Task D (the firmware pool and key 32, flashed and verified on `dev-0005`),
+> Task C (every frame volatile, with pool-pressure reclamation), Task A (the faces
+> `views()`/`onTap()` contract) and Task B (the server stages views; a tap on a staged
+> view draws nothing) are all on `track-c1-frames-in-psram` with every gate green.
+>
+> **What is NOT done: the deploy, and therefore the tap measurement.** A/B ship the
+> latency win and neither has been seen on hardware -- the tap on the glass is still the
+> one thing this track has never observed. The deploy is held because the next one also
+> carries Track A's account migration and changes how the web app signs in, which is the
+> owner's call and not a peer's.
+>
+> **STATUS 2026-09-28, updated.** Step 1 is delivered (`784ff52`). **Task D is delivered
+> and verified on hardware** (`68f15a8`): the owner authorized the flash, the board took
+> `v2.2.0-psram` by OTA, and the pool reports `capacity 16` with commits at 76-81 ms where
+> flash cost 1,528-1,678 ms and `Busy` refusals went from four to zero. See the 2026-09-28
+> entry in `docs/hardware/board-notes.md`. **Tasks A, B and C remain**, and they are now
+> unblocked: the pool they were waiting for exists on the fleet.
+>
+> The original status block, kept because its reasoning is what produced the corrections
+> below: steps 2-4 were one batch needing the owner's authorization because it ends in a
+> flash.
 > The spec sequenced 2 and 3 as landable ahead of the firmware; execution found that they
 > are not, for a reason the spec does not address — see **Correction 2** below. Nothing in
 > steps 2–4 has been started, and no file outside step 1 has been touched.
@@ -55,9 +137,12 @@ view per card and behave like today."
 
 It will not behave like today, and the budget rule cannot make it:
 
-- `firmware/main/core/volatile_asset_store.h:16` is `VOLATILE_ASSET_SLOT_COUNT 2U`, and its
-  own comment says that is "one displayed frame plus one incoming replacement". The
-  deployed fleet holds **one** committed volatile frame, not two.
+- `firmware/main/core/volatile_asset_store.h:16` is `VOLATILE_ASSET_SLOT_COUNT 2U`. Its
+  comment says that is "one displayed frame plus one incoming replacement", and **that
+  comment describes intent, not the store's bound** -- measured on `dev-0005` on
+  2026-09-28, the two-slot store committed **two** frames (76 ms and 97 ms) and refused
+  the third with `ERR_FULL`. This plan said "one" before the board was asked; the
+  argument below is unaffected, because two is still fewer than four picture cards.
 - The budget rule bounds **views per card**, not cards. With four picture cards its share
   is `max(1, floor(15 / 4))`, so it asks for one resident frame per card — four frames into
   one slot.

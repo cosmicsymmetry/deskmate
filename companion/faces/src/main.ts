@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // The seam between the Rust server and the faces. The server runs this file as a
-// subprocess and speaks two verbs:
+// subprocess and speaks four verbs:
 //
 //   main.ts describe   -> stdout: the face catalog as JSON. The browser's add menu
 //                         and settings form are built from it.
@@ -8,13 +8,25 @@
 //                      -> stdout: {"png": "<base64>", "state": ...}, which the server
 //                         feeds to the same ingest path an external producer's POST
 //                         arrives through.
+//   main.ts views      <- stdin:  {"kind": "...", "settings": {...}, "state": ...}
+//                      -> stdout: {"views": ["", ...]}
+//   main.ts tap        <- stdin:  {"kind": "...", "settings": {...}, "state": ...,
+//                                "event": {"taps": 1, "point": null}}
+//                      -> stdout: {"view": "...", "state": ...}
 //
 // Exit codes are the error taxonomy: 0 is a frame, 2 means the owner must change a
 // setting (retrying cannot help), anything else is transient and the stored frame
 // stays. The one line on stderr is what the server logs. Nothing but the JSON result
 // may reach stdout in `render`, which is why diagnostics never use `console.log` here.
 
-import { ConfigurationError, type FaceDefinition, type RenderContext, type Settings } from "./face";
+import {
+  ConfigurationError,
+  type FaceDefinition,
+  type RenderContext,
+  type Settings,
+  type TapEvent,
+  type ViewId,
+} from "./face";
 import { pngFromSvg } from "./kit/raster";
 import { warmSandbox } from "./plugins/sandbox";
 import { FACES, allFaces, faceOfKind } from "./registry";
@@ -44,7 +56,7 @@ export function describeCatalog(faces: readonly FaceDefinition[] = FACES): strin
   );
 }
 
-function tapEvent(value: unknown): RenderContext["event"] {
+function tapEvent(value: unknown): TapEvent | undefined {
   if (typeof value !== "object" || value === null) {
     return undefined;
   }
@@ -73,17 +85,14 @@ function tapEvent(value: unknown): RenderContext["event"] {
   return { taps: boundedTaps, point: { x, y } };
 }
 
-export async function renderRequest(
-  request: {
-    kind?: unknown;
-    settings?: unknown;
-    state?: unknown;
-    event?: unknown;
-    timezone?: unknown;
-  },
-  face?: FaceDefinition,
-  now: Date = new Date(),
-): Promise<{ png: string; state?: unknown }> {
+interface FaceRequest {
+  kind?: unknown;
+  settings?: unknown;
+  state?: unknown;
+  timezone?: unknown;
+}
+
+function definitionFor(request: FaceRequest, face?: FaceDefinition): FaceDefinition {
   const definition =
     face ?? (typeof request.kind === "string" ? faceOfKind(request.kind) : undefined);
   if (definition === undefined) {
@@ -91,13 +100,48 @@ export async function renderRequest(
       `this faces package has no face of kind ${JSON.stringify(request.kind)}`,
     );
   }
-  const values =
-    typeof request.settings === "object" && request.settings !== null
-      ? (request.settings as Settings)
-      : {};
-  const result = await definition.render(values, now, {
+  return definition;
+}
+
+function settingsFor(request: FaceRequest): Settings {
+  return typeof request.settings === "object" && request.settings !== null
+    ? (request.settings as Settings)
+    : {};
+}
+
+export function viewsRequest(request: FaceRequest, face?: FaceDefinition): { views: ViewId[] } {
+  const definition = definitionFor(request, face);
+  return {
+    views: definition.views?.(settingsFor(request), request.state) ?? [""],
+  };
+}
+
+export function tapRequest(
+  request: FaceRequest & { event?: unknown },
+  face?: FaceDefinition,
+  now: Date = new Date(),
+): { view: ViewId; state?: unknown } {
+  const definition = definitionFor(request, face);
+  if (definition.onTap === undefined) {
+    throw new Error("this face handles taps through render");
+  }
+  const event = tapEvent(request.event);
+  if (event === undefined) {
+    throw new Error("the tap request has no valid event");
+  }
+  return definition.onTap(settingsFor(request), request.state, event, now);
+}
+
+export async function renderRequest(
+  request: FaceRequest & { event?: unknown; view?: unknown },
+  face?: FaceDefinition,
+  now: Date = new Date(),
+): Promise<{ png: string; state?: unknown }> {
+  const definition = definitionFor(request, face);
+  const result = await definition.render(settingsFor(request), now, {
     state: request.state,
     event: tapEvent(request.event),
+    view: typeof request.view === "string" ? request.view : undefined,
     // Additive: an older server simply omits this, and a plugin that needs a zone
     // falls back to the host process's own (see `plugins/discovery.ts`).
     ...(typeof request.timezone === "string" ? { timezone: request.timezone } : {}),
@@ -114,32 +158,52 @@ async function describe(): Promise<string> {
   return describeCatalog(await allFaces());
 }
 
-async function render(input: string, now: Date): Promise<string> {
+function requestFromJson(
+  input: string,
+  verb: string,
+): FaceRequest & {
+  event?: unknown;
+  view?: unknown;
+} {
   let request: unknown;
   try {
     request = JSON.parse(input);
   } catch {
-    throw new Error("the render request on stdin is not JSON");
+    throw new Error(`the ${verb} request on stdin is not JSON`);
   }
-  const req = (request ?? {}) as {
-    kind?: unknown;
-    settings?: unknown;
-    state?: unknown;
-    event?: unknown;
-    timezone?: unknown;
-  };
-  // Discovered fresh for this render, so a plugin folder added, fixed or removed
-  // since the last invocation is picked up without restarting anything (the built-in
-  // faces are unaffected either way -- `allFaces()` always returns them).
+  return (request ?? {}) as FaceRequest & { event?: unknown; view?: unknown };
+}
+
+async function requestedFace(request: FaceRequest): Promise<FaceDefinition> {
+  // Built-in planning stays on the fast path; plugin discovery runs sandboxed.
+  const builtin = typeof request.kind === "string" ? faceOfKind(request.kind) : undefined;
+  if (builtin !== undefined) return builtin;
+  await warmSandbox();
   const faces = await allFaces();
-  const definition =
-    typeof req.kind === "string" ? faces.find((face) => face.kind === req.kind) : undefined;
-  return JSON.stringify(await renderRequest(req, definition, now));
+  return definitionFor(
+    request,
+    faces.find((face) => face.kind === request.kind),
+  );
+}
+
+async function render(input: string, now: Date): Promise<string> {
+  const request = requestFromJson(input, "render");
+  return JSON.stringify(await renderRequest(request, await requestedFace(request), now));
+}
+
+async function views(input: string): Promise<string> {
+  const request = requestFromJson(input, "views");
+  return JSON.stringify(viewsRequest(request, await requestedFace(request)));
+}
+
+async function tap(input: string): Promise<string> {
+  const request = requestFromJson(input, "tap");
+  return JSON.stringify(tapRequest(request, await requestedFace(request)));
 }
 
 async function main(): Promise<number> {
   const verb = process.argv[2];
-  if (verb === "describe" || verb === "render") {
+  if (verb === "describe") {
     // Discovery verifies each plugin folder by running its `plan()` in the sandbox
     // (`plugins/discovery.ts`), and a render that resolves to a plugin runs its
     // `plan`/`render` there too -- both need the WASM runtime loaded first.
@@ -155,7 +219,17 @@ async function main(): Promise<number> {
     await Bun.write(Bun.stdout, await render(await Bun.stdin.text(), new Date()));
     return 0;
   }
-  process.stderr.write("usage: main.ts describe | render < request.json > result.json\n");
+  if (verb === "views") {
+    await Bun.write(Bun.stdout, await views(await Bun.stdin.text()));
+    return 0;
+  }
+  if (verb === "tap") {
+    await Bun.write(Bun.stdout, await tap(await Bun.stdin.text()));
+    return 0;
+  }
+  process.stderr.write(
+    "usage: main.ts describe | render | views | tap < request.json > result.json\n",
+  );
   return 64;
 }
 

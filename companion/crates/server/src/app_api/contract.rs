@@ -20,11 +20,12 @@ use app_core::{
     AlertHold, AppConfig, AppPreferences, AppSnapshot, AssetKind, AssetSource,
     CURRENT_SCHEMA_VERSION, CardAlert, CardDataSnapshot, CardError, CardErrorKind, CardField,
     CardFieldValue, CardSettings, CarouselAdvance, ConnectionState, DeviceAssetStore,
-    DeviceCapability, DeviceCounters, DeviceOtaState, DeviceSnapshot, DeviceTier, DeviceWifiState,
-    DisplayOrientation, DisplayTemplate, IconGlyphMapping, PersistenceState, PomodoroAction,
-    PomodoroSnapshot, PomodoroState, RefreshPolicy, RuntimeDiagnostics, RuntimeState,
-    SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE, SaveReceipt, StoreWarning, UpdateChannel,
-    UpdateCheckPolicy, UpdaterSettings, ValidationCode, ValidationIssue, WidgetTapAction,
+    DeviceCapability, DeviceCounters, DeviceOtaState, DeviceSnapshot, DeviceTier,
+    DeviceVolatileAssets, DeviceWifiState, DisplayOrientation, DisplayTemplate, IconGlyphMapping,
+    PersistenceState, PomodoroAction, PomodoroSnapshot, PomodoroState, RefreshPolicy,
+    RuntimeDiagnostics, RuntimeState, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE, SaveReceipt,
+    StoreWarning, UpdateChannel, UpdateCheckPolicy, UpdaterSettings, ValidationCode,
+    ValidationIssue, WidgetTapAction,
 };
 use serde::Serialize;
 
@@ -206,6 +207,13 @@ fn contract_fixtures() -> ContractFixtures {
                     used_bytes: 141_312,
                     free_bytes: 6_149_120,
                     asset_count: 4,
+                }),
+                volatile_assets: Some(DeviceVolatileAssets {
+                    committed_count: 4,
+                    slot_capacity: 16,
+                    used_bytes: 1_318_960,
+                    psram_free_bytes: 7_012_352,
+                    psram_low_water_bytes: 6_803_456,
                 }),
             },
             pomodoros: vec![PomodoroSnapshot {

@@ -5641,6 +5641,174 @@ returns a different PNG for a tap, and weather's second tap returns to its first
 - `an asset release was slow` should now appear at most twice an hour, not after
   every frame.
 
+## 2026-09-28 -- the frame pool is real, and the OTA download is finally observed
+
+`dev-0005`, flashed by **OTA** from `v2.1.0-proto2` to `v2.2.0-psram`
+(`VOLATILE_ASSET_SLOT_COUNT` 2 -> 16, `StatusResponse` key 32). Server-side
+observation throughout, plus the device's own numbers read back through the new key.
+
+**The OTA download is verified.** It had been owed since 2026-09-11 against the
+-104-byte `.bss` shift, and it was never run. The board took the new image over the
+tunnel with nothing but a reset to prompt it:
+
+```
+11:32:28  firmware check dev-0005 current=v2.1.0-proto2   <- boot check sees the new offer
+11:32:28  device link closed                              <- download, then reboot
+11:32:55  device link established
+11:32:56  firmware check dev-0005 current=v2.2.0-psram    <- running the new image
+```
+
+It stayed on the new image (no rollback, so `ota_mark_running_image_valid()` ran) and
+has been serving frames since. Internal statics were **byte-flat** across the change --
+DIRAM 203,763, `.bss` 87,000, `.data` 23,128, IRAM 16,384/16,384 with 0 remaining --
+the same figures recorded for `v2.1.0-proto2`, because the 14 new slots are metadata
+inside `s_context`, a `MALLOC_CAP_SPIRAM` allocation. So this OTA does **not** discharge
+the question of whether a statics *shift* breaks a download; it discharges the weaker
+and still-unanswered one, that the download path works at all on this fleet.
+
+**Two slots versus sixteen, on the same board, twenty minutes apart.** This is the
+clearest evidence the project has for why the tier inversion cost what it did.
+
+| | v2.1.0-proto2 (2 slots), 11:29:54-11:30:13 | v2.2.0-psram (16 slots), 11:32:58-11:33:26 |
+|---|---|---|
+| `Busy: volatile asset reserve failed` | **4** | **0** |
+| `AssetCommit` | 1,528 / 1,558 / 1,589 / 1,678 ms (flash) | **76 / 76 / 79 / 81 ms** (PSRAM) |
+| `an asset release was slow` | 10,547 ms and 10,065 ms | **0 occurrences** |
+
+Before the change the first two frames committed volatile (76 ms, 97 ms) and every
+one after that was refused and fell back to flash. **Correction to the plan and the
+spec: the deployed two-slot store held TWO committed frames, not one** -- the header's
+"one displayed frame plus one incoming replacement" describes intent, not the store's
+bound, which is `VOLATILE_ASSET_SLOT_COUNT` committed and then `ERR_FULL`. The argument
+for the pool is unchanged (two is still fewer than four picture cards) but the number
+written down was wrong.
+
+**Key 32, read back through the deployed server's snapshot** -- the PSRAM figures this
+project has never had:
+
+```
+firmware_version: v2.2.0-psram        connection: online
+asset_store:      used 2,637,920  free 3,645,344  count 8        (flash, key 31)
+volatile_assets:  committed 4  capacity 16  used 1,318,960
+                  psram_free 6,977,400  psram_low_water 6,977,264  (key 32)
+```
+
+- `4 x 329,740 = 1,318,960` exactly, so occupancy accounting is right.
+- `capacity 16` is read by name from the running image, not assumed.
+- **The pool fits with room to spare, measured rather than derived.** Eleven more frames
+  are 3,627,140 bytes against 6,977,400 free, leaving ~3.2 MiB. The low-water mark sits
+  136 bytes under the current free figure, so nothing is dipping transiently.
+- The spec computed its headroom from `free_heap`, which is
+  `esp_get_free_heap_size()` -- a total across every capability. Measured here, total
+  free is 7,015,083 against PSRAM's 6,977,400, so that overstated PSRAM headroom by
+  about 38 KB. Directionally the correction was right and the magnitude was small.
+- Flash still holds 8 records and 2.6 MB from the old durable writes. `used_bytes` is
+  the number to watch now: it should stop moving.
+
+### Still owed, and not claimable from any of the above
+
+- A **tap** on the glass, and its redraw time on the new image. Everything above is
+  scheduled-refresh traffic; no tap was made.
+- A **server-rendered face at both mountings**, still never observed.
+- The **framebuffer matrix** (44 rows / 2 excluded / 42 comparable), last run 2026-09-06.
+- A **release with an empty durable store, timed** -- the durable tier still holds 8
+  records, so the cheap-release claim is untested.
+- Whether a statics **shift** still breaks an OTA download. This image moved none.
+
+### 2026-09-28, later -- every frame volatile, and what the low-water mark says
+
+Task C deployed, then corrected an hour later. The correction is the interesting part:
+`apply_image_source_update` was volatile, and **the reconnect path was not**. Every link
+re-establishment runs `synchronize_full` -> `AssetSync::reconcile`, which still sent
+`volatile: false`, so minutes after the deploy the board was still paying flash:
+
+```
+12:14:53  commit_ms=1550     12:14:56  commit_ms=1535     12:15:06  release 10,565 ms
+```
+
+Every host test passed throughout, because the tests drive the update path and a
+reconnect drives the other one. After choosing the tier by what the asset *is*
+(an image is volatile whenever bit 9 is advertised, fonts stay durable):
+
+```
+12:20:53  commit_ms=141      12:20:55  commit_ms=79       12:20:57  commit_ms=79
+12:21:01  release 4,789 ms   <- down from 10.5 s, and still draining the old records
+```
+
+**The durable store is emptying**, which is the spec's wear claim becoming observable:
+
+| | before | after |
+|---|---|---|
+| `asset_store.used_bytes` | 2,637,920 | **329,740** |
+| `asset_store.asset_count` | 8 | **1** |
+
+The last record is one frame still named by the keep-set; it goes when its digest next
+changes. Releases should fall to milliseconds once it does -- **not yet observed**, and
+it is the remaining half of the "a release with an empty durable store, timed" item.
+
+**The pool's real margin, from key 32's low-water mark:**
+
+```
+volatile_assets: committed 4  capacity 16  used 1,318,960
+                 psram_free 6,977,392  psram_low_water 4,961,976
+```
+
+`psram_low_water` is **2.0 MB below** the current free figure, so something transient --
+most likely the OTA download buffer -- took that much at its peak. Scaling to a full
+pool: 15 frames is 4,946,100 bytes, which would leave about 3.35 MB free, and a 2 MB
+transient on top of that leaves roughly **1.35 MB**. It fits, but the headroom is about
+half what `16 x 329,740` against total free suggested. This is the number the spec wanted
+and could not get, and it exists only because key 32 reports the allocator's low-water
+mark rather than the store's slot count.
+
+## 2026-09-29 -- the views seam, verified on the live server (not yet on the glass)
+
+Deployed with Track A's account migration, which moved the flat layout into
+`acc_559b1e35eb57508ad1b822c7ab27b7fa` and kept the originals under
+`configs/legacy-20260929T093211Z` (5 devices). A copy of the pre-migration `configs/`
+was taken first, as `configs-backup-<ts>`, because a migration is one-way.
+
+**Staging works against the real faces package**, first refresh after the restart:
+
+```
+09:32:12  staged a view for a tap  source_id=image-8e361aaf...  view=page-2
+09:32:12  staged a view for a tap  source_id=image-8e361aaf...  view=page-3
+09:32:19  staged a view for a tap  source_id=image-a9773eb4...  view=days
+```
+
+**The staged views are the ones a tap will actually select.** This looked wrong at first
+-- rss staged `page-2` and `page-3` while its stored page was 0, so `page-1` appeared to be
+missing -- and it is not: the face names pages the way a reader counts them, so the resting
+view **is** page 1. Asked directly, with the live state:
+
+```
+views → {"views":["","page-2","page-3","page-4"]}
+tap   → {"view":"page-2", ...}
+```
+
+`page-2` is staged, so the first tap takes the fast path. The second (`page-3`) does too;
+the third falls back to a render, which is what `MAX_STAGED_FRAMES_PER_SOURCE = 3` means.
+
+**The store, and the two ceilings it has to respect:**
+
+| | count |
+|---|---|
+| sources | 7 |
+| frames on disk | 10 (rss 3, weather 2, five others 1 each) |
+| device resident slots | 15 |
+| wire `AssetRelease` digests | 32 |
+
+Ten is comfortably inside both. A fifth tappable face would want watching.
+
+### What is still NOT observed, and cannot be from here
+
+- **A tap on the glass, and its redraw time.** This is the measurement the whole track is
+  for, and it needs a finger on the panel. `dev-0005` was not linked during this window
+  (its resting state), so nothing above touched the device at all.
+- Every figure in this entry is server-side. The tap path has been proven as far as "the
+  face chooses a staged view and the frame is in the store" -- which is exactly the
+  boundary `CLAUDE.md` warns is not the panel.
+
 ## 2026-09-29 -- a third-party plugin's card, drawn on dev-0005
 
 **Observed by the owner, not by the session that built it.** The owner added the
@@ -5671,3 +5839,157 @@ because the tests set that variable in their own process. Fixed by passing the r
 account's own directory (accounts are per-account since Track A) on the `render` verb only.
 **The fix is not yet observed on the board**: it needs a real credential in a real
 `plugin-secrets.json`, which the owner has not yet provided.
+
+## 2026-09-30 -- the tap, timed on the glass; and a 24-hour silent C1 rollback
+
+Sources are labelled throughout, because they are not interchangeable: **log** = the live
+journal, **snapshot** = `GET /v1/devices/dev-0005`, **video** = the owner's recording
+`2026-09-30 14.14.39.mp4` (30 fps, 29.9 s, 270 degrees), **repro** = a local run of the
+faces package against the live state.
+
+### The live server had not been running C1's server half for a day
+
+**Finding (log + binary).** From 2026-09-29 10:12:24 UTC to 2026-09-30 09:59:24 the
+deployed binary contained none of C1's strings. Track B's deploy (`96bed8c`, from a branch
+that did not contain C1) replaced it, silently and with no warning from `deploy.sh`. The
+binary it overwrote is still on the VM as `deskmate-server.bak-20260929T101224Z` and does
+contain them.
+
+What that cost, all observed this morning before the redeploy:
+
+- no `staged a view` line since 2026-09-29 10:02 -- the staging seam was simply absent;
+- commits back on flash at **1,564-1,620 ms**, and one release of **15,206 ms**;
+- key 31 regrown to **2,308,180 B / 7 records**, from 329,740 / 1 on 09-28;
+- key 32 **absent** from the snapshot.
+
+So **every C1 claim made on 09-29 after 10:12 UTC was measured against the old path.** The
+2026-09-29 entries above predate the rollback and stand; anything asserted after it does
+not.
+
+Redeployed by the owner from `track-c1-frames-in-psram` @ `865e83c` -- binary, web and
+faces, all three confirmed by `--status`. That branch contains `origin/main` and Track B,
+so B was not rolled back in turn.
+
+**After the redeploy (log + snapshot):** the link re-established 2 s after the restart
+(09:59:26) and staging resumed at once (weather `days`, rss `page-2`/`page-3`, token
+`line`). Commits **106-232 ms**. `firmware_version v2.2.0-psram`; the board did not reboot
+for the server restart, so the last `firmware check ... current=v2.2.0-psram` is still the
+09:48:26 boot.
+
+| key | reading |
+|---|---|
+| 32 | committed 9 / capacity 16, used 2,967,660 B (= 9 x 329,740 exactly) |
+| 31 | 1,318,960 B / 4 records, draining (one 9-digest release took 10,866 ms) |
+| psram | free 5,298,008, low water 3,954,336 |
+
+### The tap, timed -- the fast path works on the glass
+
+The firmware classifies a gesture **on release** (`ui/carousel.c`), so contact-to-stable
+includes the owner's finger dwell and release-to-stable is the system's share. Both are
+given. Times are video-relative: contact and release +-2 frames, face change +-1 frame
+(33 ms).
+
+| # | card | change | contact | release | first new pixels | stable | contact->stable | release->stable | server `face-state` write |
+|---|---|---|---|---|---|---|---|---|---|
+| W1 | weather | now->days | 0.23 | 0.90 | 1.33 | 1.37 | 1.13 s | 0.47 s | 10:10:43.241 |
+| W2 | weather | days->now | 2.57 | 3.07 | 3.57 | 3.63 | 1.07 s | 0.57 s | 10:10:45.314 |
+| W3 | weather | now->days | 4.57 | 5.07 | 5.53 | 5.57 | 1.00 s | 0.50 s | 10:10:47.416 |
+| W4 | weather | days->now | 6.53 | 7.07 | 7.37 | 7.43 | 0.90 s | 0.37 s | 10:10:49.214 |
+| H1 | rss | p1->p2 (staged) | 10.23 | 10.73 | 11.03 | 11.10 | 0.87 s | 0.37 s | 10:10:52.902 |
+| H2 | rss | p2->p3 (staged) | 11.90 | 12.47 | 12.90 | 12.93 | 1.03 s | 0.47 s | 10:10:54.708 |
+| H3 | rss | p3->p4 (fallback) | -- | ~14.3 | **none** | -- | -- | -- | render 10:10:56.683 "face is unchanged" |
+| H4 | rss | again | -- | ~16.6 | **none** | -- | -- | -- | render 10:10:59.136 "face is unchanged" |
+| H5 | rss | again | -- | ~21.4 | **none** | -- | -- | -- | render 10:11:03.524 "face is unchanged" |
+| T1 | token | candles->line | 25.93 | 26.50 | 26.83 | 26.87 | 0.93 s | 0.37 s | 10:11:08.683 |
+| T2 | token | line->candles | 27.90 | 28.50 | 28.77 | 28.80 | 0.90 s | 0.30 s | 10:11:10.634 |
+
+**Eight fast-path taps: contact->stable 0.87-1.13 s (median ~0.97 s); release->stable
+0.30-0.57 s (median ~0.42 s).** Against the 13.3 s of 2026-09-26, on that entry's own
+definition, that is roughly **13x**. It **misses the <= 250 ms figure the track proposed**,
+on either definition, and that gap is now a measured fact rather than an estimate.
+
+- **The correlation holds.** Server write time minus video first-new-pixel time is
+  41.75-41.91 s across all 8 taps (+-80 ms).
+- **Where the time goes cannot be split.** Nothing in the frame carries sub-second absolute
+  time, so device->server and server->panel are not separable from this video. The panel
+  clock shows minutes only (10:10 at t 8.6, 10:11 at t 24.4).
+- **The wire was quiet.** No asset transfer between 10:10:09 and 10:14:28, so no tap moved a
+  frame -- as staging intends. The journal logs neither a tap's arrival nor a `PushScene`,
+  so "one PushScene per tap" remains the code's claim, not an observation.
+- Every face change shows 1-2 video frames with old and new faces blended.
+
+**Two swipes** were classified NEXT, not tap: weather->HN (release ~8.47) and HN->token
+(release ~24.3). Each showed the **clock face for ~0.1-0.2 s** between the two cards;
+release->stable was 0.37 s and 0.23 s.
+
+### Defect -- the rendered fallback turns no page (log + video + repro)
+
+The third rss tap needs `page-4`, which is not staged
+(`MAX_STAGED_FRAMES_PER_SOURCE = 3`), so it takes the slow path.
+`data_cards/worker.rs::render_frame` sends `taps` with `view: None`;
+`rss.ts::renderRssRequest` receives the event plus stored state, draws
+`pageForView(undefined)` = page 1, and returns the previous state. The frame is
+byte-identical to the stored resting frame, so `accept_server_rendered` reports it
+unchanged and **nothing is pushed**. `face-state` stays at `page: 2`, so every later tap
+repeats the same path forever. The panel sat on staged page 3 while the server's stored
+frame was page 1. Repro against the live state: `view:""` and a tap-without-view both hash
+`dc08706d...`, while `view:"page-4"` hashes `21576e70...`. `hackernews.ts` has the same
+shape. Weather and token never reach the fallback -- their only other view is staged.
+
+**So the staged-vs-rendered comparison this session was for could not be made: the rendered
+tap produced no face at all.** Tracked as ROD-13; the fix is not deployed, and deploying it
+needs the owner.
+
+### Still owed
+
+- **The rendered-tap time.** Blocked on the defect above; runnable as soon as the fix is
+  deployed.
+- **Both mountings.** The video is **270 degrees only**. Weather, rss and token at 90
+  degrees, with the owner judging letter-spacing overhang and legibility from a chair, is
+  not started.
+- **The `hackernews` face has still never crossed the tunnel.** The card named "Hacker
+  News" is the **rss** face; no card uses the `hackernews` kind, so its 61 KB / 33 chunks is
+  untested. The largest frame that crossed today was 30 chunks / 55,824 B. A
+  `hackernews`-kind card has to be added to the live config first.
+- **A timed release with an empty durable store.** Key 31 still holds 4 records.
+- **A full USB flash** for a rollback baseline OTA cannot produce. Optional, cable only.
+- **The framebuffer matrix**, deliberately not in this session.
+
+## 2026-10-01 — the owner's disposition of what 09-30 left owed
+
+Decisions, not observations. The list above is the record of what the 09-30 session saw;
+this says what is still wanted, and the two items the owner retired are retired
+**unobserved** -- nothing below was seen on the panel.
+
+- **Both mountings: retired.** The owner's words were "count 90 as done". So 90 degrees
+  was **never seen**: the only footage is 270, and no one has judged letter-spacing
+  overhang or legibility from a chair at 90. Do not read this entry, or the closing of
+  ROD-12, as verification of a face at 90 degrees. If a later session needs that fact it
+  starts from zero.
+- **A full USB flash: dropped** ("drop it for now"). The rollback test still has no
+  baseline OTA cannot produce, and that is the accepted state.
+- **The 250 ms target: the owner chose to chase the gap**, not to move the target. The
+  0.30-0.57 s release->stable stands as the measured number and the track owes a
+  reduction. Tracked as ROD-14, whose first deliverable is the thing this session could
+  not do: **split release->stable into device->server and server->panel.** The journal
+  logs neither a tap's arrival nor a `PushScene`, so the split needs server-side
+  instrumentation before any optimisation is worth attempting. Server-only by
+  construction -- no schema, wire or firmware-statics crossing without the owner.
+- **The `hackernews` face: to be added** ("yes, add a hackernews card"), and it is a
+  window action, not a deploy. Confirmed read-only on the VM this morning: the deployed
+  faces package at `865e83c` already carries `hackernews.ts`
+  (`/var/lib/deskmate/faces/src/faces/`), so the live add menu offers the face today. The
+  card is created with "Add a card" -> picture -> source **Hacker News**, whose only
+  field is `Stories` (default `top` = front page); `POST /v1/images {name, face_kind}`
+  mints the source and attaches the face in one request, and the picture card then joins
+  the loop. **This needs the owner's account session in their own browser** -- the admin
+  token does not satisfy `AccountSession`, and `deskmate-cli` is cable-only (status,
+  time-sync, push-timer, provision, factory-reset), so there is no sanctioned non-browser
+  path. It was therefore **not done**; hand-editing the account's `data-cards.json` on the
+  VM was rejected as the way to do it, because a config the store refuses stays refused
+  and would take the live loop down for a change the add menu makes in one click.
+- **Live at this entry: `865e83c` for all three parts** (faces, web, binary --
+  `deploy.sh --status`). ROD-13's fix is on the branch at `4757753` and is **not
+  deployed**, so the rendered-tap time is still blocked. The fix is faces-only, so
+  `deploy.sh --faces-only` ships it: an rsync plus the suite on the VM, no Rust, no
+  restart, no schema and no wire.

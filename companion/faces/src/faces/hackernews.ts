@@ -24,6 +24,7 @@ import {
   type FaceDefinition,
   type RenderContext,
   type Settings,
+  type ViewId,
   text,
   TransientError,
 } from "../face";
@@ -701,6 +702,26 @@ function normalizedPage(page: number, stories: Story[]): number {
   return page % pageCount(stories);
 }
 
+/** Shared by staged selection and the server's render-only tap fallback. */
+function tappedState(previous: HackerNewsState, taps: number, now: Date): HackerNewsState {
+  return {
+    ...previous,
+    page: normalizedPage(previous.page + taps, previous.stories),
+    tappedAt: now.toISOString(),
+  };
+}
+
+function pageViews(stories: Story[]): ViewId[] {
+  return Array.from({ length: pageCount(stories) }, (_, page) =>
+    page === 0 ? "" : `page-${page + 1}`,
+  );
+}
+
+function pageForView(view: ViewId | undefined, stories: Story[]): number {
+  const page = pageViews(stories).indexOf(view ?? "");
+  return page === -1 ? 0 : page;
+}
+
 function recentTap(tappedAt: string | null, now: Date): boolean {
   if (tappedAt === null) {
     return false;
@@ -725,24 +746,31 @@ export async function renderHackerNewsRequest(
   get: FetchText = fetchText,
 ): Promise<{ svg: string; state: HackerNewsState }> {
   const previous = storedState(context.state);
-  if (context.event !== undefined && previous !== undefined && previous.stories.length > 0) {
-    const state: HackerNewsState = {
-      stories: previous.stories,
-      page: normalizedPage(previous.page + context.event.taps, previous.stories),
-      tappedAt: now.toISOString(),
-    };
+  // Explicit views only draw; an unstaged tap arrives without a view and must
+  // advance the stored state, using the same transition as onTap.
+  if (context.view === undefined && context.event !== undefined && previous !== undefined) {
+    const state = tappedState(previous, context.event.taps, now);
     return { svg: drawState(state), state };
+  }
+  if (context.view !== undefined && previous !== undefined) {
+    return {
+      svg: drawState({ ...previous, page: pageForView(context.view, previous.stories) }),
+      state: previous,
+    };
   }
 
   const fresh = await fetchHackerNews(settings, now, get);
-  const keepPage =
-    context.event === undefined && previous !== undefined && recentTap(previous.tappedAt, now);
+  const keepPage = previous !== undefined && recentTap(previous.tappedAt, now);
   const state: HackerNewsState = {
     stories: fresh.stories,
     page: keepPage ? normalizedPage(previous.page, fresh.stories) : 0,
-    tappedAt: keepPage ? previous.tappedAt : context.event === undefined ? null : now.toISOString(),
+    tappedAt: keepPage ? previous.tappedAt : null,
   };
-  return { svg: drawState(state), state };
+  // A scheduled refresh names no view, and must draw the page the state above
+  // just decided -- that is where "a tap holds its page for ten minutes" lives.
+  // Reading an absent view as page zero threw that decision away.
+  const page = context.view === undefined ? state.page : pageForView(context.view, fresh.stories);
+  return { svg: drawState({ ...state, page }), state };
 }
 
 export const hackernews: FaceDefinition = {
@@ -764,6 +792,18 @@ export const hackernews: FaceDefinition = {
       ],
     },
   ],
+  views(_settings, value) {
+    const state = storedState(value);
+    return state === undefined ? [""] : pageViews(state.stories);
+  },
+  onTap(_settings, value, event, now) {
+    const previous = storedState(value);
+    if (previous === undefined) {
+      return { view: "" };
+    }
+    const state = tappedState(previous, event.taps, now);
+    return { view: pageViews(state.stories)[state.page] ?? "", state };
+  },
   render(settings, now, context) {
     return renderHackerNewsRequest(settings, now, context);
   },

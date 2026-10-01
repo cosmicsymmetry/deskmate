@@ -72,12 +72,41 @@ render)
 		exit 1
 		;;
 	*alternate-frame*) cat "$here/fake-face-alt.png" ;;
+	*'"view":"page-1"'*) cat "$here/fake-face-alt.png" ;;
 	*'"event":'*) printf '{"png":"%s","state":{"page":3}}' "$(base64 < "$here/fake-face.png" | tr -d '\n')" ;;
 	*) cat "$here/fake-face.png" ;;
 	esac
 	;;
+views)
+	request=$(cat)
+	if [ -n "${DESKMATE_FAKE_FACES_REQUEST_DIR:-}" ]; then
+		printf '%s\n' "$request" >> "$DESKMATE_FAKE_FACES_REQUEST_DIR/plans.jsonl"
+	fi
+	case "$request" in
+	# Only the tappable face offers a second view, matching `describe` above.
+	*'"kind":"headlines"'*) printf '{"views":["","page-1"]}' ;;
+	*) printf '{"views":[""]}' ;;
+	esac
+	;;
+tap)
+	request=$(cat)
+	if [ -n "${DESKMATE_FAKE_FACES_REQUEST_DIR:-}" ]; then
+		printf '%s\n' "$request" >> "$DESKMATE_FAKE_FACES_REQUEST_DIR/plans.jsonl"
+	fi
+	# The blocked-render fixture exists to exercise the render path, so a tap
+	# there must fall back to one rather than being answered from a staged view.
+	if [ "${DESKMATE_FAKE_FACES_BLOCK_TAPS:-}" = "1" ]; then
+		echo "this fixture sends taps down the render path" >&2
+		exit 1
+	fi
+	case "$request" in
+	*refuse-the-tap*) echo "the tap could not be resolved" >&2; exit 1 ;;
+	*'"kind":"headlines"'*) printf '{"view":"page-1","state":{"page":1}}' ;;
+	*) printf '{"view":""}' ;;
+	esac
+	;;
 *)
-	echo "usage: fake-faces.sh describe | render" >&2
+	echo "usage: fake-faces.sh describe | render | views | tap" >&2
 	exit 64
 	;;
 esac

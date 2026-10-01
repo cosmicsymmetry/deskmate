@@ -6,6 +6,7 @@
 
 #include "../main/core/protocol_frame.h"
 #include "../main/core/protocol_message.h"
+#include "../main/core/volatile_asset_store.h"
 
 #define FIXTURE_DIRECTORY "../../protocol/fixtures/v2/"
 
@@ -380,6 +381,62 @@ static void test_status_asset_store_stats_round_trip_and_legacy_default(void)
     assert(decoded.value.status.asset_store_used_bytes == 4096U);
     assert(decoded.value.status.asset_store_free_bytes == 6291456U);
     assert(decoded.value.status.asset_count == 3U);
+}
+
+static void test_status_volatile_pool_stats_round_trip_and_legacy_default(void)
+{
+    size_t length = 0U;
+    uint8_t *fixture = read_fixture("status_response_networked.bin", &length);
+    protocol_frame_t frame;
+    assert(protocol_frame_decode(fixture, length, &frame) ==
+           PROTOCOL_FRAME_OK);
+    free(fixture);
+
+    protocol_message_t message;
+    assert(protocol_message_decode(&frame, &message) == PROTOCOL_MESSAGE_OK);
+    /* This fixture predates key 32, so its absence must remain decodable, and
+     * a reader must not mistake a silent zero for a pool with no room. */
+    assert(!message.value.status.has_volatile_asset_stats);
+    assert(message.value.status.volatile_committed_count == 0U);
+    assert(message.value.status.volatile_slot_capacity == 0U);
+    assert(message.value.status.volatile_used_bytes == 0U);
+    assert(message.value.status.psram_free_bytes == 0U);
+    assert(message.value.status.psram_low_water_bytes == 0U);
+
+    uint8_t encoded[PROTOCOL_MAX_WIRE_FRAME];
+    size_t encoded_length = 0U;
+    protocol_frame_t round_trip_frame;
+    protocol_message_t decoded;
+
+    /* Keys 31 and 32 are independent: a device reports both, and each has to
+     * survive the other being present. */
+    message.value.status.has_asset_store_stats = true;
+    message.value.status.asset_store_used_bytes = 141312U;
+    message.value.status.asset_store_free_bytes = 6149120U;
+    message.value.status.asset_count = 4U;
+    message.value.status.has_volatile_asset_stats = true;
+    message.value.status.volatile_committed_count = 4U;
+    message.value.status.volatile_slot_capacity = VOLATILE_ASSET_SLOT_COUNT;
+    message.value.status.volatile_used_bytes = 4U * VOLATILE_ASSET_FRAME_BYTES;
+    message.value.status.psram_free_bytes = 7012352U;
+    message.value.status.psram_low_water_bytes = 6803456U;
+    assert(protocol_message_encode(frame.request_id, &message, encoded,
+                                   sizeof(encoded), &encoded_length) ==
+           PROTOCOL_MESSAGE_OK);
+    assert(protocol_frame_decode(encoded, encoded_length,
+                                 &round_trip_frame) == PROTOCOL_FRAME_OK);
+    assert(protocol_message_decode(&round_trip_frame, &decoded) ==
+           PROTOCOL_MESSAGE_OK);
+    assert(decoded.value.status.has_asset_store_stats);
+    assert(decoded.value.status.asset_store_used_bytes == 141312U);
+    assert(decoded.value.status.has_volatile_asset_stats);
+    assert(decoded.value.status.volatile_committed_count == 4U);
+    assert(decoded.value.status.volatile_slot_capacity ==
+           VOLATILE_ASSET_SLOT_COUNT);
+    assert(decoded.value.status.volatile_used_bytes ==
+           4U * VOLATILE_ASSET_FRAME_BYTES);
+    assert(decoded.value.status.psram_free_bytes == 7012352U);
+    assert(decoded.value.status.psram_low_water_bytes == 6803456U);
 }
 
 static void assert_invalid_message_fixture(
@@ -1606,6 +1663,7 @@ int main(void)
     test_status_capability_handshake_and_legacy_defaults();
     test_status_last_ota_error_round_trip_and_legacy_default();
     test_status_asset_store_stats_round_trip_and_legacy_default();
+    test_status_volatile_pool_stats_round_trip_and_legacy_default();
     test_incremental_decoder();
     test_overflow_resynchronizes();
     test_invalid_fixtures();

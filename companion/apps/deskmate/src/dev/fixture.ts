@@ -131,6 +131,13 @@ export function mockSnapshot(config: AppConfig): AppSnapshot {
       // What a linked board with four picture frames in flash reports. Nothing
       // renders it; it is here because the harness mirrors the shipped shape.
       asset_store: { used_bytes: 141_312, free_bytes: 6_149_120, asset_count: 4 },
+      volatile_assets: {
+        committed_count: 4,
+        slot_capacity: 16,
+        used_bytes: 1_318_960,
+        psram_free_bytes: 7_012_352,
+        psram_low_water_bytes: 6_803_456,
+      },
     },
     pomodoros: [
       {

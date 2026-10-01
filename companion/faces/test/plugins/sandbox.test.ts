@@ -24,15 +24,17 @@ describe("the sandbox", () => {
     expect(Date.now() - start).toBeLessThan(3_000);
   });
 
-  test("stops an allocation loop at the memory cap", () => {
-    expect(() =>
-      runInSandbox(
-        `export function render(){ const a=[]; for(;;) a.push(new Array(100000).fill("x")); }`,
-        "render",
-        {},
-        { memoryBytes: 8 * 1024 * 1024, deadlineMs: 5_000 },
-      ),
-    ).toThrow(SandboxError);
+  test("refuses an allocation above the memory cap", () => {
+    // One bounded allocation isolates the memory guard from the interrupt deadline.
+    // An endless allocation loop raced Bun's own 5s test timeout on Linux and
+    // accepted a deadline error as evidence of a working memory cap.
+    const source = `export function render(){ return new Uint8Array(16 * 1024 * 1024).byteLength; }`;
+    expect(() => runInSandbox(source, "render", {}, { memoryBytes: 8 * 1024 * 1024 })).toThrow(
+      /out of memory/i,
+    );
+    expect(runInSandbox<number>(source, "render", {}, { memoryBytes: 32 * 1024 * 1024 })).toBe(
+      16 * 1024 * 1024,
+    );
   });
 
   test("has no way to reach files or the network", () => {

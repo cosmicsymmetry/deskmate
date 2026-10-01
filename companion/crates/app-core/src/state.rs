@@ -116,6 +116,8 @@ pub struct DeviceSnapshot {
     pub counters: DeviceCounters,
     #[serde(default)]
     pub asset_store: Option<DeviceAssetStore>,
+    #[serde(default)]
+    pub volatile_assets: Option<DeviceVolatileAssets>,
 }
 
 /// What the device says about its **durable flash** asset store, from key 31 of
@@ -133,6 +135,23 @@ pub struct DeviceAssetStore {
     pub used_bytes: u32,
     pub free_bytes: u32,
     pub asset_count: u32,
+}
+
+/// The display's volatile frame pool, and the PSRAM heap its frames come from.
+/// `None` on any image built before the pool existed, which must not be read as
+/// a pool with no room.
+///
+/// This is the tier a picture frame lives in, so unlike [`DeviceAssetStore`]
+/// these numbers say whether another frame will fit. `free_heap` cannot answer
+/// that: the device reports it as a total across every memory capability, so it
+/// counts internal SRAM the frames cannot use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceVolatileAssets {
+    pub committed_count: u32,
+    pub slot_capacity: u32,
+    pub used_bytes: u32,
+    pub psram_free_bytes: u32,
+    pub psram_low_water_bytes: u32,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]

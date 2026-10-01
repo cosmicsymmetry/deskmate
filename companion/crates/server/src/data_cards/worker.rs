@@ -145,6 +145,41 @@ fn render_frame(
             settings: &spec.face.settings,
             state,
             taps,
+            view: None,
+        },
+        account_dir,
+    )
+    .map_err(|error| match error {
+        FaceRenderError::Configuration(message) => RefreshFailure::Configuration(message),
+        FaceRenderError::Malformed(message) => RefreshFailure::NotAFrame(message),
+        FaceRenderError::Transient(message) => RefreshFailure::Transient(message),
+    })?;
+    let faces_package::Rendered { png, state } = rendered;
+    let frame = canonical_frame_from_png(&png)
+        .map_err(|error| RefreshFailure::NotAFrame(error.to_string()))?;
+    Ok(RenderedFrame { frame, state })
+}
+
+/// Draws one named view of a face, for staging.
+///
+/// The view goes to the package as `view`, never as a tap count: a staged view is
+/// not a tap, and telling the face otherwise would stamp "the owner just tapped"
+/// into its state and hold the wrong view on the next scheduled refresh.
+fn render_view_frame(
+    faces: &FaceCommand,
+    account_dir: &Path,
+    spec: &DataCardSpec,
+    state: Option<&serde_json::Value>,
+    view: &str,
+) -> Result<RenderedFrame, RefreshFailure> {
+    let rendered = faces_package::render(
+        faces,
+        RenderRequest {
+            kind: &spec.face.kind,
+            settings: &spec.face.settings,
+            state,
+            taps: 0,
+            view: Some(view),
         },
         account_dir,
     )
@@ -192,6 +227,12 @@ async fn refresh_once(
     taps: u32,
 ) -> Option<RefreshOutcome> {
     let (source_id, kind) = (&spec.source_id, &spec.face.kind);
+    let started = std::time::Instant::now();
+    if taps > 0 {
+        tracing::info!(target: "server::tap_latency", account_id = %space.account_id,
+            source_id = %source_id, taps, unix_us = chrono::Utc::now().timestamp_micros(),
+            "tap render started");
+    }
     let previous_state = face_state.get(source_id);
     let render_faces = faces.clone();
     let render_spec = spec.clone();
@@ -206,6 +247,12 @@ async fn refresh_once(
         )
     })
     .await;
+    if taps > 0 {
+        tracing::info!(target: "server::tap_latency", account_id = %space.account_id,
+            source_id = %source_id, taps, unix_us = chrono::Utc::now().timestamp_micros(),
+            elapsed_us = started.elapsed().as_micros(), ok = matches!(&rendered, Ok(Ok(_))),
+            "tap render completed");
+    }
     let rendered = match rendered {
         Ok(Ok(rendered)) => rendered,
         Ok(Err(RefreshFailure::Configuration(error))) => {
@@ -233,6 +280,7 @@ async fn refresh_once(
 
     let accept_source = source_id.clone();
     let accept_space = Arc::clone(space);
+    let face_state_for_staging = Arc::clone(face_state);
     let next_face_state = rendered.state;
     let face_state = Arc::clone(face_state);
     let accepted = tokio::task::spawn_blocking(move || {
@@ -254,6 +302,7 @@ async fn refresh_once(
             if !notify_image_source_outcome(state, space, source_id, &outcome) {
                 tracing::debug!(target: "server::data_cards", source_id = %source_id, kind, "the face is unchanged");
             }
+            stage_other_views(space, faces, face_state_for_staging, spec).await;
             Some(RefreshOutcome::Drawn)
         }
         Ok(Err(error)) => {
@@ -265,6 +314,114 @@ async fn refresh_once(
         Err(error) => {
             tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error, "the store task panicked");
             None
+        }
+    }
+}
+
+/// How many frames one source may hold, resting view included.
+///
+/// The real ceilings are the device's fifteen resident slots and the wire's
+/// 32-digest `AssetRelease`, and both are shared across every picture card. Four
+/// cards at four views each would exceed the first and approach the second, so
+/// this is deliberately conservative: it keeps a four-card loop inside both with
+/// room to spare. The spec's proportional budget -- `floor(15 / picture_cards)`
+/// with the remainder to the cards that declared the most -- needs the device's
+/// card count here, which this worker does not have; a flat cap is the honest
+/// version of it until it does.
+const MAX_STAGED_FRAMES_PER_SOURCE: usize = 3;
+
+/// Draws the face's other views and stores each, so a tap on one costs a scene
+/// and nothing else.
+///
+/// Every failure here is swallowed on purpose. The resting frame is already
+/// stored and already on its way to the panel by the time this runs; staging is
+/// an optimisation for a tap that may never come, and a face that cannot draw
+/// its second view must not turn a delivered refresh into a failed one. A view
+/// that is not staged is simply rendered on the tap that asks for it, which is
+/// what happened before any of this existed.
+async fn stage_other_views(
+    space: &Arc<AccountSpace>,
+    faces: &FaceCommand,
+    face_state: Arc<FaceStateStore>,
+    spec: &DataCardSpec,
+) {
+    let source_id = spec.source_id.clone();
+    let stored = face_state.get(&source_id);
+    let views_faces = faces.clone();
+    let views_spec = spec.clone();
+    let views_state = stored.clone();
+    let Ok(Ok(views)) = tokio::task::spawn_blocking(move || {
+        faces_package::views(
+            &views_faces,
+            &views_spec.face.kind,
+            &views_spec.face.settings,
+            views_state.as_ref(),
+        )
+    })
+    .await
+    else {
+        // An older faces package answers non-zero here, which reads as "one
+        // resting view" -- exactly what such a package can draw.
+        return;
+    };
+
+    for view in views
+        .into_iter()
+        .filter(|view| !view.is_empty())
+        .take(MAX_STAGED_FRAMES_PER_SOURCE.saturating_sub(1))
+    {
+        let render_faces = faces.clone();
+        let render_spec = spec.clone();
+        let render_state = stored.clone();
+        let render_view = view.clone();
+        let render_account_dir = space.root.clone();
+        let drawn = tokio::task::spawn_blocking(move || {
+            render_view_frame(
+                &render_faces,
+                &render_account_dir,
+                &render_spec,
+                render_state.as_ref(),
+                &render_view,
+            )
+        })
+        .await;
+        let rendered = match drawn {
+            Ok(Ok(rendered)) => rendered,
+            Ok(Err(failure)) => {
+                // Staging is optional, but a view that cannot be drawn should
+                // leave a trace: silently skipping it makes "why is this tap
+                // still slow?" unanswerable.
+                tracing::warn!(target: "server::data_cards",
+                    source_id = %source_id, view = %view, error = ?failure,
+                    "a view could not be drawn for staging; a tap on it will render instead");
+                continue;
+            }
+            Err(error) => {
+                tracing::error!(target: "server::data_cards",
+                    source_id = %source_id, view = %view, %error, "the staging render panicked");
+                continue;
+            }
+        };
+        let accept_space = Arc::clone(space);
+        let accept_source = source_id.clone();
+        let accept_view = view.clone();
+        let staged = tokio::task::spawn_blocking(move || {
+            accept_space.image_sources.accept_staged_view(
+                &accept_source,
+                &accept_view,
+                rendered.frame,
+                Utc::now(),
+            )
+        })
+        .await;
+        match staged {
+            Ok(Ok(_)) => tracing::debug!(target: "server::data_cards",
+                source_id = %source_id, view = %view, "staged a view for a tap"),
+            Ok(Err(error)) => tracing::warn!(target: "server::data_cards",
+                source_id = %source_id, view = %view, %error,
+                "a view was drawn but not stored; a tap on it will render instead"),
+            Err(error) => tracing::error!(target: "server::data_cards",
+                source_id = %source_id, view = %view, %error, "the staging task panicked"),
         }
     }
 }

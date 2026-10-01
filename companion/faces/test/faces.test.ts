@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { ConfigurationError, type RenderResult, TransientError } from "../src/face";
+import {
+  ConfigurationError,
+  type FaceDefinition,
+  type RenderResult,
+  type Settings,
+  TransientError,
+} from "../src/face";
 import {
   fetchHackerNews,
   hackernews,
@@ -9,7 +15,7 @@ import {
   type Story,
   storyFromItem,
 } from "../src/faces/hackernews";
-import { fetchRss, parseFeed, renderRss, renderRssRequest } from "../src/faces/rss";
+import { fetchRss, parseFeed, renderRss, renderRssRequest, rss } from "../src/faces/rss";
 import {
   fetchToken,
   parseCandles,
@@ -17,6 +23,7 @@ import {
   renderToken,
   renderTokenRequest,
   splitPrice,
+  token,
 } from "../src/faces/token";
 import {
   conditionFromWmo,
@@ -74,6 +81,31 @@ const visibleSvgText = (svg: string): string =>
     .replaceAll("&lt;", "<")
     .replaceAll("&amp;", "&");
 
+/**
+ * A tap as the server performs it: `onTap` alone, with no fetch and no draw.
+ *
+ * `onTap` is optional on the interface because a face may ignore taps, but a
+ * face under test here declares one -- so the assertion is part of the helper
+ * rather than a `!` at every call site.
+ */
+function tapOn(
+  face: FaceDefinition,
+  settings: Settings,
+  state: unknown,
+  taps: number,
+  now: Date,
+): { view: string; state?: unknown } {
+  if (face.onTap === undefined) {
+    throw new Error(`${face.kind} declares no onTap`);
+  }
+  return face.onTap(settings, state, { taps, point: null }, now);
+}
+
+/** The page a paging face's stored state is on. */
+function pageOf(state: unknown): number {
+  return (state as { page: number }).page;
+}
+
 describe("token", () => {
   const MARKETS = JSON.stringify([
     {
@@ -114,10 +146,12 @@ describe("token", () => {
     const first = await renderTokenRequest(settings, NOW, {}, get);
     expect(first.state?.chart).toBe("line");
 
+    const toCandles = tapOn(token, settings, first.state, 1, NOW);
+    expect(toCandles.view).toBe("candles");
     const tapped = await renderTokenRequest(
       settings,
       NOW,
-      { state: first.state, event: { taps: 1, point: null } },
+      { state: toCandles.state, view: toCandles.view },
       get,
     );
     expect(tapped.state?.chart).toBe("candles");
@@ -385,25 +419,28 @@ describe("rss", () => {
     expect(fetches).toBe(1);
     expect(first.state.page).toBe(0);
 
+    const toSecond = tapOn(rss, settings, first.state, 1, NOW);
     const second = await renderRssRequest(
       settings,
       NOW,
-      { state: first.state, event: { taps: 1, point: null } },
+      { state: toSecond.state, view: toSecond.view },
       counting,
     );
     expect(fetches).toBe(1);
-    expect(second.state.page).toBe(1);
+    expect(pageOf(toSecond.state)).toBe(1);
     expect(second.svg).not.toBe(first.svg);
 
     // Five entries is two pages, so a second tap wraps rather than stopping.
+    const toThird = tapOn(rss, settings, toSecond.state, 1, NOW);
     const third = await renderRssRequest(
       settings,
       NOW,
-      { state: second.state, event: { taps: 1, point: null } },
+      { state: toThird.state, view: toThird.view },
       counting,
     );
     expect(fetches).toBe(1);
-    expect(third.state.page).toBe(0);
+    expect(pageOf(toThird.state)).toBe(0);
+    expect(third.svg).toBe(first.svg);
   });
 
   test("Atom parses, with an html title reduced to its text", () => {
@@ -486,10 +523,12 @@ describe("weather", () => {
     const asked = get.asked.length;
     const firstState = typeof first === "string" ? undefined : first.state;
 
+    const later = new Date(NOW.getTime() + 30_000);
+    const selection = tapOn(weather, settings, firstState, 1, later);
     const tapped = await renderWeatherRequest(
       settings,
-      new Date(NOW.getTime() + 30_000),
-      { state: firstState, event: { taps: 1, point: null } },
+      later,
+      { state: selection.state, view: selection.view },
       get,
     );
     expect(get.asked.length).toBe(asked);
@@ -661,20 +700,20 @@ describe("weather", () => {
 
   test("a tap flips to the coming days and another flips back", () => {
     expect(weather.tap).toBe("Tap the panel for the coming days.");
+    const toDays = tapOn(weather, approvedNow, { view: "now", tappedAt: null }, 1, NOW);
+    expect(toDays.view).toBe("days");
+    expect(toDays.state).toEqual({ view: "days", tappedAt: NOW.toISOString() });
     const days = renderWeatherResult(approvedNow, NOW, {
-      state: { view: "now", tappedAt: null },
-      event: { taps: 1, point: null },
+      state: toDays.state,
+      view: toDays.view,
     });
     expect(viewOf(days)).toBe("days");
-    expect(typeof days === "string" ? undefined : days.state).toEqual({
-      view: "days",
-      tappedAt: NOW.toISOString(),
-    });
-    const back = renderWeatherResult(approvedNow, NOW, {
-      state: { view: "days", tappedAt: NOW.toISOString() },
-      event: { taps: 1, point: null },
-    });
-    expect(viewOf(back)).toBe("now");
+
+    const back = tapOn(weather, approvedNow, { view: "days", tappedAt: NOW.toISOString() }, 1, NOW);
+    expect(back.view).toBe("");
+    expect(
+      viewOf(renderWeatherResult(approvedNow, NOW, { state: back.state, view: back.view })),
+    ).toBe("now");
   });
 
   test("an even number of coalesced taps lands where it started", () => {
@@ -850,48 +889,64 @@ describe("hacker news", () => {
   });
 
   test("a tap moves to the next page without fetching", async () => {
+    // The tap path as the server drives it: onTap decides, without fetching or
+    // drawing, and render draws the view it decided on. Asserting both is what
+    // proves the two halves agree -- a view onTap can return but render cannot
+    // draw is the failure this seam invites.
     const get = fake({});
+    const selection = tapOn(
+      hackernews,
+      {},
+      { stories: capturedStories(), page: 0, tappedAt: null },
+      1,
+      CAPTURED_AT,
+    );
     const result = await renderHackerNewsRequest(
       {},
       CAPTURED_AT,
-      {
-        state: { stories: capturedStories(), page: 0, tappedAt: null },
-        event: { taps: 1, point: null },
-      },
+      { state: selection.state, view: selection.view },
       get,
     );
     expect(get.asked).toEqual([]);
     expect(hackernews.tap).toBe("Tap the panel for the next stories.");
-    expect(result.state.page).toBe(1);
+    expect(pageOf(selection.state)).toBe(1);
     expect(visibleSvgText(result.svg)).toContain(capturedTitle(4));
     expect(result.svg).toContain(">2 / 5<");
   });
 
   test("three coalesced taps move three pages", async () => {
+    const selection = tapOn(
+      hackernews,
+      {},
+      { stories: capturedStories(), page: 0, tappedAt: null },
+      3,
+      CAPTURED_AT,
+    );
     const result = await renderHackerNewsRequest(
       {},
       CAPTURED_AT,
-      {
-        state: { stories: capturedStories(), page: 0, tappedAt: null },
-        event: { taps: 3, point: null },
-      },
+      { state: selection.state, view: selection.view },
       fake({}),
     );
-    expect(result.state.page).toBe(3);
+    expect(pageOf(selection.state)).toBe(3);
     expect(visibleSvgText(result.svg)).toContain(capturedTitle(12));
   });
 
   test("paging wraps at the end", async () => {
+    const selection = tapOn(
+      hackernews,
+      {},
+      { stories: capturedStories(), page: 4, tappedAt: null },
+      1,
+      CAPTURED_AT,
+    );
     const result = await renderHackerNewsRequest(
       {},
       CAPTURED_AT,
-      {
-        state: { stories: capturedStories(), page: 4, tappedAt: null },
-        event: { taps: 1, point: null },
-      },
+      { state: selection.state, view: selection.view },
       fake({}),
     );
-    expect(result.state.page).toBe(0);
+    expect(pageOf(selection.state)).toBe(0);
     expect(visibleSvgText(result.svg)).toContain(capturedTitle(0));
     expect(visibleSvgText(result.svg)).toContain(capturedTitle(1));
     expect(visibleSvgText(result.svg)).toContain(capturedTitle(2));
@@ -938,17 +993,71 @@ describe("hacker news", () => {
   });
 
   test("a page with fewer than four stories still draws", async () => {
+    const selection = tapOn(
+      hackernews,
+      {},
+      { stories: capturedStories(17), page: 3, tappedAt: null },
+      1,
+      CAPTURED_AT,
+    );
     const result = await renderHackerNewsRequest(
       {},
       CAPTURED_AT,
-      {
-        state: { stories: capturedStories(17), page: 3, tappedAt: null },
-        event: { taps: 1, point: null },
-      },
+      { state: selection.state, view: selection.view },
       fake({}),
     );
-    expect(result.state.page).toBe(4);
+    expect(pageOf(selection.state)).toBe(4);
     expect(visibleSvgText(result.svg)).toContain(capturedTitle(16));
     expect(result.svg).toContain(">5 / 5<");
+  });
+});
+
+describe("the views seam", () => {
+  // The saving a tap makes is that NOTHING fetches and NOTHING rasterises on the
+  // tap path: the server asks which view, then pushes a scene naming a frame the
+  // device already holds. A face that fetched inside views() or onTap() would put
+  // a network round trip back in front of the owner's finger and nothing else
+  // here would notice.
+  const faces: FaceDefinition[] = [weather, hackernews, rss, token];
+
+  test("views and onTap neither fetch nor draw", () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = (() => {
+      throw new Error("a pure entry point must not reach the network");
+    }) as unknown as typeof fetch;
+    try {
+      for (const face of faces) {
+        const settings = { location: "Dubai", url: "https://example.com/feed.xml", coin_id: "SOL" };
+        expect(() => face.views?.(settings, undefined)).not.toThrow();
+        expect(() =>
+          face.onTap?.(settings, undefined, { taps: 1, point: null }, NOW),
+        ).not.toThrow();
+      }
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("every face that offers views can answer a tap, and every view it names is one it offers", () => {
+    for (const face of faces) {
+      // The two are a pair: a face with views must be able to select one, and a
+      // face that selects must say what it can select between.
+      expect(face.views === undefined).toBe(face.onTap === undefined);
+      if (face.views === undefined || face.onTap === undefined) {
+        continue;
+      }
+      const settings = { location: "Dubai", url: "https://example.com/feed.xml", coin_id: "SOL" };
+      const offered = face.views(settings, undefined);
+      expect(offered.length).toBeGreaterThan(0);
+      expect(offered[0]).toBe("");
+      const selected = face.onTap(settings, undefined, { taps: 1, point: null }, NOW);
+      expect(offered).toContain(selected.view);
+    }
+  });
+
+  test("a face that declares a tap sentence declares views, and the reverse", () => {
+    for (const face of faces) {
+      expect(typeof face.tap === "string").toBe(face.views !== undefined);
+    }
   });
 });

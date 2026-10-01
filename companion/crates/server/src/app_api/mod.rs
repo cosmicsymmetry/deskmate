@@ -417,6 +417,7 @@ fn change_key(value: &serde_json::Value) -> String {
             // is every refresh of every picture card. The page renders none of
             // them, and letting them through would re-render it on each frame.
             "asset_store",
+            "volatile_assets",
         ] {
             if let Some(field) = device.get_mut(volatile) {
                 *field = serde_json::Value::Null;

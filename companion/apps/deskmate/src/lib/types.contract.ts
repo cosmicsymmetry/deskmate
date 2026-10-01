@@ -132,6 +132,13 @@ export const apiContractFixtures = {
         "used_bytes": 141312,
         "free_bytes": 6149120,
         "asset_count": 4
+      },
+      "volatile_assets": {
+        "committed_count": 4,
+        "slot_capacity": 16,
+        "used_bytes": 1318960,
+        "psram_free_bytes": 7012352,
+        "psram_low_water_bytes": 6803456
       }
     },
     "pomodoros": [

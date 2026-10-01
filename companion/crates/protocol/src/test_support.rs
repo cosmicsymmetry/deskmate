@@ -47,6 +47,7 @@ pub fn sample_status_response() -> StatusResponse {
         // shape the golden frames in `tests/fixtures.rs` were captured in. The
         // present shape has its own coverage in `message.rs`.
         asset_store: None,
+        volatile_assets: None,
     }
 }
 

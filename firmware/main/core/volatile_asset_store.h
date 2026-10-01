@@ -8,12 +8,20 @@
 #include "core/rle565.h"
 #include "core/scene_model.h"
 
-/* One displayed frame plus one incoming replacement is the minimum bound
- * that permits an atomic swap. A larger directory would permit unbounded
- * accumulation in roughly 330 KiB steps. The slots are metadata only and
- * live inside the caller-provided store object; frame bytes are always
- * allocated through the callbacks below. */
-#define VOLATILE_ASSET_SLOT_COUNT 2U
+/* Fifteen resident frames plus one incoming replacement, so an atomic swap is
+ * still possible with the pool full. The slots are metadata only and live inside
+ * the caller-provided store object; frame bytes are always allocated through the
+ * callbacks below, which is where the roughly 330 KiB steps are actually spent --
+ * 16 x 329,740 B = 5.03 MB of PSRAM at full occupancy.
+ *
+ * This was 2 -- "one displayed frame plus one incoming replacement" -- until
+ * 2026-09-28. Two slots made every policy over this tier fail: the host could
+ * keep only the frame on the glass here and had to put every other card's frame
+ * in the flash partition, spending its endurance on data that is dead within one
+ * refresh interval. A pool lets every picture frame be volatile, which is what
+ * the tier was built for. See
+ * docs/superpowers/specs/2026-09-28-deskmate-frames-live-in-psram-design.md. */
+#define VOLATILE_ASSET_SLOT_COUNT 16U
 #define VOLATILE_ASSET_HEADER_BYTES 12U
 #define VOLATILE_ASSET_IMAGE_MAGIC 0x19U
 #define VOLATILE_ASSET_RGB565_FORMAT 0x12U
@@ -124,6 +132,20 @@ volatile_asset_store_result_t volatile_asset_store_release(
     size_t keep_count, size_t *out_released_count);
 
 void volatile_asset_store_destroy(volatile_asset_store_t *store);
+
+/* Occupancy, for the status report. `used_bytes` is what the committed slots
+ * hold -- the PSRAM this store is accountable for -- and excludes an incoming
+ * allocation, which no scene can name yet. The heap's own free and low-water
+ * figures are not here on purpose: they come from the allocator, and this
+ * translation unit stays free of ESP-IDF. */
+typedef struct {
+    uint32_t committed_count;
+    uint32_t capacity;
+    uint32_t used_bytes;
+} volatile_asset_store_stats_t;
+
+void volatile_asset_store_stats(const volatile_asset_store_t *store,
+                                volatile_asset_store_stats_t *out_stats);
 
 /* Pure keep/use predicate for AssetRelease's display teardown decision.
  * A kept volatile allocation never moves, so a scene reading only that

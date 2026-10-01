@@ -15,6 +15,7 @@ import {
   type FaceDefinition,
   type RenderContext,
   type Settings,
+  type ViewId,
   text,
   TransientError,
 } from "../face";
@@ -353,6 +354,26 @@ function normalizedPage(page: number, entries: FeedEntry[]): number {
   return ((page % pages) + pages) % pages;
 }
 
+/** Shared by staged selection and the server's render-only tap fallback. */
+function tappedState(previous: RssState, taps: number, now: Date): RssState {
+  return {
+    ...previous,
+    page: normalizedPage(previous.page + taps, previous.entries),
+    tappedAt: now.toISOString(),
+  };
+}
+
+function pageViews(entries: FeedEntry[]): ViewId[] {
+  return Array.from({ length: pageCount(entries) }, (_, page) =>
+    page === 0 ? "" : `page-${page + 1}`,
+  );
+}
+
+function pageForView(view: ViewId | undefined, entries: FeedEntry[]): number {
+  const page = pageViews(entries).indexOf(view ?? "");
+  return page === -1 ? 0 : page;
+}
+
 function recentTap(tappedAt: string | null, now: Date): boolean {
   if (tappedAt === null) {
     return false;
@@ -381,25 +402,40 @@ export async function renderRssRequest(
   get: FetchText = fetchText,
 ): Promise<{ svg: string; state: RssState }> {
   const previous = storedState(context.state);
-  if (context.event !== undefined && previous !== undefined && previous.entries.length > 0) {
-    const state: RssState = {
-      ...previous,
-      page: normalizedPage(previous.page + context.event.taps, previous.entries),
-      tappedAt: now.toISOString(),
-    };
+  // Explicit views only draw; an unstaged tap arrives without a view and must
+  // advance the stored state, using the same transition as onTap.
+  if (context.view === undefined && context.event !== undefined && previous !== undefined) {
+    const state = tappedState(previous, context.event.taps, now);
     return { svg: renderRss(faceForPage(state)), state };
+  }
+  if (context.view !== undefined && previous !== undefined) {
+    return {
+      svg: renderRss(
+        faceForPage({ ...previous, page: pageForView(context.view, previous.entries) }),
+      ),
+      state: previous,
+    };
   }
 
   const fresh = await fetchRss(settings, now, get);
-  const keepPage =
-    context.event === undefined && previous !== undefined && recentTap(previous.tappedAt, now);
+  const keepPage = previous !== undefined && recentTap(previous.tappedAt, now);
   const state: RssState = {
     feedTitle: fresh.feedTitle,
     entries: fresh.entries,
     page: keepPage ? normalizedPage(previous.page, fresh.entries) : 0,
-    tappedAt: keepPage ? previous.tappedAt : context.event === undefined ? null : now.toISOString(),
+    tappedAt: keepPage ? previous.tappedAt : null,
   };
-  return { svg: renderRss(faceForPage(state)), state };
+  return {
+    svg: renderRss(
+      faceForPage({
+        ...state,
+        // As in hackernews: an absent view is a scheduled refresh, which draws
+        // the page the state decided rather than resetting to the first one.
+        page: context.view === undefined ? state.page : pageForView(context.view, fresh.entries),
+      }),
+    ),
+    state,
+  };
 }
 
 export const rss: FaceDefinition = {
@@ -410,6 +446,18 @@ export const rss: FaceDefinition = {
     { type: "url", key: "url", label: "Feed URL", placeholder: "https://example.com/feed.xml" },
     { type: "text", key: "title", label: "Title", placeholder: "News" },
   ],
+  views(_settings, value) {
+    const state = storedState(value);
+    return state === undefined ? [""] : pageViews(state.entries);
+  },
+  onTap(_settings, value, event, now) {
+    const previous = storedState(value);
+    if (previous === undefined) {
+      return { view: "" };
+    }
+    const state = tappedState(previous, event.taps, now);
+    return { view: pageViews(state.entries)[state.page] ?? "", state };
+  },
   async render(settings, now, context) {
     return renderRssRequest(settings, now, context);
   },

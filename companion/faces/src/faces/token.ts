@@ -29,6 +29,7 @@ import {
   type FaceDefinition,
   type RenderContext,
   type Settings,
+  type ViewId,
   text,
   TransientError,
   truncateUtf8,
@@ -823,6 +824,36 @@ const TEMPORARY_CHART_MS = 10 * 60 * 1_000;
  */
 const TAPPABLE_CHARTS = ["line", "candles"] as const;
 
+function configuredChart(settings: Settings): ChartStyle {
+  const chosen = text(settings, "chart");
+  return chosen === "candles" || chosen === "none" ? chosen : "line";
+}
+
+function orderedCharts(settings: Settings): ChartStyle[] {
+  const configured = configuredChart(settings);
+  return configured === "none"
+    ? [configured]
+    : [configured, ...TAPPABLE_CHARTS.filter((chart) => chart !== configured)];
+}
+
+function chartViews(settings: Settings): ViewId[] {
+  return orderedCharts(settings).map((chart, index) => (index === 0 ? "" : chart));
+}
+
+function chartForView(settings: Settings, view: ViewId | undefined): ChartStyle {
+  const charts = orderedCharts(settings);
+  if (view === undefined || view === "") {
+    return charts[0] ?? "line";
+  }
+  return charts.find((chart) => chart === view) ?? charts[0] ?? "line";
+}
+
+function viewForChart(settings: Settings, selected: ChartStyle): ViewId {
+  const charts = orderedCharts(settings);
+  const index = charts.indexOf(selected);
+  return index <= 0 ? "" : (chartViews(settings)[index] ?? "");
+}
+
 function storedState(value: unknown): TokenState | undefined {
   if (typeof value !== "object" || value === null) {
     return undefined;
@@ -862,8 +893,7 @@ export async function renderTokenRequest(
   // The style has to be settled BEFORE fetching, not after: a line reads
   // `market_chart` and candles read `ohlc`, never both, so overriding the face
   // afterwards would draw one style from the other's data.
-  const chosen = text(settings, "chart");
-  const configured: ChartStyle = chosen === "candles" || chosen === "none" ? chosen : "line";
+  const configured = configuredChart(settings);
   // A card set to "none" requests no series at all, so there is nothing for a
   // tap to switch to. Returning null state keeps a stale override from
   // reappearing if the owner later turns a chart back on.
@@ -873,17 +903,15 @@ export async function renderTokenRequest(
 
   const previous = storedState(context.state);
   let state: TokenState;
-  if (context.event !== undefined) {
-    state = {
-      chart: nextChart(previous?.chart ?? configured, context.event.taps),
-      tappedAt: now.toISOString(),
-    };
-  } else if (previous !== undefined && recentTap(previous.tappedAt, now)) {
+  if (
+    previous !== undefined &&
+    (context.view !== undefined || context.event !== undefined || recentTap(previous.tappedAt, now))
+  ) {
     state = previous;
   } else {
     state = { chart: configured, tappedAt: null };
   }
-  const face = await fetchToken({ ...settings, chart: state.chart }, get);
+  const face = await fetchToken({ ...settings, chart: chartForView(settings, context.view) }, get);
   return { svg: renderToken(face), state };
 }
 
@@ -907,6 +935,19 @@ export const token: FaceDefinition = {
       ],
     },
   ],
+  views(settings) {
+    return chartViews(settings);
+  },
+  onTap(settings, value, event, now) {
+    const configured = configuredChart(settings);
+    if (configured === "none") {
+      return { view: "", state: null };
+    }
+    const previous = storedState(value);
+    const chart = nextChart(previous?.chart ?? configured, event.taps);
+    const state: TokenState = { chart, tappedAt: now.toISOString() };
+    return { view: viewForChart(settings, chart), state };
+  },
   async render(settings, now, context) {
     return renderTokenRequest(settings, now, context);
   },

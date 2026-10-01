@@ -71,12 +71,28 @@ struct ServerTapSink {
 }
 
 impl CardTapSink for ServerTapSink {
-    fn tapped(&self, _card_id: &str, source_id: &str) {
+    fn tapped(&self, card_id: &str, source_id: &str) {
+        let started = Instant::now();
+        let span = tracing::info_span!(target: "server::tap_latency", "tap_route",
+            account_id = %self.space.account_id, card_id, source_id);
+        tracing::info!(target: "server::tap_latency", parent: &span,
+            unix_us = chrono::Utc::now().timestamp_micros(), taps = 1, "tap dispatched by runtime");
         let state = self.state.clone();
         let space = std::sync::Arc::clone(&self.space);
         let source_id = source_id.to_owned();
-        std::mem::drop(self.runtime.spawn(async move {
+        // `spawn_blocking`, not `spawn`: routing a tap now asks the faces package
+        // which view it selects, and that is a subprocess. It is bounded at five
+        // seconds, but five seconds on an async worker thread would stall every
+        // other task sharing it.
+        std::mem::drop(self.runtime.spawn_blocking(move || {
+            let _entered = span.enter();
+            tracing::info!(target: "server::tap_latency",
+                unix_us = chrono::Utc::now().timestamp_micros(),
+                queue_us = started.elapsed().as_micros(), "tap routing started");
             crate::data_cards::tapped(&state, &space, &source_id);
+            tracing::info!(target: "server::tap_latency",
+                unix_us = chrono::Utc::now().timestamp_micros(),
+                elapsed_us = started.elapsed().as_micros(), "tap routing finished");
         }));
     }
 }

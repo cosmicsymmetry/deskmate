@@ -338,15 +338,10 @@ async fn refresh_once(
 
 /// How many frames one source may hold, resting view included.
 ///
-/// The real ceilings are the device's fifteen resident slots and the wire's
-/// 32-digest `AssetRelease`, and both are shared across every picture card. Four
-/// cards at four views each would exceed the first and approach the second, so
-/// this is deliberately conservative: it keeps a four-card loop inside both with
-/// room to spare. The spec's proportional budget -- `floor(15 / picture_cards)`
-/// with the remainder to the cards that declared the most -- needs the device's
-/// card count here, which this worker does not have; a flat cap is the honest
-/// version of it until it does.
-const MAX_STAGED_FRAMES_PER_SOURCE: usize = 3;
+/// The store admits extras atomically against an account-wide fifteen-frame
+/// budget, reserving all eight possible resting frames. Four is the per-source
+/// fairness ceiling, not the device capacity; a refused extra stays a fallback.
+const MAX_STAGED_FRAMES_PER_SOURCE: usize = 4;
 
 /// Draws the face's other views and stores each, so a tap on one costs a scene
 /// and nothing else.

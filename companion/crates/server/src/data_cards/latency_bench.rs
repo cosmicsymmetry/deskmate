@@ -279,7 +279,9 @@ async fn tap_latency_bench() {
         PathBuf::from(String::from_utf8(bun.stdout).unwrap().trim()),
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../faces"),
     );
-    for staged in [true, false] {
+    for mode in ["staged", "fallback", "page-four"] {
+        let staged = mode != "fallback";
+        let page_four = mode == "page-four";
         let state =
             ServerState::in_memory_with_runtime_options(app_core::RuntimeOptions::default());
         set_faces(&state, command.clone());
@@ -289,15 +291,23 @@ async fn tap_latency_bench() {
             .unwrap();
         let space = state.account_space(&account.id);
         let source = space.image_sources.mint("Bench").unwrap();
-        let initial_page = if staged { 0 } else { 2 };
-        let next_view = if staged { "page-2" } else { "page-4" };
-        let base = draw(&command, &space, if staged { "" } else { "page-3" });
+        let initial_page = if staged && !page_four { 0 } else { 2 };
+        let next_view = if staged && !page_four {
+            "page-2"
+        } else {
+            "page-4"
+        };
+        let base = draw(
+            &command,
+            &space,
+            if staged && !page_four { "" } else { "page-3" },
+        );
         let next = draw(&command, &space, next_view);
         space
             .image_sources
             .accept_server_rendered(&source.id, base.clone(), chrono::Utc::now())
             .unwrap();
-        if staged {
+        if staged && !page_four {
             space
                 .image_sources
                 .accept_staged_view(&source.id, next_view, next.clone(), chrono::Utc::now())
@@ -347,11 +357,44 @@ async fn tap_latency_bench() {
         .await
         .unwrap();
         face_state.put(&source.id, Some(rss_state(initial_page)));
+        if page_four {
+            let before = space.data_cards.lock().unwrap().outcomes[&source.id].1;
+            // Exercise the real refresher's four-page staging before connecting
+            // the peer. Initial synchronization then proves device residency.
+            tapped(&state, &space, &source.id);
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if space.data_cards.lock().unwrap().outcomes[&source.id].1 > before {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                space.image_sources.select_view(&source.id, next_view),
+                Some(next.digest)
+            );
+            space
+                .image_sources
+                .accept_server_rendered(&source.id, base.clone(), chrono::Utc::now())
+                .unwrap();
+            space.image_sources.select_view(&source.id, "").unwrap();
+            face_state.put(&source.id, Some(rss_state(initial_page)));
+        }
         write_config(&space, &source.id);
         let mut peer = Peer::start(&state, &account.id).await;
         peer.until(base.digest).await;
         let mut samples = Vec::new();
         for trial in 0..35 {
+            if !staged {
+                // Deliberately exercise the miss even after page-four staging
+                // is enabled. This setup eviction is outside the timed path.
+                space
+                    .image_sources
+                    .forget_staged_view_for_test(&source.id, next_view);
+            }
             // Let post-render staging finish before the next isolated sample.
             // Vary the idle phase so a 25ms polling loop is not phase-locked.
             tokio::time::sleep(Duration::from_millis(30 + trial * 7 % 29)).await;
@@ -380,10 +423,7 @@ async fn tap_latency_bench() {
                 assert_eq!(assets, 0, "staged tap transferred an asset");
             }
             let elapsed = received.duration_since(started).as_secs_f64() * 1000.0;
-            println!(
-                "BENCH sample mode={} trial={trial} ms={elapsed:.3}",
-                if staged { "staged" } else { "fallback" }
-            );
+            println!("BENCH sample mode={} trial={trial} ms={elapsed:.3}", mode);
             samples.push(elapsed);
             if !staged {
                 // `record_outcome` runs AFTER staging. Wait for that exact
@@ -403,7 +443,7 @@ async fn tap_latency_bench() {
         samples.sort_by(f64::total_cmp);
         println!(
             "BENCH summary mode={} n={} median_ms={:.3} p95_ms={:.3}",
-            if staged { "staged" } else { "fallback" },
+            mode,
             samples.len(),
             samples[samples.len() / 2],
             samples[(samples.len() * 95).div_ceil(100) - 1]

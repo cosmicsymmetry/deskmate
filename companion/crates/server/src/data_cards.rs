@@ -2123,6 +2123,41 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn the_refresher_stages_page_four_when_the_shared_budget_has_room() {
+        let server = FaceTestServer::new("headlines", false, false).await;
+        {
+            let mut cards = server.space.data_cards.lock().unwrap();
+            cards.specs[0]
+                .face
+                .settings
+                .insert("list".into(), "four-pages".into());
+            let spec = cards.specs[0].clone();
+            cards.tasks.remove(&server.source_id).unwrap().abort();
+            cards.start_if_complete(
+                &tokio::runtime::Handle::current(),
+                &server.state,
+                server.space.clone(),
+                &spec,
+            );
+        }
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if server
+                    .space
+                    .image_sources
+                    .select_view(&server.source_id, "page-4")
+                    .is_some()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("page four was not staged");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_tap_on_a_face_that_declares_no_tap_is_dropped_and_counted() {
         let server = FaceTestServer::new("weather", false, false).await;
         let renders_before = server.requests().len();

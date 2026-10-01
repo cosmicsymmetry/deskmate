@@ -92,6 +92,7 @@ views)
 		printf '%s\n' "$request" >> "$DESKMATE_FAKE_FACES_REQUEST_DIR/plans.jsonl"
 	fi
 	case "$request" in
+	*four-pages*) printf '{"views":["","page-2","page-3","page-4"]}' ;;
 	# Only the tappable face offers a second view, matching `describe` above.
 	*'"kind":"headlines"'*) printf '{"views":["","page-1"]}' ;;
 	*) printf '{"views":[""]}' ;;

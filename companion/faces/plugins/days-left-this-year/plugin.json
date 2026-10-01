@@ -1,0 +1,12 @@
+{
+  "api": 1,
+  "id": "days-left-this-year",
+  "version": "1.0.0",
+  "label": "Days Left This Year",
+  "description": "Calendar days remaining, including today, and year progress. Uses the server timezone.",
+  "author": "Deskmate contributors",
+  "hosts": [],
+  "secrets": [],
+  "fields": [],
+  "refreshSeconds": 900
+}

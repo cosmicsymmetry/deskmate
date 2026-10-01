@@ -37,7 +37,7 @@ test("describe prints the catalog the server builds the add menu from", async ()
     kind: string;
     fields: { type: string; key: string }[];
   }[];
-  // Built-ins first, then the worked-example plugin under `plugins/github-stats/`
+  // Built-ins first, then the shipped plugins sorted by folder name
   // (`src/plugins/discovery.ts`) -- this is the default `DESKMATE_PLUGINS_DIR`, a
   // real folder beside the package, discovered exactly as the server would.
   expect(catalog.map((face) => face.kind)).toEqual([
@@ -45,6 +45,7 @@ test("describe prints the catalog the server builds the add menu from", async ()
     "hackernews",
     "rss",
     "token",
+    "days-left-this-year",
     "github-stats",
   ]);
   for (const face of catalog) {

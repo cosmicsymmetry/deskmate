@@ -5,6 +5,9 @@
 use super::*;
 use std::io::{BufRead as _, BufReader, Read as _};
 use std::process::Child;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+const REAP_INTERVAL: Duration = Duration::from_millis(100);
 
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_REQUESTS: usize = 256;
@@ -23,7 +26,10 @@ struct Retained {
 
 #[derive(Debug)]
 struct Worker {
-    child: Child,
+    child: Arc<Mutex<Option<Child>>>,
+    exited: Arc<AtomicBool>,
+    #[cfg(test)]
+    io_thread: std::thread::JoinHandle<()>,
     requests: mpsc::SyncSender<Vec<u8>>,
     responses: mpsc::Receiver<Result<Vec<u8>, String>>,
     started: Instant,
@@ -94,10 +100,47 @@ impl Worker {
         let mut stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
         let (requests, receiver) = mpsc::sync_channel::<Vec<u8>>(1);
         let (sender, responses) = mpsc::sync_channel(1);
+        let child = Arc::new(Mutex::new(Some(child)));
+        let exited = Arc::new(AtomicBool::new(false));
+        let weak_child = Arc::downgrade(&child);
+        let reaped = Arc::clone(&exited);
+        std::thread::spawn(move || {
+            loop {
+                let Some(child) = weak_child.upgrade() else {
+                    break;
+                };
+                let done = {
+                    let mut child = child
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if child
+                        .as_mut()
+                        .is_none_or(|child| matches!(child.try_wait(), Ok(Some(_))))
+                    {
+                        *child = None;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if done {
+                    reaped.store(true, Ordering::Release);
+                    break;
+                }
+                drop(child);
+                std::thread::sleep(REAP_INTERVAL);
+            }
+        });
+        let io_exited = Arc::clone(&exited);
         // The caller owns the deadline and kills the child. Never join this IO
         // thread: an inherited pipe writer must not turn a crash into a hang.
-        std::thread::spawn(move || {
-            while let Ok(input) = receiver.recv() {
+        let io_thread = std::thread::spawn(move || {
+            while !io_exited.load(Ordering::Acquire) {
+                let input = match receiver.recv_timeout(REAP_INTERVAL) {
+                    Ok(input) => input,
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                };
                 let answer = (|| {
                     stdin.write_all(&input)?;
                     stdin.write_all(b"\n")?;
@@ -115,8 +158,13 @@ impl Worker {
                 }
             }
         });
+        #[cfg(not(test))]
+        drop(io_thread); // Detach: inherited pipe handles must never make teardown join.
         Ok(Self {
             child,
+            exited,
+            #[cfg(test)]
+            io_thread,
             requests,
             responses,
             started: Instant::now(),
@@ -164,8 +212,16 @@ impl Worker {
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.exited.store(true, Ordering::Release);
+        if let Some(mut child) = self
+            .child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
@@ -252,6 +308,22 @@ fi
     }
 
     #[test]
+    fn an_idle_exited_worker_is_reaped_and_its_io_thread_stops_without_another_tap() {
+        let (_dir, command) = command("exit 0");
+        let worker = Worker::start(&command).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !(worker.child.lock().unwrap().is_none() && worker.io_thread.is_finished()) {
+            assert!(
+                Instant::now() < deadline,
+                "idle child or its IO thread was retained"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Keep the Worker alive throughout: replacement/drop cannot satisfy this test.
+        assert!(worker.exited.load(Ordering::Acquire));
+    }
+
+    #[test]
     fn a_crashed_worker_falls_back_to_a_fresh_spawn_and_can_recover() {
         let (_dir, command) = command(ECHO);
         select(&command);
@@ -259,8 +331,10 @@ fi
         {
             let mut retained = selector.retained.lock().unwrap();
             let worker = retained.worker.as_mut().unwrap();
-            worker.child.kill().unwrap();
-            worker.child.wait().unwrap();
+            let mut child = worker.child.lock().unwrap();
+            let child = child.as_mut().unwrap();
+            child.kill().unwrap();
+            child.wait().unwrap();
         }
         assert_eq!(select(&command), "fresh");
         assert_eq!(

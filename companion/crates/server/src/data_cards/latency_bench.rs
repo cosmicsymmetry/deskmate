@@ -423,7 +423,7 @@ async fn tap_latency_bench() {
                 assert_eq!(assets, 0, "staged tap transferred an asset");
             }
             let elapsed = received.duration_since(started).as_secs_f64() * 1000.0;
-            println!("BENCH sample mode={} trial={trial} ms={elapsed:.3}", mode);
+            println!("BENCH sample mode={mode} trial={trial} ms={elapsed:.3}");
             samples.push(elapsed);
             if !staged {
                 // `record_outcome` runs AFTER staging. Wait for that exact

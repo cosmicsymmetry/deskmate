@@ -23,7 +23,7 @@ async function run(input: string, code?: string) {
 
 test("one selector handles independent states and preserves the error taxonomy", async () => {
   const result = await run(
-    [tap(), tap({ view: "days" }), "{", '{"kind":"absent"}', tap()].join("\n") + "\n",
+    `${[tap(), tap({ view: "days" }), "{", '{"kind":"absent"}', tap()].join("\n")}\n`,
   );
   expect(result.status).toBe(0);
   const rows = result.output

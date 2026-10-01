@@ -218,6 +218,7 @@ fn next_attempt(
 
 /// One refresh: render, accept, notify. `None` means a blocking task panicked, which
 /// is a bug rather than an outcome, and ends the refresher.
+#[allow(clippy::too_many_lines)] // Render, generation-checked commit, and staging form one refresh.
 async fn refresh_once(
     state: &ServerState,
     space: &std::sync::Arc<AccountSpace>,

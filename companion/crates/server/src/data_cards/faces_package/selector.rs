@@ -370,6 +370,17 @@ fi
     }
 
     #[test]
+    fn valid_json_without_a_line_terminator_is_refused() {
+        let (_dir, command) =
+            command("read line; printf '{\"code\":0,\"result\":{\"view\":\"unterminated\"}}'");
+        let mut worker = Worker::start(&command).unwrap();
+        assert_eq!(
+            worker.exchange(b"{}").unwrap_err(),
+            "unframed or oversized selector response"
+        );
+    }
+
+    #[test]
     fn oversized_or_unframed_replies_and_blocked_pipes_are_bounded() {
         for script in [
             "read line; printf '{\"code\":0,\"result\":{\"view\":\"'; head -c 20000 /dev/zero | tr '\\000' x; printf '\"}}\\n'",

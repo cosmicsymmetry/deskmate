@@ -233,7 +233,13 @@ async fn refresh_once(
             source_id = %source_id, taps, unix_us = chrono::Utc::now().timestamp_micros(),
             "tap render started");
     }
-    let previous_state = face_state.get(source_id);
+    let transition = face_state.transition(source_id);
+    let (previous_state, generation) = {
+        let guard = transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (face_state.get(source_id), *guard)
+    };
     let render_faces = faces.clone();
     let render_spec = spec.clone();
     let render_account_dir = space.root.clone();
@@ -284,6 +290,14 @@ async fn refresh_once(
     let next_face_state = rendered.state;
     let face_state = Arc::clone(face_state);
     let accepted = tokio::task::spawn_blocking(move || {
+        let mut guard = transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *guard != generation {
+            // Selection is allowed during this render. Its newer frame and
+            // durable state win; never rewind the page when stale work finishes.
+            return Ok(None);
+        }
         let outcome = accept_space.image_sources.accept_server_rendered(
             &accept_source,
             rendered.frame,
@@ -294,11 +308,15 @@ async fn refresh_once(
         {
             face_state.put(&accept_source, next_face_state);
         }
-        outcome
+        if outcome.is_ok() {
+            *guard = guard.wrapping_add(1);
+        }
+        outcome.map(Some)
     })
     .await;
     match accepted {
-        Ok(Ok(outcome)) => {
+        Ok(Ok(None)) => Some(RefreshOutcome::Drawn),
+        Ok(Ok(Some(outcome))) => {
             if !notify_image_source_outcome(state, space, source_id, &outcome) {
                 tracing::debug!(target: "server::data_cards", source_id = %source_id, kind, "the face is unchanged");
             }

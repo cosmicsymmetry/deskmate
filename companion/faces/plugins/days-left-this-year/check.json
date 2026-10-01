@@ -1,0 +1,76 @@
+{
+  "cases": [
+    {
+      "name": "bar: October",
+      "now": "2026-10-01T12:00:00Z",
+      "timezone": "UTC",
+      "settings": {
+        "face": "bar"
+      }
+    },
+    {
+      "name": "bar: Tokyo New Year",
+      "now": "2027-12-31T15:00:00Z",
+      "timezone": "Asia/Tokyo",
+      "settings": {
+        "face": "bar"
+      }
+    },
+    {
+      "name": "bar: Los Angeles last day",
+      "now": "2028-01-01T07:59:59Z",
+      "timezone": "America/Los_Angeles",
+      "settings": {
+        "face": "bar"
+      }
+    },
+    {
+      "name": "squares: October",
+      "now": "2026-10-01T12:00:00Z",
+      "timezone": "UTC",
+      "settings": {
+        "face": "squares"
+      }
+    },
+    {
+      "name": "squares: Tokyo New Year",
+      "now": "2027-12-31T15:00:00Z",
+      "timezone": "Asia/Tokyo",
+      "settings": {
+        "face": "squares"
+      }
+    },
+    {
+      "name": "squares: Los Angeles last day",
+      "now": "2028-01-01T07:59:59Z",
+      "timezone": "America/Los_Angeles",
+      "settings": {
+        "face": "squares"
+      }
+    },
+    {
+      "name": "dots: October",
+      "now": "2026-10-01T12:00:00Z",
+      "timezone": "UTC",
+      "settings": {
+        "face": "dots"
+      }
+    },
+    {
+      "name": "dots: Tokyo New Year",
+      "now": "2027-12-31T15:00:00Z",
+      "timezone": "Asia/Tokyo",
+      "settings": {
+        "face": "dots"
+      }
+    },
+    {
+      "name": "dots: Los Angeles last day",
+      "now": "2028-01-01T07:59:59Z",
+      "timezone": "America/Los_Angeles",
+      "settings": {
+        "face": "dots"
+      }
+    }
+  ]
+}

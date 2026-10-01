@@ -135,6 +135,7 @@ describe("runPlugin", () => {
     };
     const result = await runPlugin({ ...base, source, request });
     expect(calls).toBe(3);
+    expect(result.log.join(" ")).toContain("3-round limit");
     expect(result.svg).toContain("3");
   });
 

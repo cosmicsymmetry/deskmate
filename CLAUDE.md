@@ -65,10 +65,14 @@ default. This section states only what is true now.
   because one global override cannot name per-account files. Schema stays v10 and the
   wire is untouched. The split: `crates/server/src/data_cards.rs` owns the specs, the
   browser's settings contract, validation and the refresh schedule, and **names no face kind**; the
-  package owns what a face fetches and how it is drawn. The seam is two verbs
+  package owns what a face fetches and how it is drawn. The seam has four public verbs
   (`data_cards/faces_package.rs` <-> `faces/src/main.ts`): `describe` prints the catalog
   the add menu is built from, `render` turns `{kind, settings}` on stdin into a PNG on
-  stdout that goes through `canonical_frame_from_png` like any producer's POST. Exit 2
+  stdout that goes through `canonical_frame_from_png` like any producer's POST; `tap`
+  selects a view/state and `views` lists stageable views. Private `tap-worker` IPC keeps
+  only selection warm (never renders), with 64 KiB requests, 16 KiB replies, a 5 s
+  exchange deadline, 256 requests / 60 s lifetime and 128 MiB RSS retirement between
+  requests. Crash falls back to one-shot `tap`; faces-only updates need no restart. Exit 2
   means "the owner must change a setting", anything else non-zero is transient, and
   either keeps the stored frame. The child's environment is cleared -- the server's holds
   the admin token. **Adding a face is a file in `faces/src/faces/` plus

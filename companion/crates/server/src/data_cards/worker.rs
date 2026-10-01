@@ -216,6 +216,7 @@ fn next_attempt(
 
 /// One refresh: render, accept, notify. `None` means a blocking task panicked, which
 /// is a bug rather than an outcome, and ends the refresher.
+#[allow(clippy::too_many_lines)] // Render, generation-checked commit, and staging form one refresh.
 async fn refresh_once(
     state: &ServerState,
     space: &std::sync::Arc<AccountSpace>,
@@ -224,113 +225,144 @@ async fn refresh_once(
     spec: &DataCardSpec,
     taps: u32,
 ) -> Option<RefreshOutcome> {
-    let (source_id, kind) = (&spec.source_id, &spec.face.kind);
-    let started = std::time::Instant::now();
-    if taps > 0 {
-        tracing::info!(target: "server::tap_latency", account_id = %space.account_id,
+    loop {
+        let (source_id, kind) = (&spec.source_id, &spec.face.kind);
+        let started = std::time::Instant::now();
+        if taps > 0 {
+            tracing::info!(target: "server::tap_latency", account_id = %space.account_id,
             source_id = %source_id, taps, unix_us = chrono::Utc::now().timestamp_micros(),
             "tap render started");
-    }
-    let previous_state = face_state.get(source_id);
-    let render_faces = faces.clone();
-    let render_spec = spec.clone();
-    let render_account_dir = space.root.clone();
-    let clock_state = state.clone();
-    let clock_space = Arc::clone(space);
-    let rendered = tokio::task::spawn_blocking(move || {
-        let timezone = clock::source_timezone(&clock_state, &clock_space, &render_spec.source_id);
-        render_frame(
-            &render_faces,
-            &render_account_dir,
-            &timezone,
-            &render_spec,
-            previous_state.as_ref(),
-            taps,
-        )
-    })
-    .await;
-    if taps > 0 {
-        tracing::info!(target: "server::tap_latency", account_id = %space.account_id,
+        }
+        let transition = face_state.transition(source_id);
+        let (previous_state, generation) = {
+            let guard = transition
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (face_state.get(source_id), *guard)
+        };
+        let render_faces = faces.clone();
+        let render_spec = spec.clone();
+        let render_account_dir = space.root.clone();
+        let clock_state = state.clone();
+        let clock_space = Arc::clone(space);
+        let rendered = tokio::task::spawn_blocking(move || {
+            let timezone =
+                clock::source_timezone(&clock_state, &clock_space, &render_spec.source_id);
+            render_frame(
+                &render_faces,
+                &render_account_dir,
+                &timezone,
+                &render_spec,
+                previous_state.as_ref(),
+                taps,
+            )
+        })
+        .await;
+        if taps > 0 {
+            tracing::info!(target: "server::tap_latency", account_id = %space.account_id,
             source_id = %source_id, taps, unix_us = chrono::Utc::now().timestamp_micros(),
             elapsed_us = started.elapsed().as_micros(), ok = matches!(&rendered, Ok(Ok(_))),
             "tap render completed");
-    }
-    let rendered = match rendered {
-        Ok(Ok(rendered)) => rendered,
-        Ok(Err(RefreshFailure::Configuration(error))) => {
-            tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error,
+        }
+        let rendered = match rendered {
+            Ok(Ok(rendered)) => rendered,
+            Ok(Err(RefreshFailure::Configuration(error))) => {
+                tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error,
                 "the face's settings need the owner's attention; keeping the stored frame unchanged");
-            return Some(RefreshOutcome::NeedsAttention(error));
-        }
-        Ok(Err(RefreshFailure::Transient(error))) => {
-            tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error,
-                "the data fetch failed; keeping the stored frame unchanged");
-            return Some(RefreshOutcome::Retrying(error));
-        }
-        Ok(Err(RefreshFailure::NotAFrame(error))) => {
-            tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error,
-                "the faces package did not produce an acceptable frame");
-            return Some(RefreshOutcome::Retrying(format!(
-                "the face could not be drawn: {error}"
-            )));
-        }
-        Err(error) => {
-            tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error, "the render task panicked");
-            return None;
-        }
-    };
-
-    let accept_source = source_id.clone();
-    let accept_space = Arc::clone(space);
-    let face_state_for_staging = Arc::clone(face_state);
-    let next_face_state = rendered.state;
-    let face_state = Arc::clone(face_state);
-    let accepted = tokio::task::spawn_blocking(move || {
-        let outcome = accept_space.image_sources.accept_server_rendered(
-            &accept_source,
-            rendered.frame,
-            Utc::now(),
-        );
-        if outcome.is_ok()
-            && let Some(next_face_state) = next_face_state
-        {
-            face_state.put(&accept_source, next_face_state);
-        }
-        outcome
-    })
-    .await;
-    match accepted {
-        Ok(Ok(outcome)) => {
-            if !notify_image_source_outcome(state, space, source_id, &outcome) {
-                tracing::debug!(target: "server::data_cards", source_id = %source_id, kind, "the face is unchanged");
+                return Some(RefreshOutcome::NeedsAttention(error));
             }
-            stage_other_views(state, space, faces, face_state_for_staging, spec).await;
-            Some(RefreshOutcome::Drawn)
-        }
-        Ok(Err(error)) => {
-            tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error, "the frame was not stored");
-            Some(RefreshOutcome::Retrying(format!(
-                "the frame was not stored: {error}"
-            )))
-        }
-        Err(error) => {
-            tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error, "the store task panicked");
-            None
-        }
+            Ok(Err(RefreshFailure::Transient(error))) => {
+                tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error,
+                "the data fetch failed; keeping the stored frame unchanged");
+                return Some(RefreshOutcome::Retrying(error));
+            }
+            Ok(Err(RefreshFailure::NotAFrame(error))) => {
+                tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error,
+                "the faces package did not produce an acceptable frame");
+                return Some(RefreshOutcome::Retrying(format!(
+                    "the face could not be drawn: {error}"
+                )));
+            }
+            Err(error) => {
+                tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error, "the render task panicked");
+                return None;
+            }
+        };
+
+        let accept_source = source_id.clone();
+        let accept_space = Arc::clone(space);
+        let face_state_for_staging = Arc::clone(face_state);
+        let next_face_state = rendered.state;
+        let face_state = Arc::clone(face_state);
+        let accepted = tokio::task::spawn_blocking(move || {
+            let mut guard = transition
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if *guard != generation {
+                // Selection is allowed during this render. Its newer frame and
+                // durable state win; never rewind the page when stale work finishes.
+                return Ok(None);
+            }
+            let outcome = accept_space.image_sources.accept_server_rendered(
+                &accept_source,
+                rendered.frame,
+                Utc::now(),
+            );
+            // A fallback's result lives in the resting slot. Selecting a staged
+            // view meanwhile must not leave the newly committed tap invisible,
+            // even when these pixels equal the previous resting frame.
+            let outcome = if taps > 0 && outcome.is_ok() {
+                accept_space
+                    .image_sources
+                    .select_view(&accept_source, "")
+                    .map(|digest| AcceptOutcome::Changed { digest })
+                    .ok_or(crate::image_sources::ImageSourceError::UnknownToken)
+            } else {
+                outcome
+            };
+            if outcome.is_ok()
+                && let Some(next_face_state) = next_face_state
+            {
+                face_state.put(&accept_source, next_face_state);
+            }
+            if outcome.is_ok() {
+                *guard = guard.wrapping_add(1);
+            }
+            outcome.map(Some)
+        })
+        .await;
+        return match accepted {
+            // A staged selection won the race, but it consumed only its own tap.
+            // Rebase this already-consumed batch onto the winner's durable state.
+            Ok(Ok(None)) if taps > 0 => continue,
+            Ok(Ok(None)) => Some(RefreshOutcome::Drawn),
+            Ok(Ok(Some(outcome))) => {
+                if !notify_image_source_outcome(state, space, source_id, &outcome) {
+                    tracing::debug!(target: "server::data_cards", source_id = %source_id, kind, "the face is unchanged");
+                }
+                stage_other_views(state, space, faces, face_state_for_staging, spec).await;
+                Some(RefreshOutcome::Drawn)
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error, "the frame was not stored");
+                Some(RefreshOutcome::Retrying(format!(
+                    "the frame was not stored: {error}"
+                )))
+            }
+            Err(error) => {
+                tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error, "the store task panicked");
+                None
+            }
+        };
     }
 }
 
 /// How many frames one source may hold, resting view included.
 ///
-/// The real ceilings are the device's fifteen resident slots and the wire's
-/// 32-digest `AssetRelease`, and both are shared across every picture card. Four
-/// cards at four views each would exceed the first and approach the second, so
-/// this is deliberately conservative: it keeps a four-card loop inside both with
-/// room to spare. The spec's proportional budget -- `floor(15 / picture_cards)`
-/// with the remainder to the cards that declared the most -- needs the device's
-/// card count here, which this worker does not have; a flat cap is the honest
-/// version of it until it does.
-const MAX_STAGED_FRAMES_PER_SOURCE: usize = 3;
+/// The store admits extras atomically against an account-wide fifteen-frame
+/// budget, reserving all eight possible resting frames. Four is the per-source
+/// fairness ceiling, not the device capacity; a refused extra stays a fallback.
+const MAX_STAGED_FRAMES_PER_SOURCE: usize = 4;
 
 /// Draws the face's other views and stores each, so a tap on one costs a scene
 /// and nothing else.

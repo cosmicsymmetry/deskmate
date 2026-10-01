@@ -141,7 +141,17 @@ async fn a_second_socket_for_the_same_device_is_refused() {
 
 #[tokio::test]
 async fn running_pomodoro_survives_link_close_and_reattach() {
-    let (host, identity, admin_token) = spawn().await;
+    // Detect the closed link before reapplying config while detached. Production's
+    // two-second status poll races the 1.5-second timer observation below.
+    let (host, identity, admin_token) = spawn_state(
+        ServerState::in_memory_with_runtime_options(app_core::RuntimeOptions {
+            status_interval: std::time::Duration::from_millis(20),
+            reconnect_interval: std::time::Duration::from_millis(10),
+            ..app_core::RuntimeOptions::default()
+        }),
+        support::IN_MEMORY_ADMIN_TOKEN,
+    )
+    .await;
     let client = reqwest::Client::new();
     install_pomodoro_config(&client, &host, &identity.device_id, &admin_token).await;
 

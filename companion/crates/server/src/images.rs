@@ -449,6 +449,7 @@ fn map_mint_error(error: &ImageSourceError) -> ImageRouteError {
         | ImageSourceError::UnknownToken
         | ImageSourceError::TooSoon
         | ImageSourceError::InvalidView
+        | ImageSourceError::StagingCapacity
         | ImageSourceError::TooManyViews => ImageRouteError::Internal,
     }
 }
@@ -460,6 +461,7 @@ fn map_revoke_error(error: &ImageSourceError) -> ImageRouteError {
         | ImageSourceError::Capacity
         | ImageSourceError::TooSoon
         | ImageSourceError::InvalidView
+        | ImageSourceError::StagingCapacity
         | ImageSourceError::TooManyViews => ImageRouteError::Internal,
     }
 }
@@ -476,6 +478,7 @@ fn map_accept_error(error: &ImageSourceError) -> ImageRouteError {
         ImageSourceError::Io { .. }
         | ImageSourceError::Capacity
         | ImageSourceError::InvalidView
+        | ImageSourceError::StagingCapacity
         | ImageSourceError::TooManyViews => ImageRouteError::Internal,
     }
 }

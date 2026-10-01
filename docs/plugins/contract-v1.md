@@ -605,9 +605,10 @@ which is the tree `deploy.sh` rsyncs to the VM wholesale
 (`docs/images/server-rendered-cards.md`, "Who does what"). `deploy.sh --faces-only`
 carries your plugin folder exactly as it carries a built-in face's own source file --
 no Rust build, no restart, and the catalog is re-read every 60 s, so the plugin
-appears in the add menu on its own once the deploy finishes. There is no separate
-publish, review, or registration step for a plugin on this branch; getting it into
-`companion/faces/plugins/` on the branch that gets deployed is the whole submission.
+appears in the add menu on its own once the deploy finishes. Submit new plugins and
+updates through the [PR submission and review process](submitting.md) before that
+operator-controlled release. This is a manual review workflow; the runtime has no
+separate registration step or machine-enforced approval record.
 
 ## Not yet true, though the design record describes it
 

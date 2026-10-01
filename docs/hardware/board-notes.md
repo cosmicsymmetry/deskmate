@@ -4452,7 +4452,7 @@ rasterization turns volatile assets into the common case.
 
 Board on `v2.0.0-live2`, networked tier, `dev-0005`, capabilities **491** (no bit 9 yet
 — correct for the predecessor image). WiFi re-provisioned over the cable to
-`Slate7Legacy` earlier this session; same device identity/token, no identity cost. Server
+the home network earlier this session; same device identity/token, no identity cost. Server
 redeployed 2026-09-05 from `f40958a`, registry 5/0
 (`agenda, aqi, claude-limits, svg-aqi, svg-live-clock`).
 
@@ -4681,7 +4681,7 @@ protocol, or config change — so no OTA re-verification is owed. The harness un
 pins the historical 96/10/86 split with the per-reason exclusion breakdown; the current
 post-removal test pins the unobserved 78/8/70 inventory instead.
 
-**Restore.** Re-provisioned networked (`dev-0005`, WiFi `Slate7Legacy`, offset 240,
+**Restore.** Re-provisioned networked (`dev-0005`, home WiFi, offset 240,
 plaintext token from `pass`), then full-flashed the verified release image (sha
 `29f15a6f…`). Device came up `v2.0.0-raster1`, caps `0x3eb` (1003), tier networked, WiFi
 connected (`192.168.8.168`), rotation 270°; the server confirms `dev-0005` **connected**,

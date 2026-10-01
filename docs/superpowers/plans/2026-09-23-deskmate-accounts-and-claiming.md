@@ -14,7 +14,7 @@
 > **Merged 2026-09-28 (PR #5), after C1 phase 1 was merged in and made per-account.**
 > Deploy rides C1's next deploy (owner's choice): the live server was running C1's phase-2
 > branch, and replacing it mid-session was ruled out. `DESKMATE_PUBLIC_URL` and
-> `DESKMATE_OWNER_EMAIL=re.aleksandrov1@gmail.com` are already in the live `server.env`
+> `DESKMATE_OWNER_EMAIL` (the owner's address) are already in the live `server.env`
 > (backed up first), so that first start migrates instead of refusing. Task 13 steps 5-6
 > (observe the migration live; claim `dev-0005`) are owed after that deploy.
 

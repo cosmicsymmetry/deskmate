@@ -631,10 +631,8 @@ R2 and R3 being uncertain is that something will get through.
 
 **The render host is not dedicated, and this is the residual risk that no sandbox
 removes.** `deskmate.rodi.one` runs on docker-vm — the owner's homelab VM — alongside
-unrelated personal services including immich (the photo library), nextcloud (files),
-wallabag (read-later archive) and others, behind Cloudflare → cloudflared → Caddy. The
-deploy is a root-owned tree with `sudo -n` available. The same VM also carries the
-`trmnl-claude-sync` timer and `/opt/deskmate-feeds`.
+unrelated self-hosted personal services, behind Cloudflare → cloudflared → Caddy. The
+same VM also carries the `trmnl-claude-sync` timer and `/opt/deskmate-feeds`.
 
 The honest statement of residual risk, **even with R3's process isolation fully
 implemented**:
@@ -655,7 +653,7 @@ implemented**:
 
 | | Option | Assessment |
 |---|---|---|
-| A | **Keep public content on docker-vm with process isolation.** | Reject. The residual risk above is borne by immich/nextcloud/wallabag data that has nothing to do with this project. |
+| A | **Keep public content on docker-vm with process isolation.** | Reject. The residual risk above is borne by the co-hosted personal services' data that has nothing to do with this project. |
 | B | **Dedicated VM or host for the render path** (or a managed sandbox provider). | Recommended, as a precondition. |
 | C | **No public content at all.** | The status quo, and the correct answer until B is paid for. |
 
@@ -758,7 +756,7 @@ The blocking reasons, in order of decisiveness:
 2. **Hostile content would be parsed in a process holding the V3 secrets master key and
    decrypted OAuth refresh tokens** (R3). This is disqualifying on its own.
 3. **The render host is shared with the owner's unrelated personal services** (R5). The
-   residual risk falls on immich/nextcloud/wallabag data that has no stake in this feature.
+   residual risk falls on the co-hosted personal services' data that has no stake in this feature.
 4. **No parser in the pipeline has ever been fuzzed** (R2), in a codebase whose one known
    content-handling vulnerability was found in curated input and needed two layers to close.
 5. **Quarantine is an architecture change, not a policy** (R4), because `desired_assets()`
@@ -794,7 +792,7 @@ quarantine to the uploader's own devices.
 | **Mandatory server-side image re-encoding** | **Agree, and extend it two ways.** Apply it to curated content too (one canonical producer), and add the device-side header invariant *anyway* — re-encoding is a server-side control, and this project's stated posture is that device-side code treats host bytes as untrusted. Note honestly that re-encoding moves a hostile decode into the server, so it must live inside the subprocess with one format and one decoder. |
 | **Per-uploader device quarantine** | **Agree, with a cost correction the plan does not state.** `desired_assets()` is registry-wide (`runtime.rs:3313`), so every device currently receives every plugin's assets. This is an architecture change with a real regression surface, not a policy flag, and it must be costed before stage 5 is scheduled. |
 | **Process-isolated rendering** | **Agree, and upgrade it from "requires" to "precondition".** The plan treats it as a decision to make; V3 settled it. A parser bug in `resvg`/`usvg`/`roxmltree`/`ttf-parser`/`toml` in the server process is a path to the owner's Google refresh tokens. Also: kill-on-deadline is the only thing that turns `MAX_RENDER_WALL_CLOCK` into enforcement, which benefits curated content today. |
-| **Dedicated-isolation decision** | **Decide it now: required.** Not a nice-to-have and not a later optimisation. The shared VM carries immich, nextcloud, wallabag and the V3 secrets keyfile; a sandbox does not remove a shared kernel. Public content runs on a dedicated host or it does not run. |
+| **Dedicated-isolation decision** | **Decide it now: required.** Not a nice-to-have and not a later optimisation. The shared VM carries the co-hosted personal services and the V3 secrets keyfile; a sandbox does not remove a shared kernel. Public content runs on a dedicated host or it does not run. |
 
 ### Deferred, with reasons
 

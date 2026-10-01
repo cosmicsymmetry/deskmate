@@ -1070,7 +1070,7 @@ Every Rust command below runs from `/Users/rodion/dev/deskmate/.worktrees/plugin
 
   [source]
   kind = "json"
-  url = "https://deskmate.rodi.one/feeds/119fa3cca44bf0b9bb8c33f6/claude-usage.json"
+  url = "https://<your-server>/feeds/<feed-token>/claude-usage.json"
   refresh_minutes = 10
 
   [template]

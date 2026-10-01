@@ -5954,3 +5954,42 @@ needs the owner.
 - **A timed release with an empty durable store.** Key 31 still holds 4 records.
 - **A full USB flash** for a rollback baseline OTA cannot produce. Optional, cable only.
 - **The framebuffer matrix**, deliberately not in this session.
+
+## 2026-10-01 — the owner's disposition of what 09-30 left owed
+
+Decisions, not observations. The list above is the record of what the 09-30 session saw;
+this says what is still wanted, and the two items the owner retired are retired
+**unobserved** -- nothing below was seen on the panel.
+
+- **Both mountings: retired.** The owner's words were "count 90 as done". So 90 degrees
+  was **never seen**: the only footage is 270, and no one has judged letter-spacing
+  overhang or legibility from a chair at 90. Do not read this entry, or the closing of
+  ROD-12, as verification of a face at 90 degrees. If a later session needs that fact it
+  starts from zero.
+- **A full USB flash: dropped** ("drop it for now"). The rollback test still has no
+  baseline OTA cannot produce, and that is the accepted state.
+- **The 250 ms target: the owner chose to chase the gap**, not to move the target. The
+  0.30-0.57 s release->stable stands as the measured number and the track owes a
+  reduction. Tracked as ROD-14, whose first deliverable is the thing this session could
+  not do: **split release->stable into device->server and server->panel.** The journal
+  logs neither a tap's arrival nor a `PushScene`, so the split needs server-side
+  instrumentation before any optimisation is worth attempting. Server-only by
+  construction -- no schema, wire or firmware-statics crossing without the owner.
+- **The `hackernews` face: to be added** ("yes, add a hackernews card"), and it is a
+  window action, not a deploy. Confirmed read-only on the VM this morning: the deployed
+  faces package at `865e83c` already carries `hackernews.ts`
+  (`/var/lib/deskmate/faces/src/faces/`), so the live add menu offers the face today. The
+  card is created with "Add a card" -> picture -> source **Hacker News**, whose only
+  field is `Stories` (default `top` = front page); `POST /v1/images {name, face_kind}`
+  mints the source and attaches the face in one request, and the picture card then joins
+  the loop. **This needs the owner's account session in their own browser** -- the admin
+  token does not satisfy `AccountSession`, and `deskmate-cli` is cable-only (status,
+  time-sync, push-timer, provision, factory-reset), so there is no sanctioned non-browser
+  path. It was therefore **not done**; hand-editing the account's `data-cards.json` on the
+  VM was rejected as the way to do it, because a config the store refuses stays refused
+  and would take the live loop down for a change the add menu makes in one click.
+- **Live at this entry: `865e83c` for all three parts** (faces, web, binary --
+  `deploy.sh --status`). ROD-13's fix is on the branch at `4757753` and is **not
+  deployed**, so the rendered-tap time is still blocked. The fix is faces-only, so
+  `deploy.sh --faces-only` ships it: an rsync plus the suite on the VM, no Rust, no
+  restart, no schema and no wire.

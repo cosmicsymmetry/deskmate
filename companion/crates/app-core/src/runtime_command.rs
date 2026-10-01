@@ -52,6 +52,8 @@ impl std::error::Error for RuntimeError {}
 pub(crate) type CommandReply = SyncSender<Result<(), RuntimeError>>;
 
 pub(crate) enum RuntimeCommand {
+    /// A device queued an unsolicited event; drain it without waiting for a tick.
+    DeviceEventsReady,
     ApplyConfig {
         config: AppConfig,
         reply: CommandReply,

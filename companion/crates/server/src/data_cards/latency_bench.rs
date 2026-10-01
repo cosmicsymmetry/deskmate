@@ -12,7 +12,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 struct Peer {
     taps: mpsc::UnboundedSender<tokio::sync::oneshot::Sender<Instant>>,
-    scenes: mpsc::UnboundedReceiver<([u8; 32], Instant, usize)>,
+    scenes: mpsc::UnboundedReceiver<([u8; 32], Instant, usize, usize)>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -71,6 +71,7 @@ impl Peer {
             let mut sequence = 0;
             let mut resident = HashSet::new();
             let mut assets = 0;
+            let mut begins = 0;
             loop {
                 tokio::select! {
                     request = requests.recv() => {
@@ -110,12 +111,14 @@ impl Peer {
                                         for node in &push.scene.nodes {
                                             if let protocol::SceneNode::Image(image) = node {
                                                 assert!(resident.contains(&image.digest), "scene references an absent asset");
-                                                scenes.send((image.digest, received, assets)).unwrap();
+                                                scenes.send((image.digest, received, assets, begins)).unwrap();
                                                 assets = 0;
+                                                begins = 0;
                                             }
                                         }
                                     }
                                     Message::AssetBegin(begin) => {
+                                        begins += 1;
                                         ack.already_present = Some(resident.contains(&begin.digest));
                                     }
                                     Message::AssetChunk(_) => { assets += 1; }
@@ -138,12 +141,12 @@ impl Peer {
         }
     }
 
-    async fn until(&mut self, digest: [u8; 32]) -> (Instant, usize) {
+    async fn until(&mut self, digest: [u8; 32]) -> (Instant, usize, usize) {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let (seen, at, assets) = self.scenes.recv().await.expect("device stopped");
+                let (seen, at, assets, begins) = self.scenes.recv().await.expect("device stopped");
                 if seen == digest {
-                    return (at, assets);
+                    return (at, assets, begins);
                 }
             }
         })
@@ -180,6 +183,83 @@ fn draw(command: &FaceCommand, space: &AccountSpace, view: &str) -> CanonicalFra
     )
     .unwrap();
     canonical_frame_from_png(&rendered.png).unwrap()
+}
+
+fn write_config(space: &AccountSpace, source_id: &str) {
+    let config = serde_json::json!({
+        "schema_version": 10,
+        "preferences": {"timezone":"UTC","autostart":false,"paused":false,"orientation":"landscape"},
+        "cards":[{"kind":"picture","id":"bench","title":"Bench","source_id":source_id,
+            "tap_action":{"kind":"none"},"refresh":{"kind":"manual"},"alert":{"kind":"none"},"dwell_seconds":null}],
+        "image_sources":[{"id":source_id,"name":"Bench"}],"assets":[],
+        "advance":{"kind":"manual"},"updater":{"channel":"stable","checks":"disabled"}
+    });
+    std::fs::create_dir_all(space.root.join("devices")).unwrap();
+    std::fs::write(space.root.join("bench-config.json"), config.to_string()).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_socket_tap_wakes_an_idle_runtime_before_its_next_tick() {
+    let state = ServerState::in_memory_with_runtime_options(app_core::RuntimeOptions {
+        loop_maximum_wait: Duration::from_secs(3),
+        pomodoro_interval: Duration::from_secs(30),
+        status_interval: Duration::from_secs(30),
+        time_sync_interval: Duration::from_secs(30),
+        ..app_core::RuntimeOptions::default()
+    });
+    set_faces(&state, faces_package::fake());
+    let account = state
+        .identity()
+        .create_account("wake@example.com", true, true, chrono::Utc::now())
+        .unwrap();
+    let space = state.account_space(&account.id);
+    let source = space.image_sources.mint("Wake").unwrap();
+    let frame = |name| {
+        canonical_frame_from_png(
+            &std::fs::read(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/support")
+                    .join(name),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let base = frame("fake-face.png");
+    let next = frame("fake-face-alt.png");
+    space
+        .image_sources
+        .accept_server_rendered(&source.id, base.clone(), chrono::Utc::now())
+        .unwrap();
+    space
+        .image_sources
+        .accept_staged_view(&source.id, "page-1", next.clone(), chrono::Utc::now())
+        .unwrap();
+    space.data_cards.lock().unwrap().specs.push(DataCardSpec {
+        source_id: source.id.clone(),
+        refresh_seconds: 900,
+        face: FaceSpec {
+            kind: "headlines".into(),
+            settings: BTreeMap::new(),
+        },
+    });
+    write_config(&space, &source.id);
+    let mut peer = Peer::start(&state, &account.id).await;
+    peer.until(base.digest).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (reply, started) = tokio::sync::oneshot::channel();
+    peer.taps.send(reply).unwrap();
+    started.await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(1), peer.until(next.digest)).await;
+    state.shutdown();
+    peer.task.abort();
+    assert!(result.is_ok(), "tap waited for the three-second idle poll");
+    let (_, chunks, begins) = result.unwrap();
+    assert_eq!(
+        (begins, chunks),
+        (0, 0),
+        "resident selection must push only the scene"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -267,16 +347,7 @@ async fn tap_latency_bench() {
         .await
         .unwrap();
         face_state.put(&source.id, Some(rss_state(initial_page)));
-        let config = serde_json::json!({
-            "schema_version": 10,
-            "preferences": {"timezone":"UTC","autostart":false,"paused":false,"orientation":"landscape"},
-            "cards":[{"kind":"picture","id":"bench","title":"Bench","source_id":source.id,
-                "tap_action":{"kind":"none"},"refresh":{"kind":"manual"},"alert":{"kind":"none"},"dwell_seconds":null}],
-            "image_sources":[{"id":source.id,"name":"Bench"}],"assets":[],
-            "advance":{"kind":"manual"},"updater":{"channel":"stable","checks":"disabled"}
-        });
-        std::fs::create_dir_all(space.root.join("devices")).unwrap();
-        std::fs::write(space.root.join("bench-config.json"), config.to_string()).unwrap();
+        write_config(&space, &source.id);
         let mut peer = Peer::start(&state, &account.id).await;
         peer.until(base.digest).await;
         let mut samples = Vec::new();
@@ -304,7 +375,7 @@ async fn tap_latency_bench() {
             let (reply, started) = tokio::sync::oneshot::channel();
             peer.taps.send(reply).unwrap();
             let started = started.await.unwrap();
-            let (received, assets) = peer.until(next.digest).await;
+            let (received, assets, _) = peer.until(next.digest).await;
             if staged {
                 assert_eq!(assets, 0, "staged tap transferred an asset");
             }

@@ -115,7 +115,7 @@ impl RuntimeHandle {
 
     pub fn start_with_ports(
         config: AppConfig,
-        device: Box<dyn RuntimeDevice>,
+        mut device: Box<dyn RuntimeDevice>,
         options: RuntimeOptions,
         image_source_host: Option<Box<dyn ImageSourceHost>>,
         tap_sink: Option<Arc<dyn CardTapSink>>,
@@ -135,6 +135,12 @@ impl RuntimeHandle {
             diagnostics: Arc::clone(&diagnostics),
         });
         let (sender, receiver) = mpsc::sync_channel(options.command_capacity.max(1));
+        let event_sender = sender.clone();
+        device.set_event_waker(Arc::new(move || {
+            // A full queue already wakes the worker. Never block the socket
+            // reader or replace the event queue's own bounded delivery policy.
+            let _ = event_sender.try_send(RuntimeCommand::DeviceEventsReady);
+        }));
         let worker_publisher = Arc::clone(&publisher);
         let worker_diagnostics = Arc::clone(&diagnostics);
         let worker_inputs = RuntimeWorkerInputs {
@@ -823,6 +829,7 @@ fn process_command(
         .commands_processed
         .fetch_add(1, Ordering::Relaxed);
     match command {
+        RuntimeCommand::DeviceEventsReady => {}
         RuntimeCommand::ApplyConfig { config, reply } => {
             let now = Instant::now();
             state.replace_config(config, now, scheduler);
@@ -1007,6 +1014,18 @@ fn apply_image_source_update(
     if state.config.preferences.paused {
         if visible_picture_card_id.is_some() {
             state.active_scene_dirty = true;
+        }
+        return Ok(());
+    }
+
+    // A staged selection already has a confirmed digest on this connection.
+    // Even an already-present AssetBegin costs a device round trip; the scene
+    // alone is enough. Keep the authoritative host checks above this shortcut.
+    if state.confirmed_resident_assets.contains(&digest) {
+        clear_asset_sync_refusals(state);
+        if visible_picture_card_id.is_some() {
+            state.active_scene_dirty = true;
+            push_active_scene(state, device, reconnect_interval);
         }
         return Ok(());
     }

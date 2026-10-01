@@ -276,6 +276,25 @@ struct EventRouter {
     last_queued_sequence: Option<u64>,
     diagnostics: Arc<DiagnosticCounters>,
     replay: Arc<Mutex<ReplayState>>,
+    wake: EventWake,
+}
+
+#[derive(Clone, Default)]
+struct EventWake(Arc<Mutex<Option<WakeCallback>>>);
+
+type WakeCallback = Arc<dyn Fn() + Send + Sync>;
+
+impl EventWake {
+    fn notify(&self) {
+        let wake = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(wake) = wake {
+            wake();
+        }
+    }
 }
 
 impl EventRouter {
@@ -306,6 +325,7 @@ impl EventRouter {
             missed_before,
         }) {
             Ok(()) => {
+                self.wake.notify();
                 self.last_queued_sequence = Some(sequence);
                 self.diagnostics
                     .detected_event_gaps
@@ -327,6 +347,7 @@ impl EventRouter {
 pub(crate) struct SocketConnector {
     transport: Arc<TransportSlot>,
     event_sender: SyncSender<ReceivedEvent>,
+    wake: EventWake,
     diagnostics: Arc<DiagnosticCounters>,
     replay: Arc<Mutex<ReplayState>>,
     last_ota_error: Arc<Mutex<Option<String>>>,
@@ -339,6 +360,7 @@ impl SocketConnector {
         SocketPeer {
             commands: command_receiver,
             event_router: EventRouter {
+                wake: self.wake.clone(),
                 sender: self.event_sender.clone(),
                 last_seen_sequence: None,
                 last_queued_sequence: None,
@@ -366,6 +388,7 @@ impl SocketConnector {
 
 /// The synchronous half handed to [`app_core::RuntimeHandle`].
 pub(crate) struct WebSocketRuntimeDevice {
+    wake: EventWake,
     device_id: String,
     transport: Arc<TransportSlot>,
     events: Receiver<ReceivedEvent>,
@@ -396,11 +419,13 @@ pub(crate) struct SocketPeer {
 impl WebSocketRuntimeDevice {
     pub(crate) fn channel(device_id: String) -> (Self, SocketConnector) {
         let (event_sender, event_receiver) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
+        let wake = EventWake::default();
         let diagnostics = Arc::new(DiagnosticCounters::default());
         let transport = Arc::new(TransportSlot::default());
         let replay = Arc::new(Mutex::new(ReplayState::default()));
         let last_ota_error = Arc::new(Mutex::new(None));
         let connector = SocketConnector {
+            wake: wake.clone(),
             transport: Arc::clone(&transport),
             event_sender,
             diagnostics: Arc::clone(&diagnostics),
@@ -409,6 +434,7 @@ impl WebSocketRuntimeDevice {
         };
         (
             Self {
+                wake,
                 device_id,
                 transport,
                 events: event_receiver,
@@ -584,6 +610,13 @@ impl WebSocketRuntimeDevice {
 /// status/data work refuses that generation until app-core runs `connect()`
 /// and this implementation has replayed the device model.
 impl RuntimeDevice for WebSocketRuntimeDevice {
+    fn set_event_waker(&mut self, wake: Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .wake
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(wake);
+    }
     fn connect(&mut self) -> Result<DeviceConnection, DeviceError> {
         let response = self.request(Message::StatusRequest);
         let (generation, response) = match response {
@@ -1289,6 +1322,7 @@ mod tests {
         let (device, _connector) = super::WebSocketRuntimeDevice::channel("diagnostics".into());
         (
             EventRouter {
+                wake: super::EventWake::default(),
                 sender,
                 last_seen_sequence: None,
                 last_queued_sequence: None,

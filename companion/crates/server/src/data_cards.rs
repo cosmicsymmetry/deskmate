@@ -34,6 +34,8 @@ use crate::accounts::AccountSpace;
 
 mod face_state;
 mod faces_package;
+#[cfg(test)]
+mod latency_bench;
 mod worker;
 
 use face_state::FaceStateStore;

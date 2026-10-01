@@ -19,6 +19,11 @@ recorded in [board notes](docs/hardware/board-notes.md).
 [Build and run your own server](docs/self-host.md), including first-run setup, keys,
 HTTPS and backups. No owner-specific tunnel or private crate is required.
 
+## Plugins
+
+Write a sandboxed picture producer using [plugin contract v1](docs/plugins/contract-v1.md),
+then [submit it for review through a pull request](docs/plugins/submitting.md).
+
 ## Web companion
 
 For UI work without a server or device, run the browser harness:

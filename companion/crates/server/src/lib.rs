@@ -597,6 +597,9 @@ impl ServerState {
                 .collect::<Vec<_>>();
             (device_ids, runtimes)
         };
+        tracing::info!(target: "server::tap_latency", account_id = %account,
+            source_id, digest = %protocol::digest_hex(&digest), devices = ?device_ids,
+            unix_us = chrono::Utc::now().timestamp_micros(), "image update queued for runtimes");
         #[cfg(test)]
         self.inner
             .image_notifications

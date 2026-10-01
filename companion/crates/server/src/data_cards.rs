@@ -823,12 +823,15 @@ fn count_dropped_tap(space: &AccountSpace, source_id: &str, reason: &'static str
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     data_cards.taps_dropped = data_cards.taps_dropped.saturating_add(1);
     tracing::debug!(target: "server::data_cards", source_id, reason, "dropping card tap");
+    tracing::info!(target: "server::tap_latency", source_id, reason,
+        unix_us = chrono::Utc::now().timestamp_micros(), decision = "dropped", taps = 1, "tap decision");
 }
 
 /// Routes one device tap to the source's retained refresher without starting a
 /// render task of its own. A miss is diagnostic data, not a reason to invent a
 /// face for an external producer's picture card.
 pub(crate) fn tapped(state: &ServerState, space: &AccountSpace, source_id: &str) {
+    let started = std::time::Instant::now();
     if !face_takes_taps(state, space, source_id) {
         count_dropped_tap(
             space,
@@ -858,6 +861,10 @@ pub(crate) fn tapped(state: &ServerState, space: &AccountSpace, source_id: &str)
         count_dropped_tap(space, source_id, "the face has no running refresher");
         return;
     };
+    tracing::info!(target: "server::tap_latency", source_id,
+        unix_us = chrono::Utc::now().timestamp_micros(),
+        elapsed_us = started.elapsed().as_micros(), decision = "render_fallback", taps = 1,
+        "tap decision");
     signal.tap();
 }
 
@@ -897,16 +904,28 @@ fn select_staged_view(state: &ServerState, space: &AccountSpace, source_id: &str
         return false;
     };
     let stored = face_state.get(source_id);
-    let Ok(selection) = faces_package::tap(
+    let selection_started = std::time::Instant::now();
+    let selection = faces_package::tap(
         &faces,
         &spec.face.kind,
         &spec.face.settings,
         stored.as_ref(),
         1,
-    ) else {
+    );
+    tracing::info!(target: "server::tap_latency", source_id,
+        unix_us = chrono::Utc::now().timestamp_micros(),
+        elapsed_us = selection_started.elapsed().as_micros(), ok = selection.is_ok(),
+        "tap selector completed");
+    let Ok(selection) = selection else {
         return false;
     };
-    let Some(digest) = space.image_sources.select_view(source_id, &selection.view) else {
+    let lookup_started = std::time::Instant::now();
+    let digest = space.image_sources.select_view(source_id, &selection.view);
+    tracing::info!(target: "server::tap_latency", source_id,
+        unix_us = chrono::Utc::now().timestamp_micros(), view = %selection.view,
+        elapsed_us = lookup_started.elapsed().as_micros(), hit = digest.is_some(),
+        "staged lookup completed");
+    let Some(digest) = digest else {
         return false;
     };
     // The face's own state moves with the view, or a scheduled refresh minutes
@@ -916,6 +935,10 @@ fn select_staged_view(state: &ServerState, space: &AccountSpace, source_id: &str
     if let Some(next) = selection.state {
         face_state.put(source_id, next);
     }
+    tracing::info!(target: "server::tap_latency", source_id,
+        unix_us = chrono::Utc::now().timestamp_micros(),
+        decision = "staged_hit", view = %selection.view,
+        digest = %protocol::digest_hex(&digest), taps = 1, "tap decision");
     state.notify_image_source_changed(
         &space.account_id,
         source_id.to_owned(),

@@ -205,6 +205,15 @@ struct PendingRequest {
     response: SyncSender<Result<Message, DeviceError>>,
 }
 
+impl PendingRequest {
+    fn expire(self, device_id: &str, generation: u64) {
+        tracing::info!(target: "server::tap_latency", device_id, generation,
+            request_id = self.request_id, unix_us = chrono::Utc::now().timestamp_micros(),
+            "device request timed out");
+        let _ = self.response.send(Err(DeviceError::Timeout));
+    }
+}
+
 #[derive(Default)]
 struct TransportState {
     generation: u64,
@@ -684,8 +693,16 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
             });
         }
         let revision = push.revision;
-        let response = self.connected_request(Message::PushScene(push))?;
-        require_ack(&response, protocol::TYPE_PUSH_SCENE, Some(revision))
+        let card_id = push.card_id.clone();
+        let (result, elapsed) = timed(|| {
+            let response = self.connected_request(Message::PushScene(push))?;
+            require_ack(&response, protocol::TYPE_PUSH_SCENE, Some(revision))
+        });
+        tracing::info!(target: "server::tap_latency", device_id = %self.device_id,
+            card_id, revision, unix_us = chrono::Utc::now().timestamp_micros(),
+            elapsed_us = elapsed.as_micros(), ok = result.is_ok(),
+            "scene request completed");
+        result
     }
 
     fn activate_card(&mut self, card_id: String) -> Result<(), DeviceError> {
@@ -907,7 +924,8 @@ impl SocketPeer {
                             continue;
                         }
                     };
-                    if let Err(error) = send_ws(&mut sender, WsMessage::Binary(wire.into())).await {
+                    if let Err(error) = send_visual_request(&mut sender, device_id, self.generation,
+                        request_id, &command.message, wire).await {
                         let _ = command.response.send(Err(error));
                         break;
                     }
@@ -920,7 +938,7 @@ impl SocketPeer {
                 }
                 () = tokio::time::sleep_until(pending_deadline), if pending.is_some() => {
                     if let Some(expired) = pending.take() {
-                        let _ = expired.response.send(Err(DeviceError::Timeout));
+                        expired.expire(device_id, self.generation);
                     }
                 }
                 _ = ping_tick.tick() => {
@@ -975,6 +993,13 @@ impl SocketPeer {
 
             if frame.request_id == 0 {
                 if let Message::DeviceEvent(event) = message {
+                    if event.kind == protocol::EventKind::Tap {
+                        tracing::info!(target: "server::tap_latency", device_id,
+                            generation = self.generation, sequence = event.sequence,
+                            card_id = %event.card_id, taps = 1,
+                            unix_us = chrono::Utc::now().timestamp_micros(),
+                            "device tap received");
+                    }
                     self.event_router.route(event);
                 } else {
                     self.diagnostics
@@ -1009,6 +1034,26 @@ impl SocketPeer {
             let Some(waiting) = pending.take() else {
                 continue;
             };
+            // Log only replies to visual requests; chunk summaries remain in
+            // AssetTransfer, avoiding a line for every healthy chunk.
+            if let Message::Ack(ack) = &message {
+                if matches!(
+                    ack.acknowledged_type,
+                    protocol::TYPE_PUSH_SCENE
+                        | protocol::TYPE_ASSET_BEGIN
+                        | protocol::TYPE_ASSET_COMMIT
+                ) {
+                    tracing::info!(target: "server::tap_latency", device_id,
+                        generation = self.generation, request_id = frame.request_id,
+                        acknowledged_type = ack.acknowledged_type, revision = ?ack.revision,
+                        already_present = ?ack.already_present,
+                        unix_us = chrono::Utc::now().timestamp_micros(), "visual request acknowledged");
+                }
+            } else if let Message::Error(error) = &message {
+                tracing::info!(target: "server::tap_latency", device_id,
+                    generation = self.generation, request_id = frame.request_id, ?error,
+                    unix_us = chrono::Utc::now().timestamp_micros(), "device request rejected");
+            }
             let response = match message {
                 Message::Error(error) => Err(DeviceError::Rejected(error)),
                 message if message.type_id() == waiting.expected_type => Ok(message),
@@ -1029,6 +1074,72 @@ impl SocketPeer {
             .malformed_device_frames
             .fetch_add(1, Ordering::Relaxed);
         tracing::warn!(device_id, error, "device link frame decode failed");
+    }
+}
+
+async fn send_visual_request(
+    sender: &mut SplitSink<WebSocket, WsMessage>,
+    device_id: &str,
+    generation: u64,
+    request_id: u32,
+    message: &Message,
+    wire: Vec<u8>,
+) -> Result<(), DeviceError> {
+    trace_visual_request(device_id, generation, request_id, message, "send_start");
+    let started = std::time::Instant::now();
+    let result = send_ws(sender, WsMessage::Binary(wire.into())).await;
+    trace_visual_request(
+        device_id,
+        generation,
+        request_id,
+        message,
+        if result.is_ok() {
+            "sent"
+        } else {
+            "send_failed"
+        },
+    );
+    if matches!(message, Message::PushScene(_)) {
+        tracing::info!(target: "server::tap_latency", device_id, generation, request_id,
+            unix_us = chrono::Utc::now().timestamp_micros(),
+            elapsed_us = started.elapsed().as_micros(), ok = result.is_ok(),
+            "scene socket send completed");
+    }
+    result
+}
+
+/// The timestamp is sampled at the socket boundary, not at the synchronous
+/// caller. `sent` means the local WebSocket sink completed, not stable pixels.
+fn trace_visual_request(
+    device_id: &str,
+    generation: u64,
+    request_id: u32,
+    message: &Message,
+    phase: &str,
+) {
+    match message {
+        Message::PushScene(push) => {
+            let digests: Vec<_> = push
+                .scene
+                .nodes
+                .iter()
+                .filter_map(|node| match node {
+                    protocol::SceneNode::Image(image) => Some(protocol::digest_hex(&image.digest)),
+                    _ => None,
+                })
+                .collect();
+            tracing::info!(target: "server::tap_latency", device_id, generation, request_id, phase,
+                card_id = %push.card_id, revision = push.revision, ?digests,
+                unix_us = chrono::Utc::now().timestamp_micros(), "PushScene");
+        }
+        Message::AssetBegin(begin) => tracing::info!(target: "server::tap_latency",
+            device_id, generation, request_id, phase, digest = %protocol::digest_hex(&begin.digest),
+            bytes = begin.total_length, volatile = begin.volatile,
+            unix_us = chrono::Utc::now().timestamp_micros(), "AssetBegin"),
+        Message::AssetCommit(commit) => tracing::info!(target: "server::tap_latency",
+            device_id, generation, request_id, phase, digest = %protocol::digest_hex(&commit.digest),
+            unix_us = chrono::Utc::now().timestamp_micros(), "AssetCommit"),
+        _ => {}
     }
 }
 
@@ -1330,6 +1441,89 @@ mod tests {
 
         device.remember_last_ota_error(&sample_status());
         assert_eq!(connector.last_ota_error(), None);
+    }
+
+    #[test]
+    fn tap_and_scene_logs_expose_correlation_without_logging_payloads() {
+        use std::io::Write;
+        #[derive(Clone)]
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let bytes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = Capture(bytes.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_env_filter("server::tap_latency=info")
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let (_device, connector) = super::WebSocketRuntimeDevice::channel("dev-log".into());
+            let mut peer = connector.attach();
+            let event = DeviceEvent {
+                sequence: 42,
+                kind: EventKind::Tap,
+                card_id: "picture-log".into(),
+                action: EventAction::StartPause,
+                interrupt_token: None,
+            };
+            let wire = protocol::encode_message(0, &Message::DeviceEvent(event)).unwrap();
+            assert!(peer.handle_binary(&wire, "dev-log", &mut None));
+            let mut push = sample_scene();
+            push.card_id = "picture-log".into();
+            push.scene
+                .nodes
+                .push(protocol::SceneNode::Image(protocol::SceneImage {
+                    digest: [0xab; 32],
+                    ..Default::default()
+                }));
+            super::trace_visual_request("dev-log", 1, 77, &Message::PushScene(push), "sent");
+            super::trace_visual_request(
+                "dev-log",
+                1,
+                78,
+                &Message::AssetBegin(asset_begin()),
+                "send_start",
+            );
+            // A healthy chunk must not flood the journal with pixel bytes.
+            super::trace_visual_request(
+                "dev-log",
+                1,
+                79,
+                &Message::AssetChunk(protocol::AssetChunk {
+                    digest: [0; 32],
+                    offset: 0,
+                    data: vec![0x55; 100],
+                }),
+                "sent",
+            );
+        });
+        let log = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        for expected in [
+            "device tap received",
+            "sequence=42",
+            "taps=1",
+            "unix_us=",
+            "card_id=picture-log",
+            "PushScene",
+            "request_id=77",
+            "generation=1",
+            "phase=\"sent\"",
+            "abababab",
+            "AssetBegin",
+            "request_id=78",
+        ] {
+            assert!(log.contains(expected), "missing {expected}: {log}");
+        }
+        assert_eq!(log.lines().count(), 3, "healthy chunks are silent: {log}");
     }
 
     #[test]

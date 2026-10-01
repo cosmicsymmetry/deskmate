@@ -227,6 +227,12 @@ async fn refresh_once(
     taps: u32,
 ) -> Option<RefreshOutcome> {
     let (source_id, kind) = (&spec.source_id, &spec.face.kind);
+    let started = std::time::Instant::now();
+    if taps > 0 {
+        tracing::info!(target: "server::tap_latency", account_id = %space.account_id,
+            source_id = %source_id, taps, unix_us = chrono::Utc::now().timestamp_micros(),
+            "tap render started");
+    }
     let previous_state = face_state.get(source_id);
     let render_faces = faces.clone();
     let render_spec = spec.clone();
@@ -241,6 +247,12 @@ async fn refresh_once(
         )
     })
     .await;
+    if taps > 0 {
+        tracing::info!(target: "server::tap_latency", account_id = %space.account_id,
+            source_id = %source_id, taps, unix_us = chrono::Utc::now().timestamp_micros(),
+            elapsed_us = started.elapsed().as_micros(), ok = matches!(&rendered, Ok(Ok(_))),
+            "tap render completed");
+    }
     let rendered = match rendered {
         Ok(Ok(rendered)) => rendered,
         Ok(Err(RefreshFailure::Configuration(error))) => {

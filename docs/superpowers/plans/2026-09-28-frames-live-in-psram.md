@@ -3,6 +3,19 @@
 **Spec:** `docs/superpowers/specs/2026-09-28-deskmate-frames-live-in-psram-design.md`
 **Track:** C1 (branch `track-c1-tap-to-face`, PR #4)
 
+> **2026-10-01 — ROD-14 latency instrumentation.** Owner direction is to chase
+> 250 ms, using release-to-stable as the system budget. Server-only tracing now
+> covers tap receipt/routing, selector and staged lookup, fallback render, runtime
+> notifications, scene socket send/ACK and asset transfer boundaries. See
+> [the latency budget](../../hardware/2026-10-01-tap-latency-budget.md) for measured,
+> inferred and unknown segments, correlation limits and costed candidates.
+> No schema, wire or firmware change; no merge of PR #7 or deployment. Complete
+> device/network subsegments cannot be recovered from server logs alone.
+> Verification: Rust fmt/clippy/all-targets/doctests pass, with test threads set to
+> one after an existing 100 ms fixture deadline failed in parallel; the fixture
+> also passes in isolation. Web 216 tests/check/format/build and faces 431
+> tests/check/lint/format pass. No new physical observation is claimed.
+>
 > **2026-09-30 — ROD-13 rendered tap fallback correction.** The ROD-12 bench
 > report supersedes the older claim below that no tap has been observed: staged RSS
 > pages turned, but the unstaged page-four fallback returned page one and unchanged

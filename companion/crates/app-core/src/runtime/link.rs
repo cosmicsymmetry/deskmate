@@ -141,6 +141,8 @@ pub(super) fn mark_disconnected(
     reconnect_interval: Duration,
 ) {
     state.connected = false;
+    // Residency is proven only for this attachment, never across a reboot/link.
+    state.confirmed_resident_assets.clear();
     // Capabilities belong to the new attachment, not the retained runtime. A
     // reconnect may follow an OTA in either direction, so force one render-policy
     // decision from the fresh StatusResponse even when all data is otherwise clean.

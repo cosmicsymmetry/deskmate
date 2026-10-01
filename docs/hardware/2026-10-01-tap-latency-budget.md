@@ -307,7 +307,7 @@ scene acceptance, not stable pixels. The following are **proposals only**:
 | Device monotonic timestamps for classification, send, load and blit | Diagnostic value; no direct nominal latency saving | Probably a wire amendment plus firmware image/USB/OTA cycle; server journal alone cannot supply these timestamps |
 | Increase the 200 ms device send timeout | No proven nominal saving; may prevent loss during a stall | Firmware change; not a fixed 200 ms cost, so do not tune it to chase a fictional delay |
 
-No firmware, schema or wire change, deployment, merge or physical verification is
+No firmware, schema or wire change, deployment, PR merge or physical verification is
 part of this branch. The owner retains those decisions and the next panel sitting.
 
 ## Verification
@@ -360,6 +360,16 @@ racing the production two-second status poll (502 on config reapply). It passed 
 isolation. The test now uses 20 ms status / 10 ms reconnect pacing; production timing
 is unchanged. Existing pressed-pool and resume assertions were updated to enforce
 the owner's pre-upload reclaim and live-frame preservation decisions.
+
+**Main integration, 2026-10-02:** merged `origin/main` at `a886d6d` into the pushed
+C1 branch with a merge commit. The only conflict was the roadmap: main's Track B row
+is preserved byte-for-byte, and only C1's row is updated. PR #13's Squares/Dots faces,
+tests, previews and Track B documentation are retained unchanged. All companion
+gates passed again: Rust **854 passed** (two intentional ignores), web **216 passed**,
+faces **469 passed**, plus fmt, Clippy, doctests, both typechecks, both linters, both
+format checks and the web build. The Hacker News unstaged-page-four subprocess test
+passed locally in 1.648 seconds; its Linux CI result still needs separate inspection.
+No tap implementation or latency measurement changed during this merge.
 
 GitHub CI for this branch is separate from these local results; inspect the PR checks
 before merge. No deployment or new hardware verification is claimed.

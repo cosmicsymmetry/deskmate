@@ -1,10 +1,26 @@
 # Days Left This Year
 
 A quiet calendar countdown for the 448×368 Deskmate panel: a large remaining-days
-number, the current year, and a proportional year-progress bar. No settings, data
+number, the current year, and a choice of three year-progress faces. No data
 services, network requests, secrets, stored state, or tap behavior.
 
-**Id:** `days-left-this-year` · **Version:** `1.0.0`
+**Id:** `days-left-this-year` · **Version:** `1.1.0`
+
+## Face setting
+
+Choose **Face** in the card's source settings. The choice saves immediately through
+the existing settings control:
+
+- **Progress bar**: the original large count and continuous bar; the default for
+  new cards and existing cards without a face setting.
+- **Squares**: one small square per calendar day.
+- **Dots**: one small circle per calendar day.
+
+Both grids contain exactly 365 marks (366 in a leap year), read left to right and
+then top to bottom in 25 columns. Bright marks are completed days; dim marks are
+days remaining, including today. The final row is intentionally shorter. All faces
+use the same count, date and progress calculation. Unknown face values fall back to
+the original progress bar.
 
 ## What the count means
 
@@ -56,8 +72,9 @@ bun run format:check
 The CLI render returns a JSON envelope whose `png` field is base64. The preview
 script discovers the shipped plugin and calls the actual `src/main.ts`
 `renderRequest` entrypoint with fixed UTC instants. It writes three full-size PNGs
-and their 40% reductions under `previews/`; the small images are scaled from those
-same PNGs. `preview.ts` is author tooling, not sandboxed plugin code.
+for each of the three faces and their 40% reductions under `previews/`; the small
+images are scaled from those same PNGs. `preview.ts` is author tooling, not sandboxed
+plugin code.
 
 | Fixture (UTC) | 448×368 | 40% desk scale |
 |---|---|---|
@@ -67,16 +84,25 @@ same PNGs. `preview.ts` is author tooling, not sandboxed plugin code.
 
 ![Days Left This Year on October 1, 2026](previews/october.png)
 
+| Alternative face | October 1 | Last day | Leap New Year |
+|---|---|---|---|
+| Squares | [Full](previews/october-squares.png) · [Desk](previews/october-squares-desk.png) | [Full](previews/last-day-squares.png) · [Desk](previews/last-day-squares-desk.png) | [Full](previews/leap-new-year-squares.png) · [Desk](previews/leap-new-year-squares-desk.png) |
+| Dots | [Full](previews/october-dots.png) · [Desk](previews/october-dots-desk.png) | [Full](previews/last-day-dots.png) · [Desk](previews/last-day-dots-desk.png) | [Full](previews/leap-new-year-dots.png) · [Desk](previews/leap-new-year-dots-desk.png) |
+
 Tests in `test/plugins/days-left-this-year.test.ts` exercise the real QuickJS
 sandbox: discovery's empty context, year rollover, leap boundaries and century
 exceptions, both sides of local New Year, DST transitions, invalid dates, zero
-network calls, and PNG dimensions through the real render entrypoint. The package's
-catalog test also pins the new discovered entry.
+network calls, and PNG dimensions through the real render entrypoint for all three
+faces. They also verify the catalog's Face choices, compatibility with old settings,
+and exact bright/dim marker counts in ordinary and leap years. The package's catalog
+test also pins the discovered entry.
 
-The author inspected all three fixtures at full size and 40%: one-, two- and
-three-digit counts fit; the count and its meaning remain readable at desk scale;
-the quiet footer is secondary. This is local sandbox/PNG evidence, **not** a browser,
-server frame-store, deployment, or physical-panel observation.
+One-, two- and three-digit counts were inspected at full size and desk scale.
+The original progress-bar PNGs remain byte-identical. For version 1.1.0, the real
+browser and a disposable local server were also checked: the Face choices appear,
+Squares and Dots save and render, and Dots remains selected after reload. Desktop
+and narrow-screen layouts were inspected. This is local browser, server-frame and
+PNG evidence, not a deployment or physical-panel observation.
 
 ## Attribution
 

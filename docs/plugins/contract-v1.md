@@ -400,12 +400,21 @@ through unchanged, `png` is the same base64 string an `as: "bytes"` answer alrea
 gave you as `answer.base64` -- `{ png: answer.base64 }` is the whole pass-through.
 
 A `LayoutNode` is `{ type: "div" | "img", style?, children?, src? }`
-(`companion/faces/src/plugins/card.ts:99-170`) -- CSS-like flexbox styles, converted
-to `satori`'s element shape by the host. An `img`'s `src` must be an embedded
-`data:` URI; an `http(s)://` reference is refused, because `satori`'s own SSRF guard
-resolves a hostname once to validate it and again to fetch it, which is exactly the
-DNS-rebinding gap `kit/http.ts` exists to close, and this package does not rely on a
-third-party library's weaker guard for that.
+(`companion/faces/src/plugins/card.ts`) -- CSS-like flexbox styles, converted
+to `satori`'s element shape by the host. Style values are text or numbers.
+
+**Render output cannot load external resources.** Images, backgrounds, masks and
+SVG references must embed bounded `data:` image URIs; network URLs and file paths
+are refused before layout or rasterization, even for a host in `hosts`. Obtain
+images through `plan()` and embed the returned bytes. The rule also covers nested
+SVG images, fonts and stylesheets: CSS escapes/comments/at-rules, XML DTDs and
+resource-loading processing instructions are refused; use the bundled Inter fonts.
+Same-document paint and `use` fragments remain supported (image/`feImage` hrefs
+must be data). Images share a four-image, 1 MB each, 3 MB total decoded budget across
+all locations, including backgrounds and masks. See the [renderer resource audit](render-resource-audit.md).
+The shared raster path used by both the server and `plugin:check` validates the
+computed canvas and actual PNG dimensions as 448x368; declaring attributes is
+insufficient if the engine computes a different size.
 
 `render` may also return `{ log: string[] }` beside the card: lines that reach our
 log for the plugin's author, never the panel, capped to 10 lines of 200 characters
@@ -434,13 +443,13 @@ render as a configuration error and keeps the stored frame; the engine limits
 | One `measure` item's `weight` | 400 or 600 only | `plugins/requests.ts:85` |
 | State returned beside a card | 16 KB encoded (JSON, UTF-8) | `plugins/run.ts:88`; over the cap, the state is dropped (not the render) and a log line says so |
 | `log` lines returned beside a card | 10 lines, 200 characters each | `plugins/run.ts:93-94` |
-| Boxes in a `{layout}` card | 2,000 | `plugins/card.ts:29` |
-| Nesting depth of a `{layout}` card | 400 | `plugins/card.ts:38` -- a 501-deep chain of otherwise-valid boxes was observed to corrupt the layout engine's shared module for every later render in the process, not just the offending one; this cap exists with margin below that observed boundary |
-| An `{svg}` card's document size | 512 KB | `plugins/card.ts:30` |
-| A `{png}` card, or one `img` inside a `{layout}` card | 1 MB decoded | `plugins/card.ts:32` (the same ingest cap) |
-| Images per `{layout}` card | 4 | `plugins/card.ts:44` |
-| Total image bytes per `{layout}` card | 3 MB | `plugins/card.ts:50` -- kept below `4 x 1 MB` on purpose, so this check can actually fire independently of the per-image and per-count caps |
-| Error message length from a rendering failure | 300 characters, then truncated with a count | `plugins/card.ts:55` |
+| Boxes in a `{layout}` card | 2,000 | `plugins/card.ts` (`MAX_BOXES`) |
+| Nesting depth of a `{layout}` card | 400 | `plugins/card.ts` (`MAX_DEPTH`) -- a 501-deep chain of otherwise-valid boxes was observed to corrupt the layout engine's shared module for every later render in the process, not just the offending one; this cap exists with margin below that observed boundary |
+| An `{svg}` card's document size | 512 KB | `plugins/card.ts` (`MAX_SVG_BYTES`) |
+| A `{png}` card or one embedded image in any card | 1 MB decoded | `plugins/card.ts`, `plugins/resources.ts` (`INGEST_CAP_BYTES`) |
+| Embedded images per card (all locations, including nested SVG) | 4 | `plugins/resources.ts` (`MAX_IMAGES`) |
+| Total embedded image bytes per card | 3 MB | `plugins/resources.ts` (`MAX_TOTAL_IMAGE_BYTES`) -- kept below `4 x 1 MB` on purpose, so this check can actually fire independently of the per-image and per-count caps |
+| Error message length from a rendering failure | 300 characters, then truncated with a count | `plugins/card.ts` (`MAX_ERROR_MESSAGE`) |
 
 ## Errors: which one reaches the owner
 

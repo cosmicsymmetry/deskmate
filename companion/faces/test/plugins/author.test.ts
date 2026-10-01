@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkPlugin } from "../../src/author/check";
 import { newPlugin } from "../../src/author/new";
-import { SANDBOX_LIMITS } from "../../src/plugins/sandbox";
+import { SANDBOX_LIMITS, warmSandbox } from "../../src/plugins/sandbox";
+import { discoverPlugins } from "../../src/plugins/discovery";
+import { renderRequest } from "../../src/main";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -21,6 +23,77 @@ async function fixture() {
 const card = `{ svg: '<svg xmlns="http://www.w3.org/2000/svg" width="448" height="368"><rect width="448" height="368" fill="black"/></svg>' }`;
 const errors = (report: Awaited<ReturnType<typeof checkPlugin>>) =>
   [...report.errors, ...report.cases.flatMap((example) => example.errors)].join(" ");
+
+for (const dimensions of [
+  'viewBox="0 0 100 100"',
+  'width="448pt" height="368pt"',
+  'width="100%" height="100%" viewBox="0 0 100 100"',
+]) {
+  test(`checker and server render reject actual dimensions: ${dimensions}`, async () => {
+    const f = await fixture();
+    const card = { svg: `<svg xmlns="http://www.w3.org/2000/svg" ${dimensions}/>` };
+    await writeFile(
+      join(f.directory, "index.js"),
+      `export function plan(){ return []; }\nexport function render(){ return ${JSON.stringify(card)}; }`,
+    );
+    await warmSandbox();
+    const { faces } = await discoverPlugins(f.options.pluginsDir);
+    expect(faces).toHaveLength(1);
+    await expect(renderRequest({ kind: "sample" }, faces[0])).rejects.toThrow(
+      "must be exactly 448x368",
+    );
+    const report = await f.check();
+    expect(report.ok).toBe(false);
+    expect(errors(report)).toContain("must be exactly 448x368");
+    expect(report.cases[0]?.png).toBeUndefined();
+  });
+}
+
+test("the checker accepts correct viewBox-only output through shared rendering", async () => {
+  const f = await fixture();
+  await writeFile(
+    join(f.directory, "index.js"),
+    'export function plan(){ return []; }\nexport function render(){ return {svg: \'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 368"/>\'}; }',
+  );
+  const report = await f.check();
+  expect(report.ok, errors(report)).toBe(true);
+  const filename = report.cases[0]?.png;
+  if (!filename) throw new Error(errors(report));
+  const png = await readFile(join(f.options.outDir, "sample", filename));
+  expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([448, 368]);
+});
+
+test("the live subprocess and checker both refuse unplanned renderer resources", async () => {
+  const f = await fixture();
+  // Loopback makes even a regressed test incapable of contacting a public host.
+  // Assert our own error, not Satori's optional SSRF protection or a failed dial.
+  await writeFile(
+    join(f.directory, "index.js"),
+    'export function plan(){ return []; }\nexport function render(){ return {layout: {style: {width:448, height:368, backgroundImage: "url(http://localhost:9/private.png)"}}}; }',
+  );
+  const child = Bun.spawn(
+    [process.execPath, "run", join(import.meta.dir, "../../src/main.ts"), "render"],
+    {
+      env: { ...process.env, DESKMATE_PLUGINS_DIR: f.options.pluginsDir },
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  child.stdin.write(JSON.stringify({ kind: "sample", settings: {} }));
+  await child.stdin.end();
+  const [out, err, exit] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect(exit, err).toBe(2);
+  expect(out).toBe("");
+  expect(err).toContain("external resources are not allowed");
+  const report = await f.check();
+  expect(report.ok).toBe(false);
+  expect(errors(report)).toContain("external resources are not allowed");
+});
 
 test("scaffold renders both sizes and its generated test runs", async () => {
   const f = await fixture();

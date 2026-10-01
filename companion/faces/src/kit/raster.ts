@@ -8,6 +8,8 @@
 
 import { fileURLToPath } from "node:url";
 import { Resvg, type ResvgRenderOptions } from "@resvg/resvg-js";
+import { ConfigurationError } from "../face";
+import { CANVAS_HEIGHT, CANVAS_WIDTH } from "./theme";
 
 export const FONT_FAMILY = "Inter";
 
@@ -44,7 +46,23 @@ export function pngFromSvg(svg: string, zoom = 1): Uint8Array {
       ...(zoom === 1 ? {} : { fitTo: { mode: "zoom", value: zoom } }),
     }),
   );
-  return resvg.render().asPng();
+  // The server entrypoint and author checker share this boundary. Use the
+  // engine's dimensions: SVG attributes alone miss viewBox-only sizes, units
+  // and CSS overrides. Refuse huge canvases before allocating their pixels.
+  requirePanelSize(resvg.width, resvg.height);
+  const rendered = resvg.render();
+  requirePanelSize(rendered.width, rendered.height, zoom);
+  return rendered.asPng();
+}
+
+function requirePanelSize(width: number, height: number, zoom = 1): void {
+  const expectedWidth = Math.round(CANVAS_WIDTH * zoom);
+  const expectedHeight = Math.round(CANVAS_HEIGHT * zoom);
+  if (width !== expectedWidth || height !== expectedHeight) {
+    throw new ConfigurationError(
+      `the picture is ${width}x${height}; it must be exactly ${expectedWidth}x${expectedHeight}`,
+    );
+  }
 }
 
 const widths = new Map<string, number>();

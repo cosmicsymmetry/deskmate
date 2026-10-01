@@ -683,7 +683,10 @@ mod tests {
         async fn until(ready: impl Fn() -> bool) {
             // Keep a task runnable so Tokio cannot auto-advance through the
             // six-hour timer while the real subprocess is doing blocking I/O.
-            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            // Only a watchdog for native subprocess work under concurrent test
+            // load. Calendar timing is asserted with the paused Tokio clock,
+            // so this deadline must not impose a three-second latency budget.
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
             while !ready() {
                 assert!(
                     std::time::Instant::now() < deadline,

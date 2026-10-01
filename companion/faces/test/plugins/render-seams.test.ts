@@ -27,26 +27,24 @@ export function render(c){
   return { ...c.settings.card, state: { timezone: c.now.timezone, taps: c.event?.taps ?? 0 } };
 }`,
   );
-  return async (verb: string, request: object) => {
-    const child = Bun.spawn([process.execPath, "run", main, verb], {
+  return (verb: string, request: object) => {
+    // These are complete fixture requests, not an interactive pipe test. Let
+    // spawnSync own stdin/EOF and bound each child, including failure cleanup.
+    const child = Bun.spawnSync([process.execPath, "run", main, verb], {
       env: {
         ...process.env,
         TZ: "UTC",
         DESKMATE_PLUGINS_DIR: plugins,
         DESKMATE_CONFIG_DIR: root,
       },
-      stdin: "pipe",
+      stdin: Buffer.from(`${JSON.stringify(request)}\n`),
       stdout: "pipe",
       stderr: "pipe",
+      timeout: 10_000,
     });
-    child.stdin.write(`${JSON.stringify(request)}\n`);
-    await child.stdin.end();
-    const [output, error, status] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
-    return { output, error, status };
+    const error = `${verb}: ${child.stderr.toString()}`;
+    if (child.signalCode) throw new Error(`${error} (stopped by ${child.signalCode})`);
+    return { output: child.stdout.toString(), error, status: child.exitCode };
   };
 }
 
@@ -72,7 +70,7 @@ test("the real warm selector defers plugin taps to a render carrying the owner's
     const png = Buffer.from(envelope.png, "base64");
     expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([448, 368]);
   }
-});
+}, 60_000);
 
 for (const [name, context] of [
   ["tap fallback", { event }],
@@ -104,5 +102,5 @@ for (const [name, context] of [
       expect(refused.output).toBe("");
       expect(refused.error).toContain("external resources are not allowed");
     }
-  });
+  }, 60_000);
 }

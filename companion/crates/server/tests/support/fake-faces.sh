@@ -80,6 +80,14 @@ render)
 		fi
 		exit 1
 		;;
+	*tap-counter*'"event":'*|*'"event":'*tap-counter*)
+        page=$(printf '%s' "$request" | sed -n 's/.*"page":\([0-9]*\).*/\1/p')
+        taps=$(printf '%s' "$request" | sed -n 's/.*"taps":\([0-9]*\).*/\1/p')
+        page=$(( ${page:-0} + ${taps:-0} ))
+        image=fake-face.png
+        if [ "$(( page % 2 ))" = "1" ]; then image=fake-face-alt.png; fi
+        printf '{"png":"%s","state":{"page":%s}}' "$(base64 < "$here/$image" | tr -d '\n')" "$page"
+        ;;
 	*alternate-frame*) cat "$here/fake-face-alt.png" ;;
 	*'"view":"page-1"'*) cat "$here/fake-face-alt.png" ;;
 	*'"event":'*) printf '{"png":"%s","state":{"page":3}}' "$(base64 < "$here/fake-face.png" | tr -d '\n')" ;;
@@ -92,7 +100,7 @@ views)
 		printf '%s\n' "$request" >> "$DESKMATE_FAKE_FACES_REQUEST_DIR/plans.jsonl"
 	fi
 	case "$request" in
-	*four-pages*) printf '{"views":["","page-2","page-3","page-4"]}' ;;
+	*many-pages*) printf '{"views":["","page-2","page-3","page-4","page-5","page-6"]}' ;;
 	# Only the tappable face offers a second view, matching `describe` above.
 	*'"kind":"headlines"'*) printf '{"views":["","page-1"]}' ;;
 	*) printf '{"views":[""]}' ;;

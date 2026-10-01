@@ -227,113 +227,130 @@ async fn refresh_once(
     spec: &DataCardSpec,
     taps: u32,
 ) -> Option<RefreshOutcome> {
-    let (source_id, kind) = (&spec.source_id, &spec.face.kind);
-    let started = std::time::Instant::now();
-    if taps > 0 {
-        tracing::info!(target: "server::tap_latency", account_id = %space.account_id,
+    loop {
+        let (source_id, kind) = (&spec.source_id, &spec.face.kind);
+        let started = std::time::Instant::now();
+        if taps > 0 {
+            tracing::info!(target: "server::tap_latency", account_id = %space.account_id,
             source_id = %source_id, taps, unix_us = chrono::Utc::now().timestamp_micros(),
             "tap render started");
-    }
-    let transition = face_state.transition(source_id);
-    let (previous_state, generation) = {
-        let guard = transition
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (face_state.get(source_id), *guard)
-    };
-    let render_faces = faces.clone();
-    let render_spec = spec.clone();
-    let render_account_dir = space.root.clone();
-    let rendered = tokio::task::spawn_blocking(move || {
-        render_frame(
-            &render_faces,
-            &render_account_dir,
-            &render_spec,
-            previous_state.as_ref(),
-            taps,
-        )
-    })
-    .await;
-    if taps > 0 {
-        tracing::info!(target: "server::tap_latency", account_id = %space.account_id,
+        }
+        let transition = face_state.transition(source_id);
+        let (previous_state, generation) = {
+            let guard = transition
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (face_state.get(source_id), *guard)
+        };
+        let render_faces = faces.clone();
+        let render_spec = spec.clone();
+        let render_account_dir = space.root.clone();
+        let rendered = tokio::task::spawn_blocking(move || {
+            render_frame(
+                &render_faces,
+                &render_account_dir,
+                &render_spec,
+                previous_state.as_ref(),
+                taps,
+            )
+        })
+        .await;
+        if taps > 0 {
+            tracing::info!(target: "server::tap_latency", account_id = %space.account_id,
             source_id = %source_id, taps, unix_us = chrono::Utc::now().timestamp_micros(),
             elapsed_us = started.elapsed().as_micros(), ok = matches!(&rendered, Ok(Ok(_))),
             "tap render completed");
-    }
-    let rendered = match rendered {
-        Ok(Ok(rendered)) => rendered,
-        Ok(Err(RefreshFailure::Configuration(error))) => {
-            tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error,
+        }
+        let rendered = match rendered {
+            Ok(Ok(rendered)) => rendered,
+            Ok(Err(RefreshFailure::Configuration(error))) => {
+                tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error,
                 "the face's settings need the owner's attention; keeping the stored frame unchanged");
-            return Some(RefreshOutcome::NeedsAttention(error));
-        }
-        Ok(Err(RefreshFailure::Transient(error))) => {
-            tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error,
-                "the data fetch failed; keeping the stored frame unchanged");
-            return Some(RefreshOutcome::Retrying(error));
-        }
-        Ok(Err(RefreshFailure::NotAFrame(error))) => {
-            tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error,
-                "the faces package did not produce an acceptable frame");
-            return Some(RefreshOutcome::Retrying(format!(
-                "the face could not be drawn: {error}"
-            )));
-        }
-        Err(error) => {
-            tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error, "the render task panicked");
-            return None;
-        }
-    };
-
-    let accept_source = source_id.clone();
-    let accept_space = Arc::clone(space);
-    let face_state_for_staging = Arc::clone(face_state);
-    let next_face_state = rendered.state;
-    let face_state = Arc::clone(face_state);
-    let accepted = tokio::task::spawn_blocking(move || {
-        let mut guard = transition
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if *guard != generation {
-            // Selection is allowed during this render. Its newer frame and
-            // durable state win; never rewind the page when stale work finishes.
-            return Ok(None);
-        }
-        let outcome = accept_space.image_sources.accept_server_rendered(
-            &accept_source,
-            rendered.frame,
-            Utc::now(),
-        );
-        if outcome.is_ok()
-            && let Some(next_face_state) = next_face_state
-        {
-            face_state.put(&accept_source, next_face_state);
-        }
-        if outcome.is_ok() {
-            *guard = guard.wrapping_add(1);
-        }
-        outcome.map(Some)
-    })
-    .await;
-    match accepted {
-        Ok(Ok(None)) => Some(RefreshOutcome::Drawn),
-        Ok(Ok(Some(outcome))) => {
-            if !notify_image_source_outcome(state, space, source_id, &outcome) {
-                tracing::debug!(target: "server::data_cards", source_id = %source_id, kind, "the face is unchanged");
+                return Some(RefreshOutcome::NeedsAttention(error));
             }
-            stage_other_views(space, faces, face_state_for_staging, spec).await;
-            Some(RefreshOutcome::Drawn)
-        }
-        Ok(Err(error)) => {
-            tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error, "the frame was not stored");
-            Some(RefreshOutcome::Retrying(format!(
-                "the frame was not stored: {error}"
-            )))
-        }
-        Err(error) => {
-            tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error, "the store task panicked");
-            None
-        }
+            Ok(Err(RefreshFailure::Transient(error))) => {
+                tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error,
+                "the data fetch failed; keeping the stored frame unchanged");
+                return Some(RefreshOutcome::Retrying(error));
+            }
+            Ok(Err(RefreshFailure::NotAFrame(error))) => {
+                tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error,
+                "the faces package did not produce an acceptable frame");
+                return Some(RefreshOutcome::Retrying(format!(
+                    "the face could not be drawn: {error}"
+                )));
+            }
+            Err(error) => {
+                tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error, "the render task panicked");
+                return None;
+            }
+        };
+
+        let accept_source = source_id.clone();
+        let accept_space = Arc::clone(space);
+        let face_state_for_staging = Arc::clone(face_state);
+        let next_face_state = rendered.state;
+        let face_state = Arc::clone(face_state);
+        let accepted = tokio::task::spawn_blocking(move || {
+            let mut guard = transition
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if *guard != generation {
+                // Selection is allowed during this render. Its newer frame and
+                // durable state win; never rewind the page when stale work finishes.
+                return Ok(None);
+            }
+            let outcome = accept_space.image_sources.accept_server_rendered(
+                &accept_source,
+                rendered.frame,
+                Utc::now(),
+            );
+            // A fallback's result lives in the resting slot. Selecting a staged
+            // view meanwhile must not leave the newly committed tap invisible,
+            // even when these pixels equal the previous resting frame.
+            let outcome = if taps > 0 && outcome.is_ok() {
+                accept_space
+                    .image_sources
+                    .select_view(&accept_source, "")
+                    .map(|digest| AcceptOutcome::Changed { digest })
+                    .ok_or(crate::image_sources::ImageSourceError::UnknownToken)
+            } else {
+                outcome
+            };
+            if outcome.is_ok()
+                && let Some(next_face_state) = next_face_state
+            {
+                face_state.put(&accept_source, next_face_state);
+            }
+            if outcome.is_ok() {
+                *guard = guard.wrapping_add(1);
+            }
+            outcome.map(Some)
+        })
+        .await;
+        return match accepted {
+            // A staged selection won the race, but it consumed only its own tap.
+            // Rebase this already-consumed batch onto the winner's durable state.
+            Ok(Ok(None)) if taps > 0 => continue,
+            Ok(Ok(None)) => Some(RefreshOutcome::Drawn),
+            Ok(Ok(Some(outcome))) => {
+                if !notify_image_source_outcome(state, space, source_id, &outcome) {
+                    tracing::debug!(target: "server::data_cards", source_id = %source_id, kind, "the face is unchanged");
+                }
+                stage_other_views(space, faces, face_state_for_staging, spec).await;
+                Some(RefreshOutcome::Drawn)
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error, "the frame was not stored");
+                Some(RefreshOutcome::Retrying(format!(
+                    "the frame was not stored: {error}"
+                )))
+            }
+            Err(error) => {
+                tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error, "the store task panicked");
+                None
+            }
+        };
     }
 }
 

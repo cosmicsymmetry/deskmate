@@ -2010,6 +2010,12 @@ mod tests {
         for fallback in [false, true] {
             let server = FaceTestServer::new("headlines", fallback, false).await;
             server.wait_for_staged_view("page-1").await;
+            server.space.data_cards.lock().unwrap().specs[0]
+                .face
+                .settings
+                .insert("counter".into(), "tap-counter".into());
+            // Wait for the new worker's completed staging pass, not an arbitrary sleep.
+            server.restart_with_refresh(Duration::from_mins(15)).await;
             let before = server.space.data_cards.lock().unwrap().outcomes[&server.source_id].1;
             if fallback {
                 tapped(&server.state, &server.space, &server.source_id);
@@ -2040,7 +2046,7 @@ mod tests {
             // Release before asserting, so a broken selector cannot strand a child.
             std::fs::write(server.directory.path().join("release"), b"").unwrap();
             assert!(selected.is_ok(), "staged tap queued behind a render");
-            let expected = server
+            let staged_digest = server
                 .space
                 .image_sources
                 .frame(&server.source_id, chrono::Utc::now())
@@ -2058,15 +2064,18 @@ mod tests {
             })
             .await
             .unwrap();
+            server
+                .wait_for_face_state(serde_json::json!({"page": if fallback { 2 } else { 1 }}))
+                .await;
             let face_state = server.space.data_cards.lock().unwrap().face_state.clone();
             assert_eq!(
                 face_state.get(&server.source_id),
-                Some(serde_json::json!({"page":1}))
+                Some(serde_json::json!({"page": if fallback { 2 } else { 1 }}))
             );
             assert_eq!(
                 FaceStateStore::load(server.space.root.join("face-state.json"))
                     .get(&server.source_id),
-                Some(serde_json::json!({"page":1})),
+                Some(serde_json::json!({"page": if fallback { 2 } else { 1 }})),
                 "the newer tap is durable"
             );
             assert_eq!(
@@ -2076,8 +2085,20 @@ mod tests {
                     .frame(&server.source_id, chrono::Utc::now())
                     .unwrap()
                     .digest,
-                expected,
-                "a completed older render must not rewind the frame"
+                if fallback {
+                    crate::image_ingest::canonical_frame_from_png(
+                        &std::fs::read(
+                            Path::new(env!("CARGO_MANIFEST_DIR"))
+                                .join("tests/support/fake-face.png"),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap()
+                    .digest
+                } else {
+                    staged_digest
+                },
+                "superseded tap batch must rebase on the newer state, never rewind it"
             );
         }
     }
@@ -2123,14 +2144,20 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn the_refresher_stages_page_four_when_the_shared_budget_has_room() {
+    async fn the_refresher_stages_four_frames_even_when_the_face_declares_more() {
         let server = FaceTestServer::new("headlines", false, false).await;
+        server.wait_for_staged_view("page-1").await;
+        server
+            .space
+            .image_sources
+            .forget_staged_view_for_test(&server.source_id, "page-1");
+        let before = server.space.data_cards.lock().unwrap().outcomes[&server.source_id].1;
         {
             let mut cards = server.space.data_cards.lock().unwrap();
             cards.specs[0]
                 .face
                 .settings
-                .insert("list".into(), "four-pages".into());
+                .insert("list".into(), "many-pages".into());
             let spec = cards.specs[0].clone();
             cards.tasks.remove(&server.source_id).unwrap().abort();
             cards.start_if_complete(
@@ -2147,6 +2174,8 @@ mod tests {
                     .image_sources
                     .select_view(&server.source_id, "page-4")
                     .is_some()
+                    && server.space.data_cards.lock().unwrap().outcomes[&server.source_id].1
+                        > before
                 {
                     break;
                 }
@@ -2155,6 +2184,16 @@ mod tests {
         })
         .await
         .expect("page four was not staged");
+        for view in ["page-5", "page-6"] {
+            assert!(
+                server
+                    .space
+                    .image_sources
+                    .select_view(&server.source_id, view)
+                    .is_none(),
+                "{view} exceeds the four-frame per-source ceiling"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -345,14 +345,20 @@ throwing (design spec's Evidence table). `now.local` is computed host-side, outs
 the sandbox, with real `Intl` (`companion/faces/src/plugins/context.ts:16-66`), and
 handed in as plain data.
 
-**As of this contract, `now.timezone` is not the owner's configured timezone.** The
-render request the server sends the faces subprocess carries `kind`, `settings`,
-`state` and `event`, but no `timezone`
-(`companion/crates/server/src/data_cards/faces_package.rs:347-364`), so a plugin's
-`now` falls back to the faces host process's own system zone, and then to `"UTC"` if
-even that fails (`companion/faces/src/plugins/discovery.ts:44-54`). This is a real gap
-against the design's stated intent, not a plugin bug -- do not build a plugin whose
-correctness depends on `now.timezone` being the owner's zone until this changes.
+The server forwards the owner's configured timezone on every render, including
+staged views and renders answering taps. Config v10 stores `preferences.timezone`
+per device, but a source is one shared image per account: the first active device
+with a saved picture card using that source wins, ordered by device id. Before a
+source has a consuming card, the first active saved device config supplies the zone;
+no saved config means UTC. Separate sources are needed for devices in different
+zones. Direct/older callers omitting `timezone` retain the host-zone fallback.
+
+After a successful render the server checks for a local date or saved-zone change
+once a minute. It starts a fresh render within roughly 60 seconds of the change,
+plus any ongoing rendering/staging work. Delivery adds its own time. All successful
+faces receive this check, since v1 has no date-sensitive marker. Failed renders keep
+the existing retry/backoff behavior and their old frame; no exact-midnight delivery
+is promised. The ordinary 60-second to six-hour cadence bounds are unchanged.
 
 ### `format`
 
@@ -530,73 +536,66 @@ face in this package before being written down.
 
 ## Testing a plugin locally
 
-There is no separate CLI or harness for a plugin under test -- it runs through the
-same `main.ts` seam the server drives, and the same sandbox `bun test` already
-exercises for `github-stats` and for the hostile-input fixtures under
-`companion/faces/test/plugins/`.
+Use the [submission guide](submitting.md) as the author path:
 
-1. **Place the folder.** `companion/faces/plugins/<id>/` (matching `id` in
-   `plugin.json` to the folder name), or point `DESKMATE_PLUGINS_DIR` at a scratch
-   directory while iterating, so you are not editing the shipped `github-stats`
-   folder by mistake.
-2. **Confirm discovery.** `cd companion/faces && bun run src/main.ts describe` --
-   your plugin's `kind`/`label`/`fields` should appear in the printed catalog JSON. A
-   folder that fails to load is skipped silently on stdout and named on stderr
-   (`plugin <folder> skipped: <reason>`); nothing else in the catalog is affected,
-   which is the isolation property that lets one broken plugin ship without emptying
-   the add menu for everyone else's.
-3. **Render it.** `bun run src/main.ts describe` warms the sandbox; a render needs the
-   same warm-up, which `main` does automatically:
+```sh
+cd companion/faces
+bun run plugin:new your-plugin-id
+bun run plugin:check your-plugin-id
+bun test
+bun run check
+bun run lint
+bun run format:check
+```
 
-   ```sh
-   echo '{"kind":"github-stats","settings":{"user":"octocat"}}' \
-     | bun run src/main.ts render | tee /tmp/out.json
-   jq -r .png < /tmp/out.json | base64 -d > /tmp/out.png
-   ```
+`plugin:check` calls this package's real manifest parser, discovery (`plan({})` in
+QuickJS), `renderRequest`, and rasterizer. It writes full-size and 0.4x PNGs plus
+`report.json` to `out/plugins/<id>/`. Network is always disabled and stored secrets
+are never loaded. Optional `plugins/<id>/check.json` supplies fixed dates, settings,
+and recorded replies; the guide describes it. The command reports runtime errors
+and limit notices for every supplied case, not proof about unexecuted paths. It is
+not a second renderer or a replacement for behavioral tests.
 
-   `render`'s output on stdout is the JSON envelope `{"png": "<base64>", "state": ...}`,
-   not a raw PNG -- decode the `png` field to look at the image.
-   **`bun run dump` does not cover plugins**: it drives `src/cases.ts`, which calls the
-   four built-in faces' own render functions directly and knows nothing about
-   `discoverPlugins`. There is no golden-PNG or golden-SVG harness for a plugin card
-   today; look at the decoded PNG by hand.
-4. **Write a `bun test`.** `companion/faces/test/plugins/discovery.test.ts` and
-   `run.test.ts` are the pattern to copy: write a manifest and source to a temp
-   directory (or call `runPlugin`/`cardToSvg` directly with recorded `answers`), and
-   assert on the resulting SVG or thrown error -- no network needed, which is the
-   point of the pure-function shape. Run the package's own gates before trusting a
-   change: `bun test`, `bun run check`, `bun run lint`, `bun run format:check`.
-5. **Configure a secret**, if your plugin declares one. `DESKMATE_CONFIG_DIR` names
-   two different directories depending which process reads it, and this is the one
-   place that distinction matters:
-   - On the **server process** (what `server.env` sets), it is the top-level config
-     root, and the owner's file physically lives one level under it, per account:
-     `$DESKMATE_CONFIG_DIR/accounts/<account-id>/plugin-secrets.json` -- the same
-     place `data-cards.json` lives for that account.
-   - On the **render child** -- what your plugin's code would see as
-     `process.env.DESKMATE_CONFIG_DIR`, though `readPluginSecrets` already reads it
-     for you -- the server has *rebound* the variable, per render, to already BE
-     that one account's directory. So inside `secrets.ts` the path is just
-     `${DESKMATE_CONFIG_DIR}/plugin-secrets.json`, with no `accounts/<id>` segment
-     to add; adding one there would look in the wrong place.
+The lower-level entrypoint remains available: `bun run src/main.ts describe` lists
+the catalog, and piping `{ "kind": "your-plugin-id", "settings": {} }` into
+`bun run src/main.ts render` returns a JSON envelope with a base64 `png` field.
+That lower-level command uses the normal guarded network transport. `bun run dump`
+still covers built-in fixtures only; it does not discover plugins.
 
-   Create (or edit) the file at the first (operator-facing) path, shaped
-   (`companion/faces/src/plugins/secrets.ts:1-23`):
+**Configure a secret for a normal server render**, if your plugin declares one.
 
-   ```json
-   { "github-stats": { "github_token": "ghp_..." } }
-   ```
+`DESKMATE_CONFIG_DIR` names
+two different directories depending which process reads it, and this is the one
+place that distinction matters:
 
-   The top-level key is your plugin's `id`; a plugin only ever sees its own entry,
-   and only for the account whose card is being rendered: on every `render` (never
-   on `describe`) the server rebinds the child's `DESKMATE_CONFIG_DIR` to that one
-   account's directory, so a secret filed for account A's card is never visible to
-   account B's render of the same plugin
-   (`companion/crates/server/src/data_cards/faces_package.rs`). No file, no
-   `DESKMATE_CONFIG_DIR`, or no entry for your plugin's id are all "no secrets
-   configured" and never an error -- your plugin must render sensibly with every
-   secret absent, because that is the state of most renders before an owner fills
-   the field in.
+- On the **server process** (what `server.env` sets), it is the top-level config
+  root, and the owner's file physically lives one level under it, per account:
+  `$DESKMATE_CONFIG_DIR/accounts/<account-id>/plugin-secrets.json` -- the same
+  place `data-cards.json` lives for that account.
+- On the **render child** -- what your plugin's code would see as
+  `process.env.DESKMATE_CONFIG_DIR`, though `readPluginSecrets` already reads it
+  for you -- the server has *rebound* the variable, per render, to already BE
+  that one account's directory. So inside `secrets.ts` the path is just
+  `${DESKMATE_CONFIG_DIR}/plugin-secrets.json`, with no `accounts/<id>` segment
+  to add; adding one there would look in the wrong place.
+
+Create (or edit) the file at the first (operator-facing) path, shaped
+(`companion/faces/src/plugins/secrets.ts:1-23`):
+
+```json
+{ "github-stats": { "github_token": "ghp_..." } }
+```
+
+The top-level key is your plugin's `id`; a plugin only ever sees its own entry,
+and only for the account whose card is being rendered: on every `render` (never
+on `describe`) the server rebinds the child's `DESKMATE_CONFIG_DIR` to that one
+account's directory, so a secret filed for account A's card is never visible to
+account B's render of the same plugin
+(`companion/crates/server/src/data_cards/faces_package.rs`). No file, no
+`DESKMATE_CONFIG_DIR`, or no entry for your plugin's id are all "no secrets
+configured" and never an error -- your plugin must render sensibly with every
+secret absent, because that is the state of most renders before an owner fills
+the field in.
 
 ## Reaching the panel
 

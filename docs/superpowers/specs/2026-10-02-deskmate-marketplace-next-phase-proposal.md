@@ -240,3 +240,11 @@ repeats under four local CPU-load workers passed (whole-test median 0.589 s, max
 0.666 s); twenty isolated repeats against the installed Linux runtime passed
 (median 0.392 s, max 0.409 s). Mutating timezone forwarding and suppressing the
 worker reply each failed the revised test, bringing the caught-probe total to 55.
+
+The owner merged PR #27 while the final fixture change was running, carrying
+the shared review fixes into main. The first trusted approval job for this PR
+failed closed: its event still named the older `9e2bb7e` base, which predates the
+checker. Current main (`0e16762`) is merged, retaining Track D's new board facts
+and Track H's released lock. The remaining PR difference is the fixture and
+documentation; the owner-merged release/runtime controls and deployed hashes
+are preserved unchanged.

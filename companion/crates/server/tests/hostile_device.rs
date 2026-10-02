@@ -92,7 +92,9 @@ async fn assert_rejected(host: &str, identity: &server::registry::DeviceIdentity
                 Some(Ok(WsMessage::Ping(payload))) => {
                     socket.send(WsMessage::Pong(payload)).await.unwrap();
                 }
-                Some(Ok(_)) => return false,
+                // Scheduled requests can already be in flight when the hostile
+                // frame arrives. They do not cancel the bounded closure check.
+                Some(Ok(_)) => {}
             }
         }
     })

@@ -47,12 +47,24 @@ Auto-brightness, schedules, night mode, per-card levels and gestures are out of 
 ## Verification record
 
 All required local gates passed: firmware clean host tests, ASan/UBSan, IDF build;
-Rust formatting, clippy with `-D warnings`, **867 workspace tests** and the separate
+Rust formatting, clippy with `-D warnings`, **868 workspace tests** and the separate
 doctest invocation; **218 window tests**, TypeScript check, format check and production
-build; **556 faces tests**, type check, lint and format check. A subsequent focused
-migration check also covers all authored fields and invalid migrated card lists.
+build; **556 faces tests**, type check, lint and format check. Migration checks cover
+all authored fields and invalid migrated card lists.
 Rust uses the repository's pinned 1.98.0 toolchain from `companion/`. An earlier root-directory invocation used
 1.97 and produced unrelated unknown-lint errors; no lint policy was weakened.
+
+The first CI run exposed an existing race in
+`a_tap_naming_a_card_that_does_not_exist_is_counted_and_dropped`: the atomic counter
+advances before the worker publishes its snapshot. The test now waits for the
+snapshot it asserts, retaining the sink and accessor checks. Forcing the snapshot's
+tap counter to zero still fails that test on its bounded wait; the mutation was
+restored before rerunning the Rust gates. Runtime behavior is unchanged by this fix.
+The local rerun also exposed a race in `hostile_device_frames_are_bounded_and_concatenated_frames_decode`:
+an already queued scheduled request could arrive before the close frame. Its helper
+now waits through those messages for closure within the original one-second deadline
+(less than the two-second request timeout). Disabling wire-decode rejection still
+fails that closure assertion. These are test synchronization fixes only.
 
 Firmware size measured with `idf.py size` against the clean `origin/main` image at
 `c20dbbb`, using the same local configuration/toolchain:

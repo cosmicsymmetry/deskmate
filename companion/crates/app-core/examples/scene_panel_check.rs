@@ -310,6 +310,7 @@ fn apply_config(
     case: &CheckCase,
 ) -> Result<(), CaseError> {
     let config = ApplyConfig {
+        brightness: None,
         revision,
         rotation: rotation_degrees(case.request.orientation),
         cards: vec![CardConfig {

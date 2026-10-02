@@ -16,7 +16,7 @@ use app_core::{
 
 #[test]
 fn unsupported_schema_matrix_preserves_bytes_and_uses_only_genuine_fallbacks() {
-    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11] {
+    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12] {
         for bytes in [
             format!(r#"{{"schema_version":{version}}}"#).into_bytes(),
             format!(
@@ -129,7 +129,7 @@ fn assert_unsupported_version_uses_only_genuine_fallbacks(version: u32, bytes: &
 }
 
 #[test]
-fn v10_without_image_sources_loads_as_current_without_rewriting() {
+fn v11_without_image_sources_loads_as_current_without_rewriting() {
     let (_directory, path, store) = test_store("v10-omitted-image-sources");
     let bytes = include_bytes!("fixtures/default.json");
     fs::write(&path, bytes).unwrap();
@@ -144,7 +144,8 @@ fn v10_without_image_sources_loads_as_current_without_rewriting() {
 #[test]
 fn an_empty_v10_loop_is_validation_failed_not_repaired() {
     let (_directory, path, store) = test_store("empty-v10-loop");
-    let mut value = serde_json::to_value(AppConfig::default()).unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/v10.json")).unwrap();
     value["cards"] = serde_json::json!([]);
     let bytes = serde_json::to_vec_pretty(&value).unwrap();
     fs::write(&path, &bytes).unwrap();
@@ -157,7 +158,7 @@ fn an_empty_v10_loop_is_validation_failed_not_repaired() {
         issues,
     } = outcome
     else {
-        panic!("an empty current loop must remain a validation failure");
+        panic!("an empty migrated loop must remain a validation failure");
     };
     assert_eq!(origin, ConfigOrigin::Defaults);
     assert_eq!(config, AppConfig::default());
@@ -486,10 +487,73 @@ fn a_future_schema_is_a_recoverable_error_preserving_bytes() {
     assert!(matches!(
         outcome.recovery(),
         Some(StoreError::UnsupportedVersion {
-            found: 11,
+            found: 12,
             supported: CURRENT_SCHEMA_VERSION
         })
     ));
     // The unreadable source bytes are never rewritten.
     assert_eq!(fs::read_to_string(&path).unwrap(), future);
+}
+
+#[test]
+fn v10_migration_preserves_boot_brightness_and_original_bytes() {
+    let (_directory, path, store) = test_store("brightness-v10");
+    let bytes = include_bytes!("fixtures/v10.json");
+    fs::write(&path, bytes).unwrap();
+    let loaded = store.load();
+    assert_eq!(loaded.origin(), ConfigOrigin::Migrated);
+    assert_eq!(loaded.config().schema_version, 11);
+    assert_eq!(loaded.config().preferences.brightness, 78);
+    assert_eq!(loaded.config().preferences.brightness_level(), 200);
+    assert_eq!(
+        loaded.config().compile(1).unwrap().layout.brightness,
+        Some(200)
+    );
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    store.save(loaded.config()).unwrap();
+    assert_eq!(store.load().origin(), ConfigOrigin::Current);
+    assert_eq!(store.load().config(), loaded.config());
+}
+
+#[test]
+fn v10_migration_keeps_closed_preferences_and_validation() {
+    for (field, value) in [
+        ("brightness", serde_json::json!(78)),
+        ("extra", serde_json::json!(true)),
+    ] {
+        let (_directory, path, store) = test_store("brightness-closed-v10");
+        let mut document: serde_json::Value =
+            serde_json::from_slice(include_bytes!("fixtures/v10.json")).unwrap();
+        document["preferences"][field] = value;
+        let bytes = serde_json::to_vec(&document).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        assert!(matches!(
+            store.load().recovery(),
+            Some(StoreError::InvalidJson { .. })
+        ));
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn v10_migration_preserves_all_authored_fields() {
+    for fixture in [
+        include_str!("fixtures/full.json"),
+        include_str!("fixtures/card-surface.json"),
+    ] {
+        let expected: AppConfig = serde_json::from_str(fixture).unwrap();
+        let mut legacy = serde_json::to_value(&expected).unwrap();
+        legacy["schema_version"] = serde_json::json!(10);
+        legacy["preferences"]
+            .as_object_mut()
+            .unwrap()
+            .remove("brightness");
+        let bytes = serde_json::to_vec(&legacy).unwrap();
+        let (_directory, path, store) = test_store("brightness-v10-preserve");
+        fs::write(&path, &bytes).unwrap();
+        let loaded = store.load();
+        assert_eq!(loaded.origin(), ConfigOrigin::Migrated);
+        assert_eq!(loaded.config(), &expected);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
 }

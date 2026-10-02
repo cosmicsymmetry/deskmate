@@ -127,6 +127,7 @@ fn apply_acceptance_config(
         .checked_add(1)
         .ok_or_else(|| "cannot run config check at maximum retained revision".to_owned())?;
     let config = ApplyConfig {
+        brightness: None,
         revision: config_revision,
         rotation: 90,
         cards: vec![CardConfig {

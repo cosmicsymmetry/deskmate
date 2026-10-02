@@ -145,8 +145,8 @@ mod tests {
             ConfigOrigin::Defaults,
             Some(ConfigFallbackReason::Recovery),
             Some(StoreError::UnsupportedVersion {
-                found: 11,
-                supported: 10,
+                found: 12,
+                supported: 11,
             }),
         );
 
@@ -158,7 +158,7 @@ mod tests {
         assert_eq!(
             clean.persistence,
             PersistenceState::RecoverableError {
-                message: "config schema version 11 is unsupported; expected 10".into(),
+                message: "config schema version 12 is unsupported; expected 11".into(),
             }
         );
 

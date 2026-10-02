@@ -522,10 +522,6 @@ impl WebSocketRuntimeDevice {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        // Protocol v2 has no capability a card list can require: the bits that
-        // described template rendering and rotation support are gone, and a
-        // scene arrives already laid out for the mount. There is nothing to
-        // re-check before replaying a config.
 
         self.latest_data_revision = status.latest_revision;
         self.latest_config_revision = status.config_revision;
@@ -543,6 +539,10 @@ impl WebSocketRuntimeDevice {
 
         let mut config_applied = false;
         if let Some(config) = replay.config.as_mut() {
+            // Firmware may have changed while disconnected. Gate replay too.
+            if status.capabilities & protocol::CAPABILITY_DISPLAY_BRIGHTNESS == 0 {
+                config.brightness = None;
+            }
             if config.revision != status.config_revision {
                 if config.revision < status.config_revision {
                     config.revision = status
@@ -671,16 +671,21 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
         Ok(())
     }
 
-    fn apply_layout(&mut self, rotation: u16, cards: Vec<CardConfig>) -> Result<(), DeviceError> {
+    fn apply_layout(
+        &mut self,
+        brightness: Option<u8>,
+        rotation: u16,
+        cards: Vec<CardConfig>,
+    ) -> Result<(), DeviceError> {
         if self.connected_generation.is_none() {
             return Err(DeviceError::NoDevice);
         }
-        // Protocol v2 retired every capability that described rendering a
-        // template, and rotation is no longer one a device can lack: a scene
-        // arrives already laid out for the mount. Nothing in a card list is
-        // still capability-gated, so there is nothing to check here.
+        // Brightness is an optional preference: omit it for older firmware,
+        // while preserving the saved setting and the rest of the card model.
         let revision = Self::next_revision(self.latest_config_revision)?;
         let request = Message::ApplyConfig(ApplyConfig {
+            brightness: brightness
+                .filter(|_| self.capabilities & protocol::CAPABILITY_DISPLAY_BRIGHTNESS != 0),
             revision,
             rotation,
             cards,
@@ -1380,6 +1385,7 @@ mod tests {
     fn duplicate_navigation_does_not_change_socket_replay_state() {
         let replay = Arc::new(Mutex::new(ReplayState {
             config: Some(ApplyConfig {
+                brightness: None,
                 revision: 1,
                 rotation: 90,
                 cards: replay_cards(),
@@ -1404,6 +1410,7 @@ mod tests {
     fn socket_replay_updates_even_when_the_delivery_queue_is_full() {
         let replay = Arc::new(Mutex::new(ReplayState {
             config: Some(ApplyConfig {
+                brightness: None,
                 revision: 1,
                 rotation: 90,
                 cards: replay_cards(),
@@ -1730,7 +1737,9 @@ mod tests {
                 utc_offset_minutes: 0,
             })
             .expect("initial time sync");
-        device.apply_layout(90, Vec::new()).expect("initial layout");
+        device
+            .apply_layout(None, 90, Vec::new())
+            .expect("initial layout");
         device
             .push_timer("pomodoro".into(), 60_000, 30_000, false)
             .expect("initial timer");
@@ -1786,7 +1795,7 @@ mod tests {
         let first_actor = spawn_test_actor(connector.attach());
         device.connect().expect("first connect");
         device
-            .apply_layout(90, replay_cards())
+            .apply_layout(None, 90, replay_cards())
             .expect("initial layout");
         device
             .push_timer("timer".into(), 60_000, 30_000, false)
@@ -1906,6 +1915,53 @@ mod tests {
             vec![Message::StatusRequest, Message::PushScene(push)]
         );
         assert_eq!(third, vec![Message::StatusRequest]);
+    }
+
+    #[test]
+    fn brightness_is_gated_on_initial_apply_and_firmware_downgrade_replay() {
+        for supported in [false, true] {
+            let (mut device, connector) =
+                super::WebSocketRuntimeDevice::channel("brightness-test".into());
+            let mut status = sample_status();
+            status.capabilities &= !protocol::CAPABILITY_DISPLAY_BRIGHTNESS;
+            if supported {
+                status.capabilities |= protocol::CAPABILITY_DISPLAY_BRIGHTNESS;
+            }
+            let first_actor = spawn_test_actor_with_status(connector.attach(), status.clone());
+            device.connect().unwrap();
+            device.apply_layout(Some(26), 90, replay_cards()).unwrap();
+            // A different running image may lack the feature. Retained config
+            // must not smuggle the new key through the reconnect replay path.
+            status.capabilities &= !protocol::CAPABILITY_DISPLAY_BRIGHTNESS;
+            status.config_revision = 0;
+            let second_actor = spawn_test_actor_with_status(connector.attach(), status);
+            device.connect().unwrap();
+            connector.detach();
+            let initial = first_actor.join().unwrap();
+            let replayed = second_actor.join().unwrap();
+            let brightness = |requests: &[Message]| {
+                requests
+                    .iter()
+                    .find_map(|message| match message {
+                        Message::ApplyConfig(config) => Some(config.brightness),
+                        _ => None,
+                    })
+                    .expect("ApplyConfig was actually sent")
+            };
+            assert_eq!(
+                brightness(&initial),
+                if supported { Some(26) } else { None }
+            );
+            assert_eq!(brightness(&replayed), None);
+            let config = initial
+                .iter()
+                .find(|message| matches!(message, Message::ApplyConfig(_)))
+                .unwrap();
+            let wire = protocol::encode_message(1, config).unwrap();
+            let decoded =
+                protocol::decode_message(&protocol::decode_wire_frame(&wire).unwrap()).unwrap();
+            assert_eq!(&decoded, config);
+        }
     }
 
     fn spawn_test_actor(peer: super::SocketPeer) -> std::thread::JoinHandle<Vec<Message>> {

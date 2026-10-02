@@ -1255,6 +1255,23 @@ fieldset legend {
     background 150ms var(--ease);
 }
 
+.brightness-label {
+  display: flex;
+  justify-content: space-between;
+}
+
+.brightness-label output {
+  font-variant-numeric: tabular-nums;
+}
+
+.field input[type="range"] {
+  height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  accent-color: var(--act);
+}
+
 .field input:hover,
 .field select:hover {
   border-color: color-mix(in srgb, var(--ink) 20%, transparent);

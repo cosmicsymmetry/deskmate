@@ -45,6 +45,10 @@ static inline apply_config_validation_result_t apply_config_validate(
     if (config->rotation != 90U && config->rotation != 270U) {
         return APPLY_CONFIG_INVALID_VALUE;
     }
+    if (config->has_brightness &&
+        config->brightness < PROTOCOL_MIN_DISPLAY_BRIGHTNESS) {
+        return APPLY_CONFIG_INVALID_VALUE;
+    }
     for (size_t i = 0U; i < config->card_count; ++i) {
         const protocol_card_config_t *card = &config->cards[i];
         if (!apply_config_text_nonempty(card->card_id,

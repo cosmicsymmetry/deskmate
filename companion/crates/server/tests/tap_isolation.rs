@@ -36,7 +36,7 @@ fn fake_faces_failing_scheduled_renders(root: &Path) -> PathBuf {
 
 fn picture_config() -> serde_json::Value {
     serde_json::json!({
-        "schema_version": 10,
+        "schema_version": 11,
         "preferences": {
             "timezone": "UTC",
             "autostart": false,

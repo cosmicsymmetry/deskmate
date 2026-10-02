@@ -258,7 +258,13 @@ mod strict_tagged_enum {
     }
 }
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 10;
+pub const CURRENT_SCHEMA_VERSION: u32 = 11;
+pub const MIN_BRIGHTNESS_PERCENT: u8 = 10;
+pub const DEFAULT_BRIGHTNESS_PERCENT: u8 = 78;
+
+const fn default_brightness() -> u8 {
+    DEFAULT_BRIGHTNESS_PERCENT
+}
 pub const MAX_WIDGET_TITLE_LEN: usize = 64;
 pub const MAX_TIMEZONE_LEN: usize = 64;
 pub const MAX_ACTION_URL_LEN: usize = 2_048;
@@ -352,6 +358,13 @@ impl AppConfig {
             &mut issues,
         );
         validate_timezone(&self.preferences.timezone, &mut issues);
+        if !(MIN_BRIGHTNESS_PERCENT..=100).contains(&self.preferences.brightness) {
+            issues.push(ValidationIssue::new(
+                "preferences.brightness",
+                ValidationCode::OutOfRange,
+                "brightness must be an integer from 10 to 100 percent",
+            ));
+        }
         validate_collection_bounds("cards", self.cards.len(), MAX_CONFIG_CARDS, &mut issues);
 
         let mut card_ids = HashSet::with_capacity(self.cards.len());
@@ -529,6 +542,7 @@ impl AppConfig {
 
         Ok(CompiledAppConfig {
             layout: ApplyConfig {
+                brightness: Some(self.preferences.brightness_level()),
                 revision,
                 rotation: self.preferences.orientation.rotation_degrees(),
                 cards,
@@ -562,6 +576,17 @@ pub struct AppPreferences {
     pub paused: bool,
     #[serde(default)]
     pub orientation: DisplayOrientation,
+    #[serde(default = "default_brightness")]
+    pub brightness: u8,
+}
+
+impl AppPreferences {
+    /// Quantize upward over 256 panel levels; cap the full-scale endpoint.
+    /// 78% maps to exactly 200, the existing final boot level.
+    pub fn brightness_level(&self) -> u8 {
+        u8::try_from((u16::from(self.brightness) * 256).div_ceil(100).min(255))
+            .expect("panel level is bounded to u8")
+    }
 }
 
 impl Default for AppPreferences {
@@ -571,6 +596,7 @@ impl Default for AppPreferences {
             autostart: false,
             paused: false,
             orientation: DisplayOrientation::default(),
+            brightness: DEFAULT_BRIGHTNESS_PERCENT,
         }
     }
 }

@@ -13,6 +13,7 @@ export interface AppPreferences {
   autostart: boolean;
   paused: boolean;
   orientation: DisplayOrientation;
+  brightness: number;
 }
 
 export type DisplayOrientation = "landscape" | "landscape-flipped";
@@ -308,7 +309,8 @@ export type DeviceCapability =
   | "networking"
   | "scene-render"
   | "volatile-assets"
-  | "durable-asset-encoding";
+  | "durable-asset-encoding"
+  | "display-brightness";
 
 export interface DeviceCounters {
   host_reconnects: number;

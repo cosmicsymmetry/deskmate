@@ -779,6 +779,47 @@ function DeviceApp({
               </select>
               <small>Saved with your layout and reapplied whenever the display reconnects.</small>
             </label>
+            <div className="field">
+              <span className="brightness-label">
+                <label htmlFor="display-brightness">Brightness</label>
+                <output htmlFor="display-brightness">{draft.preferences.brightness}%</output>
+              </span>
+              <input
+                id="display-brightness"
+                type="range"
+                aria-label="Brightness"
+                aria-valuetext={`${draft.preferences.brightness}%`}
+                aria-describedby="brightness-help"
+                min={10}
+                max={100}
+                step={1}
+                value={draft.preferences.brightness}
+                onChange={(event) =>
+                  replaceDraft({
+                    ...draft,
+                    preferences: {
+                      ...draft.preferences,
+                      brightness: Number(event.currentTarget.value),
+                    },
+                  })
+                }
+                aria-invalid={issues.some((issue) => issue.path === "preferences.brightness")}
+              />
+              <small id="brightness-help">
+                {(snapshot.device.connection.kind === "online" ||
+                  snapshot.device.connection.kind === "standalone") &&
+                !snapshot.device.capabilities.includes("display-brightness")
+                  ? "Your panel’s firmware does not support brightness yet. You can save a level for when it does."
+                  : "Saved with your layout. The preview stays at full brightness."}
+              </small>
+              {issues
+                .filter((issue) => issue.path === "preferences.brightness")
+                .map((issue) => (
+                  <small className="field-error" role="alert" key={issue.code}>
+                    {issue.message}
+                  </small>
+                ))}
+            </div>
           </div>
         </section>
 

@@ -484,7 +484,7 @@ async fn unsupported_device_config_does_not_block_startup_listing_or_other_devic
     std::fs::create_dir_all(valid_path.parent().unwrap()).expect("create devices directory");
     std::fs::write(&valid_path, &valid_bytes).expect("write valid config");
 
-    let unsupported_bytes = br#"{"schema_version":11,"future_body":true}"#;
+    let unsupported_bytes = br#"{"schema_version":12,"future_body":true}"#;
     let unsupported_path = device_config_path(&initial, &unsupported.device_id);
     std::fs::write(&unsupported_path, unsupported_bytes).expect("write unsupported config");
 
@@ -530,7 +530,7 @@ async fn unsupported_device_config_does_not_block_startup_listing_or_other_devic
         unsupported_snapshot["persistence"],
         serde_json::json!({
             "kind": "recoverable-error",
-            "message": "config schema version 11 is unsupported; expected 10",
+            "message": "config schema version 12 is unsupported; expected 11",
         })
     );
     assert_eq!(
@@ -602,7 +602,7 @@ async fn a_malformed_draft_is_an_invalid_payload() {
     let client = Client::new();
     let device = mint_device(&client, &server).await;
 
-    let malformed = serde_json::json!({ "schema_version": 10, "cards": [] });
+    let malformed = serde_json::json!({ "schema_version": 11, "cards": [] });
     let response = save_config(&client, &server, &device.device_id, &malformed).await;
     // A shape that does not deserialize is the caller's payload, not a
     // validation verdict about a configuration -- the two are different repairs.
@@ -1043,7 +1043,7 @@ async fn the_device_list_says_which_identities_have_ever_been_configured() {
 }
 
 #[tokio::test]
-async fn preview_stays_upright_for_both_physical_mountings() {
+async fn preview_stays_upright_and_undimmed_for_both_physical_mountings() {
     let (server, _state) = spawn().await;
     let client = Client::new();
     let device = mint_device(&client, &server).await;
@@ -1055,7 +1055,13 @@ async fn preview_stays_upright_for_both_physical_mountings() {
     let mut config: serde_json::Value = serde_json::from_str(&fixture).expect("fixture JSON");
     let mut previews = Vec::new();
 
-    for orientation in ["landscape", "landscape-flipped"] {
+    for (orientation, brightness) in [
+        ("landscape", 10),
+        ("landscape", 100),
+        ("landscape-flipped", 10),
+        ("landscape-flipped", 100),
+    ] {
+        config["preferences"]["brightness"] = serde_json::json!(brightness);
         config["preferences"]["orientation"] = serde_json::json!(orientation);
         let saved = save_config(&client, &server, &device.device_id, &config).await;
         assert_eq!(saved.status(), StatusCode::OK);
@@ -1087,10 +1093,12 @@ async fn preview_stays_upright_for_both_physical_mountings() {
         previews.push(frame["png_base64"].clone());
     }
 
-    assert_eq!(
-        previews[0], previews[1],
-        "physical mounting changed the person's upright preview"
-    );
+    for preview in &previews[1..] {
+        assert_eq!(
+            &previews[0], preview,
+            "mounting or brightness changed the person's upright, undimmed preview"
+        );
+    }
 }
 
 #[tokio::test]

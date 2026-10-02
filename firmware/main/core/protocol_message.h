@@ -47,6 +47,8 @@
  * bytes to flash verbatim, so an RLE565 durable asset would be stored as if the
  * compressed bytes were pixels. */
 #define PROTOCOL_CAPABILITY_DURABLE_ASSET_ENCODING (UINT64_C(1) << 10)
+#define PROTOCOL_CAPABILITY_DISPLAY_BRIGHTNESS (UINT64_C(1) << 11)
+#define PROTOCOL_MIN_DISPLAY_BRIGHTNESS 26U
 /* Protocol v2 retired bits 0-4: they described a device that rendered
  * templates itself, which this one has not since stage 3a. The numbers are NOT
  * re-used -- a bit's meaning is its identity. */
@@ -56,7 +58,8 @@
      PROTOCOL_CAPABILITY_NETWORKING |                            \
      PROTOCOL_CAPABILITY_SCENE_RENDER |                          \
      PROTOCOL_CAPABILITY_VOLATILE_ASSETS |                       \
-     PROTOCOL_CAPABILITY_DURABLE_ASSET_ENCODING)
+     PROTOCOL_CAPABILITY_DURABLE_ASSET_ENCODING |                 \
+     PROTOCOL_CAPABILITY_DISPLAY_BRIGHTNESS)
 #define PROTOCOL_MAX_SSID_LENGTH 32U
 #define PROTOCOL_MAX_PSK_LENGTH 64U
 #define PROTOCOL_MAX_SERVER_URL_LENGTH 128U
@@ -202,6 +205,8 @@ typedef struct {
 typedef struct {
     uint32_t revision;
     uint16_t rotation;
+    uint8_t brightness;
+    bool has_brightness;
     size_t card_count;
     protocol_card_config_t cards[PROTOCOL_MAX_CONFIG_CARDS];
 } protocol_apply_config_t;

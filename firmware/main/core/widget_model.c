@@ -34,7 +34,9 @@ widget_model_config_result_t widget_model_check_config(
     if (model == NULL || config == NULL) {
         return WIDGET_MODEL_CONFIG_INVALID_ARGUMENT;
     }
-    if (config->revision == 0U) {
+    if (config->revision == 0U ||
+        (config->has_brightness &&
+         config->brightness < PROTOCOL_MIN_DISPLAY_BRIGHTNESS)) {
         return WIDGET_MODEL_CONFIG_INVALID_VALUE;
     }
     const protocol_apply_config_t *current = live_config(model);
@@ -43,6 +45,19 @@ widget_model_config_result_t widget_model_check_config(
             return WIDGET_MODEL_CONFIG_STALE_REVISION;
         }
         if (config->revision == current->revision) {
+            if (config->rotation != current->rotation ||
+                config->has_brightness != current->has_brightness ||
+                (config->has_brightness && config->brightness != current->brightness) ||
+                config->card_count != current->card_count) {
+                return WIDGET_MODEL_CONFIG_STALE_REVISION;
+            }
+            for (size_t i = 0U; i < current->card_count; ++i) {
+                if (strncmp(config->cards[i].card_id, current->cards[i].card_id,
+                            sizeof(current->cards[i].card_id)) != 0 ||
+                    config->cards[i].tap_action != current->cards[i].tap_action) {
+                    return WIDGET_MODEL_CONFIG_STALE_REVISION;
+                }
+            }
             return WIDGET_MODEL_CONFIG_REPLAYED;
         }
     }

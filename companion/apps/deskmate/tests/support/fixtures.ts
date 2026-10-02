@@ -62,7 +62,13 @@ export function pomodoroCard(
 export function cardListConfig(cardList: CardSettings[]): AppConfig {
   return {
     schema_version: snapshot.config.schema_version,
-    preferences: { timezone: "UTC", autostart: false, paused: false, orientation: "landscape" },
+    preferences: {
+      timezone: "UTC",
+      autostart: false,
+      paused: false,
+      orientation: "landscape",
+      brightness: 78,
+    },
     cards: cardList,
     image_sources: cardList.flatMap((card) =>
       card.kind === "picture" ? [{ id: card.source_id, name: "Claude limits" }] : [],

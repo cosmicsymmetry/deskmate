@@ -458,7 +458,7 @@ test("validation-failed persistence shows the saved-settings banner and issue me
 });
 
 test("unsupported saved settings use the generic recoverable-error banner", async () => {
-  const message = "config schema version 11 is unsupported; expected 10";
+  const message = "config schema version 12 is unsupported; expected 11";
   backendMocks.snapshotImpl = async () => ({
     ...(structuredClone(snapshot) as AppSnapshot),
     has_saved_config: true,
@@ -1025,3 +1025,49 @@ test("Resume rejects a draft edit before its disabled state paints", async () =>
   expect(resumes).toBe(0);
   expect(buttonWithText(container, "Resume sending")?.disabled).toBe(true);
 });
+
+for (const supported of [false, true]) {
+  test(`brightness saves through the settings Save with firmware support=${supported}`, async () => {
+    const live: AppSnapshot = structuredClone(snapshot);
+    live.device.connection = { kind: "online" };
+    live.device.capabilities = supported ? ["display-brightness"] : [];
+    live.device.tier = "networked";
+    const saved: AppConfig[] = [];
+    backendMocks.snapshotImpl = async () => live;
+    backendMocks.saveConfigImpl = async (config) => {
+      saved.push(config);
+      live.config = config;
+      return { save: { generation: 1, warning: null } };
+    };
+    const { container } = await mount(<App />);
+    await act(async () => container.querySelector<HTMLButtonElement>(".settings-trigger")?.click());
+    const slider = container.querySelector<HTMLInputElement>("#display-brightness");
+    expect(slider).not.toBeNull();
+    expect(
+      container.querySelector<HTMLLabelElement>("label[for=display-brightness]")?.control,
+    ).toBe(slider);
+    expect(slider?.min).toBe("10");
+    expect(slider?.max).toBe("100");
+    expect(slider?.disabled).toBe(false);
+    expect(
+      container
+        .querySelector("#brightness-help")
+        ?.textContent?.includes("does not support brightness yet"),
+    ).toBe(!supported);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(slider, "35");
+      slider?.dispatchEvent(new Event("input", { bubbles: true }));
+      slider?.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await waitFor(() =>
+      expect(container.querySelector("output[for='display-brightness']")?.textContent).toBe("35%"),
+    );
+    const dialog = container.querySelector("dialog");
+    if (!dialog) throw new Error("Settings sheet missing");
+    await waitFor(() => expect(buttonWithText(dialog, "Save to server")?.disabled).toBe(false));
+    await act(async () => buttonWithText(dialog, "Save to server")?.click());
+    await waitFor(() => expect(saved).toHaveLength(1));
+    expect(saved[0].preferences.brightness).toBe(35);
+    expect(saved[0].schema_version).toBe(11);
+  });
+}

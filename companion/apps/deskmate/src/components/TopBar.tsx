@@ -1,3 +1,4 @@
+import { PRODUCT_NAME } from "../lib/product";
 import { Icon } from "./Icon";
 
 interface TopBarProps {
@@ -19,7 +20,7 @@ export function TopBar({ attention, onOpenSettings }: TopBarProps) {
     <header className="topbar">
       <div className="wordmark">
         <span className="wordmark__mark" aria-hidden="true" />
-        <span className="wordmark__text">Deskmate</span>
+        <span className="wordmark__text">{PRODUCT_NAME}</span>
       </div>
 
       <button

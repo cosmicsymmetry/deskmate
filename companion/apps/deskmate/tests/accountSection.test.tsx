@@ -133,7 +133,7 @@ test("PanelSetup renders every setup state and keeps the Wi-Fi form for a retry"
     expect(container.textContent).toContain("Wi-Fi network");
     expect(container.textContent).toContain("Wi-Fi password");
     expect(container.textContent).toContain(
-      "Your Wi-Fi password goes to the panel over the cable. It is never sent to Deskmate's server.",
+      "Your Wi-Fi password goes to the panel over the cable. It is never sent to Deskboy's server.",
     );
     await changeInput(container.querySelector('input[name="wifi-network"]'), "Studio");
     await changeInput(container.querySelector('input[name="wifi-password"]'), "secret");

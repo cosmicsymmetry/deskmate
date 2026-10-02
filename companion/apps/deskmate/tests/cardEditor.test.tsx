@@ -238,13 +238,6 @@ async function mountFaceSettings(face: FaceDescriptor, status: FaceStatus | null
     setStatus: (next: FaceStatus | null) => {
       currentStatus = next;
     },
-    cleanup: async () => {
-      await mounted.cleanup();
-      backendMocks.imageSourcesImpl = async () => [];
-      backendMocks.updateImageSourceFaceImpl = async () => {
-        throw new Error("updateImageSourceFace not configured for this test");
-      };
-    },
   };
 }
 
@@ -254,34 +247,26 @@ test("face settings save themselves: there is no second save button to forget", 
   // face stayed blank, the panel said "Waiting for the first picture", the window said
   // "Saved to the server".
   const editor = await mountFaceSettings(opaqueFace, null);
-  try {
-    expect(buttonWithText(editor.container, "Save source settings")).toBeUndefined();
+  expect(buttonWithText(editor.container, "Save source settings")).toBeUndefined();
 
-    const place = await editor.type("Dubai", "Berlin");
-    expect(editor.saves).toEqual([]);
-    // Leaving the field is what clicking the window's own save does first.
-    await act(async () => place?.dispatchEvent(new FocusEvent("focusout", { bubbles: true })));
-    await waitFor(() => expect(editor.saves).toEqual([{ place: "Berlin" }]));
+  const place = await editor.type("Dubai", "Berlin");
+  expect(editor.saves).toEqual([]);
+  // Leaving the field is what clicking the window's own save does first.
+  await act(async () => place?.dispatchEvent(new FocusEvent("focusout", { bubbles: true })));
+  await waitFor(() => expect(editor.saves).toEqual([{ place: "Berlin" }]));
 
-    // A choice has no "leaving": it saves at once, and only what changed.
-    await act(async () => buttonWithText(editor.container, "Imperial")?.click());
-    await waitFor(() => expect(editor.saves).toEqual([{ place: "Berlin" }, { units: "imperial" }]));
-    expect(editor.container.textContent).not.toContain(opaqueFace.kind);
-  } finally {
-    await editor.cleanup();
-  }
+  // A choice has no "leaving": it saves at once, and only what changed.
+  await act(async () => buttonWithText(editor.container, "Imperial")?.click());
+  await waitFor(() => expect(editor.saves).toEqual([{ place: "Berlin" }, { units: "imperial" }]));
+  expect(editor.container.textContent).not.toContain(opaqueFace.kind);
 });
 
 test("an emptied required field is an unfinished form, not a request", async () => {
   const editor = await mountFaceSettings(opaqueFace, null);
-  try {
-    const place = await editor.type("Dubai", "   ");
-    await act(async () => place?.dispatchEvent(new FocusEvent("focusout", { bubbles: true })));
-    await act(async () => {});
-    expect(editor.saves).toEqual([]);
-  } finally {
-    await editor.cleanup();
-  }
+  const place = await editor.type("Dubai", "   ");
+  await act(async () => place?.dispatchEvent(new FocusEvent("focusout", { bubbles: true })));
+  await act(async () => {});
+  expect(editor.saves).toEqual([]);
 });
 
 test("the window says why a face is not drawing, in the server's own words", async () => {
@@ -298,25 +283,21 @@ test("the window says why a face is not drawing, in the server's own words", asy
     message: null,
     at_unix_seconds: null,
   });
-  try {
-    expect(editor.container.textContent).toContain("Fill in Coin ID to start this face.");
+  expect(editor.container.textContent).toContain("Fill in Coin ID to start this face.");
 
-    // A ticker where an id belongs: the server reports it, and saving re-reads the status.
-    editor.setStatus({
-      state: "needs-attention",
-      message: "the token was not found; check the coin ID",
-      at_unix_seconds: 1_790_000_000,
-    });
-    const coin = await editor.type("solana", "SOL");
-    await act(async () => coin?.dispatchEvent(new FocusEvent("focusout", { bubbles: true })));
-    await waitFor(() =>
-      expect(editor.container.querySelector('[role="alert"]')?.textContent).toBe(
-        "The token was not found; check the coin ID.",
-      ),
-    );
-  } finally {
-    await editor.cleanup();
-  }
+  // A ticker where an id belongs: the server reports it, and saving re-reads the status.
+  editor.setStatus({
+    state: "needs-attention",
+    message: "the token was not found; check the coin ID",
+    at_unix_seconds: 1_790_000_000,
+  });
+  const coin = await editor.type("solana", "SOL");
+  await act(async () => coin?.dispatchEvent(new FocusEvent("focusout", { bubbles: true })));
+  await waitFor(() =>
+    expect(editor.container.querySelector('[role="alert"]')?.textContent).toBe(
+      "The token was not found; check the coin ID.",
+    ),
+  );
 });
 
 test("a drawn face and a retrying one are statuses, not alarms", async () => {
@@ -325,14 +306,10 @@ test("a drawn face and a retrying one are statuses, not alarms", async () => {
     message: "api.coingecko.com returned HTTP 429",
     at_unix_seconds: 1_790_000_000,
   });
-  try {
-    const status = editor.container.querySelector('.source-settings [role="status"]');
-    expect(status?.textContent).toContain("api.coingecko.com returned HTTP 429.");
-    expect(status?.textContent).toContain("keeps the last frame");
-    expect(editor.container.querySelector('.source-settings [role="alert"]')).toBeNull();
-  } finally {
-    await editor.cleanup();
-  }
+  const status = editor.container.querySelector('.source-settings [role="status"]');
+  expect(status?.textContent).toContain("api.coingecko.com returned HTTP 429.");
+  expect(status?.textContent).toContain("keeps the last frame");
+  expect(editor.container.querySelector('.source-settings [role="alert"]')).toBeNull();
 });
 
 test("an external picture producer adds no settings form", async () => {
@@ -340,30 +317,25 @@ test("an external picture producer adds no settings form", async () => {
   backendMocks.imageSourcesImpl = async () => [
     { id: picture.source_id, name: "Claude limits", face: null, face_status: null },
   ];
-  const { container, root, cleanup } = await mount();
-  try {
-    await act(async () =>
-      root.render(
-        <CardEditor
-          card={picture}
-          config={cardListConfig([picture])}
-          issues={[]}
-          cardError={null}
-          pomodoro={null}
-          timerBusy={false}
-          onChange={() => {}}
-          onConfigChange={() => {}}
-          onRemove={() => {}}
-          onTimerAction={() => {}}
-        />,
-      ),
-    );
-    await waitFor(() => expect(container.textContent).not.toContain("Loading source settings"));
-    expect(container.textContent).not.toContain("Save source settings");
-  } finally {
-    await cleanup();
-    backendMocks.imageSourcesImpl = async () => [];
-  }
+  const { container, root } = await mount();
+  await act(async () =>
+    root.render(
+      <CardEditor
+        card={picture}
+        config={cardListConfig([picture])}
+        issues={[]}
+        cardError={null}
+        pomodoro={null}
+        timerBusy={false}
+        onChange={() => {}}
+        onConfigChange={() => {}}
+        onRemove={() => {}}
+        onTimerAction={() => {}}
+      />,
+    ),
+  );
+  await waitFor(() => expect(container.textContent).not.toContain("Loading source settings"));
+  expect(container.textContent).not.toContain("Save source settings");
 });
 
 test("never shows the wire id", () => {
@@ -435,23 +407,19 @@ test("the selected card's timed-loop dwell field writes the card's own dwell", a
     );
   }
 
-  const { container, root, cleanup } = await mount();
-  try {
-    await act(async () => root.render(<Harness />));
-    const dwell = container.querySelector<HTMLInputElement>(
-      'input[aria-label="Stays on the panel for Clock"]',
-    );
-    expect(dwell?.placeholder).toBe("20 s, the loop's default");
-    expect(dwell?.getAttribute("aria-invalid")).toBe("true");
-    expect(container.textContent).toContain("Entry dwell is out of range.");
-    await act(async () => {
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(dwell, "45");
-      dwell?.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    expect(latest.cards[0].dwell_seconds).toBe(45);
-  } finally {
-    await cleanup();
-  }
+  const { container, root } = await mount();
+  await act(async () => root.render(<Harness />));
+  const dwell = container.querySelector<HTMLInputElement>(
+    'input[aria-label="Stays on the panel for Clock"]',
+  );
+  expect(dwell?.placeholder).toBe("20 s, the loop's default");
+  expect(dwell?.getAttribute("aria-invalid")).toBe("true");
+  expect(container.textContent).toContain("Entry dwell is out of range.");
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(dwell, "45");
+    dwell?.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  expect(latest.cards[0].dwell_seconds).toBe(45);
 });
 
 test("the dwell field is shown when the loop is timed or the value must be repaired", () => {
@@ -514,14 +482,10 @@ test("a tappable face tells the owner what a tap does, and others say nothing", 
   }
 
   const quiet = await mountFaceSettings(opaqueFace, null);
-  try {
-    expect(quiet.container.textContent).not.toContain("Tap the panel");
-    await waitFor(() =>
-      expect(quiet.container.textContent).toContain("Tapping this card does nothing."),
-    );
-  } finally {
-    await quiet.cleanup();
-  }
+  expect(quiet.container.textContent).not.toContain("Tap the panel");
+  await waitFor(() =>
+    expect(quiet.container.textContent).toContain("Tapping this card does nothing."),
+  );
 });
 
 test("switching from a tappable picture to a clock clears the gesture sentence", async () => {

@@ -128,117 +128,103 @@ test("a tile does not print the source name twice when the title repeats it", ()
 
 test("the add menu creates a picture through its own server action", async () => {
   let pictureAdds = 0;
-  const { container, root, cleanup } = await mount();
-  try {
-    await act(async () =>
-      root.render(
-        <CardList
-          {...cardListDefaults()}
-          config={cardListConfig([clockCard("clock", "Desk")])}
-          onAddPicture={() => {
-            pictureAdds += 1;
-          }}
-        />,
-      ),
-    );
-    await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
-    expect(container.textContent).toContain("Pictures");
-    const items = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
-    const picture = items.find((button) => button.textContent?.includes("New picture source"));
-    expect(picture).toBeDefined();
-    const beforePicture = items.at(-2);
+  const { container, root } = await mount();
+  await act(async () =>
+    root.render(
+      <CardList
+        {...cardListDefaults()}
+        config={cardListConfig([clockCard("clock", "Desk")])}
+        onAddPicture={() => {
+          pictureAdds += 1;
+        }}
+      />,
+    ),
+  );
+  await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
+  expect(container.textContent).toContain("Pictures");
+  const items = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+  const picture = items.find((button) => button.textContent?.includes("New picture source"));
+  expect(picture).toBeDefined();
+  const beforePicture = items.at(-2);
 
-    beforePicture?.focus();
-    await act(async () =>
-      beforePicture?.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
-      ),
-    );
-    expect<Element | null | undefined>(document.activeElement).toBe(picture);
+  beforePicture?.focus();
+  await act(async () =>
+    beforePicture?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })),
+  );
+  expect<Element | null | undefined>(document.activeElement).toBe(picture);
 
-    await act(async () => picture?.click());
-    expect(pictureAdds).toBe(1);
-    expect(container.querySelector('[role="menu"]')).toBeNull();
-  } finally {
-    await cleanup();
-  }
+  await act(async () => picture?.click());
+  expect(pictureAdds).toBe(1);
+  expect(container.querySelector('[role="menu"]')).toBeNull();
 });
 
 test("a server-drawn face is not filed under Built in", async () => {
   // Server-drawn faces produce picture cards, so filing them beside device-local
   // kinds would contradict the tile, editor heading, and `cardLabel` result.
-  const { container, root, cleanup } = await mount();
-  try {
-    await act(async () =>
-      root.render(
-        <CardList
-          {...cardListDefaults()}
-          config={cardListConfig([])}
-          creatableFaces={[{ kind: "weather", label: "Weather", fields: [] }]}
-          onAddFace={() => {}}
-        />,
-      ),
-    );
-    await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
+  const { container, root } = await mount();
+  await act(async () =>
+    root.render(
+      <CardList
+        {...cardListDefaults()}
+        config={cardListConfig([])}
+        creatableFaces={[{ kind: "weather", label: "Weather", fields: [] }]}
+        onAddFace={() => {}}
+      />,
+    ),
+  );
+  await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
 
-    const groups = [...container.querySelectorAll(".menu__group")].map((group) => ({
-      legend: group.querySelector("legend")?.textContent?.trim() ?? "",
-      items: [...group.querySelectorAll('[role="menuitem"]')].map(
-        (item) => item.querySelector("strong")?.textContent?.trim() ?? "",
-      ),
-    }));
+  const groups = [...container.querySelectorAll(".menu__group")].map((group) => ({
+    legend: group.querySelector("legend")?.textContent?.trim() ?? "",
+    items: [...group.querySelectorAll('[role="menuitem"]')].map(
+      (item) => item.querySelector("strong")?.textContent?.trim() ?? "",
+    ),
+  }));
 
-    const builtIn = groups.find((group) => group.legend === "Built in");
-    const serverSide = groups.find((group) => group.legend === "Server-side");
-    expect(builtIn).toBeDefined();
-    expect(serverSide).toBeDefined();
-    expect(builtIn?.items).toContain("Digital clock");
-    expect(builtIn?.items).not.toContain("Weather");
-    expect(serverSide?.items).toEqual(["Weather"]);
-  } finally {
-    await cleanup();
-  }
+  const builtIn = groups.find((group) => group.legend === "Built in");
+  const serverSide = groups.find((group) => group.legend === "Server-side");
+  expect(builtIn).toBeDefined();
+  expect(serverSide).toBeDefined();
+  expect(builtIn?.items).toContain("Digital clock");
+  expect(builtIn?.items).not.toContain("Weather");
+  expect(serverSide?.items).toEqual(["Weather"]);
 });
 
 test("the add menu offers the faces the server says it can draw", async () => {
   // The app does not know what weather is: it renders whatever the server
   // listed, so a fourth face appears here with no app change at all.
   let chosen: { kind: string; label: string } | null = null;
-  const { container, root, cleanup } = await mount();
-  try {
-    await act(async () =>
-      root.render(
-        <CardList
-          {...cardListDefaults()}
-          config={cardListConfig([])}
-          creatableFaces={[
-            { kind: "weather", label: "Weather", fields: [] },
-            { kind: "sunrise", label: "Sunrise", fields: [] },
-          ]}
-          onAddFace={(kind, label) => {
-            chosen = { kind, label };
-          }}
-        />,
-      ),
-    );
-    await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
-    const menu = container.querySelector('[role="menu"]');
-    expect(menu?.textContent).toContain("Weather");
-    // A face this app has never heard of still reaches the menu.
-    expect(menu?.textContent).toContain("Sunrise");
+  const { container, root } = await mount();
+  await act(async () =>
+    root.render(
+      <CardList
+        {...cardListDefaults()}
+        config={cardListConfig([])}
+        creatableFaces={[
+          { kind: "weather", label: "Weather", fields: [] },
+          { kind: "sunrise", label: "Sunrise", fields: [] },
+        ]}
+        onAddFace={(kind, label) => {
+          chosen = { kind, label };
+        }}
+      />,
+    ),
+  );
+  await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
+  const menu = container.querySelector('[role="menu"]');
+  expect(menu?.textContent).toContain("Weather");
+  // A face this app has never heard of still reaches the menu.
+  expect(menu?.textContent).toContain("Sunrise");
 
-    const weatherItem = [
-      ...(menu?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? []),
-    ].find((button) => button.textContent?.includes("Weather"));
-    await act(async () => weatherItem?.click());
-    expect<{ kind: string; label: string } | null>(chosen).toEqual({
-      kind: "weather",
-      label: "Weather",
-    });
-    expect(container.querySelector('[role="menu"]') === null).toBe(true);
-  } finally {
-    await cleanup();
-  }
+  const weatherItem = [
+    ...(menu?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? []),
+  ].find((button) => button.textContent?.includes("Weather"));
+  await act(async () => weatherItem?.click());
+  expect<{ kind: string; label: string } | null>(chosen).toEqual({
+    kind: "weather",
+    label: "Weather",
+  });
+  expect(container.querySelector('[role="menu"]') === null).toBe(true);
 });
 
 test("the add menu offers an unused picture source and omits one already in the loop", async () => {
@@ -249,34 +235,30 @@ test("the add menu offers an unused picture source and omits one already in the 
     image_sources: [used, unused],
   };
   let chosenSource: string | null = null;
-  const { container, root, cleanup } = await mount();
-  try {
-    await act(async () =>
-      root.render(
-        <CardList
-          {...cardListDefaults()}
-          config={config}
-          onAddPicture={(source) => {
-            chosenSource = source?.id ?? null;
-          }}
-        />,
-      ),
-    );
-    await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
-    const menu = container.querySelector('[role="menu"]');
-    expect(menu?.textContent).toContain(unused.name);
-    expect(menu?.textContent).not.toContain(used.name);
-    expect(menu?.textContent).toContain("New picture source");
+  const { container, root } = await mount();
+  await act(async () =>
+    root.render(
+      <CardList
+        {...cardListDefaults()}
+        config={config}
+        onAddPicture={(source) => {
+          chosenSource = source?.id ?? null;
+        }}
+      />,
+    ),
+  );
+  await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
+  const menu = container.querySelector('[role="menu"]');
+  expect(menu?.textContent).toContain(unused.name);
+  expect(menu?.textContent).not.toContain(used.name);
+  expect(menu?.textContent).toContain("New picture source");
 
-    const unusedItem = [
-      ...(menu?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? []),
-    ].find((button) => button.textContent?.includes(unused.name));
-    await act(async () => unusedItem?.click());
-    expect<string | null>(chosenSource).toBe(unused.id);
-    expect(container.querySelector('[role="menu"]')).toBeNull();
-  } finally {
-    await cleanup();
-  }
+  const unusedItem = [
+    ...(menu?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? []),
+  ].find((button) => button.textContent?.includes(unused.name));
+  await act(async () => unusedItem?.click());
+  expect<string | null>(chosenSource).toBe(unused.id);
+  expect(container.querySelector('[role="menu"]')).toBeNull();
 });
 
 test("add-menu keyboard navigation crosses groups, wraps, and skips a disabled source action", async () => {
@@ -287,60 +269,56 @@ test("add-menu keyboard navigation crosses groups, wraps, and skips a disabled s
       name: `Source ${index}`,
     })),
   };
-  const { container, root, cleanup } = await mount();
-  try {
+  const { container, root } = await mount();
+  await act(async () =>
+    root.render(
+      <CardList
+        {...cardListDefaults()}
+        config={config}
+        creatableFaces={[{ kind: "weather", label: "Weather", fields: [] }]}
+        onAddFace={() => {}}
+      />,
+    ),
+  );
+  await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
+  const items = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+  const item = (label: string) =>
+    items.find((button) => button.querySelector("strong")?.textContent === label);
+  const press = async (button: HTMLButtonElement | undefined, key: string) => {
     await act(async () =>
-      root.render(
-        <CardList
-          {...cardListDefaults()}
-          config={config}
-          creatableFaces={[{ kind: "weather", label: "Weather", fields: [] }]}
-          onAddFace={() => {}}
-        />,
-      ),
+      button?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true })),
     );
-    await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
-    const items = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
-    const item = (label: string) =>
-      items.find((button) => button.querySelector("strong")?.textContent === label);
-    const press = async (button: HTMLButtonElement | undefined, key: string) => {
-      await act(async () =>
-        button?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true })),
-      );
-    };
+  };
 
-    expect(items.map((button) => button.querySelector("strong")?.textContent)).toEqual([
-      "Digital clock",
-      "Pomodoro",
-      "Weather",
-      "Source 0",
-      "Source 1",
-      "Source 2",
-      "Source 3",
-      "Source 4",
-      "Source 5",
-      "Source 6",
-      "Source 7",
-      "New picture source",
-    ]);
-    expect(item("New picture source")?.disabled).toBe(true);
+  expect(items.map((button) => button.querySelector("strong")?.textContent)).toEqual([
+    "Digital clock",
+    "Pomodoro",
+    "Weather",
+    "Source 0",
+    "Source 1",
+    "Source 2",
+    "Source 3",
+    "Source 4",
+    "Source 5",
+    "Source 6",
+    "Source 7",
+    "New picture source",
+  ]);
+  expect(item("New picture source")?.disabled).toBe(true);
 
-    item("Digital clock")?.focus();
-    await press(item("Digital clock"), "ArrowDown");
-    expect<Element | null | undefined>(document.activeElement).toBe(item("Pomodoro"));
-    await press(item("Pomodoro"), "ArrowDown");
-    expect<Element | null | undefined>(document.activeElement).toBe(item("Weather"));
-    await press(item("Weather"), "ArrowDown");
-    expect<Element | null | undefined>(document.activeElement).toBe(item("Source 0"));
+  item("Digital clock")?.focus();
+  await press(item("Digital clock"), "ArrowDown");
+  expect<Element | null | undefined>(document.activeElement).toBe(item("Pomodoro"));
+  await press(item("Pomodoro"), "ArrowDown");
+  expect<Element | null | undefined>(document.activeElement).toBe(item("Weather"));
+  await press(item("Weather"), "ArrowDown");
+  expect<Element | null | undefined>(document.activeElement).toBe(item("Source 0"));
 
-    item("Source 7")?.focus();
-    await press(item("Source 7"), "ArrowDown");
-    expect<Element | null | undefined>(document.activeElement).toBe(item("Digital clock"));
-    await press(item("Digital clock"), "ArrowUp");
-    expect<Element | null | undefined>(document.activeElement).toBe(item("Source 7"));
-  } finally {
-    await cleanup();
-  }
+  item("Source 7")?.focus();
+  await press(item("Source 7"), "ArrowDown");
+  expect<Element | null | undefined>(document.activeElement).toBe(item("Digital clock"));
+  await press(item("Digital clock"), "ArrowUp");
+  expect<Element | null | undefined>(document.activeElement).toBe(item("Source 7"));
 });
 
 test("the grid renders container issues and scopes a card's own issues to its tile", () => {
@@ -455,56 +433,48 @@ test("the add menu aligns to the slot end only when it would overflow the viewpo
 test("a click inside the menu is not mistaken for focus leaving it", async () => {
   const config = cardListConfig([clockCard("clock", "Desk")]);
   const added: string[] = [];
-  const { container, root, cleanup } = await mount();
+  const { container, root } = await mount();
   container.className = "face__work";
 
-  try {
-    await act(async () =>
-      root.render(
-        <CardList {...cardListDefaults()} config={config} onAdd={(kind) => added.push(kind)} />,
-      ),
-    );
-    const slot = container.querySelector<HTMLButtonElement>(".card-tile__add");
-    await act(async () => slot?.click());
-    const firstItem = container.querySelector<HTMLButtonElement>('[role="menuitem"]');
-    if (!firstItem) {
-      throw new Error("the add menu rendered no items");
-    }
-
-    // What WebKit does when the mouse goes down on a menu item.
-    await act(async () => {
-      firstItem.dispatchEvent(new FocusEvent("focusout", { bubbles: true, relatedTarget: null }));
-    });
-
-    expect(container.querySelector(".menu")).not.toBeNull();
-
-    await act(async () => firstItem.click());
-    expect(added).toEqual(["clock"]);
-  } finally {
-    await cleanup();
+  await act(async () =>
+    root.render(
+      <CardList {...cardListDefaults()} config={config} onAdd={(kind) => added.push(kind)} />,
+    ),
+  );
+  const slot = container.querySelector<HTMLButtonElement>(".card-tile__add");
+  await act(async () => slot?.click());
+  const firstItem = container.querySelector<HTMLButtonElement>('[role="menuitem"]');
+  if (!firstItem) {
+    throw new Error("the add menu rendered no items");
   }
+
+  // What WebKit does when the mouse goes down on a menu item.
+  await act(async () => {
+    firstItem.dispatchEvent(new FocusEvent("focusout", { bubbles: true, relatedTarget: null }));
+  });
+
+  expect(container.querySelector(".menu")).not.toBeNull();
+
+  await act(async () => firstItem.click());
+  expect(added).toEqual(["clock"]);
 });
 
 test("the add menu survives the scroll that opening it causes", async () => {
   const config = cardListConfig([clockCard("clock", "Desk")]);
-  const { container, root, cleanup } = await mount();
+  const { container, root } = await mount();
   container.className = "face__work";
 
-  try {
-    await act(async () => root.render(<CardList {...cardListDefaults()} config={config} />));
-    const slot = container.querySelector<HTMLButtonElement>(".card-tile__add");
-    await act(async () => slot?.click());
-    expect(container.querySelector(".menu")).not.toBeNull();
+  await act(async () => root.render(<CardList {...cardListDefaults()} config={config} />));
+  const slot = container.querySelector<HTMLButtonElement>(".card-tile__add");
+  await act(async () => slot?.click());
+  expect(container.querySelector(".menu")).not.toBeNull();
 
-    await act(async () => {
-      container.dispatchEvent(new Event("scroll", { bubbles: false }));
-      window.dispatchEvent(new Event("scroll"));
-    });
+  await act(async () => {
+    container.dispatchEvent(new Event("scroll", { bubbles: false }));
+    window.dispatchEvent(new Event("scroll"));
+  });
 
-    expect(container.querySelector(".menu")).not.toBeNull();
-  } finally {
-    await cleanup();
-  }
+  expect(container.querySelector(".menu")).not.toBeNull();
 });
 
 test("the add slot menu restores focus on Escape and a picked kind enrols and selects", async () => {
@@ -533,54 +503,50 @@ test("the add slot menu restores focus on Escape and a picked kind enrols and se
     );
   }
 
-  const { container, root, cleanup } = await mount();
-  try {
-    await act(async () => root.render(<Harness />));
-    const slot = container.querySelector<HTMLButtonElement>(".card-tile__add");
-    await act(async () => slot?.click());
-    expect(slot?.getAttribute("aria-expanded")).toBe("true");
-    expect(container.querySelector('[role="menu"]')).not.toBeNull();
-    const menuText = container.querySelector('[role="menu"]')?.textContent;
-    expect(menuText).toContain("Digital clock");
-    expect(menuText).toContain("Pomodoro");
-    expect(menuText).not.toContain("Weather");
-    expect(menuText).not.toContain("Calendar");
-    expect(menuText).not.toContain("RSS");
+  const { container, root } = await mount();
+  await act(async () => root.render(<Harness />));
+  const slot = container.querySelector<HTMLButtonElement>(".card-tile__add");
+  await act(async () => slot?.click());
+  expect(slot?.getAttribute("aria-expanded")).toBe("true");
+  expect(container.querySelector('[role="menu"]')).not.toBeNull();
+  const menuText = container.querySelector('[role="menu"]')?.textContent;
+  expect(menuText).toContain("Digital clock");
+  expect(menuText).toContain("Pomodoro");
+  expect(menuText).not.toContain("Weather");
+  expect(menuText).not.toContain("Calendar");
+  expect(menuText).not.toContain("RSS");
 
-    const firstItem = container.querySelector<HTMLButtonElement>('[role="menuitem"]');
-    await act(async () => {
-      firstItem?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-    expect(container.querySelector('[role="menu"]')).toBeNull();
-    expect(document.activeElement === slot).toBe(true);
+  const firstItem = container.querySelector<HTMLButtonElement>('[role="menuitem"]');
+  await act(async () => {
+    firstItem?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(container.querySelector('[role="menu"]')).toBeNull();
+  expect(document.activeElement === slot).toBe(true);
 
-    await act(async () => slot?.click());
-    slot?.focus();
-    await act(async () => {
-      slot?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-    expect(container.querySelector('[role="menu"]')).toBeNull();
-    expect(slot?.getAttribute("aria-expanded")).toBe("false");
-    expect(document.activeElement === slot).toBe(true);
+  await act(async () => slot?.click());
+  slot?.focus();
+  await act(async () => {
+    slot?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(container.querySelector('[role="menu"]')).toBeNull();
+  expect(slot?.getAttribute("aria-expanded")).toBe("false");
+  expect(document.activeElement === slot).toBe(true);
 
-    await act(async () => slot?.click());
-    const pomodoro = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(
-      (button) => button.textContent?.includes("Pomodoro"),
-    );
-    await act(async () => pomodoro?.click());
-    expect(latest.cards.at(-1)?.kind).toBe("pomodoro");
-    expect(latest.cards.at(-1)?.id).toBe("pomodoro");
-    expect<string | null>(selected).toBe("pomodoro");
-    expect(container.querySelector('[role="menu"]')).toBeNull();
-    expect(document.activeElement !== document.body).toBe(true);
-    expect(document.activeElement?.classList.contains("card-tile__body")).toBe(true);
-    // The tile is the countdown and the label now; the template is not printed.
-    expect(document.activeElement?.textContent).toContain("Focus");
-  } finally {
-    await cleanup();
-  }
+  await act(async () => slot?.click());
+  const pomodoro = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(
+    (button) => button.textContent?.includes("Pomodoro"),
+  );
+  await act(async () => pomodoro?.click());
+  expect(latest.cards.at(-1)?.kind).toBe("pomodoro");
+  expect(latest.cards.at(-1)?.id).toBe("pomodoro");
+  expect<string | null>(selected).toBe("pomodoro");
+  expect(container.querySelector('[role="menu"]')).toBeNull();
+  expect(document.activeElement !== document.body).toBe(true);
+  expect(document.activeElement?.classList.contains("card-tile__body")).toBe(true);
+  // The tile is the countdown and the label now; the template is not printed.
+  expect(document.activeElement?.textContent).toContain("Focus");
 });
 
 test("tabbing focus outside the add slot closes its menu", async () => {
@@ -608,7 +574,7 @@ test("tabbing focus outside the add slot closes its menu", async () => {
 test("grid move buttons and Alt arrows update active-loop order", async () => {
   const config = cardListConfig([pomodoroCard("first", "Desk"), pomodoroCard("second", "Up next")]);
   let latest = config;
-  const { container, root, cleanup } = await mount();
+  const { container, root } = await mount();
 
   function Harness() {
     const [value, setValue] = useState(config);
@@ -616,59 +582,53 @@ test("grid move buttons and Alt arrows update active-loop order", async () => {
     return <CardList {...cardListDefaults()} config={value} onChange={setValue} />;
   }
 
-  try {
-    await act(async () => root.render(<Harness />));
-    expect(
-      container.querySelector<HTMLButtonElement>(
-        'button[aria-label="Move Pomodoro — Desk earlier"]',
-      )?.disabled,
-    ).toBe(true);
-    expect(
-      container.querySelector<HTMLButtonElement>(
-        'button[aria-label="Move Pomodoro — Up next later"]',
-      )?.disabled,
-    ).toBe(true);
-    const earlier = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Move Pomodoro — Up next earlier"]',
+  await act(async () => root.render(<Harness />));
+  expect(
+    container.querySelector<HTMLButtonElement>('button[aria-label="Move Pomodoro — Desk earlier"]')
+      ?.disabled,
+  ).toBe(true);
+  expect(
+    container.querySelector<HTMLButtonElement>('button[aria-label="Move Pomodoro — Up next later"]')
+      ?.disabled,
+  ).toBe(true);
+  const earlier = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Move Pomodoro — Up next earlier"]',
+  );
+  expect(earlier).not.toBeNull();
+  await act(async () => earlier?.click());
+  expect(latest.cards.map((card) => card.id)).toEqual(["second", "first"]);
+
+  const later = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Move Pomodoro — Up next later"]',
+  );
+  await act(async () => later?.click());
+  expect(latest.cards.map((card) => card.id)).toEqual(["first", "second"]);
+
+  let selectedTile = [
+    ...container.querySelectorAll<HTMLButtonElement>(".card-tile .card-tile__body"),
+  ].find((button) => button.textContent?.includes("Desk"));
+  expect(selectedTile).not.toBeNull();
+  await act(async () => {
+    selectedTile?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowRight", altKey: true, bubbles: true }),
     );
-    expect(earlier).not.toBeNull();
-    await act(async () => earlier?.click());
-    expect(latest.cards.map((card) => card.id)).toEqual(["second", "first"]);
+  });
+  expect(latest.cards.map((card) => card.id)).toEqual(["second", "first"]);
 
-    const later = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Move Pomodoro — Up next later"]',
+  selectedTile = [
+    ...container.querySelectorAll<HTMLButtonElement>(".card-tile .card-tile__body"),
+  ].find((button) => button.textContent?.includes("Desk"));
+  await act(async () => {
+    selectedTile?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowLeft", altKey: true, bubbles: true }),
     );
-    await act(async () => later?.click());
-    expect(latest.cards.map((card) => card.id)).toEqual(["first", "second"]);
-
-    let selectedTile = [
-      ...container.querySelectorAll<HTMLButtonElement>(".card-tile .card-tile__body"),
-    ].find((button) => button.textContent?.includes("Desk"));
-    expect(selectedTile).not.toBeNull();
-    await act(async () => {
-      selectedTile?.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "ArrowRight", altKey: true, bubbles: true }),
-      );
-    });
-    expect(latest.cards.map((card) => card.id)).toEqual(["second", "first"]);
-
-    selectedTile = [
-      ...container.querySelectorAll<HTMLButtonElement>(".card-tile .card-tile__body"),
-    ].find((button) => button.textContent?.includes("Desk"));
-    await act(async () => {
-      selectedTile?.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "ArrowLeft", altKey: true, bubbles: true }),
-      );
-    });
-    expect(latest.cards.map((card) => card.id)).toEqual(["first", "second"]);
-  } finally {
-    await cleanup();
-  }
+  });
+  expect(latest.cards.map((card) => card.id)).toEqual(["first", "second"]);
 });
 
 test("keyboard reorder restores focus to the moved tile body", async () => {
   const config = cardListConfig([pomodoroCard("first", "Desk"), pomodoroCard("second", "Up next")]);
-  const { container, root, cleanup } = await mount();
+  const { container, root } = await mount();
 
   function Harness() {
     const [value, setValue] = useState(config);
@@ -684,66 +644,54 @@ test("keyboard reorder restores focus to the moved tile body", async () => {
     );
   }
 
-  try {
-    await act(async () => root.render(<Harness />));
-    const firstTile = [...container.querySelectorAll<HTMLButtonElement>(".card-tile__body")].find(
-      (button) => button.textContent?.includes("Desk"),
-    );
-    firstTile?.focus();
-    await act(async () =>
-      firstTile?.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "ArrowRight", altKey: true, bubbles: true }),
-      ),
-    );
-    const movedTile = [...container.querySelectorAll<HTMLButtonElement>(".card-tile__body")].find(
-      (button) => button.textContent?.includes("Desk"),
-    );
-    expect(movedTile?.textContent).toContain("Desk");
-    expect(document.activeElement === movedTile).toBe(true);
-  } finally {
-    await cleanup();
-  }
+  await act(async () => root.render(<Harness />));
+  const firstTile = [...container.querySelectorAll<HTMLButtonElement>(".card-tile__body")].find(
+    (button) => button.textContent?.includes("Desk"),
+  );
+  firstTile?.focus();
+  await act(async () =>
+    firstTile?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowRight", altKey: true, bubbles: true }),
+    ),
+  );
+  const movedTile = [...container.querySelectorAll<HTMLButtonElement>(".card-tile__body")].find(
+    (button) => button.textContent?.includes("Desk"),
+  );
+  expect(movedTile?.textContent).toContain("Desk");
+  expect(document.activeElement === movedTile).toBe(true);
 });
 
 test("dropping a loop tile on itself does not emit a draft change", async () => {
   const config = cardListConfig([pomodoroCard("first", "Desk"), pomodoroCard("second", "Up next")]);
   const changes: AppConfig[] = [];
-  const { container, root, cleanup } = await mount();
+  const { container, root } = await mount();
 
-  try {
-    await act(async () =>
-      root.render(
-        <CardList
-          {...cardListDefaults()}
-          config={config}
-          onChange={(next) => changes.push(next)}
-        />,
-      ),
-    );
-    const firstTile = [
-      ...container.querySelectorAll<HTMLLIElement>('.card-tile[draggable="true"]'),
-    ].find((tile) => tile.textContent?.includes("Desk"));
-    const secondTile = [
-      ...container.querySelectorAll<HTMLLIElement>('.card-tile[draggable="true"]'),
-    ].find((tile) => tile.textContent?.includes("Up next"));
-    if (!firstTile || !secondTile) throw new Error("Both draggable tiles must be rendered");
-    const transfer = new DataTransfer();
-    transfer.setData("text/plain", "first");
-    const drop = new Event("drop", { bubbles: true }) as DragEvent;
-    Object.defineProperty(drop, "dataTransfer", { value: transfer });
-    await act(async () => firstTile.dispatchEvent(drop));
-    expect(changes).toHaveLength(0);
+  await act(async () =>
+    root.render(
+      <CardList {...cardListDefaults()} config={config} onChange={(next) => changes.push(next)} />,
+    ),
+  );
+  const firstTile = [
+    ...container.querySelectorAll<HTMLLIElement>('.card-tile[draggable="true"]'),
+  ].find((tile) => tile.textContent?.includes("Desk"));
+  const secondTile = [
+    ...container.querySelectorAll<HTMLLIElement>('.card-tile[draggable="true"]'),
+  ].find((tile) => tile.textContent?.includes("Up next"));
+  if (!firstTile || !secondTile) throw new Error("Both draggable tiles must be rendered");
+  const transfer = new DataTransfer();
+  transfer.setData("text/plain", "first");
+  const drop = new Event("drop", { bubbles: true }) as DragEvent;
+  Object.defineProperty(drop, "dataTransfer", { value: transfer });
+  await act(async () => firstTile.dispatchEvent(drop));
+  expect(changes).toHaveLength(0);
 
-    const secondTransfer = new DataTransfer();
-    secondTransfer.setData("text/plain", "first");
-    const secondDrop = new Event("drop", { bubbles: true });
-    Object.defineProperty(secondDrop, "dataTransfer", { value: secondTransfer });
-    await act(async () => secondTile.dispatchEvent(secondDrop));
-    expect(changes).toHaveLength(1);
-    expect(changes[0].cards.map((card) => card.id)).toEqual(["second", "first"]);
-  } finally {
-    await cleanup();
-  }
+  const secondTransfer = new DataTransfer();
+  secondTransfer.setData("text/plain", "first");
+  const secondDrop = new Event("drop", { bubbles: true });
+  Object.defineProperty(secondDrop, "dataTransfer", { value: secondTransfer });
+  await act(async () => secondTile.dispatchEvent(secondDrop));
+  expect(changes).toHaveLength(1);
+  expect(changes[0].cards.map((card) => card.id)).toEqual(["second", "first"]);
 });
 
 for (const activation of ["click", "Enter", " "]) {

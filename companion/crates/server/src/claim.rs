@@ -209,6 +209,17 @@ fn delete_account_data(
         crate::data_cards::stop_account_refreshers(&space);
     }
     state.identity().delete_account(account_id)?;
+    {
+        let _guard = state
+            .inner
+            .setup_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.identity().account_count()? == 0 {
+            let code = state.inner.setup_code.regenerate();
+            crate::web_auth::setup_code::announce_setup_code(state.public_url(), &code);
+        }
+    }
     remove_directory_if_present(&root)?;
     Ok(())
 }

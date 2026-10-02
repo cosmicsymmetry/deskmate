@@ -687,6 +687,54 @@ async fn first_run_setup_creates_the_owner_once() {
 }
 
 #[tokio::test]
+async fn deleting_the_last_account_restores_first_run_setup() {
+    let state = ServerState::in_memory();
+    let code = state.setup_code_for_tests().unwrap();
+    let server = spawn_http(app(state.clone())).await;
+    let setup = post_json(
+        &server,
+        "/v1/app/setup",
+        json!({"code": code, "email": "first@example.com"}),
+    )
+    .await;
+    assert_eq!(setup.status(), StatusCode::OK);
+    let cookie = google_cookie(&setup);
+    assert!(state.setup_code_for_tests().is_none());
+    assert_eq!(
+        get_json(&server, "/v1/app/instance").await["setup_required"],
+        false
+    );
+
+    let deleted = reqwest::Client::new()
+        .delete(format!("{}/v1/app/account", server.base_url))
+        .header("origin", "https://deskmate.test")
+        .header("cookie", cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    assert_eq!(state.identity().account_count().unwrap(), 0);
+    assert_eq!(
+        get_json(&server, "/v1/app/instance").await["setup_required"],
+        true
+    );
+    let replacement = state
+        .setup_code_for_tests()
+        .expect("regenerated setup code");
+    let setup_again = post_json(
+        &server,
+        "/v1/app/setup",
+        json!({"code": replacement, "email": "next@example.com"}),
+    )
+    .await;
+    assert_eq!(setup_again.status(), StatusCode::OK);
+    let body = json_body(setup_again).await;
+    assert_eq!(body["account"]["email"], "next@example.com");
+    assert_eq!(body["account"]["is_instance_owner"], true);
+    assert!(state.setup_code_for_tests().is_none());
+}
+
+#[tokio::test]
 async fn setup_code_guesses_are_rate_limited() {
     let (state, _mail) = state_with_mailer();
     let server = spawn_http(app(state)).await;

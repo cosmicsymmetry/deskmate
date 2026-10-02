@@ -280,10 +280,7 @@ impl ServerState {
             == 0
         {
             let (setup_code, code) = web_auth::setup_code::SetupCode::generate();
-            tracing::warn!(target: "deskmate_server::setup",
-                "\n==============================================\n  Deskmate setup code: {code}\n  Open {url} to set up this server.\n==============================================",
-                url = options.public_url
-            );
+            web_auth::setup_code::announce_setup_code(&options.public_url, &code);
             setup_code
         } else {
             web_auth::setup_code::SetupCode::inactive()

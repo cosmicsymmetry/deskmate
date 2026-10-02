@@ -11,17 +11,22 @@ pub(crate) struct SetupCode {
 
 impl SetupCode {
     pub(crate) fn generate() -> (Self, String) {
+        let code = Self::inactive();
+        let display = code.regenerate();
+        (code, display)
+    }
+
+    pub(crate) fn regenerate(&self) -> String {
         let mut rng = rand::rng();
         let raw = (0..CODE_LEN)
             .map(|_| ALPHABET[rng.random_range(0..ALPHABET.len())] as char)
             .collect::<String>();
         let display = format!("{}-{}", &raw[..4], &raw[4..]);
-        (
-            Self {
-                value: Mutex::new(Some(raw)),
-            },
-            display,
-        )
+        *self
+            .value
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(raw);
+        display
     }
 
     pub(crate) fn inactive() -> Self {
@@ -72,9 +77,32 @@ fn normalize(presented: &str) -> String {
         .collect()
 }
 
+pub(crate) fn announce_setup_code(url: &url::Url, code: &str) {
+    tracing::warn!(target: "deskmate_server::setup",
+        "\n==============================================\n  Deskmate setup code: {code}\n  Open {url} to set up this server.\n=============================================="
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_inactive_code_can_be_regenerated() {
+        let code = SetupCode::inactive();
+        assert!(!code.is_active());
+        let display = code.regenerate();
+        assert!(code.is_active());
+        assert!(code.matches(&display));
+        assert_eq!(display.len(), 9);
+        assert_eq!(&display[4..5], "-");
+        assert!(
+            display
+                .bytes()
+                .enumerate()
+                .all(|(i, b)| i == 4 || ALPHABET.contains(&b))
+        );
+    }
 
     #[test]
     fn generated_code_has_the_unambiguous_display_shape_and_is_erasable() {

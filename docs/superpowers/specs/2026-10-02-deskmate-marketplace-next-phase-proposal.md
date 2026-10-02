@@ -1,6 +1,9 @@
-# DRAFT -- NOT APPROVED -- owner decision needed
+# APPROVED by the owner 2026-10-02 -- all four recommendations
 
-2026-10-02 · Track B · Decision request, not implementation scope.
+2026-10-02 · Track B · Approved decision record.
+
+The owner approved all four recommendations as written: “do as recommended”.
+The original alternatives and recommendations below remain as decision history.
 
 The [submission trial](2026-10-01-deskmate-plugin-marketplace-design.md) produced
 Days Left This Year through PR #12, then the owner-approved three-face update in
@@ -58,8 +61,9 @@ Revocation must distinguish removal from the catalog (blocks new use) from stopp
 existing refreshers. Choose an operator denylist checked during discovery/refresh
 for urgent removal; document that an already stored frame remains visible and stale.
 Clearing a frame or removing a user's card is a separate owner-visible decision.
-Deploy-time hashes alone cannot provide immediate runtime revocation. No denylist,
-release index, version enforcement or runtime service is implemented by this proposal.
+Deploy-time hashes alone cannot provide runtime revocation. The approved follow-up
+implements the release index and operator denylist; a runtime release service remains
+outside the decision.
 
 ## 4. Author tooling after this follow-up
 
@@ -73,3 +77,126 @@ release index, version enforcement or runtime service is implemented by this pro
 was concrete friction; an online IDE is hypothetical. Ask the next outside author
 to follow the guide unaided, then invest in the steps where that attempt actually
 stalls. PNG evidence supplements review; it never proves physical-panel delivery.
+
+## Decisions taken while implementing
+
+- Directory and identity remain documentation: a generated, test-checked
+  [plugin index](../../plugins/index.md) links each README. GitHub account and PR
+  history identify contributors; manifest author text is unverified attribution.
+  No panel or hosted account is required to submit.
+- The [canonical release hash](../../plugins/releases.md) covers every regular file,
+  including tests, docs and assets, with UTF-8 byte ordering and length framing.
+  Symlinks and special files are refused. No extension-based exclusions; consequently
+  any file change inside a reviewed folder requires a new version and review.
+  The two reviewed shipped plugins seed the index; GitHub stats gains a setup README.
+  Moon Phase joins the seeds at its exact merged content: the owner accepted PR #16
+  and explicitly directed its inclusion. All three plugins pass strict install
+  verification and appear in the documentation directory.
+- Owner-authored index PRs are the approval source. Previous entries are immutable
+  rollback history. A trusted-base `pull_request_target` workflow checks PR identity
+  without executing submitted code; CODEOWNERS is documentation, with no repository
+  settings changed. An outside PR can pass with a pending new version, but cannot
+  change the index or reuse an indexed version for different bytes.
+- The deploy verifies locally before faces-related VM contact and re-verifies the
+  staged target bytes immediately before installation. All modes that ship faces
+  share this path. Its verification command is tested in isolation: `--dry-run`
+  still touches the VM and is not used for this work.
+- Operator withdrawal defaults to the instance config root's `plugin-denylist.json`,
+  outside deployed faces; the cleared child environment receives only its explicit
+  path. Discovery retains private withdrawal metadata for existing-card status while
+  hiding those plugins from creation. Every refresh checks again. Missing file means
+  no denials; malformed/unreadable policy fails closed for plugins and logs an error.
+  Existing pixels remain stored and visible; built-ins are unaffected. Catalog changes
+  appear within its minute-level reload; refresh and recovery keep the existing cadence.
+- Author previews stay offline and independent of instance secrets/withdrawal policy.
+  The next outside author is invited to use the existing guide unaided and report
+  where they get stuck. No preview UI, install API or account/publisher service is added.
+
+## Local verification (2026-10-02)
+
+- Rust: fmt, clippy with warnings denied, workspace all-targets (867 passed,
+  two existing ignored) and separate doctests pass. Web: 216 tests, typecheck,
+  lint, formatting and build pass. Faces after integrating main's Moon Phase:
+  631 tests, typecheck, lint, formatting, dump, cold describe and all three offline
+  author checks pass. Two repository integration tests and seven approval-policy
+  tests pass; actionlint and shell syntax validation pass.
+- All 32 deliberate guard mutations were caught, covering hash/content/version
+  identity, approval and rollback history, deployment refusal, discovery, refresh,
+  malformed policy, status/menu/API behavior, logging and cleared-environment paths.
+  CLI/deploy mutations were repeated after moving their repository-only tests out
+  of the separately shipped faces bundle.
+- The faces bundle was copied to an isolated temporary directory without repository
+  docs or deploy scripts. Its complete suite and cold describe pass. Reviewed fixture
+  bytes pass the real verification CLI; changed bytes stop the extracted deploy
+  preflight before gates or VM-command stubs. All three seeded plugins, including
+  the owner's accepted Moon Phase release, pass strict verification. Unindexed
+  fixture versions pass CI but fail installation. Before the subsequent deployment
+  authorization, neither deploy nor its dry-run was run, and no VM contact or
+  hardware verification was performed.
+- Built-in SVG goldens are unchanged. All 18 Days Left checker PNGs match the prior
+  accepted output byte-for-byte; its three desk-scale layouts were inspected again.
+
+An initial run with Rust, web and faces gates concurrent failed three unchanged C1
+selector subprocess tests (idle reaping, inherited-pipe timing and a worker refusal).
+Ten consecutive focused selector runs then passed, followed by the complete Rust
+workspace run. Selector lifecycle code and its deadlines are unchanged by this work;
+the initial failures are disclosed rather than hidden by a timeout change.
+
+The owner subsequently authorized deployment. Its first attempt stopped before
+installation: the VM build user could not traverse the live config directory,
+which correctly made ordinary package tests treat the denylist as unreadable.
+Tests now use an isolated policy path, and the staging catalog check receives a
+temporary empty policy removed on exit. The live service's path and policy guards
+are unchanged. All 631 faces tests pass under an inherited malformed policy; three
+repository integration checks pass, and deleting either isolation guard fails its
+regression check (34 caught mutations total).
+
+## PR #19 review fixes (2026-10-02)
+
+- Owner-only approval now covers the [protected machinery](../../plugins/releases.md#submissions-and-approval),
+  not only the index: the base checker defines the path set and names changed files
+  in outside-author refusals. Host tests and loader configuration are included because
+  deployment executes them. Plugin-folder contributions and documentation remain open;
+  the catalog test discovers new plugin folders without requiring a host-test edit.
+- Denylist containment resolves the nearest existing ancestor before appending missing
+  path components. Missing intermediate directories under a symlink into faces are
+  rejected, as are `..` and dangling/unreadable ancestors. Validation creates no directories.
+- `pull_request_target` is retained deliberately. A test pins the read-only base
+  checkout and the two allowed commands, preventing accidental PR-head execution.
+- Tests now drive the real CLI with an unindexed release, and cover hidden-file
+  additions/changes, nested removal/rename, exact CRLF bytes and non-ASCII UTF-8 ordering.
+  The ordering case uses a fixed digest independently calculated from the documented format.
+
+After merging main through `0e132ae`, including the already deployed passwordless
+sign-in fix (#20), brightness/schema v11 (#18, `4f13dd3`) and Deskboy branding (#23),
+full local gates pass: Rust 884 tests (two existing ignored), web 225, faces 637,
+three repository integration checks and 14 approval-policy tests, plus formatting,
+linting, typechecks, builds, doctests, actionlint, shell syntax, firmware host tests
+and ASan/UBSan, and all three release hashes. The schema/wire lock is released by
+Track H; Track B introduces no schema or wire change. All 19 review-specific mutations were caught (53 probes across the initial,
+deployment-isolation and review checks). A fresh scaffolded outside submission in
+an isolated copy passed 638 tests and pending-release CI verification without changing
+the index or any host test. Built-in goldens remain byte-identical.
+
+The owner then merged the nine-card batch as PR #21 (`8b733db`) while this
+follow-up was running. Integration retains its independent review fixes and the
+push-gate test synchronization. The release index adds all nine 1.0.0 releases at
+exact merged content, retaining the original three entries; the generated directory
+lists all twelve. The catalog conflict keeps folder discovery so the next outside
+author still need not edit protected host tests. This acceptance is based on the
+owner-authored PR's recorded review and owner merge, not an automatic approval of
+unmerged submissions.
+
+The integrated batch passes the full gates again: 884 Rust tests (two existing
+ignored), 225 web tests, 779 faces tests, three repository checks and 14 policy
+tests. All twelve offline author checks and strict release verification pass;
+formatting, lint, typechecks, builds, doctests, directory generation and cold
+discovery pass. Built-in golden bytes and the already deployed web/firmware code
+remain identical to main.
+
+All seven CI jobs passed at `4381e81` (run 37003915944); the Hacker News unstaged
+tap case passed in 3.166 seconds. The pre-deploy ancestry check then stopped before
+installation because the live UI had advanced to merged PR #22 (`0c7ecbb`). That
+merge preserves the deployed UI exactly and changes no faces, server, firmware,
+approval tooling or workflow bytes. The web gates pass again (225 tests); final
+CI and deployment evidence follow in PR #19.

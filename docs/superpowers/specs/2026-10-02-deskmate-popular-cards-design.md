@@ -192,3 +192,22 @@ fixtures. Their READMEs no longer describe Calvin-only GIF checks. No saved acco
 configuration is rewritten. Local validation passes: **737 faces tests / 4046
 assertions**, typecheck, lint, formatting, cold discovery (15 faces, no Calvin), and
 xkcd/Anime author checks (8 cases / 16 PNGs). CI, merge and deployment are pending.
+
+
+### Concurrent release-policy deployment
+
+PR #24 passed all six CI jobs (attempt two, after an unchanged Rust pause-test race),
+merged as `9e2bb7e`, and shipped at 2026-10-02 12:19:38 UTC. The installed catalog
+then matched all 15 expected entries and the Calvin directory was absent.
+
+During that deployment another track shipped release-policy revision `72173e1`
+(seven green CI jobs) to the binary/web. Reconciliation preserves that entire live
+revision alongside the Calvin removal; this avoids leaving the older faces host
+without the operator withdrawal policy. All old approval entries remain immutable.
+xkcd/Anime require documentation-only 1.0.1 entries because the newly deployed
+policy hashes every file, including README changes already merged in PR #24. Their
+rendering source and permissions remain unchanged. The generated directory omits
+Calvin; its old approval entry remains historical.
+
+Reconciled local checks: 762 faces tests / 4177 assertions, typecheck, lint,
+formatting and strict approval verification for all eleven installed plugins pass.

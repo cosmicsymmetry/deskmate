@@ -7,6 +7,7 @@ import { discoverPlugins } from "../plugins/discovery";
 import { parseManifest } from "../plugins/manifest";
 import { SANDBOX_LIMITS, warmSandbox } from "../plugins/sandbox";
 import { OUTPUT_DIR, PLUGINS_DIR, checkId, message } from "./common";
+import { hashPlugin, readReleases, releaseStatus, type Release } from "../plugins/releases";
 
 interface CheckCase {
   name?: string;
@@ -22,6 +23,8 @@ export interface CheckReport {
   id: string;
   ok: boolean;
   errors: string[];
+  release?: Release;
+  review?: "reviewed" | "pending";
   cases: { name: string; png?: string; desk?: string; errors: string[]; notices: string[] }[];
 }
 
@@ -72,6 +75,8 @@ export async function checkPlugin(
       JSON.parse(await readFile(join(root, id, "plugin.json"), "utf8")),
       id,
     );
+    report.release = hashPlugin(root, id);
+    report.review = releaseStatus(report.release, readReleases(root, true));
     const defaults = Object.fromEntries(
       manifest.fields.map((field) => [field.key, field.default ?? ""]),
     );
@@ -103,6 +108,7 @@ export async function checkPlugin(
           {
             request: async (input) => offlineReply(input, example, result.notices),
             readSecrets: async () => ({}),
+            denylistPath: null,
             onLog: (line) => result.notices.push(line),
           },
           [id],
@@ -159,6 +165,14 @@ if (import.meta.main) {
       `${report.ok ? "PASS" : "FAIL"}: ${id} — real discovery, plan({}), sandbox and render; network disabled, no secrets.`,
     );
     for (const error of report.errors) console.error(`  Error: ${error}`);
+    if (report.release) {
+      console.log(`Release identity: ${JSON.stringify(report.release)}`);
+      console.log(
+        report.review === "reviewed"
+          ? "Reviewed hash verified."
+          : "Not yet in the release index; the owner adds approval after review.",
+      );
+    }
     for (const example of report.cases) {
       console.log(
         `  ${example.name}: ${example.errors.length ? "FAIL" : "448×368 and 0.4× PNGs rendered"}`,

@@ -54,6 +54,14 @@ default. This section states only what is true now.
   older decoder skips unknown key 4; the gate enforces advertised feature support.
   Existing `v2.2.0-psram` keeps working; there is **no flash-first order** for Track H.
   Deploy the v11 server before its SPA; firmware installation remains separate.
+  **Track H merged as PR #18 (`4f13dd3`) and its server/SPA are deployed; the
+  schema/wire lock is RELEASED.** Track B's release-index follow-up (PR #19)
+  retains v11 and the deployed sign-in/Deskboy changes; its reviewed release hashes
+  cover Days Left This Year, GitHub stats, Moon Phase and the nine owner-accepted
+  cards from merged PR #21 (`8b733db`).
+  The approval checker protects the full verification machinery, and operator
+  withdrawal policy lives outside the deployed faces tree; see
+  `docs/plugins/releases.md` for the approval boundary and bootstrap limit.
 - **Three card kinds: clock, pomodoro, picture.** Clock and pomodoro tick on the device
   between host pushes. A picture card's face is a raster frame, frozen between pushes,
   from one of two producers: an external one POSTing a PNG, or **the server itself**. The
@@ -414,8 +422,11 @@ These are decisions, not defaults. Changing one needs the owner, not a judgement
   and undimmed. ApplyConfig key 4 is gated by bit 11; unsupported firmware never blocks
   saving. Firmware applies from the LVGL UI queue, RAM only, and reboots at raw 200.
   The standalone diagnostic stays. The dead branch's colliding "schema v6" is still
-  not reusable. New firmware's USB flash, OTA download and both-mounting glass checks
-  remain UNOBSERVED; see the Track H entry in board notes.
+  not reusable. Track H recorded successful OTA installation of `v2.3.0-brightness`
+  on `dev-0005` at 2026-10-02 11:55 UTC, capability `display-brightness` by name
+  and live schema v11 at 78%. These are server-side observations; visible level
+  changes at both mountings and the remaining checks are still UNOBSERVED. See
+  the Track H entry in board notes.
 
 ### Hardware verification still owed
 

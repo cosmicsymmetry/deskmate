@@ -35,10 +35,11 @@ const EXIT_TRANSIENT = 1;
 
 export function describeCatalog(faces: readonly FaceDefinition[] = FACES): string {
   return JSON.stringify(
-    faces.map(({ kind, label, fields, tap, refreshSeconds }) => ({
+    faces.map(({ kind, label, fields, tap, refreshSeconds, withdrawn }) => ({
       kind,
       label,
       fields,
+      ...(withdrawn === undefined ? {} : { withdrawn }),
       ...(tap === undefined ? {} : { tap }),
       // snake_case on the wire, deliberately: this JSON is read by
       // `crates/server/src/data_cards/faces_package.rs`'s `CatalogFace`, which has no
@@ -154,7 +155,7 @@ export async function renderRequest(
 }
 
 async function describe(): Promise<string> {
-  return describeCatalog(await allFaces());
+  return describeCatalog(await allFaces(true));
 }
 
 function requestFromJson(
@@ -178,11 +179,13 @@ async function requestedFace(request: FaceRequest): Promise<FaceDefinition> {
   const builtin = typeof request.kind === "string" ? faceOfKind(request.kind) : undefined;
   if (builtin !== undefined) return builtin;
   await warmSandbox();
-  const faces = await allFaces();
-  return definitionFor(
+  const faces = await allFaces(true);
+  const face = definitionFor(
     request,
     faces.find((face) => face.kind === request.kind),
   );
+  if (face.withdrawn) throw new ConfigurationError(face.withdrawn);
+  return face;
 }
 
 async function render(input: string, now: Date): Promise<string> {

@@ -785,6 +785,7 @@ pub(crate) fn creatable_faces(state: &ServerState) -> Vec<FaceDescriptor> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .catalog()
         .iter()
+        .filter(|face| face.withdrawn.is_none())
         .map(|face| describe_face(face, &BTreeMap::new()))
         .collect()
 }
@@ -978,12 +979,24 @@ pub(crate) fn status_for_source(
         message: None,
         at_unix_seconds: None,
     };
-    let descriptor = state
+    let mut catalog = state
         .inner
         .face_catalog
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .descriptor(&face);
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(message) = catalog
+        .catalog()
+        .iter()
+        .find(|candidate| candidate.kind == face.kind)
+        .and_then(|candidate| candidate.withdrawn.as_ref())
+    {
+        return Some(FaceStatus {
+            state: FaceState::NeedsAttention,
+            message: Some(message.clone()),
+            at_unix_seconds: None,
+        });
+    }
+    let descriptor = catalog.descriptor(&face);
     let Some(descriptor) = descriptor else {
         return Some(plain(FaceState::Unavailable));
     };
@@ -1113,7 +1126,7 @@ pub(crate) fn create_face(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .catalog()
         .iter()
-        .find(|candidate| candidate.kind == kind)
+        .find(|candidate| candidate.kind == kind && candidate.withdrawn.is_none())
         .cloned()
         .ok_or_else(|| FaceUpdateError::UnknownField(kind.to_owned()))?;
     if data_cards
@@ -2427,6 +2440,126 @@ mod tests {
             baseline + 1,
             "the startup render and tap render reset the interval"
         );
+    }
+
+    #[test]
+    fn withdrawn_catalog_status_overrides_the_last_success_before_another_refresh() {
+        let state = ServerState::in_memory();
+        let space = test_space(&state);
+        let source = space.image_sources.mint("Headlines").unwrap();
+        create_face(&state, &space, &source.id, "headlines").unwrap();
+        space.data_cards.lock().unwrap().outcomes.insert(
+            source.id.clone(),
+            (RefreshOutcome::Drawn, chrono::Utc::now()),
+        );
+        assert_eq!(
+            status_for_source(&state, &space, &source.id).unwrap().state,
+            FaceState::Drawn
+        );
+        let reason = "withdrawn by the operator: Review pending";
+        {
+            let mut catalog = state.inner.face_catalog.lock().unwrap();
+            let mut faces = catalog.catalog().as_ref().clone();
+            faces
+                .iter_mut()
+                .find(|f| f.kind == "headlines")
+                .unwrap()
+                .withdrawn = Some(reason.into());
+            catalog.catalog = Some(Arc::new(faces));
+        }
+        let status = status_for_source(&state, &space, &source.id).unwrap();
+        assert_eq!(status.state, FaceState::NeedsAttention);
+        assert_eq!(status.message.as_deref(), Some(reason));
+        assert!(
+            !creatable_faces(&state)
+                .iter()
+                .any(|f| f.kind == "headlines")
+        );
+        assert!(creatable_faces(&state).iter().any(|f| f.kind == "weather"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn withdrawn_face_retains_pixels_and_reports_the_reason_after_catalog_removal() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let server = FaceTestServer::new("weather", false, false).await;
+        let frame_digest = || {
+            server
+                .space
+                .image_sources
+                .frame(&server.source_id, chrono::Utc::now())
+                .unwrap()
+                .digest
+        };
+        let digest = frame_digest();
+        let wrapper = server.directory.path().join("operator-faces");
+        let policy = server.directory.path().join("withdrawn");
+        let old = shell_word(&server.directory.path().join("fake-faces"));
+        let reason = "withdrawn by the operator: Safety review";
+        let withdrawn = serde_json::json!([{ "kind": "weather", "label": "Weather", "fields": [], "withdrawn": reason }]);
+        std::fs::write(&wrapper, format!("#!/bin/sh\nif [ -f \"$DESKMATE_PLUGIN_DENYLIST\" ]; then\nif [ \"$1\" = describe ]; then\nprintf '%s' '{withdrawn}'\nelse\ncat >/dev/null\nprintf '%s' '{reason}' >&2\nexit 2\nfi\nelse\nexec {old} \"$@\"\nfi\n")).unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let command = FaceCommand::program(wrapper).with_denylist(policy.clone());
+        set_faces(&server.state, command.clone());
+        server
+            .restart_with_refresh(Duration::from_millis(100))
+            .await;
+        std::fs::write(&policy, "withdrawn").unwrap();
+        // The running worker must surface exit 2 even before the catalog re-read.
+        let status = status_when(&server.state, &server.space, &server.source_id, |s| {
+            s.state == FaceState::NeedsAttention
+        })
+        .await;
+        assert_eq!(status.message.as_deref(), Some(reason));
+        assert!(status.at_unix_seconds.is_some());
+
+        // Simulate the catalog reloader seeing the withdrawal. Existing-card
+        // errors must survive disappearance from the public creation catalog.
+        set_faces(&server.state, command.clone());
+        assert!(creatable_faces(&server.state).is_empty());
+        let other = server.space.image_sources.mint("Another").unwrap();
+        assert!(create_face(&server.state, &server.space, &other.id, "weather").is_err());
+        assert_eq!(
+            status_for_source(&server.state, &server.space, &server.source_id)
+                .unwrap()
+                .message
+                .as_deref(),
+            Some(reason)
+        );
+        assert_eq!(frame_digest(), digest);
+
+        std::fs::remove_file(&policy).unwrap();
+        set_faces(&server.state, command.clone());
+        assert!(
+            creatable_faces(&server.state)
+                .iter()
+                .any(|f| f.kind == "weather")
+        );
+        status_when(&server.state, &server.space, &server.source_id, |s| {
+            s.state == FaceState::Drawn
+        })
+        .await;
+        // Starting while denied must retain a worker for eventual recovery.
+        std::fs::write(&policy, "withdrawn").unwrap();
+        set_faces(&server.state, command);
+        {
+            let mut cards = server.space.data_cards.lock().unwrap();
+            cards.tasks.remove(&server.source_id).unwrap().abort();
+            cards.outcomes.clear();
+            let spec = cards
+                .specs
+                .iter()
+                .find(|s| s.source_id == server.source_id)
+                .unwrap()
+                .clone();
+            cards.start_if_complete(
+                &tokio::runtime::Handle::current(),
+                &server.state,
+                Arc::clone(&server.space),
+                &spec,
+            );
+            assert!(cards.tasks.contains_key(&server.source_id));
+        }
+        assert_eq!(frame_digest(), digest);
     }
 
     /// Polls until the face's status satisfies `done`, the way the window does.

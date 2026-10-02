@@ -397,7 +397,7 @@ async fn main() {
     // graceful shutdown below drains connections, and an in-flight fetch is
     // abandoned with it. That is safe because a card's durable state is the
     // frame already in the store: losing a refresh loses nothing but the tick.
-    if let Some(faces) = faces_command() {
+    if let Some(faces) = faces_command(&config_dir) {
         server::set_faces(&state, faces);
     } else {
         tracing::info!("no faces package configured (DESKMATE_FACES_DIR unset)");
@@ -518,7 +518,7 @@ fn required_firmware_version(value: Result<String, std::env::VarError>) -> Strin
 /// `DESKMATE_BUN` names the runtime; both must be absolute, because the child's
 /// environment is cleared and a relative path would resolve against nothing the
 /// operator chose.
-fn faces_command() -> Option<server::FaceCommand> {
+fn faces_command(config_dir: &std::path::Path) -> Option<server::FaceCommand> {
     let faces_dir = PathBuf::from(std::env::var("DESKMATE_FACES_DIR").ok()?);
     let bun =
         std::env::var("DESKMATE_BUN").map_or_else(|_| "/usr/local/bin/bun".into(), PathBuf::from);
@@ -538,7 +538,57 @@ fn faces_command() -> Option<server::FaceCommand> {
         "DESKMATE_BUN ({}) does not exist; the faces package needs the Bun runtime",
         bun.display()
     );
-    Some(server::FaceCommand::bun(bun, &faces_dir))
+    let denylist = plugin_denylist_path(
+        config_dir,
+        &faces_dir,
+        std::env::var_os("DESKMATE_PLUGIN_DENYLIST"),
+    );
+    Some(server::FaceCommand::bun(bun, &faces_dir).with_denylist(denylist))
+}
+
+fn plugin_denylist_path(
+    config_dir: &std::path::Path,
+    faces_dir: &std::path::Path,
+    configured: Option<std::ffi::OsString>,
+) -> PathBuf {
+    let denylist =
+        configured.map_or_else(|| config_dir.join("plugin-denylist.json"), PathBuf::from);
+    assert!(
+        denylist.is_absolute(),
+        "DESKMATE_PLUGIN_DENYLIST must be an absolute path"
+    );
+    assert!(
+        !denylist
+            .components()
+            .any(|part| part == std::path::Component::ParentDir),
+        "DESKMATE_PLUGIN_DENYLIST must not contain '..'"
+    );
+    // Resolve the nearest existing ancestor: the policy file and several parent
+    // directories may not exist yet, including below a symlink into faces.
+    // An unreadable or dangling ancestor cannot establish safe containment.
+    let mut ancestor = denylist.as_path();
+    let mut missing = Vec::new();
+    while let Err(error) = ancestor.symlink_metadata() {
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::NotFound,
+            "cannot inspect DESKMATE_PLUGIN_DENYLIST ancestor"
+        );
+        missing.push(ancestor.file_name().expect("absolute path has an ancestor"));
+        ancestor = ancestor.parent().expect("absolute path has an ancestor");
+    }
+    let mut resolved = ancestor
+        .canonicalize()
+        .expect("cannot resolve DESKMATE_PLUGIN_DENYLIST ancestor");
+    for part in missing.iter().rev() {
+        resolved.push(part);
+    }
+    // A faces deployment must never replace operator withdrawal policy.
+    assert!(
+        !resolved.starts_with(faces_dir.canonicalize().expect("faces directory exists")),
+        "DESKMATE_PLUGIN_DENYLIST must be outside DESKMATE_FACES_DIR"
+    );
+    denylist
 }
 
 /// `axum::serve` can drain in-flight connections before the process exits.
@@ -571,6 +621,103 @@ async fn shutdown_signal(state: ServerState) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn operator_policy_defaults_to_instance_root_and_stays_outside_faces() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("configs");
+        let faces = root.path().join("faces");
+        std::fs::create_dir(&config).unwrap();
+        std::fs::create_dir(&faces).unwrap();
+        assert_eq!(
+            super::plugin_denylist_path(&config, &faces, None),
+            config.join("plugin-denylist.json")
+        );
+        let override_path = root.path().join("withdrawn.json");
+        assert_eq!(
+            super::plugin_denylist_path(&config, &faces, Some(override_path.clone().into())),
+            override_path
+        );
+        for path in [
+            std::path::PathBuf::from("relative.json"),
+            faces.join("withdrawn.json"),
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| super::plugin_denylist_path(
+                    &config,
+                    &faces,
+                    Some(path.into())
+                ))
+                .is_err()
+            );
+        }
+        #[cfg(unix)]
+        {
+            let link = root.path().join("faces-link");
+            std::os::unix::fs::symlink(&faces, &link).unwrap();
+            assert!(
+                std::panic::catch_unwind(|| super::plugin_denylist_path(
+                    &config,
+                    &faces,
+                    Some(link.join("withdrawn.json").into())
+                ))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn operator_policy_resolves_aliases_even_with_missing_intermediate_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let faces = root.path().join("faces");
+        let config = root.path().join("configs");
+        std::fs::create_dir(&faces).unwrap();
+        // A future outside directory is fine, and validation must not create it.
+        let outside = config.join("operator/nested/denylist.json");
+        assert_eq!(
+            super::plugin_denylist_path(&config, &faces, Some(outside.clone().into())),
+            outside
+        );
+        assert!(!config.exists());
+        assert!(
+            std::panic::catch_unwind(|| super::plugin_denylist_path(
+                &config,
+                &faces,
+                Some(faces.join("../outside.json").into())
+            ))
+            .is_err()
+        );
+        #[cfg(unix)]
+        {
+            let alias = root.path().join("faces-link");
+            std::os::unix::fs::symlink(&faces, &alias).unwrap();
+            for policy in [
+                alias.join("operator/denylist.json"),
+                alias.join("operator/nested/denylist.json"),
+                root.path().join("future/../faces/denylist.json"),
+            ] {
+                assert!(
+                    std::panic::catch_unwind(|| super::plugin_denylist_path(
+                        &config,
+                        &faces,
+                        Some(policy.into())
+                    ))
+                    .is_err()
+                );
+            }
+            assert!(!faces.join("operator").exists());
+            let dangling = root.path().join("dangling");
+            std::os::unix::fs::symlink(faces.join("future"), &dangling).unwrap();
+            assert!(
+                std::panic::catch_unwind(|| super::plugin_denylist_path(
+                    &config,
+                    &faces,
+                    Some(dangling.join("denylist.json").into())
+                ))
+                .is_err()
+            );
+        }
+    }
+
     fn server_options(
         public_url: &str,
         signups: Option<&str>,

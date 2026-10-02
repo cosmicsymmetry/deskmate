@@ -6,7 +6,7 @@
 // is what turns it into a `FaceDefinition`. Either way the server learns about it from
 // `main.ts describe` -- there is no Rust change and no binary redeploy.
 
-import type { FaceDefinition } from "./face";
+import { ConfigurationError, type FaceDefinition } from "./face";
 import { hackernews } from "./faces/hackernews";
 import { rss } from "./faces/rss";
 import { token } from "./faces/token";
@@ -26,8 +26,21 @@ export function faceOfKind(kind: string): FaceDefinition | undefined {
  * than override something the owner already relies on. Re-runs discovery on every
  * call -- see `discoverPlugins` for why that is cheap enough to be the point.
  */
-export async function allFaces(): Promise<readonly FaceDefinition[]> {
-  const { faces } = await discoverPlugins();
+export async function allFaces(includeWithdrawn = false): Promise<readonly FaceDefinition[]> {
+  const { faces, skipped } = await discoverPlugins();
   const builtIn = new Set(FACES.map((face) => face.kind));
-  return [...FACES, ...faces.filter((face) => !builtIn.has(face.kind))];
+  const withdrawn: FaceDefinition[] = includeWithdrawn
+    ? skipped
+        .filter((s) => s.withdrawn)
+        .map((s) => ({
+          kind: s.folder,
+          label: s.folder,
+          fields: [],
+          withdrawn: s.reason,
+          render() {
+            throw new ConfigurationError(s.reason);
+          },
+        }))
+    : [];
+  return [...FACES, ...[...faces, ...withdrawn].filter((face) => !builtIn.has(face.kind))];
 }

@@ -473,6 +473,7 @@ function claimedIssues(issues: ValidationIssue[], config: AppConfig): Validation
   claim(issuesForPath(issues, "advance"));
   claim(issuesForPath(issues, "advance.default_dwell_seconds"));
   claim(issuesForPath(issues, "preferences.timezone"));
+  claim(issuesForPath(issues, "preferences.brightness"));
   return [...claimed];
 }
 

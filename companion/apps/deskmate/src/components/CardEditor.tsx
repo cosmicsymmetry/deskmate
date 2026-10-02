@@ -21,6 +21,7 @@ import type {
   PomodoroSnapshot,
   ValidationIssue,
 } from "../lib/types";
+import { PRODUCT_NAME } from "../lib/product";
 import { FieldIssues } from "./FieldIssues";
 
 interface CardEditorProps {
@@ -87,7 +88,7 @@ function HoldSelector({
       <details className="editor-help">
         <summary>How alert timing works</summary>
         <p>
-          This setting controls when Deskmate can accept another alert. It does not clear the
+          This setting controls when {PRODUCT_NAME} can accept another alert. It does not clear the
           display; tap the display to dismiss the current alert.
         </p>
       </details>
@@ -574,7 +575,8 @@ export function CardEditor({
                   </button>
                 </div>
                 <small>
-                  This plaintext token is shown once. Copy it now; Deskmate cannot show it again.
+                  This plaintext token is shown once. Copy it now; {PRODUCT_NAME} cannot show it
+                  again.
                 </small>
               </div>
             )}

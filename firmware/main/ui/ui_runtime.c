@@ -3,6 +3,8 @@
 #include <string.h>
 
 #include "clock_screen.h"
+#include "board/display.h"
+#include "core/protocol_message.h"
 #include "carousel.h"
 #include "esp_check.h"
 #include "esp_log.h"
@@ -70,6 +72,14 @@ static void consume_command(const ui_command_t *command)
     case UI_COMMAND_ACTION_APPLY_TIME_OFFSET:
         clock_screen_set_utc_offset_minutes(command->utc_offset_minutes);
         break;
+    case UI_COMMAND_ACTION_APPLY_BRIGHTNESS: {
+        /* This consumer runs on LVGL's timer, never in the protocol callback. */
+        esp_err_t status = board_display_set_brightness(command->brightness);
+        if (status != ESP_OK) {
+            ESP_LOGE(TAG, "display brightness failed (%s)", esp_err_to_name(status));
+        }
+        break;
+    }
     case UI_COMMAND_ACTION_NONE:
         break;
     }
@@ -162,4 +172,17 @@ uint32_t ui_runtime_dropped_commands(void)
 uint32_t ui_runtime_queue_high_water(void)
 {
     return ui_command_queue_high_water(&s_queue);
+}
+
+// Only validated ApplyConfig values reach the UI mailbox. No NVS write.
+bool ui_runtime_set_brightness(uint8_t level)
+{
+    if (!s_initialized) {
+        return false;
+    }
+    const ui_command_t command = {
+        .type = UI_COMMAND_BRIGHTNESS,
+        .brightness = level,
+    };
+    return publish_scalar(&command);
 }

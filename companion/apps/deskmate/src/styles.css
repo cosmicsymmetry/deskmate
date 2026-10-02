@@ -1327,6 +1327,23 @@ fieldset legend {
   opacity: 1;
 }
 
+.brightness-label {
+  display: flex;
+  justify-content: space-between;
+}
+
+.brightness-label output {
+  font-variant-numeric: tabular-nums;
+}
+
+.field input[type="range"] {
+  height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  accent-color: var(--act);
+}
+
 .field input:hover,
 .field select:hover {
   border-color: color-mix(in srgb, var(--ink) 20%, transparent);
@@ -1906,6 +1923,30 @@ fieldset legend {
 
 .startup .button {
   margin-top: 12px;
+}
+
+/* The way back to the product's site: the quietest thing on the screen, set
+   apart from the form's own actions. */
+.startup__site {
+  /* Padding, not margin, makes the gap: the whole 43px is the touch target. */
+  margin-top: 8px;
+  padding: 14px 12px;
+  color: var(--ink-3);
+  font-size: 0.75rem;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
+  text-underline-offset: 0.25em;
+  border-radius: 4px;
+  transition: color 120ms ease;
+}
+
+.startup__site:hover {
+  color: var(--ink);
+}
+
+.startup__site:focus-visible {
+  outline: 2px solid var(--live);
+  outline-offset: 4px;
 }
 
 /* A row of actions on a startup screen follows the screen's centred column,

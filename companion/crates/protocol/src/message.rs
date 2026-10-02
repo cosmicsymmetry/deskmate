@@ -45,12 +45,15 @@ pub const CAPABILITY_VOLATILE_ASSETS: u64 = 1 << 9;
 /// is 172 sequential chunk round trips at `MAX_ASSET_CHUNK_BYTES`, and the
 /// tunnel does not survive that. The same frame RLE565-encoded is a handful.
 pub const CAPABILITY_DURABLE_ASSET_ENCODING: u64 = 1 << 10;
+pub const CAPABILITY_DISPLAY_BRIGHTNESS: u64 = 1 << 11;
+pub const MIN_DISPLAY_BRIGHTNESS: u8 = 26;
 pub const CURRENT_CAPABILITIES: u64 = CAPABILITY_ASSET_TRANSFER
     | CAPABILITY_FIRMWARE_UPDATE
     | CAPABILITY_NETWORKING
     | CAPABILITY_SCENE_RENDER
     | CAPABILITY_VOLATILE_ASSETS
-    | CAPABILITY_DURABLE_ASSET_ENCODING;
+    | CAPABILITY_DURABLE_ASSET_ENCODING
+    | CAPABILITY_DISPLAY_BRIGHTNESS;
 const _: () = assert!(CURRENT_CAPABILITIES & RETIRED_V1_CAPABILITY_BITS == 0);
 /// A card id is an identifier the host chose, not free text.
 ///
@@ -225,6 +228,8 @@ pub struct CardConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplyConfig {
     pub revision: u32,
+    /// Raw panel level, 26..=255. Omitted unless bit 11 is advertised.
+    pub brightness: Option<u8>,
     pub rotation: u16,
     /// The loop, in order. Protocol v2 dropped the parallel `screens` array:
     /// since config schema v10 a screen id is always the card id, so it
@@ -688,6 +693,12 @@ fn validate_apply_config(config: &ApplyConfig) -> Result<(), MessageError> {
     if !matches!(config.rotation, 90 | 270) {
         return Err(MessageError::InvalidValue("config rotation"));
     }
+    if config
+        .brightness
+        .is_some_and(|level| level < MIN_DISPLAY_BRIGHTNESS)
+    {
+        return Err(MessageError::InvalidValue("config brightness"));
+    }
     for (index, card) in config.cards.iter().enumerate() {
         checked_text(&card.card_id, 1, MAX_CARD_ID_LEN, "card_id")?;
         if config.cards[..index]
@@ -848,7 +859,7 @@ pub fn validate_message(message: &Message) -> Result<(), MessageError> {
 }
 
 fn encode_config_payload(encoder: &mut Encoder, config: &ApplyConfig) {
-    encoder.map(3);
+    encoder.map(3 + usize::from(config.brightness.is_some()));
     encoder.unsigned(0);
     encoder.unsigned(u64::from(config.revision));
     encoder.unsigned(1);
@@ -862,6 +873,10 @@ fn encode_config_payload(encoder: &mut Encoder, config: &ApplyConfig) {
     }
     encoder.unsigned(3);
     encoder.unsigned(u64::from(config.rotation));
+    if let Some(level) = config.brightness {
+        encoder.unsigned(4);
+        encoder.unsigned(u64::from(level));
+    }
 }
 
 fn encode_device_event_payload(encoder: &mut Encoder, event: &DeviceEvent) {
@@ -1255,11 +1270,13 @@ fn decode_apply_config(payload: &[u8]) -> Result<ApplyConfig, MessageError> {
     let mut revision = None;
     let mut cards = None;
     let mut rotation = None;
+    let mut brightness = None;
     for _ in 0..len {
         match next_numeric_key(&mut decoder, &mut previous)? {
             0 => revision = Some(read_u32(&mut decoder, "config revision")?),
             1 => cards = Some(decode_cards(&mut decoder)?),
             3 => rotation = Some(read_u16(&mut decoder, "config rotation")?),
+            4 => brightness = Some(read_u8(&mut decoder, "config brightness")?),
             _ => decoder.skip()?,
         }
     }
@@ -1267,6 +1284,7 @@ fn decode_apply_config(payload: &[u8]) -> Result<ApplyConfig, MessageError> {
     Ok(ApplyConfig {
         revision: revision.ok_or(MessageError::MissingField(0))?,
         rotation: rotation.unwrap_or(90),
+        brightness,
         cards: cards.ok_or(MessageError::MissingField(1))?,
     })
 }
@@ -1899,6 +1917,7 @@ mod tests {
                 diagnostic: "stale revision".into(),
             });
             "apply_config", 42, Message::ApplyConfig(ApplyConfig {
+                brightness: None,
                 revision: 3,
                 rotation: 270,
                 cards: vec![CardConfig {
@@ -2163,8 +2182,8 @@ mod tests {
         // what now follows them on the wire. The tail is
         // CURRENT_CAPABILITIES, which protocol v2 re-based: bits 0-4 described
         // a device that rendered templates and are retired, leaving
-        // 2016 (0x07e0). It moves whenever a capability bit changes.
-        let pattern = [0x15, 0x09, 0x16, 0x02, 0x17, 0x19, 0x07, 0xe0];
+        // 4064 (0x0fe0). It moves whenever a capability bit changes.
+        let pattern = [0x15, 0x09, 0x16, 0x02, 0x17, 0x19, 0x0f, 0xe0];
         let offset = payload
             .windows(pattern.len())
             .position(|window| window == pattern)
@@ -2409,6 +2428,7 @@ mod tests {
     #[test]
     fn config_rotation_is_landscape_only_and_legacy_payloads_default_to_90() {
         let config = ApplyConfig {
+            brightness: None,
             revision: 1,
             rotation: 270,
             cards: vec![CardConfig {

@@ -85,7 +85,7 @@ to the display: `0 12px 28px -16px`, black at 28% in light mode and 60% in dark 
 
 ## Card editing
 
-The strip is the schema-v10 ordered `cards[]` loop. Drag, earlier/later buttons, and
+The strip is the schema-v11 ordered `cards[]` loop. Drag, earlier/later buttons, and
 Alt+arrow keys all change that same order. Position numbers communicate sequence and
 are hidden from assistive technology to keep card names concise. Move/remove controls
 appear on hover or focus, and remain visible at narrow widths or on touch devices.

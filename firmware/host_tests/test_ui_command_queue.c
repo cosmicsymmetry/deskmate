@@ -104,12 +104,34 @@ static void test_offline_transition_cannot_be_starved(void)
     assert(ui_command_queue_coalesced(&s_queue) == 1U);
 }
 
+static void test_brightness_coalesces_and_survives_host_loss(void)
+{
+    ui_command_queue_init(&s_queue);
+    ui_command_t command = {.type = UI_COMMAND_BRIGHTNESS, .brightness = 26U};
+    assert(ui_command_action(command.type) == UI_COMMAND_ACTION_APPLY_BRIGHTNESS);
+    assert(ui_command_queue_push(&s_queue, &command));
+    command.brightness = 255U;
+    assert(ui_command_queue_push(&s_queue, &command));
+    command.type = UI_COMMAND_SHOW_CARD_FALLBACK;
+    assert(ui_command_queue_push(&s_queue, &command));
+    command.type = UI_COMMAND_LINK_STATE;
+    command.online = false;
+    assert(ui_command_queue_push(&s_queue, &command));
+    assert(ui_command_queue_pop(&s_queue, &s_output));
+    assert(s_output.type == UI_COMMAND_BRIGHTNESS && s_output.brightness == 255U);
+    assert(ui_command_queue_pop(&s_queue, &s_output));
+    assert(s_output.type == UI_COMMAND_LINK_STATE && !s_output.online);
+    assert(!ui_command_queue_pop(&s_queue, &s_output));
+    assert(ui_command_queue_dropped(&s_queue) == 0U);
+}
+
 int main(void)
 {
     test_card_fallback_maps_to_standalone_clock();
     test_card_fallback_round_trips_through_queue();
     test_duplicate_card_fallbacks_coalesce();
     test_scalar_updates_replace_pending();
+    test_brightness_coalesces_and_survives_host_loss();
     test_scene_cancels_only_the_card_fallback();
     test_offline_transition_cannot_be_starved();
     printf("test_ui_command_queue: OK (%zu-byte queue, capacity %u)\n",

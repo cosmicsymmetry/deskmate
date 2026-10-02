@@ -1,1 +1,1 @@
-v2.2.0-psram
+v2.3.0-brightness

@@ -163,6 +163,7 @@ fn apply_case_config(
     request: &SceneRenderRequest,
 ) -> Result<(), String> {
     let config = ApplyConfig {
+        brightness: None,
         revision,
         rotation: rotation_degrees(request.orientation),
         cards: vec![CardConfig {

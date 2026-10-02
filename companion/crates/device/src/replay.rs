@@ -92,6 +92,7 @@ mod tests {
 
     fn config(revision: u32) -> ApplyConfig {
         ApplyConfig {
+            brightness: None,
             revision,
             rotation: 90,
             cards: vec![CardConfig {
@@ -136,6 +137,7 @@ mod tests {
         assert_eq!(replay.active_card.as_ref().unwrap().card_id, "timer");
 
         let changed = ApplyConfig {
+            brightness: None,
             revision: 2,
             rotation: current.rotation,
             cards: vec![CardConfig {

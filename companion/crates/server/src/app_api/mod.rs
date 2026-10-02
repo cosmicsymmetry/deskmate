@@ -887,7 +887,7 @@ mod tests {
         // This test drives the same predicate the stream uses, because reproducing a
         // live board's telemetry through the HTTP surface would need hardware.
         let base = serde_json::json!({
-            "config": { "schema_version": 10 },
+            "config": { "schema_version": 11 },
             "device": {
                 "connection": { "kind": "online" },
                 "uptime_ms": 1_000,
@@ -909,7 +909,7 @@ mod tests {
         );
 
         let mut meaningful = base.clone();
-        meaningful["config"]["schema_version"] = serde_json::json!(11);
+        meaningful["config"]["schema_version"] = serde_json::json!(12);
         assert_ne!(
             change_key(&base),
             change_key(&meaningful),

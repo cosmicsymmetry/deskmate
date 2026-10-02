@@ -9,6 +9,8 @@ ui_command_action_t ui_command_action(ui_command_type_t type)
         return UI_COMMAND_ACTION_APPLY_LINK_STATE;
     case UI_COMMAND_TIME_OFFSET:
         return UI_COMMAND_ACTION_APPLY_TIME_OFFSET;
+    case UI_COMMAND_BRIGHTNESS:
+        return UI_COMMAND_ACTION_APPLY_BRIGHTNESS;
     default:
         return UI_COMMAND_ACTION_NONE;
     }

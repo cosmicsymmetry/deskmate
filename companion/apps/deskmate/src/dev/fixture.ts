@@ -42,6 +42,7 @@ export function mockConfig(): AppConfig {
       autostart: true,
       paused: false,
       orientation: "landscape",
+      brightness: 78,
     },
     cards: [
       {

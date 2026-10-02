@@ -59,7 +59,11 @@ pub(super) fn synchronize_full(
     }
     if !sync_device_result(
         state,
-        device.apply_layout(compiled.layout.rotation, compiled.layout.cards),
+        device.apply_layout(
+            compiled.layout.brightness,
+            compiled.layout.rotation,
+            compiled.layout.cards,
+        ),
     )? {
         return Ok(());
     }

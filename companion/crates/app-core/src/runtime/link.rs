@@ -27,7 +27,12 @@ pub trait RuntimeDevice: Send + 'static {
     fn connect(&mut self) -> Result<DeviceConnection, DeviceError>;
     fn status(&mut self) -> Result<StatusResponse, DeviceError>;
     fn time_sync(&mut self, sync: TimeSync) -> Result<(), DeviceError>;
-    fn apply_layout(&mut self, rotation: u16, cards: Vec<CardConfig>) -> Result<(), DeviceError>;
+    fn apply_layout(
+        &mut self,
+        _brightness: Option<u8>,
+        rotation: u16,
+        cards: Vec<CardConfig>,
+    ) -> Result<(), DeviceError>;
     /// The timer a card's `timer.*` scene bindings resolve against. Protocol
     /// v2 replaced the generic field push with this.
     fn push_timer(

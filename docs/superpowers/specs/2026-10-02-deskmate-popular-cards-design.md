@@ -64,7 +64,7 @@ specific limitation and use a supported source/configuration instead of a fake f
 - [x] Supply offline `check.json` fixtures and accessible full/desk previews.
 - [x] Verify live provider requests through the real guarded runtime.
 - [x] Run full applicable faces checks and changed-plugin preview checks.
-- [ ] Complete independent visual/code review and documentation handoff.
+- [x] Complete independent visual/code review and documentation handoff.
 - [ ] Open the submission PR and confirm CI passes on the reviewed head.
 - [ ] Integrate current main and check ancestry against every live component.
 - [ ] Merge and deploy the reviewed merged revision, then verify the installed
@@ -79,9 +79,10 @@ cards respectively. Track B's primary branch owns integration, review records, P
 merge and deployment. Other open tracks' changes are preserved and are not deployed
 from an unmerged branch as a side effect.
 
-Status: all nine plugins implemented and integrated; independent review in progress.
-Combined faces suite: **727 tests, 4029 assertions, zero failures**. Typecheck, lint
-and format pass. The nine offline author checks pass **27 cases / 54 PNGs**, with
+Status: all nine plugins implemented, integrated and independently reviewed; PR #21
+awaits final CI, merge and deployment.
+Combined faces suite: **754 tests, 4077 assertions, zero failures**. Typecheck, lint
+and format pass. The nine offline author checks pass **28 cases / 56 PNGs**, with
 no runtime-limit notices. Live guarded renders and tap changes pass for the eight
 automatic cards; the supplied-URL Calvin path also renders an official GIF.
 Live baseline observed before work: faces
@@ -106,3 +107,32 @@ Provider preflight from the deployment host returned HTTP 200 for all eight remo
 services/asset hosts tested (Wikipedia, icanhazdadjoke, Wiktionary, Met, Ghibli, xkcd,
 Nekos.best and GoComics' image server). Full installed-runtime checks remain a
 separate deployment gate.
+
+### Review outcome
+
+Independent visual review inspected all nine actual-content/default faces and desk
+views, plus relevant variants. Its sole material finding was xkcd #162's dense
+dialogue; that comic was removed from the compact selection. The same full/desk
+contact sheets were recaptured. The reviewer scored that correction **resolved**,
+with no fix-introduced visual regressions, and returned **ship** at that scope.
+
+Independent implementation review found that signature-only image checks could
+accept a truncated PNG, silently draw no artwork and advance state. The three media
+plugins now check bounded PNG/JPEG/GIF structure before acceptance, including PNG
+chunk checksums and required endings. All nine original truncation reproductions
+now throw transient errors, and Anime falls back when the first candidate is corrupt.
+The reviewer independently reran 47 media tests / 92 assertions and found no material
+regression in the fix. These are structural guards, not complete compressed-stream
+decoders; each README states that remaining limit.
+
+The reviewed production head is `167513c`. Documentation review passed on that head:
+settings, sources, attribution, tap semantics, failure behavior and preview claims
+agree with the implementations. No global design-system change or repair of older
+PRODUCT.md/DESIGN.md drift belongs to this card batch.
+
+[PR #21](https://github.com/cosmicsymmetry/deskmate/pull/21) uses the plugin submission
+template. The initial CI run passed faces, previews, firmware and firmware host
+tests; companion failed the unchanged `push_gate_waiter_panics_when_the_gate_is_not_opened`
+fixture because its 100 ms scheduling deadline elapsed before the worker reported.
+The final submission reruns the repository gates; no skipped or failing gate is
+accepted as a release pass.

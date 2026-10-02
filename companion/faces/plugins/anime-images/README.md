@@ -74,3 +74,22 @@ physical-panel or hosted frame-store delivery is asserted.
 
 ![Synthetic portrait framing](previews/1-full.png)
 ![Same frame at desk scale](previews/1-desk.png)
+
+## Image validation scope
+
+Before accepting bytes, the plugin checks a complete, bounded image structure:
+PNG chunk bounds/order, IHDR fields, all chunk CRCs, palette requirements, zlib
+header and terminal IEND; JPEG segment bounds, frame dimensions, quantization and
+Huffman table lengths, scan framing and terminal EOI; and (Calvin only) GIF colour
+tables, image descriptors, terminated data sub-blocks and the final trailer. The
+same validator is bundled into each standalone plugin because sandbox imports are
+unavailable. Invalid structure is transient and cannot advance saved selection;
+Anime tries its bounded alternate image before failing.
+
+These are **structural checks, not a complete pixel decoder**. They do not inflate
+PNG IDAT streams or decode JPEG entropy / GIF LZW data. A structurally consistent
+but invalid compressed stream can still pass this check; the normal rasterizer is
+responsible for decoding. No claim is made that every possible malformed image is
+detected before rasterization. The tests pin common truncations (first 33 bytes,
+first 100 bytes, and missing final chunks/terminators), PNG CRC damage, valid
+synthetic PNG/JPEG/GIF rendering and Anime's truncation fallback.

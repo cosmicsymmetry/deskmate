@@ -43,7 +43,7 @@ describe("xkcd media plugin", () => {
     const seen: string[] = [];
     const result = await runPlugin(
       input("xkcd", {
-        state: { version: 1, mode: "compact", index: 4 },
+        state: { version: 1, mode: "compact", index: 3 },
         event: { taps: 3, point: null },
         request: async (r) => {
           seen.push(r.url);
@@ -292,4 +292,104 @@ test("Calvin accepts the current official CDN without following the legacy redir
   );
   expect(seen).toEqual([url]);
   expect(result.state).toEqual({ version: 1, url });
+});
+
+// These fixtures contain only synthetic artwork; original source images stay out
+// of the repository. Exercise the complete sandbox and production raster path.
+const animeCases = JSON.parse(readFileSync(join(root, "anime-images/check.json"), "utf8"));
+const jpeg = Buffer.from(
+  animeCases.cases.find((entry: { name: string }) => entry.name.includes("JPEG")).responses[1]
+    .base64,
+  "base64",
+);
+const calvinCases = JSON.parse(readFileSync(join(root, "calvin-and-hobbes/check.json"), "utf8"));
+const gif = Buffer.from(
+  calvinCases.cases.find((entry: { name: string }) => entry.name.includes("GIF")).responses[0]
+    .base64,
+  "base64",
+);
+
+for (const id of ["xkcd", "calvin-and-hobbes", "anime-images"]) {
+  for (const [format, bytes] of [
+    ["PNG", png],
+    ["JPEG", jpeg],
+  ] as const) {
+    for (const end of [33, 100, bytes.length - 24]) {
+      test(`${id} refuses truncated ${format} at ${end} bytes without advancing state`, async () => {
+        const state =
+          id === "xkcd" ? { version: 1, mode: "compact", index: 0 } : { version: 1, url: official };
+        const saved = JSON.stringify(state);
+        await expect(
+          runPlugin(
+            input(id, {
+              settings: id === "calvin-and-hobbes" ? { strips: official } : {},
+              state,
+              request: (r) =>
+                response(r, r.as === "json" ? JSON.stringify(metadata) : bytes.subarray(0, end)),
+            }),
+          ),
+        ).rejects.toBeInstanceOf(TransientError);
+        expect(JSON.stringify(state)).toBe(saved);
+      });
+    }
+  }
+  test(`${id} rejects a PNG with a corrupted IDAT checksum`, async () => {
+    const corrupt = Buffer.from(png);
+    corrupt[45] = (corrupt[45] ?? 0) ^ 1;
+    await expect(
+      runPlugin(
+        input(id, {
+          settings: id === "calvin-and-hobbes" ? { strips: official } : {},
+          request: (r) => response(r, r.as === "json" ? JSON.stringify(metadata) : corrupt),
+        }),
+      ),
+    ).rejects.toBeInstanceOf(TransientError);
+  });
+}
+
+for (const end of [33, 100, gif.length - 24, gif.length - 1]) {
+  test(`Calvin refuses a truncated GIF at ${end} bytes`, async () => {
+    await expect(
+      runPlugin(
+        input("calvin-and-hobbes", {
+          settings: { strips: official },
+          request: (r) => response(r, gif.subarray(0, end)),
+        }),
+      ),
+    ).rejects.toBeInstanceOf(TransientError);
+  });
+}
+
+test("Calvin renders a complete synthetic GIF through the production rasterizer", async () => {
+  const result = await runPlugin(
+    input("calvin-and-hobbes", {
+      settings: { strips: official },
+      request: (r) => response(r, gif),
+    }),
+  );
+  expect(result.svg).toContain("data:image/gif;base64,");
+  expect(pngFromSvg(result.svg).length).toBeGreaterThan(1000);
+});
+
+test("Anime uses its third-round fallback when a fresh PNG has a valid but truncated header", async () => {
+  let count = 0;
+  const result = await runPlugin(
+    input("anime-images", {
+      settings: { selection: "fresh" },
+      request: (r) => {
+        count++;
+        return response(
+          r,
+          r.as === "json"
+            ? JSON.stringify({ results: [artist] })
+            : r.url === artist.url
+              ? png.subarray(0, 100)
+              : png,
+        );
+      },
+    }),
+  );
+  expect(count).toBe(3);
+  expect(result.state).not.toMatchObject({ url: artist.url });
+  expect(pngFromSvg(result.svg).length).toBeGreaterThan(1000);
 });

@@ -1,7 +1,7 @@
 # xkcd
 
 Version 1.0.0. A comic fills the panel above a small Randall Munroe credit and comic
-number. **Compact selection** rotates seven inspected single-panel comics, starting
+number. **Compact selection** rotates six inspected single-panel comics, starting
 at a time-seeded random position; refresh advances one and a tap advances by its tap
 count. **Latest comic** fetches the current official comic on refresh or tap. It
 always shows the whole image; unusually wide or tall latest comics can be too small
@@ -18,7 +18,7 @@ Images come only from `imgs.xkcd.com/comics/`; the plugin validates this exact h
 and HTTPS path before requesting bytes. It requests two responses per render.
 
 Compact collection: 149 Sandwich; 303 Compiling; 88 Escher Bracelet; 55 Useless;
-231 Cat Proximity; 259 Clichéd Exchanges; 162 Angular Momentum. The original
+231 Cat Proximity; 259 Clichéd Exchanges. The original
 artwork is never cropped, redrawn, translated or bundled in this repository.
 
 Plugin code follows the repository GPL-3.0-only licence. The comic content does
@@ -55,3 +55,22 @@ hosted frame-store delivery is asserted.
 
 ![Synthetic compact layout](previews/1-full.png)
 ![Same frame at desk scale](previews/1-desk.png)
+
+## Image validation scope
+
+Before accepting bytes, the plugin checks a complete, bounded image structure:
+PNG chunk bounds/order, IHDR fields, all chunk CRCs, palette requirements, zlib
+header and terminal IEND; JPEG segment bounds, frame dimensions, quantization and
+Huffman table lengths, scan framing and terminal EOI; and (Calvin only) GIF colour
+tables, image descriptors, terminated data sub-blocks and the final trailer. The
+same validator is bundled into each standalone plugin because sandbox imports are
+unavailable. Invalid structure is transient and cannot advance saved selection;
+Anime tries its bounded alternate image before failing.
+
+These are **structural checks, not a complete pixel decoder**. They do not inflate
+PNG IDAT streams or decode JPEG entropy / GIF LZW data. A structurally consistent
+but invalid compressed stream can still pass this check; the normal rasterizer is
+responsible for decoding. No claim is made that every possible malformed image is
+detected before rasterization. The tests pin common truncations (first 33 bytes,
+first 100 bytes, and missing final chunks/terminators), PNG CRC damage, valid
+synthetic PNG/JPEG/GIF rendering and Anime's truncation fallback.

@@ -1,0 +1,204 @@
+{
+  "checked": "2026-10-02",
+  "method": "GET every image; exact URL and status verified, no redirects. Met object JSON or official Ghibli gallery HTML verified before image requests.",
+  "images": [
+    {
+      "id": "totoro15",
+      "source": "https://www.ghibli.jp/works/totoro/",
+      "image": "https://www.ghibli.jp/gallery/totoro015.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 270993,
+      "sha256": "d8582f97ce62d012d68389644b19dafcb68406c335a8f10bbc0836b93302289a",
+      "foundInOfficialGallery": true,
+      "credit": "© 1988 Hayao Miyazaki/Studio Ghibli"
+    },
+    {
+      "id": "totoro30",
+      "source": "https://www.ghibli.jp/works/totoro/",
+      "image": "https://www.ghibli.jp/gallery/totoro030.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 205385,
+      "sha256": "f9494fa952a53157b7e5f8a7a328eee984f4056c8ecba2577efabcece41713f7",
+      "foundInOfficialGallery": true,
+      "credit": "© 1988 Hayao Miyazaki/Studio Ghibli"
+    },
+    {
+      "id": "totoro45",
+      "source": "https://www.ghibli.jp/works/totoro/",
+      "image": "https://www.ghibli.jp/gallery/totoro045.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 203690,
+      "sha256": "347fed5e9855aec24bed084a5a39b981338414afe286d1e97bd263fc47487ea5",
+      "foundInOfficialGallery": true,
+      "credit": "© 1988 Hayao Miyazaki/Studio Ghibli"
+    },
+    {
+      "id": "chihiro1",
+      "source": "https://www.ghibli.jp/works/chihiro/",
+      "image": "https://www.ghibli.jp/gallery/chihiro001.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 272475,
+      "sha256": "e9dfa5041a9774e546e7d7f0125543044d688e935a35bfd36cbdad228a2d8668",
+      "foundInOfficialGallery": true,
+      "credit": "© 2001 Hayao Miyazaki/Studio Ghibli, NDDTM"
+    },
+    {
+      "id": "chihiro15",
+      "source": "https://www.ghibli.jp/works/chihiro/",
+      "image": "https://www.ghibli.jp/gallery/chihiro015.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 226990,
+      "sha256": "40d2db2e388e8870b425d3c2b3a66eee6511e24978650282bb624937711ea55c",
+      "foundInOfficialGallery": true,
+      "credit": "© 2001 Hayao Miyazaki/Studio Ghibli, NDDTM"
+    },
+    {
+      "id": "chihiro45",
+      "source": "https://www.ghibli.jp/works/chihiro/",
+      "image": "https://www.ghibli.jp/gallery/chihiro045.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 260819,
+      "sha256": "eeddb69629bcd515ac6db6b244b436c02a6f98dad5b2063ce69ef715d4e322d4",
+      "foundInOfficialGallery": true,
+      "credit": "© 2001 Hayao Miyazaki/Studio Ghibli, NDDTM"
+    },
+    {
+      "id": "howl15",
+      "source": "https://www.ghibli.jp/works/howl/",
+      "image": "https://www.ghibli.jp/gallery/howl015.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 310352,
+      "sha256": "b732b22ec7cb2f70fc2e1cb8703892561229b0b8047c95fe2a3755ba497745cf",
+      "foundInOfficialGallery": true,
+      "credit": "© 2004 Diana Wynne Jones/Hayao Miyazaki/Studio Ghibli, NDDMT"
+    },
+    {
+      "id": "howl30",
+      "source": "https://www.ghibli.jp/works/howl/",
+      "image": "https://www.ghibli.jp/gallery/howl030.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 336650,
+      "sha256": "cc7ae4452c958d772f65ebd8e3058d476321c46ae20084f1e0ccfd18aeb53e8a",
+      "foundInOfficialGallery": true,
+      "credit": "© 2004 Diana Wynne Jones/Hayao Miyazaki/Studio Ghibli, NDDMT"
+    },
+    {
+      "id": "howl45",
+      "source": "https://www.ghibli.jp/works/howl/",
+      "image": "https://www.ghibli.jp/gallery/howl045.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 174396,
+      "sha256": "86251a2de440f12ad102d210a308108b912e90a0a33dc3e1fa02980a9e3471dc",
+      "foundInOfficialGallery": true,
+      "credit": "© 2004 Diana Wynne Jones/Hayao Miyazaki/Studio Ghibli, NDDMT"
+    },
+    {
+      "id": "majo15",
+      "source": "https://www.ghibli.jp/works/majo/",
+      "image": "https://www.ghibli.jp/gallery/majo015.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 282676,
+      "sha256": "b2461e03c29ffa9288d4546a4fb4915790841ff787ca4c934dbbab64bee679c4",
+      "foundInOfficialGallery": true,
+      "credit": "© 1989 Eiko Kadono/Hayao Miyazaki/Studio Ghibli, N"
+    },
+    {
+      "id": "majo30",
+      "source": "https://www.ghibli.jp/works/majo/",
+      "image": "https://www.ghibli.jp/gallery/majo030.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 274336,
+      "sha256": "2530610fb7dd0392066f16c2d1cce5bb98cf188a80b1f479644e8a92279fd4a8",
+      "foundInOfficialGallery": true,
+      "credit": "© 1989 Eiko Kadono/Hayao Miyazaki/Studio Ghibli, N"
+    },
+    {
+      "id": "majo45",
+      "source": "https://www.ghibli.jp/works/majo/",
+      "image": "https://www.ghibli.jp/gallery/majo045.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 292759,
+      "sha256": "a698818ca6c8026f2ce87b248a2cc96c8d4b2b1c470d8cbed8b4efa8fe8977b1",
+      "foundInOfficialGallery": true,
+      "credit": "© 1989 Eiko Kadono/Hayao Miyazaki/Studio Ghibli, N"
+    },
+    {
+      "id": "ponyo1",
+      "source": "https://www.ghibli.jp/works/ponyo/",
+      "image": "https://www.ghibli.jp/gallery/ponyo001.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 284142,
+      "sha256": "ae257471d333f5f122eaca1da6a41c09d76f64b8525a21e88d7f5f6b4f9507fe",
+      "foundInOfficialGallery": true,
+      "credit": "© 2008 Hayao Miyazaki/Studio Ghibli, NDHDMT"
+    },
+    {
+      "id": "ponyo30",
+      "source": "https://www.ghibli.jp/works/ponyo/",
+      "image": "https://www.ghibli.jp/gallery/ponyo030.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 258330,
+      "sha256": "11200258e92e40f9e5bd5595ab604996ad9fe34b241df8453503ddd943b8ee43",
+      "foundInOfficialGallery": true,
+      "credit": "© 2008 Hayao Miyazaki/Studio Ghibli, NDHDMT"
+    },
+    {
+      "id": "ponyo45",
+      "source": "https://www.ghibli.jp/works/ponyo/",
+      "image": "https://www.ghibli.jp/gallery/ponyo045.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 323782,
+      "sha256": "2b355b33e7ce0af620f054f668d41f193d8a53e4d5d5833579bae2849d78ec16",
+      "foundInOfficialGallery": true,
+      "credit": "© 2008 Hayao Miyazaki/Studio Ghibli, NDHDMT"
+    },
+    {
+      "id": "laputa15",
+      "source": "https://www.ghibli.jp/works/laputa/",
+      "image": "https://www.ghibli.jp/gallery/laputa015.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 269342,
+      "sha256": "02f5a61c83c49139fbb50333e95627013d14ff51d8eb706a8bd3f0d6ce745171",
+      "foundInOfficialGallery": true,
+      "credit": "© 1986 Hayao Miyazaki/Studio Ghibli"
+    },
+    {
+      "id": "laputa30",
+      "source": "https://www.ghibli.jp/works/laputa/",
+      "image": "https://www.ghibli.jp/gallery/laputa030.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 280752,
+      "sha256": "c95945296d63136d4d2477ae2aac3303eaa6d4667d90d6514d78c1d14d32b4bd",
+      "foundInOfficialGallery": true,
+      "credit": "© 1986 Hayao Miyazaki/Studio Ghibli"
+    },
+    {
+      "id": "laputa45",
+      "source": "https://www.ghibli.jp/works/laputa/",
+      "image": "https://www.ghibli.jp/gallery/laputa045.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 318599,
+      "sha256": "71a56fce000824ebb1362192f5437a87ab6a69baad5ece8f32fa1671a03e4f87",
+      "foundInOfficialGallery": true,
+      "credit": "© 1986 Hayao Miyazaki/Studio Ghibli"
+    }
+  ]
+}

@@ -1,0 +1,164 @@
+[
+  {
+    "id": "totoro15",
+    "collection": "totoro",
+    "title": "My Neighbor Totoro",
+    "year": 1988,
+    "credit": "© 1988 Hayao Miyazaki/Studio Ghibli",
+    "image": "https://www.ghibli.jp/gallery/totoro015.jpg",
+    "source": "https://www.ghibli.jp/works/totoro/"
+  },
+  {
+    "id": "totoro30",
+    "collection": "totoro",
+    "title": "My Neighbor Totoro",
+    "year": 1988,
+    "credit": "© 1988 Hayao Miyazaki/Studio Ghibli",
+    "image": "https://www.ghibli.jp/gallery/totoro030.jpg",
+    "source": "https://www.ghibli.jp/works/totoro/"
+  },
+  {
+    "id": "totoro45",
+    "collection": "totoro",
+    "title": "My Neighbor Totoro",
+    "year": 1988,
+    "credit": "© 1988 Hayao Miyazaki/Studio Ghibli",
+    "image": "https://www.ghibli.jp/gallery/totoro045.jpg",
+    "source": "https://www.ghibli.jp/works/totoro/"
+  },
+  {
+    "id": "chihiro1",
+    "collection": "chihiro",
+    "title": "Spirited Away",
+    "year": 2001,
+    "credit": "© 2001 Hayao Miyazaki/Studio Ghibli, NDDTM",
+    "image": "https://www.ghibli.jp/gallery/chihiro001.jpg",
+    "source": "https://www.ghibli.jp/works/chihiro/"
+  },
+  {
+    "id": "chihiro15",
+    "collection": "chihiro",
+    "title": "Spirited Away",
+    "year": 2001,
+    "credit": "© 2001 Hayao Miyazaki/Studio Ghibli, NDDTM",
+    "image": "https://www.ghibli.jp/gallery/chihiro015.jpg",
+    "source": "https://www.ghibli.jp/works/chihiro/"
+  },
+  {
+    "id": "chihiro45",
+    "collection": "chihiro",
+    "title": "Spirited Away",
+    "year": 2001,
+    "credit": "© 2001 Hayao Miyazaki/Studio Ghibli, NDDTM",
+    "image": "https://www.ghibli.jp/gallery/chihiro045.jpg",
+    "source": "https://www.ghibli.jp/works/chihiro/"
+  },
+  {
+    "id": "howl15",
+    "collection": "howl",
+    "title": "Howl’s Moving Castle",
+    "year": 2004,
+    "credit": "© 2004 Diana Wynne Jones/Hayao Miyazaki/Studio Ghibli, NDDMT",
+    "image": "https://www.ghibli.jp/gallery/howl015.jpg",
+    "source": "https://www.ghibli.jp/works/howl/"
+  },
+  {
+    "id": "howl30",
+    "collection": "howl",
+    "title": "Howl’s Moving Castle",
+    "year": 2004,
+    "credit": "© 2004 Diana Wynne Jones/Hayao Miyazaki/Studio Ghibli, NDDMT",
+    "image": "https://www.ghibli.jp/gallery/howl030.jpg",
+    "source": "https://www.ghibli.jp/works/howl/"
+  },
+  {
+    "id": "howl45",
+    "collection": "howl",
+    "title": "Howl’s Moving Castle",
+    "year": 2004,
+    "credit": "© 2004 Diana Wynne Jones/Hayao Miyazaki/Studio Ghibli, NDDMT",
+    "image": "https://www.ghibli.jp/gallery/howl045.jpg",
+    "source": "https://www.ghibli.jp/works/howl/"
+  },
+  {
+    "id": "majo15",
+    "collection": "majo",
+    "title": "Kiki’s Delivery Service",
+    "year": 1989,
+    "credit": "© 1989 Eiko Kadono/Hayao Miyazaki/Studio Ghibli, N",
+    "image": "https://www.ghibli.jp/gallery/majo015.jpg",
+    "source": "https://www.ghibli.jp/works/majo/"
+  },
+  {
+    "id": "majo30",
+    "collection": "majo",
+    "title": "Kiki’s Delivery Service",
+    "year": 1989,
+    "credit": "© 1989 Eiko Kadono/Hayao Miyazaki/Studio Ghibli, N",
+    "image": "https://www.ghibli.jp/gallery/majo030.jpg",
+    "source": "https://www.ghibli.jp/works/majo/"
+  },
+  {
+    "id": "majo45",
+    "collection": "majo",
+    "title": "Kiki’s Delivery Service",
+    "year": 1989,
+    "credit": "© 1989 Eiko Kadono/Hayao Miyazaki/Studio Ghibli, N",
+    "image": "https://www.ghibli.jp/gallery/majo045.jpg",
+    "source": "https://www.ghibli.jp/works/majo/"
+  },
+  {
+    "id": "ponyo1",
+    "collection": "ponyo",
+    "title": "Ponyo",
+    "year": 2008,
+    "credit": "© 2008 Hayao Miyazaki/Studio Ghibli, NDHDMT",
+    "image": "https://www.ghibli.jp/gallery/ponyo001.jpg",
+    "source": "https://www.ghibli.jp/works/ponyo/"
+  },
+  {
+    "id": "ponyo30",
+    "collection": "ponyo",
+    "title": "Ponyo",
+    "year": 2008,
+    "credit": "© 2008 Hayao Miyazaki/Studio Ghibli, NDHDMT",
+    "image": "https://www.ghibli.jp/gallery/ponyo030.jpg",
+    "source": "https://www.ghibli.jp/works/ponyo/"
+  },
+  {
+    "id": "ponyo45",
+    "collection": "ponyo",
+    "title": "Ponyo",
+    "year": 2008,
+    "credit": "© 2008 Hayao Miyazaki/Studio Ghibli, NDHDMT",
+    "image": "https://www.ghibli.jp/gallery/ponyo045.jpg",
+    "source": "https://www.ghibli.jp/works/ponyo/"
+  },
+  {
+    "id": "laputa15",
+    "collection": "laputa",
+    "title": "Castle in the Sky",
+    "year": 1986,
+    "credit": "© 1986 Hayao Miyazaki/Studio Ghibli",
+    "image": "https://www.ghibli.jp/gallery/laputa015.jpg",
+    "source": "https://www.ghibli.jp/works/laputa/"
+  },
+  {
+    "id": "laputa30",
+    "collection": "laputa",
+    "title": "Castle in the Sky",
+    "year": 1986,
+    "credit": "© 1986 Hayao Miyazaki/Studio Ghibli",
+    "image": "https://www.ghibli.jp/gallery/laputa030.jpg",
+    "source": "https://www.ghibli.jp/works/laputa/"
+  },
+  {
+    "id": "laputa45",
+    "collection": "laputa",
+    "title": "Castle in the Sky",
+    "year": 1986,
+    "credit": "© 1986 Hayao Miyazaki/Studio Ghibli",
+    "image": "https://www.ghibli.jp/gallery/laputa045.jpg",
+    "source": "https://www.ghibli.jp/works/laputa/"
+  }
+]

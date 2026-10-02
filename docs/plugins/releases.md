@@ -8,8 +8,12 @@ for rollback history. The initial entries cover the reviewed `days-left-this-yea
 index is the approval**.
 
 Moon Phase's seed records the exact content accepted by the owner in merged
-PR #16, alongside the two previously shipped plugins. All three pass strict
-installation verification.
+PR #16, alongside the two previously shipped plugins. The owner subsequently
+merged PR #21 (`8b733db`), accepting nine additional cards after independent review:
+anime-images, art-of-the-day, calvin-and-hobbes, dad-jokes, ghibli-scenes,
+ink-landscape, this-day-in-history, word-of-the-day and xkcd, all at 1.0.0.
+Their exact merged folder bytes are also seeded; previous entries are unchanged.
+All twelve pass strict installation verification.
 
 ## Submissions and approval
 

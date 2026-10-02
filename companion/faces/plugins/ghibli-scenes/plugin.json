@@ -1,0 +1,84 @@
+{
+  "api": 1,
+  "id": "ghibli-scenes",
+  "version": "1.0.0",
+  "label": "Ghibli Scenes",
+  "description": "Official Studio Ghibli gallery stills from six films. Copyright remains with the credited owners; studio usage terms apply.",
+  "author": "Deskmate contributors",
+  "hosts": [
+    "www.ghibli.jp"
+  ],
+  "secrets": [],
+  "fields": [
+    {
+      "type": "enum",
+      "key": "collection",
+      "label": "Film",
+      "default": "all",
+      "options": [
+        {
+          "value": "all",
+          "label": "All six films"
+        },
+        {
+          "value": "totoro",
+          "label": "My Neighbor Totoro"
+        },
+        {
+          "value": "chihiro",
+          "label": "Spirited Away"
+        },
+        {
+          "value": "howl",
+          "label": "Howl’s Moving Castle"
+        },
+        {
+          "value": "majo",
+          "label": "Kiki’s Delivery Service"
+        },
+        {
+          "value": "ponyo",
+          "label": "Ponyo"
+        },
+        {
+          "value": "laputa",
+          "label": "Castle in the Sky"
+        }
+      ]
+    },
+    {
+      "type": "enum",
+      "key": "change",
+      "label": "Change image",
+      "default": "daily",
+      "options": [
+        {
+          "value": "daily",
+          "label": "Each day"
+        },
+        {
+          "value": "shuffle",
+          "label": "Shuffle each refresh"
+        }
+      ]
+    },
+    {
+      "type": "enum",
+      "key": "framing",
+      "label": "Framing",
+      "default": "fit",
+      "options": [
+        {
+          "value": "fit",
+          "label": "Show entire image"
+        },
+        {
+          "value": "fill",
+          "label": "Fill image area (crop)"
+        }
+      ]
+    }
+  ],
+  "refreshSeconds": 21600,
+  "tap": "Next scene. Fetches a new image before updating the panel."
+}

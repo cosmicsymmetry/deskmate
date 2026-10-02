@@ -177,3 +177,12 @@ Track H; Track B introduces no schema or wire change. All 19 review-specific mut
 deployment-isolation and review checks). A fresh scaffolded outside submission in
 an isolated copy passed 638 tests and pending-release CI verification without changing
 the index or any host test. Built-in goldens remain byte-identical.
+
+The owner then merged the nine-card batch as PR #21 (`8b733db`) while this
+follow-up was running. Integration retains its independent review fixes and the
+push-gate test synchronization. The release index adds all nine 1.0.0 releases at
+exact merged content, retaining the original three entries; the generated directory
+lists all twelve. The catalog conflict keeps folder discovery so the next outside
+author still need not edit protected host tests. This acceptance is based on the
+owner-authored PR's recorded review and owner merge, not an automatic approval of
+unmerged submissions.

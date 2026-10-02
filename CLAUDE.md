@@ -57,7 +57,8 @@ default. This section states only what is true now.
   **Track H merged as PR #18 (`4f13dd3`) and its server/SPA are deployed; the
   schema/wire lock is RELEASED.** Track B's release-index follow-up (PR #19)
   retains v11 and the deployed sign-in/Deskboy changes; its reviewed release hashes
-  cover Days Left This Year, GitHub stats and the owner-accepted Moon Phase.
+  cover Days Left This Year, GitHub stats, Moon Phase and the nine owner-accepted
+  cards from merged PR #21 (`8b733db`).
   The approval checker protects the full verification machinery, and operator
   withdrawal policy lives outside the deployed faces tree; see
   `docs/plugins/releases.md` for the approval boundary and bootstrap limit.

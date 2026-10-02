@@ -1,0 +1,21 @@
+{
+  "id": "ghibli-scenes",
+  "ok": true,
+  "errors": [],
+  "cases": [
+    {
+      "name": "Synthetic gallery fixture — fit",
+      "errors": [],
+      "notices": [],
+      "png": "synthetic-fit.png",
+      "desk": "synthetic-fit-desk.png"
+    },
+    {
+      "name": "Synthetic gallery fixture — crop and long credit",
+      "errors": [],
+      "notices": [],
+      "png": "synthetic-fill.png",
+      "desk": "synthetic-fill-desk.png"
+    }
+  ]
+}

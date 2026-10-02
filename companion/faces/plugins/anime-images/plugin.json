@@ -1,0 +1,46 @@
+{
+  "api": 1,
+  "version": "1.0.0",
+  "author": "Deskmate contributors",
+  "secrets": [],
+  "refreshSeconds": 21600,
+  "id": "anime-images",
+  "label": "Anime Images",
+  "description": "Curated safe-for-work art from Nekos.best, with artist sources. Private noncommercial use only.",
+  "hosts": ["nekos.best"],
+  "fields": [
+    {
+      "type": "enum",
+      "key": "selection",
+      "label": "Selection",
+      "default": "curated",
+      "options": [
+        {
+          "value": "curated",
+          "label": "Compact curated collection"
+        },
+        {
+          "value": "fresh",
+          "label": "New from Nekos.best"
+        }
+      ]
+    },
+    {
+      "type": "enum",
+      "key": "fit",
+      "label": "Image framing",
+      "default": "contain",
+      "options": [
+        {
+          "value": "contain",
+          "label": "Show whole image"
+        },
+        {
+          "value": "cover",
+          "label": "Fill (crops edges)"
+        }
+      ]
+    }
+  ],
+  "tap": "Tap for another image. Refresh and taps download through the server."
+}

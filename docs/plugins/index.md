@@ -9,6 +9,15 @@ See [submitting a plugin](submitting.md) and [reviewed releases](releases.md).
 
 | Plugin | Version | Description |
 | --- | --- | --- |
+| [Anime Images](../../companion/faces/plugins/anime-images/README.md) | 1.0.0 | Curated safe-for-work art from Nekos.best, with artist sources. Private noncommercial use only. |
+| [Art of the Day](../../companion/faces/plugins/art-of-the-day/README.md) | 1.0.0 | Public-domain art from The Met: Japanese prints, landscapes and paintings. Tap for the next work. |
+| [Calvin and Hobbes](../../companion/faces/plugins/calvin-and-hobbes/README.md) | 1.0.0 | Display supplied official Calvin and Hobbes image URLs. Requires your authorized strip URLs; no automatic archive. |
+| [Dad Jokes](../../companion/faces/plugins/dad-jokes/README.md) | 1.0.0 | A fresh dad joke each local day, or whenever you tap. |
 | [Days Left This Year](../../companion/faces/plugins/days-left-this-year/README.md) | 1.1.0 | Calendar days remaining, including today, and year progress. Uses the owner's timezone. |
+| [Ghibli Scenes](../../companion/faces/plugins/ghibli-scenes/README.md) | 1.0.0 | Official Studio Ghibli gallery stills from six films. Copyright remains with the credited owners; studio usage terms apply. |
 | [GitHub stats](../../companion/faces/plugins/github-stats/README.md) | 1.0.0 | Public repos, followers and following for a GitHub username. |
+| [Ink Landscape](../../companion/faces/plugins/ink-landscape/README.md) | 1.0.0 | An original, changing landscape of mountain ridges and still water. Works offline. |
 | [Moon Phase](../../companion/faces/plugins/moon-phase/README.md) | 1.0.0 | The current moon, illumination and next full moon date \(UTC\). No account needed. |
+| [This Day in History](../../companion/faces/plugins/this-day-in-history/README.md) | 1.0.0 | Selected historical events for today in your timezone, from Wikipedia. |
+| [Word of the Day](../../companion/faces/plugins/word-of-the-day/README.md) | 1.0.0 | A daily English word with a live Wiktionary definition. Tap to explore another. |
+| [xkcd](../../companion/faces/plugins/xkcd/README.md) | 1.0.0 | Compact xkcd comics or the latest strip, credited to Randall Munroe. Noncommercial content. |

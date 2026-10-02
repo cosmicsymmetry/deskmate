@@ -1,0 +1,28 @@
+{
+  "id": "art-of-the-day",
+  "ok": true,
+  "errors": [],
+  "cases": [
+    {
+      "name": "Japanese print — fit",
+      "errors": [],
+      "notices": [],
+      "png": "japanese-print-fit.png",
+      "desk": "japanese-print-fit-desk.png"
+    },
+    {
+      "name": "Landscape — fill",
+      "errors": [],
+      "notices": [],
+      "png": "landscape-fill.png",
+      "desk": "landscape-fill-desk.png"
+    },
+    {
+      "name": "Portrait — fit",
+      "errors": [],
+      "notices": [],
+      "png": "portrait-fit.png",
+      "desk": "portrait-fit-desk.png"
+    }
+  ]
+}

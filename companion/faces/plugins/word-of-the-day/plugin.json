@@ -1,0 +1,30 @@
+{
+  "api": 1,
+  "id": "word-of-the-day",
+  "version": "1.0.0",
+  "label": "Word of the Day",
+  "description": "A daily English word with a live Wiktionary definition. Tap to explore another.",
+  "author": "Deskmate contributors",
+  "hosts": ["en.wiktionary.org"],
+  "secrets": [],
+  "fields": [
+    {
+      "type": "enum",
+      "key": "vocabulary",
+      "label": "Vocabulary",
+      "default": "curious",
+      "options": [
+        {
+          "value": "curious",
+          "label": "Curious words"
+        },
+        {
+          "value": "everyday",
+          "label": "Everyday words"
+        }
+      ]
+    }
+  ],
+  "refreshSeconds": 21600,
+  "tap": "Tap to fetch the next word in this vocabulary."
+}

@@ -58,5 +58,15 @@
     "id": "xkcd",
     "version": "1.0.0",
     "sha256": "9c14449b394a6fa2b66f86e977d98a673c2d80a5e57261891c0aa96698a013d0"
+  },
+  {
+    "id": "anime-images",
+    "version": "1.0.1",
+    "sha256": "fd4406ebc047e6c8f1f96cb92c63b04cdd1deed295d743a143425e0bc805ca96"
+  },
+  {
+    "id": "xkcd",
+    "version": "1.0.1",
+    "sha256": "456adc7408c18f513fd3c95c94fb299c8bd41443e12fbe5334215f49cb16c800"
   }
 ]

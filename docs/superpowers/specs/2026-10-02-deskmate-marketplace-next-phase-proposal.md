@@ -200,3 +200,21 @@ installation because the live UI had advanced to merged PR #22 (`0c7ecbb`). That
 merge preserves the deployed UI exactly and changes no faces, server, firmware,
 approval tooling or workflow bytes. The web gates pass again (225 tests); final
 CI and deployment evidence follow in PR #19.
+
+All seven CI jobs passed again at `72173e1` (run 37004982968), including the Hacker
+News case in 3.058 seconds. Full deployment passed the local and VM gates and
+installed all components; another authorized deployment then replaced faces with
+owner-merged PR #24 (`9e2bb7e`) seconds later. This branch integrates that removal
+rather than restoring Calvin. Its index retains every prior entry, including
+Calvin's history, and versions the merged xkcd/Anime README corrections at 1.0.1:
+documentation bytes are part of a release too. Runtime plugin code and permissions
+are unchanged; the directory now lists eleven plugins, with fourteen release
+entries including rollback history. The final deployment restores verification
+and withdrawal controls around this current catalog.
+
+Post-removal verification: 762 faces tests, all eleven offline author checks,
+strict release verification, directory/cold discovery, and all three repository
+checks pass. Typecheck, lint, formatting and dump pass. Server, web, firmware,
+approval checker and workflow bytes are unchanged from the seven-green-job head;
+the 884 Rust, 225 web and 14 policy test results remain applicable. Final CI runs
+the complete job set again.

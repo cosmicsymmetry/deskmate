@@ -13,7 +13,12 @@ merged PR #21 (`8b733db`), accepting nine additional cards after independent rev
 anime-images, art-of-the-day, calvin-and-hobbes, dad-jokes, ghibli-scenes,
 ink-landscape, this-day-in-history, word-of-the-day and xkcd, all at 1.0.0.
 Their exact merged folder bytes are also seeded; previous entries are unchanged.
-All twelve pass strict installation verification.
+The owner then removed Calvin and Hobbes in merged PR #24 (`9e2bb7e`), so it is
+absent from the current directory; its historical approval stays for rollback.
+That PR also corrected the xkcd/Anime READMEs. Because documentation contributes
+to the hash, those exact merged corrections ship at 1.0.1 with new entries rather
+than overwriting the 1.0.0 history. All eleven installed plugins pass strict
+verification; fourteen entries retain the current releases and rollback history.
 
 ## Submissions and approval
 

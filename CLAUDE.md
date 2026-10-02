@@ -58,7 +58,8 @@ default. This section states only what is true now.
   schema/wire lock is RELEASED.** Track B's release-index follow-up (PR #19)
   retains v11 and the deployed sign-in/Deskboy changes; its reviewed release hashes
   cover Days Left This Year, GitHub stats, Moon Phase and the nine owner-accepted
-  cards from merged PR #21 (`8b733db`).
+  cards from merged PR #21 (`8b733db`) as immutable history. PR #24 removes
+  Calvin; eleven plugins remain, with xkcd/Anime README corrections at 1.0.1.
   The approval checker protects the full verification machinery, and operator
   withdrawal policy lives outside the deployed faces tree; see
   `docs/plugins/releases.md` for the approval boundary and bootstrap limit.

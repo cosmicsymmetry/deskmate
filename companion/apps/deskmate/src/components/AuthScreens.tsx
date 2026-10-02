@@ -36,6 +36,7 @@ export function SetupScreen({ onComplete }: { onComplete: (account: Account) => 
 
   return (
     <main className="startup">
+      <span className="startup__mark" aria-hidden="true" />
       <h1>Set up this server</h1>
       <form
         className="startup__form"
@@ -92,6 +93,7 @@ export function SetupScreen({ onComplete }: { onComplete: (account: Account) => 
 export function CheckInbox({ email, edition }: { email: string; edition: Instance["edition"] }) {
   return (
     <main className="startup">
+      <span className="startup__mark" aria-hidden="true" />
       <h1>Check your inbox</h1>
       <p>We sent a link to {email}. It works for 15 minutes.</p>
       {edition === "self-hosted" && (
@@ -117,6 +119,7 @@ export function SignInScreen({
 
   return (
     <main className="startup">
+      <span className="startup__mark" aria-hidden="true" />
       <h1>Sign in to Deskmate</h1>
       <SignInError reason={signInError} />
       <form
@@ -178,6 +181,7 @@ export function LinkLanding({
 
   return (
     <main className="startup">
+      <span className="startup__mark" aria-hidden="true" />
       <h1>Sign in to Deskmate</h1>
       {error ? (
         <>

@@ -283,7 +283,11 @@ export function AccountSection({
                         <span>
                           <strong className="numeral">{panel.id}</strong>
                           <br />
-                          <small>{panelStatus(panel)}</small>
+                          <small
+                            className={`panel-status${panel.state !== "pending" && panel.connected ? " panel-status--online" : ""}`}
+                          >
+                            {panelStatus(panel)}
+                          </small>
                         </span>
                         <button
                           className="text-button text-button--danger"

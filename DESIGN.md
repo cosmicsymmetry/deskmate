@@ -134,6 +134,11 @@ only text naming a value ("LINK", "ADD A CARD", "WORKDAY").
 - **The work column is one surface.** Sections are bare regions separated by space and a
   hairline. **There is no panel-card layer** — a card inside a card is always wrong, and
   only the interactive atoms (tiles, inputs, controls) are elevated off the ground.
+  The card editor follows it too (2026-10-02): the Alert group and the gesture note are
+  bare regions under a hairline, not a bordered box around a filled check field and a
+  grey box of prose. A group's name (Alert, a face's name) is ink at 0.8rem, one step
+  above its fields' labels, never an uppercase eyebrow over a label. The editor's fields
+  hold a 40rem measure, and a number input is not stretched to the column.
 - **The panel identifies itself.** No label above it, no resolution beside it, no caption
   under it. It is the one object on the page that looks exactly like the thing it
   represents, so anything printed around it described what you could already see.
@@ -182,7 +187,12 @@ the centre at 1.75rem.
 
 The centre prints a compact `1:50`, not `formatDuration`'s "1 min 50 s": the prose form
 is right in a sentence and wrong inside a ring, where it wraps at hero size. The full
-phrasing still reaches assistive technology through the ring's `aria-label`.
+phrasing still reaches assistive technology through the ring's `aria-label`. The word
+under it is "Total" (2026-10-02): "Loop length" at label tracking was wider than the
+ring's inner edge and ran into the stroke, and the ring already says it is the loop.
+
+The live arc's glow is `--arc-glow`, and it is `none` on the light ground for the same
+reason the stage bloom is scheme-aware: on black it is light, on grey it is a pink haze.
 
 It replaces the previous filmstrip and keeps the same truth — a card's share of the loop,
 which no other control shows — in the form the rest of this world is built from. All the

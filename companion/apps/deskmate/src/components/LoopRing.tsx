@@ -311,7 +311,9 @@ export function LoopRing({ config, issues, selectedCardId, onSelect, onChange }:
               {isTimed && total !== null ? compactDuration(total) : String(segments.length)}
             </strong>
             <span className="tile-label">
-              {isTimed ? "Loop length" : segments.length === 1 ? "Card" : "Cards"}
+              {/* "Total", not "Loop length": the ring already says it is the loop, and
+                  the longer label overran the ring's inner edge at 124px. */}
+              {isTimed ? "Total" : segments.length === 1 ? "Card" : "Cards"}
             </span>
           </div>
         </div>

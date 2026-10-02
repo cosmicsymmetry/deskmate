@@ -57,6 +57,9 @@
   /* The panel is an OLED. It is black in every scheme. */
   --stage: #000000;
   --stage-bloom: 0 14px 34px -18px rgb(0 0 0 / 40%);
+  /* The live arc glows only on black. On a light ground the same bloom reads as a
+     pink haze around the ring, for the reason the stage's bloom is scheme-aware. */
+  --arc-glow: none;
 
   --r-tile: 18px;
   --r-control: 11px;
@@ -98,6 +101,7 @@
     --arc-a: #fa114f;
     --arc-b: #ffb340;
     --stage-bloom: 0 18px 60px -22px color-mix(in srgb, var(--live) 34%, transparent);
+    --arc-glow: drop-shadow(0 0 7px color-mix(in srgb, var(--live) 55%, transparent));
   }
 }
 
@@ -120,6 +124,7 @@
   --arc-a: #fa114f;
   --arc-b: #ffb340;
   --stage-bloom: 0 18px 60px -22px color-mix(in srgb, var(--live) 34%, transparent);
+  --arc-glow: drop-shadow(0 0 7px color-mix(in srgb, var(--live) 55%, transparent));
 }
 
 * {
@@ -640,7 +645,7 @@ fieldset legend,
 .loop__arc.is-live {
   opacity: 1;
   stroke-width: 19;
-  filter: drop-shadow(0 0 7px color-mix(in srgb, var(--live) 55%, transparent));
+  filter: var(--arc-glow);
 }
 
 .loop__marker {
@@ -919,10 +924,6 @@ fieldset legend {
   line-height: 1.15;
 }
 
-.card-tile.is-selected .card-tile__value {
-  color: var(--act);
-}
-
 /* The optional owner-set Pomodoro label shown beneath its countdown. */
 .card-tile__name {
   overflow: hidden;
@@ -1165,14 +1166,25 @@ fieldset legend {
 .form-grid {
   display: flex;
   flex-direction: column;
-  gap: 13px;
+  gap: 14px;
+  /* A 760px input for a two-digit number reads as a missing layout, and prose in
+     the gesture note ran past 120 characters a line. */
+  max-width: 40rem;
+}
+
+.panel > .form-grid .field input[type="number"] {
+  max-width: 15rem;
+}
+
+.panel > .form-grid .field select {
+  max-width: 20rem;
 }
 
 .source-settings {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding-top: 4px;
+  padding-top: 14px;
   border-top: 1px solid var(--hairline);
 }
 
@@ -1185,7 +1197,6 @@ fieldset legend {
   border: 0;
 }
 
-.source-settings__fields > legend,
 .source-settings__enum > legend {
   padding: 0;
 }
@@ -1275,6 +1286,16 @@ fieldset legend {
   color: var(--ink-3);
   font-size: 0.69rem;
   line-height: 1.45;
+}
+
+.field > strong {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.field > strong + small {
+  margin-top: -3px;
+  font-family: var(--round);
 }
 
 /* Card and source failures keep long server explanations contained within the editor. */
@@ -1378,11 +1399,68 @@ fieldset legend {
   gap: 10px;
 }
 
+.alert-fieldset {
+  padding: 14px 0 0;
+  border: 0;
+  border-top: 1px solid var(--hairline);
+  border-radius: 0;
+}
+
+/* A group's name sits one step above its fields' labels: ink, not ink-2, and a
+   touch larger. It is a name for what follows, not an uppercase eyebrow over a
+   label, which is what the face's own legend used to read as. */
+.alert-fieldset > legend,
+.source-settings__fields > legend {
+  float: left;
+  width: 100%;
+  margin-bottom: 2px;
+  padding: 0;
+  color: var(--ink);
+  font-size: 0.8rem;
+  font-weight: 620;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+/* The timer is a control, so it takes the control surface the check field has. */
 .timer-controls {
   flex-direction: row;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  padding: 10px 10px 10px 13px;
+  border: 0;
+  background: var(--tile-2);
+}
+
+.timer-controls > span .timer-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.timer-state::before {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink-3);
+  content: "";
+}
+
+.timer-state--running {
+  color: var(--live);
+}
+
+.timer-state--running::before {
+  background: var(--live);
+}
+
+.timer-state--paused {
+  color: var(--warn);
+}
+
+.timer-state--paused::before {
+  background: var(--warn);
 }
 
 .timer-controls > span strong {
@@ -1408,13 +1486,13 @@ fieldset legend {
   gap: 7px;
 }
 
+/* Prose about the card, not a control: it sits on the ground, below a hairline. */
 .gesture-note {
   display: flex;
   flex-direction: column;
   gap: 5px;
-  padding: 11px 13px;
-  border-radius: var(--r-control);
-  background: var(--tile-2);
+  padding-top: 14px;
+  border-top: 1px solid var(--hairline);
   color: var(--ink-3);
   font-size: 0.71rem;
   line-height: 1.5;
@@ -1438,6 +1516,16 @@ fieldset legend {
 .ownership-badge--unknown {
   background: color-mix(in srgb, var(--bad) 15%, transparent);
   color: var(--bad);
+}
+
+.panel-status {
+  color: var(--ink-3);
+  font-size: 0.73rem;
+  font-weight: 560;
+}
+
+.panel-status--online {
+  color: var(--good);
 }
 
 .settings-destination {
@@ -1761,6 +1849,15 @@ fieldset legend {
   height: 100%;
   padding: 32px;
   text-align: center;
+}
+
+.startup__mark {
+  width: 44px;
+  height: 36px;
+  margin-bottom: 14px;
+  border-radius: 11px;
+  background: radial-gradient(120% 140% at 50% 30%, #ffd48a, var(--live) 78%);
+  box-shadow: 0 0 26px -4px color-mix(in srgb, var(--live) 60%, transparent);
 }
 
 .startup p:last-of-type {

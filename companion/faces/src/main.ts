@@ -154,10 +154,6 @@ export async function renderRequest(
     : { png, state: result.state };
 }
 
-async function describe(): Promise<string> {
-  return describeCatalog(await allFaces(true));
-}
-
 function requestFromJson(
   input: string,
   verb: string,
@@ -179,7 +175,7 @@ async function requestedFace(request: FaceRequest): Promise<FaceDefinition> {
   const builtin = typeof request.kind === "string" ? faceOfKind(request.kind) : undefined;
   if (builtin !== undefined) return builtin;
   await warmSandbox();
-  const faces = await allFaces(true);
+  const faces = await allFaces();
   const face = definitionFor(
     request,
     faces.find((face) => face.kind === request.kind),
@@ -215,9 +211,7 @@ async function main(): Promise<number> {
     // (`plugins/discovery.ts`), and a render that resolves to a plugin runs its
     // `plan`/`render` there too -- both need the WASM runtime loaded first.
     await warmSandbox();
-  }
-  if (verb === "describe") {
-    process.stdout.write(`${await describe()}\n`);
+    process.stdout.write(`${describeCatalog(await allFaces())}\n`);
     return 0;
   }
   if (verb === "render") {

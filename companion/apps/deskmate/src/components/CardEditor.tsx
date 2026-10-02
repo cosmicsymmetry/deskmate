@@ -21,6 +21,7 @@ import type {
   PomodoroSnapshot,
   ValidationIssue,
 } from "../lib/types";
+import { PRODUCT_NAME } from "../lib/product";
 import { FieldIssues } from "./FieldIssues";
 
 interface CardEditorProps {
@@ -82,7 +83,7 @@ function HoldSelector({
       )}
       <small>
         The alert stays on screen until you tap it, regardless of this setting — it only bounds how
-        long Deskmate treats the alert as outstanding, freeing it for the next one.
+        long {PRODUCT_NAME} treats the alert as outstanding, freeing it for the next one.
       </small>
       <FieldIssues issues={issues} />
     </label>
@@ -559,7 +560,8 @@ export function CardEditor({
                   </button>
                 </div>
                 <small>
-                  This plaintext token is shown once. Copy it now; Deskmate cannot show it again.
+                  This plaintext token is shown once. Copy it now; {PRODUCT_NAME} cannot show it
+                  again.
                 </small>
               </div>
             )}
@@ -593,7 +595,7 @@ export function CardEditor({
                 <strong>Take over the screen when the timer ends</strong>
                 <small>
                   Shows full-screen until you tap it. The hold setting below controls how long
-                  Deskmate treats it as outstanding, not how long it's shown.
+                  {PRODUCT_NAME} treats it as outstanding, not how long it's shown.
                 </small>
               </span>
             </label>

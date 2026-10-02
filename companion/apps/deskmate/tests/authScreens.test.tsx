@@ -126,6 +126,23 @@ test("setup submits the log code and email before loading the device window", as
   }
 });
 
+test("the sign-in screen names the product and links back to its site", async () => {
+  requireMissingSession();
+
+  const { container, root, cleanup } = await mount();
+  try {
+    await act(async () => root.render(<App />));
+    await waitFor(() => expect(container.textContent).toContain("Sign in to Deskboy"));
+    expect(container.textContent).not.toContain("Deskmate");
+
+    const site = container.querySelector<HTMLAnchorElement>("a.startup__site");
+    expect(site?.getAttribute("href")).toBe("https://deskboy.sh");
+    expect(site?.textContent).toBe("deskboy.sh");
+  } finally {
+    await cleanup();
+  }
+});
+
 test("email sign-in always leads to the same inbox screen", async () => {
   const requested: string[] = [];
   requireMissingSession();
@@ -136,7 +153,7 @@ test("email sign-in always leads to the same inbox screen", async () => {
   const { container, root, cleanup } = await mount();
   try {
     await act(async () => root.render(<App />));
-    await waitFor(() => expect(container.textContent).toContain("Sign in to Deskmate"));
+    await waitFor(() => expect(container.textContent).toContain("Sign in to Deskboy"));
     expect(container.textContent).not.toContain("Admin token");
 
     await changeInput(container.querySelector('input[type="email"]'), "anyone@example.com");
@@ -174,7 +191,7 @@ test("Google sign-in appears only when the instance enables it", async () => {
   const second = await mount();
   try {
     await act(async () => second.root.render(<App />));
-    await waitFor(() => expect(second.container.textContent).toContain("Sign in to Deskmate"));
+    await waitFor(() => expect(second.container.textContent).toContain("Sign in to Deskboy"));
     expect(second.container.textContent).not.toContain("Sign in with Google");
   } finally {
     await second.cleanup();
@@ -207,7 +224,7 @@ test("opening an email link does not consume it until Sign in is pressed", async
   const { container, root, cleanup } = await mount();
   try {
     await act(async () => root.render(<App />));
-    await waitFor(() => expect(container.textContent).toContain("Sign in to Deskmate"));
+    await waitFor(() => expect(container.textContent).toContain("Sign in to Deskboy"));
     expect(tokens).toEqual([]);
 
     await act(async () => buttonWithText(container, "Sign in")?.click());
@@ -330,11 +347,11 @@ test("session expiry closes the stream and ignores late snapshots", async () => 
     await waitFor(() => expect(container.textContent).toContain("Settings"));
     requireMissingSession();
     await act(async () => window.dispatchEvent(new Event("focus")));
-    await waitFor(() => expect(container.textContent).toContain("Sign in to Deskmate"));
+    await waitFor(() => expect(container.textContent).toContain("Sign in to Deskboy"));
     expect(stops).toBe(1);
     const { snapshot } = await import("./support/fixtures");
     await act(async () => publish?.(snapshot));
-    expect(container.textContent).toContain("Sign in to Deskmate");
+    expect(container.textContent).toContain("Sign in to Deskboy");
     expect(container.textContent).not.toContain("Settings");
   } finally {
     await cleanup();
@@ -354,7 +371,7 @@ test("an account without a panel can sign out", async () => {
     await act(async () => root.render(<App />));
     await waitFor(() => expect(buttonWithText(container, "Sign out")).toBeDefined());
     await act(async () => buttonWithText(container, "Sign out")?.click());
-    await waitFor(() => expect(container.textContent).toContain("Sign in to Deskmate"));
+    await waitFor(() => expect(container.textContent).toContain("Sign in to Deskboy"));
   } finally {
     await cleanup();
   }

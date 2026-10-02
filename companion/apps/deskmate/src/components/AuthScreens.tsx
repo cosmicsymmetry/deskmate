@@ -8,6 +8,7 @@ import {
   googleSignInUrl,
   requestSignInLink,
 } from "../lib/account";
+import { PRODUCT_NAME, PRODUCT_SITE } from "../lib/product";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -172,7 +173,7 @@ export function SignInScreen({
 
   return (
     <main className="startup">
-      <h1>Sign in to Deskmate</h1>
+      <h1>Sign in to {PRODUCT_NAME}</h1>
       <p>
         {logDelivery
           ? "This server puts sign-in links in its log. Ask the server owner for your link."
@@ -219,7 +220,20 @@ export function SignInScreen({
           </span>
         )}
       </form>
+      <SiteLink />
     </main>
+  );
+}
+
+/** The way back to the product's own site. A visitor who followed "Sign in"
+ *  from there and has no account otherwise has nowhere to go but the back
+ *  button. An anchor, not a paragraph: `.startup p:last-of-type` styles the
+ *  screen's explanation, and a trailing <p> would take that role from it. */
+function SiteLink() {
+  return (
+    <a className="startup__site" href={PRODUCT_SITE}>
+      {new URL(PRODUCT_SITE).host}
+    </a>
   );
 }
 
@@ -239,7 +253,7 @@ export function LinkLanding({
 
   return (
     <main className="startup">
-      <h1>Sign in to Deskmate</h1>
+      <h1>Sign in to {PRODUCT_NAME}</h1>
       {error ? (
         <>
           <p className="save-error" role="alert">

@@ -26,11 +26,12 @@ import type {
   ValidationIssue,
 } from "../lib/types";
 import type { PanelRow } from "../lib/account";
-import { crc32c, MessageType, rawDecoded } from "../lib/serial/codec";
+import { MessageType, rawDecoded } from "../lib/serial/codec";
 import type { PanelPort } from "../lib/serial/port";
-import { mockCardData, mockConfig, mockNetworkSettings, mockSnapshot } from "./fixture";
+import { mockConfig, mockNetworkSettings, mockSnapshot } from "./fixture";
 import { renderMockFrame } from "./mockPreview";
 import { mockPictureConfig } from "./pictureFixture";
+import { responseFrame } from "./serialResponse";
 
 export const SCENARIOS = [
   "default",
@@ -202,7 +203,6 @@ function applyScenario() {
       snapshot = mockSnapshot(config);
       snapshot.has_saved_config = false;
       snapshot.pomodoros = [];
-      snapshot.card_data = [];
       break;
     case "empty":
       config = {
@@ -211,7 +211,6 @@ function applyScenario() {
       };
       snapshot = mockSnapshot(config);
       snapshot.pomodoros = [];
-      snapshot.card_data = [];
       break;
     case "carderror":
       snapshot.card_errors = [
@@ -225,7 +224,6 @@ function applyScenario() {
     case "picture":
       config = mockPictureConfig();
       snapshot = mockSnapshot(config);
-      snapshot.card_data = [];
       snapshot.pomodoros = [];
       break;
     default:
@@ -358,7 +356,6 @@ window.setInterval(() => {
     }
   }
   if (changed) {
-    snapshot.card_data = mockCardData();
     publish();
   }
 }, 1000);
@@ -386,43 +383,6 @@ let panels: PanelRow[] =
           state: "active" as const,
         },
       ];
-
-function cobsEncode(decoded: Uint8Array): Uint8Array {
-  const encoded: number[] = [0];
-  let codeIndex = 0;
-  let code = 1;
-  for (const byte of decoded) {
-    if (byte === 0) {
-      encoded[codeIndex] = code;
-      codeIndex = encoded.length;
-      encoded.push(0);
-      code = 1;
-    } else {
-      encoded.push(byte);
-      code += 1;
-      if (code === 0xff) {
-        encoded[codeIndex] = code;
-        codeIndex = encoded.length;
-        encoded.push(0);
-        code = 1;
-      }
-    }
-  }
-  encoded[codeIndex] = code;
-  return Uint8Array.from([...encoded, 0]);
-}
-
-function responseFrame(messageType: number, requestId: number, payload: Uint8Array): Uint8Array {
-  const decoded = new Uint8Array(10 + payload.byteLength + 4);
-  const view = new DataView(decoded.buffer);
-  decoded[0] = 2;
-  decoded[1] = messageType;
-  view.setUint32(4, requestId, true);
-  view.setUint16(8, payload.byteLength, true);
-  decoded.set(payload, 10);
-  view.setUint32(decoded.byteLength - 4, crc32c(decoded.subarray(0, -4)), true);
-  return cobsEncode(decoded);
-}
 
 function statusResponse(requestId: number, configured: boolean): Uint8Array {
   const firmware = new TextEncoder().encode("deskmate-mock");
@@ -760,15 +720,6 @@ export async function renderCardPreview(cardId: string): Promise<PreviewFrame> {
     sample: true,
     state: null,
   };
-}
-
-export function selectMockDevice(deviceId: string): Promise<NetworkSettings> {
-  network = {
-    ...network,
-    // A blank selection keeps the harness's automatically selected display.
-    device_id: deviceId.trim() === "" ? network.device_id : deviceId,
-  };
-  return delay(network);
 }
 
 export function listenToAppState(handler: (payload: AppSnapshot) => void): Promise<() => void> {

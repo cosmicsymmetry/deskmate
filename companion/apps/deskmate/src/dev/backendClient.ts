@@ -10,7 +10,7 @@
  * browser session guard shared by snapshot and account calls.
  */
 
-import type { ApiError, AppSnapshot } from "../lib/types";
+import type { AppSnapshot } from "../lib/types";
 import {
   listenToAppState as mockListenToAppState,
   mockAccountRequest,
@@ -25,6 +25,7 @@ export {
   SESSION_REQUIRED_MESSAGE,
   isNoPanels,
   isSessionMissing,
+  toApiError,
 } from "../lib/apiErrors";
 
 export {
@@ -39,26 +40,6 @@ export {
   listImageSources,
   updateImageSourceFace,
 } from "./mockBackend";
-
-export function toApiError(error: unknown): ApiError {
-  if (error instanceof DeskmateApiError) {
-    return error.details;
-  }
-  if (
-    typeof error === "object" &&
-    error !== null &&
-    "category" in error &&
-    "message" in error &&
-    typeof error.category === "string" &&
-    typeof error.message === "string"
-  ) {
-    return error as ApiError;
-  }
-  return {
-    category: "internal",
-    message: error instanceof Error ? error.message : String(error),
-  };
-}
 
 /** The harness can be asked to render the signed-out state with `?scenario=signedout`. */
 function signedOutScenario(): boolean {

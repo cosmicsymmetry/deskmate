@@ -56,13 +56,26 @@ describe("API error primitives", () => {
     }
   });
 
-  test("production rejects unknown categories while the mock passes them through", () => {
+  test("both clients reject unknown categories", () => {
     const unknown = { category: "future-category", message: "Future failure", extra: true };
-    expect(production.toApiError(unknown)).toEqual({
-      category: "internal",
-      message: "[object Object]",
-    });
-    expect(mock.toApiError(unknown) === unknown).toBe(true);
+    for (const client of [production, mock]) {
+      expect(client.toApiError(unknown)).toEqual({
+        category: "internal",
+        message: "[object Object]",
+      });
+    }
+  });
+
+  test("valid structural categories take precedence over constructor details", () => {
+    for (const client of [production, mock]) {
+      const details: ApiError = { category: "not-found", message: "Missing" };
+      const error = Object.assign(new client.DeskmateApiError(details), {
+        category: "device",
+      });
+      expect(client.toApiError(error) === error).toBe(true);
+      error.category = "future-category";
+      expect(client.toApiError(error)).toBe(details);
+    }
   });
 
   test("preserves structural errors and normalizes unstructured failures", () => {

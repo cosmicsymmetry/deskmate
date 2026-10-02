@@ -37,7 +37,7 @@ function clockFace(ctx: CanvasRenderingContext2D, showSeconds: boolean, timezone
   ctx.textBaseline = "alphabetic";
   ctx.fillStyle = INK;
   ctx.font = "300 136px ui-rounded, ui-sans-serif, system-ui, sans-serif";
-  const time = showSeconds ? `${hh}:${mm}` : `${hh}:${mm}`;
+  const time = `${hh}:${mm}`;
   ctx.fillText(time, PANEL_WIDTH / 2, 210);
   if (showSeconds) {
     ctx.font = "400 44px ui-rounded, ui-sans-serif, system-ui, sans-serif";

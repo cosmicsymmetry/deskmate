@@ -323,6 +323,34 @@ test(
      export function render(){ return { layout: { type: "div", style: { display: "flex", width: 448, height: 368, background: "#000" }, children: "ok" } }; }`,
     );
 
+    const malformed = [
+      { fields: [{ type: "text", key: "user", label: "User" }] },
+      { fields: [{ type: "number", key: "n", label: "N" }] },
+      { fields: [{ type: "text", key: "k", label: "L", placeholder: "p", default: 5 }] },
+      { fields: [{ type: "enum", key: "k", label: "L", default: "a" }] },
+      { refreshSeconds: -1 },
+      { refreshSeconds: 1e20 },
+    ];
+    for (const [i, extra] of malformed.entries()) {
+      write(
+        `malformed-${i}`,
+        {
+          api: 1,
+          id: `malformed-${i}`,
+          version: "1.0.0",
+          label: "Malformed",
+          description: "d",
+          author: "a",
+          hosts: [],
+          secrets: [],
+          fields: [],
+          ...extra,
+        },
+        `export function plan(){ return []; }
+          export function render(){ return { svg: ${JSON.stringify(SQUARE_SVG)} }; }`,
+      );
+    }
+
     const { code, out, err } = await run("describe", "", { DESKMATE_PLUGINS_DIR: root });
     expect(code).toBe(0);
     const catalog = JSON.parse(new TextDecoder().decode(out)) as { kind: string }[];
@@ -335,6 +363,10 @@ test(
     ]);
     expect(err).toContain("broken-plugin");
     expect(err).toContain("hostile-plugin");
+    for (const i of malformed.keys()) {
+      expect(catalog.map((face) => face.kind)).not.toContain(`malformed-${i}`);
+      expect(err).toContain(`malformed-${i}`);
+    }
 
     // A good plugin still renders, unaffected by the broken folders sitting beside
     // it -- deliberately the discovered plugin itself, not a built-in like `weather`,

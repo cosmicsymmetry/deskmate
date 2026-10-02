@@ -6089,8 +6089,10 @@ maps default to raw 200. **200 is the existing final boot brightness**:
 The 10% floor maps to raw 26, above black; its desk visibility is not yet observed.
 
 Firmware `v2.3.0-brightness` advertises bit 11; ApplyConfig key 4 carries raw 26..255.
-The server gates initial apply and reconnect replay, so current `v2.2.0-psram` is
-compatible without flashing first. The queued LVGL consumer calls the existing
+The server gates initial apply and reconnect replay on advertised support, retaining
+the desired level across upgrade/downgrade cycles. The older decoder accepts and skips
+unknown key 4; the gate is protocol hygiene. Current `v2.2.0-psram` is compatible
+without flashing first. The queued LVGL consumer calls the existing
 QSPI-envelope-correct `board_display_set_brightness()`. RAM only; reboot returns to
 200 and the next config restores the preference. Status key 6 is reused. The
 standalone clock's top-half brightness diagnostic is unchanged.

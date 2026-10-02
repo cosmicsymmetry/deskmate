@@ -22,6 +22,9 @@ The dead `feat/display-brightness` commits were neither rebased nor cherry-picke
   by new capability bit **11, DisplayBrightness**. Current capabilities: **4064**.
   Bits 0–4 and key 2 remain retired. Both initial sends and reconnect replay check
   the running firmware's bit. Brightness is not a required capability for saving.
+  The cache retains desired brightness; only the transmitted copy is gated. An
+  upgrade, including after a downgrade, restores the saved level without another
+  save. A changed payload advances a matching revision before being sent.
   Omission retains the current level. `StatusResponse` key 6 reports the actual
   last successful board write. Incorrect types and levels are rejected before use.
 - Firmware **v2.3.0-brightness** (not previously used in repository version history).
@@ -39,7 +42,9 @@ The dead `feat/display-brightness` commits were neither rebased nor cherry-picke
   unsupported firmware gets a plain explanation while the setting stays saveable.
   Preview pixels remain upright and undimmed at both mountings and both extremes.
 - **No flash-first deploy order.** Existing `v2.2.0-psram` receives no key 4 and
-  continues working. The schema bump still requires the v11 server before its SPA.
+  continues working. Its decoder accepts and skips unknown key 4; the bit-11 gate
+  is protocol hygiene, not what prevents decoder rejection. The schema bump still
+  requires the v11 server before its SPA.
   Firmware installation is a separate owner operation. No deployment occurred.
 
 Auto-brightness, schedules, night mode, per-card levels and gestures are out of scope.
@@ -129,6 +134,41 @@ production source was restored. Positive full gates were rerun after restoration
 brightness, with byte-for-byte Rust/C round trips; hostile fixtures cover zero, below
 floor, overflow, negative and boolean values. The Web Serial codec's existing exact
 fixture tests also pass with the amended capability word.
+
+### Review round 1: brightness across firmware changes
+
+The review found that gating before caching discarded the desired level, both when
+saving on unsupported firmware and during downgrade replay. The server now retains
+the desired config and gates a transmitted copy. It tracks the last acknowledged
+brightness payload so a support change also replays when revisions match, advancing
+the revision for changed content. Unsupported firmware still receives no key 4.
+
+`saved_brightness_survives_firmware_upgrade_downgrade_and_upgrade` failed on the
+reviewed code (`None` instead of raw `26`) and passes after the fix. It exercises
+2016→4064→2016→4064 with reset, matching, and newer device revisions, and verifies
+that unchanged reconnects do not resend. `brightness_upgrade_refuses_an_exhausted_revision_before_sending`
+checks the matching-revision boundary at `u32::MAX` without sending an invalid apply.
+
+Seven review-round mutation probes failed, with sources restored afterward:
+
+| Mutation | Failing test |
+| --- | --- |
+| Cache the gated initial payload | `saved_brightness_survives_firmware_upgrade_downgrade_and_upgrade` |
+| Overwrite desired brightness during gated replay | same regression |
+| Skip replay when only capability support changes | same regression |
+| Reuse the matching revision for changed content | same regression |
+| Do not remember the acknowledged replay brightness | same regression |
+| Remove initial bit-11 gate | same regression and `brightness_is_gated_on_initial_apply_and_firmware_downgrade_replay` |
+| Remove replay bit-11 gate | both brightness tests above |
+
+The independent review compiled the older decoder against the new fixture and
+observed it accepting and skipping key 4. Documentation therefore describes the gate
+as enforcement of advertised feature support. The existing Settings Save action was
+confirmed by the owner; there is no drag-to-autosave change in this round.
+
+After restoring the probes, Rust 1.98.0 formatting, workspace/all-target clippy with
+`-D warnings`, all **870 workspace tests**, and separate doctests passed. This round
+changes server replay and its tests/documentation; the firmware and window are unchanged.
 
 ## Hardware still owed — UNOBSERVED
 

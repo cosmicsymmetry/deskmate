@@ -50,6 +50,8 @@ default. This section states only what is true now.
   explicit successful save. A `docs/config/vN.md` exists iff the store reads vN.
   **The 2026-10-02 brightness amendment is additive within v2**: ApplyConfig key 4
   is sent only to firmware advertising bit 11 (`DisplayBrightness`), including replay.
+  The replay cache retains desired brightness across upgrade/downgrade cycles. The
+  older decoder skips unknown key 4; the gate enforces advertised feature support.
   Existing `v2.2.0-psram` keeps working; there is **no flash-first order** for Track H.
   Deploy the v11 server before its SPA; firmware installation remains separate.
 - **Three card kinds: clock, pomodoro, picture.** Clock and pomodoro tick on the device

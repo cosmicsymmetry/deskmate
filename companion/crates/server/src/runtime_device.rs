@@ -400,6 +400,9 @@ pub(crate) struct WebSocketRuntimeDevice {
     latest_data_revision: u32,
     latest_config_revision: u32,
     capabilities: u64,
+    /// Brightness in the last acknowledged wire config. `replay.config` keeps
+    /// the desired value even when this payload omitted it for older firmware.
+    applied_brightness: Option<u8>,
     /// Accounting for the asset push currently open, if any. Diagnostic only:
     /// nothing reads it to make a decision, so losing it costs a log line and
     /// never a transfer.
@@ -446,6 +449,7 @@ impl WebSocketRuntimeDevice {
                 latest_data_revision: 0,
                 latest_config_revision: 0,
                 capabilities: 0,
+                applied_brightness: None,
                 asset_transfer: None,
             },
             connector,
@@ -539,26 +543,29 @@ impl WebSocketRuntimeDevice {
 
         let mut config_applied = false;
         if let Some(config) = replay.config.as_mut() {
-            // Firmware may have changed while disconnected. Gate replay too.
-            if status.capabilities & protocol::CAPABILITY_DISPLAY_BRIGHTNESS == 0 {
-                config.brightness = None;
-            }
-            if config.revision != status.config_revision {
-                if config.revision < status.config_revision {
+            // Gate the transmitted copy, never the owner's retained preference.
+            // A capability change can require a different payload even when the
+            // device reports the revision we last acknowledged.
+            let brightness = config
+                .brightness
+                .filter(|_| status.capabilities & protocol::CAPABILITY_DISPLAY_BRIGHTNESS != 0);
+            if config.revision != status.config_revision || brightness != self.applied_brightness {
+                if config.revision <= status.config_revision {
                     config.revision = status
                         .config_revision
                         .checked_add(1)
                         .ok_or(DeviceError::RevisionExhausted)?;
                 }
-                let (_, response) = self.request_on_generation(
-                    Some(generation),
-                    Message::ApplyConfig(config.clone()),
-                )?;
+                let mut wire_config = config.clone();
+                wire_config.brightness = brightness;
+                let (_, response) = self
+                    .request_on_generation(Some(generation), Message::ApplyConfig(wire_config))?;
                 require_ack(
                     &response,
                     protocol::TYPE_APPLY_CONFIG,
                     Some(config.revision),
                 )?;
+                self.applied_brightness = brightness;
                 config_applied = true;
             }
             self.latest_config_revision = config.revision;
@@ -680,20 +687,22 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
         if self.connected_generation.is_none() {
             return Err(DeviceError::NoDevice);
         }
-        // Brightness is an optional preference: omit it for older firmware,
-        // while preserving the saved setting and the rest of the card model.
         let revision = Self::next_revision(self.latest_config_revision)?;
-        let request = Message::ApplyConfig(ApplyConfig {
-            brightness: brightness
-                .filter(|_| self.capabilities & protocol::CAPABILITY_DISPLAY_BRIGHTNESS != 0),
+        let config = ApplyConfig {
+            brightness,
             revision,
             rotation,
             cards,
-        });
-        let response = self.connected_request(request.clone())?;
+        };
+        let mut wire_config = config.clone();
+        wire_config.brightness =
+            brightness.filter(|_| self.capabilities & protocol::CAPABILITY_DISPLAY_BRIGHTNESS != 0);
+        let applied_brightness = wire_config.brightness;
+        let response = self.connected_request(Message::ApplyConfig(wire_config))?;
         require_ack(&response, protocol::TYPE_APPLY_CONFIG, Some(revision))?;
         self.latest_config_revision = revision;
-        self.remember_success(&request);
+        self.applied_brightness = applied_brightness;
+        self.remember_success(&Message::ApplyConfig(config));
         Ok(())
     }
 
@@ -1962,6 +1971,91 @@ mod tests {
                 protocol::decode_message(&protocol::decode_wire_frame(&wire).unwrap()).unwrap();
             assert_eq!(&decoded, config);
         }
+    }
+
+    #[test]
+    fn saved_brightness_survives_firmware_upgrade_downgrade_and_upgrade() {
+        // A reboot resets revisions, but an attachment can also report the
+        // cached revision or a newer one. Capability changes need a fresh apply
+        // in all three cases, without another save from the owner.
+        for revision_offset in [None, Some(0), Some(10)] {
+            let (mut device, connector) =
+                super::WebSocketRuntimeDevice::channel("brightness-upgrade".into());
+            let mut status = sample_status();
+            status.config_revision = 0;
+            status.capabilities &= !protocol::CAPABILITY_DISPLAY_BRIGHTNESS;
+            let actor = spawn_test_actor_with_status(connector.attach(), status.clone());
+            device.connect().unwrap();
+            device.apply_layout(Some(26), 90, replay_cards()).unwrap();
+            connector.detach();
+            let configs = |messages: Vec<Message>| {
+                messages
+                    .into_iter()
+                    .filter_map(|message| match message {
+                        Message::ApplyConfig(config) => Some(config),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let initial = configs(actor.join().unwrap());
+            assert_eq!(initial.len(), 1);
+            assert_eq!(initial[0].brightness, None);
+            let mut revision = initial[0].revision;
+
+            for supported in [true, false, true] {
+                status.config_revision = revision_offset.map_or(0, |offset| revision + offset);
+                status.capabilities = if supported { 4064 } else { 2016 };
+                let actor = spawn_test_actor_with_status(connector.attach(), status.clone());
+                device.connect().expect("firmware change reconnects");
+                connector.detach();
+                let applied = configs(actor.join().unwrap());
+                assert_eq!(
+                    applied.len(),
+                    1,
+                    "capability change must apply the saved config"
+                );
+                assert_eq!(
+                    applied[0].brightness,
+                    if supported { Some(26) } else { None },
+                    "saved 10% must survive upgrade, downgrade, and upgrade again"
+                );
+                assert_eq!(applied[0].rotation, 90);
+                assert_eq!(applied[0].cards, replay_cards());
+                assert_eq!(
+                    applied[0].revision,
+                    revision.max(status.config_revision + 1)
+                );
+                revision = applied[0].revision;
+
+                // Matching capabilities and revision still avoid redundant work.
+                status.config_revision = revision;
+                let actor = spawn_test_actor_with_status(connector.attach(), status.clone());
+                device.connect().unwrap();
+                connector.detach();
+                assert!(configs(actor.join().unwrap()).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn brightness_upgrade_refuses_an_exhausted_revision_before_sending() {
+        let (mut device, connector) =
+            super::WebSocketRuntimeDevice::channel("brightness-exhausted".into());
+        let mut status = sample_status();
+        status.config_revision = u32::MAX - 1;
+        status.capabilities &= !protocol::CAPABILITY_DISPLAY_BRIGHTNESS;
+        let actor = spawn_test_actor_with_status(connector.attach(), status.clone());
+        device.connect().unwrap();
+        device.apply_layout(Some(26), 90, replay_cards()).unwrap();
+        connector.detach();
+        actor.join().unwrap();
+
+        status.config_revision = u32::MAX;
+        status.capabilities |= protocol::CAPABILITY_DISPLAY_BRIGHTNESS;
+        let actor = spawn_test_actor_with_status(connector.attach(), status);
+        assert_eq!(device.connect(), Err(DeviceError::RevisionExhausted));
+        connector.detach();
+        assert_eq!(actor.join().unwrap(), vec![Message::StatusRequest]);
     }
 
     fn spawn_test_actor(peer: super::SocketPeer) -> std::thread::JoinHandle<Vec<Message>> {

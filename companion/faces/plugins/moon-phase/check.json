@@ -1,0 +1,14 @@
+{
+  "cases": [
+    { "name": "new", "now": "2026-10-10T15:50:00Z", "settings": { "hemisphere": "north" } },
+    { "name": "waxing-crescent", "now": "2026-10-14T12:00:00Z", "settings": { "hemisphere": "north" } },
+    { "name": "first-quarter", "now": "2026-10-18T16:12:00Z", "settings": { "hemisphere": "north" } },
+    { "name": "waxing-gibbous", "now": "2026-10-22T12:00:00Z", "settings": { "hemisphere": "north" } },
+    { "name": "full", "now": "2026-10-26T04:12:00Z", "settings": { "hemisphere": "north" } },
+    { "name": "waning-gibbous", "now": "2026-10-02T12:00:00Z", "settings": { "hemisphere": "north" } },
+    { "name": "last-quarter", "now": "2026-10-03T13:25:00Z", "settings": { "hemisphere": "north" } },
+    { "name": "waning-crescent", "now": "2026-10-06T12:00:00Z", "settings": { "hemisphere": "north" } },
+    { "name": "southern-crescent", "now": "2026-10-14T12:00:00Z", "settings": { "hemisphere": "south" } },
+    { "name": "year-end", "now": "2026-12-31T12:00:00Z", "settings": { "hemisphere": "north" } }
+  ]
+}

@@ -87,7 +87,7 @@ test("the loop ring owns pacing and writes the active loop advance mode", async 
   const { container, root, cleanup } = await mount();
   try {
     await act(async () => root.render(<Harness />));
-    expect(container.textContent).toContain("The loop");
+    expect(container.querySelector("#loop-heading")?.textContent).toBe("Rotation");
     expect(container.textContent).not.toContain("Workday");
     const dwell = container.querySelector<HTMLInputElement>(".loop__dwell input");
     expect(dwell?.getAttribute("aria-invalid")).toBe("true");

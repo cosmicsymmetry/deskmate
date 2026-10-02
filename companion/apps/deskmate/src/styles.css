@@ -21,8 +21,8 @@
  *    pixels emit nothing. Rendering it on a light ground in light mode would be a
  *    picture of a different device.
  *
- * 3. --arc-a/--arc-b ARE A RAMP, NOT STATES. They encode share-of-loop, and only the
- *    ring uses them. Which arc is live is said by luminance, never by hue.
+ * 3. --arc-a/--arc-b ARE A NEUTRAL RAMP, NOT STATES. Only the ring uses them.
+ *    The selected arc uses --act, like the selected card in the work column.
  *
  * 4. NUMERALS ARE ROUNDED AND TABULAR. `ui-rounded` uses the platform's rounded
  *    system face without a font download. Every duration, time, count and index
@@ -36,7 +36,7 @@
   color-scheme: light dark;
 
   /* Light: a cool system grey, deliberately not cream. */
-  --ground: #ececf0;
+  --ground: #f5f5f7;
   --tile: #ffffff;
   --tile-2: #f4f4f7;
   --tile-3: #e6e6eb;
@@ -51,16 +51,15 @@
   --warn: #975d00;
   --bad: #d70015;
 
-  --arc-a: #e5004c;
-  --arc-b: #e08600;
+  --arc-a: #62626b;
+  --arc-b: #b3b3bb;
 
   /* The panel is an OLED. It is black in every scheme. */
   --stage: #000000;
-  --stage-bloom: 0 14px 34px -18px rgb(0 0 0 / 40%);
+  --stage-bloom: 0 12px 28px -16px rgb(0 0 0 / 28%);
 
-  --r-tile: 18px;
-  --r-control: 11px;
-  --r-pill: 999px;
+  --r-tile: 14px;
+  --r-control: 7px;
 
   --font: ui-sans-serif, -apple-system, system-ui, "Segoe UI", roboto, sans-serif;
   --round: ui-rounded, "SF Pro Rounded", ui-sans-serif, -apple-system, system-ui, sans-serif;
@@ -95,9 +94,9 @@
     --warn: #ff9f0a;
     --bad: #ff453a;
 
-    --arc-a: #fa114f;
-    --arc-b: #ffb340;
-    --stage-bloom: 0 18px 60px -22px color-mix(in srgb, var(--live) 34%, transparent);
+    --arc-a: #a0a0a8;
+    --arc-b: #53535c;
+    --stage-bloom: 0 12px 28px -16px rgb(0 0 0 / 60%);
   }
 }
 
@@ -117,9 +116,9 @@
   --warn: #ff9f0a;
   --bad: #ff453a;
 
-  --arc-a: #fa114f;
-  --arc-b: #ffb340;
-  --stage-bloom: 0 18px 60px -22px color-mix(in srgb, var(--live) 34%, transparent);
+  --arc-a: #a0a0a8;
+  --arc-b: #53535c;
+  --stage-bloom: 0 12px 28px -16px rgb(0 0 0 / 60%);
 }
 
 * {
@@ -259,7 +258,11 @@ fieldset legend,
 
 .face {
   display: grid;
-  grid-template-columns: 484px minmax(0, 1fr);
+  grid-template-columns: 464px minmax(0, 1fr);
+  gap: 40px;
+  width: min(100%, 1216px);
+  margin-inline: auto;
+  padding: 44px 24px 32px;
   min-height: 0;
 }
 
@@ -267,18 +270,26 @@ fieldset legend,
   display: flex;
   overflow-y: auto;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px 16px 20px 18px;
+  gap: 28px;
   min-height: 0;
+  padding: 0 0 24px;
+}
+
+/* Reserve room for a classic scrollbar without stealing exact preview pixels. */
+.face__rail > * {
+  flex-shrink: 0;
+  width: 448px;
+  max-width: 100%;
 }
 
 .face__work {
   display: flex;
   overflow-y: auto;
   flex-direction: column;
-  gap: 12px;
-  padding: 14px 18px 28px 14px;
+  gap: 28px;
+  min-width: 0;
   min-height: 0;
+  padding: 0 4px 24px;
 }
 
 .face__rail,
@@ -297,49 +308,62 @@ fieldset legend,
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 18px;
-  padding: 10px 18px;
+  gap: 20px;
+  min-height: 72px;
+  padding: 16px max(24px, calc((100% - 1168px) / 2));
   border-bottom: 1px solid var(--hairline);
-  background: var(--ground);
+  background: var(--tile);
 }
 
 .wordmark {
   display: flex;
   flex-shrink: 0;
   align-items: center;
-  gap: 9px;
+  gap: 11px;
 }
 
-/* The mark is the product: a lit rounded panel. Nothing else in the app glows. */
+/* A small outline of the display, in the same ink as the wordmark. */
 .wordmark__mark {
-  width: 24px;
-  height: 20px;
-  border-radius: 6px;
-  background: radial-gradient(120% 140% at 50% 30%, #ffd48a, var(--live) 78%);
-  box-shadow: 0 0 14px -2px color-mix(in srgb, var(--live) 60%, transparent);
+  position: relative;
+  width: 26px;
+  height: 22px;
+  border: 2px solid currentColor;
+  border-radius: 5px;
+}
+
+.wordmark__mark::after {
+  position: absolute;
+  bottom: 4px;
+  left: 6px;
+  right: 6px;
+  height: 2px;
+  border-radius: 1px;
+  background: currentColor;
+  content: "";
 }
 
 .wordmark__text {
-  font-size: 0.8rem;
-  font-weight: 680;
-  letter-spacing: -0.01em;
+  font-size: 1.0625rem;
+  font-weight: 650;
+  letter-spacing: -0.025em;
 }
 
 .topbar__settings {
   display: flex;
   position: relative;
   align-items: center;
-  gap: 7px;
-  padding: 5px 13px 5px 10px;
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-pill);
-  background: var(--tile);
+  gap: 8px;
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--r-control);
+  background: transparent;
   color: var(--ink-2);
-  font-size: 0.75rem;
-  font-weight: 570;
+  font-size: 0.8125rem;
+  font-weight: 550;
   transition:
-    color 0.14s var(--ease),
-    background 0.14s var(--ease);
+    color 150ms var(--ease),
+    background 150ms var(--ease);
 }
 
 .topbar__settings:hover {
@@ -432,6 +456,7 @@ fieldset legend,
 }
 
 .sheet__close {
+  border: 0;
   display: grid;
   flex-shrink: 0;
   place-items: center;
@@ -455,11 +480,7 @@ fieldset legend,
   gap: 7px;
 }
 
-/*
- * The one emissive object on the page. The bloom is the panel's own light
- * falling on the desk behind it, which is why nothing else in this design carries
- * a shadow.
- */
+/* The display alone has depth; controls are defined by their edges. */
 .stage__frame {
   width: 448px;
   height: 368px;
@@ -497,9 +518,9 @@ fieldset legend,
   top: 12px;
   right: 12px;
   padding: 3px 9px;
-  border-radius: var(--r-pill);
-  background: color-mix(in srgb, var(--warn) 22%, #000);
-  color: var(--warn);
+  border-radius: var(--r-control);
+  background: #251b0b;
+  color: #ffbc57;
   font-size: 0.625rem;
   font-weight: 700;
   letter-spacing: 0.06em;
@@ -511,9 +532,8 @@ fieldset legend,
 .loop {
   display: flex;
   flex-direction: column;
-  gap: 9px;
-  padding: 11px 2px 2px;
-  border-top: 1px solid var(--hairline);
+  gap: 20px;
+  padding: 0 0 4px;
 }
 
 .loop__head {
@@ -522,13 +542,20 @@ fieldset legend,
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 12px;
-  min-height: 26px;
+  min-height: 36px;
+}
+
+.loop__head h2 {
+  font-size: 0.875rem;
+  font-weight: 600;
+  letter-spacing: normal;
 }
 
 .loop__head-right {
   display: flex;
   align-items: center;
-  gap: 6px;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .loop__pacing {
@@ -541,19 +568,20 @@ fieldset legend,
   gap: 1px;
   padding: 2px;
   border: 1px solid var(--hairline);
-  border-radius: var(--r-pill);
+  border-radius: var(--r-control);
   background: var(--tile-2);
 }
 
 .loop__pace {
-  padding: 3px 9px;
-  font-size: 0.68rem;
+  min-height: 30px;
+  padding: 5px 10px;
+  font-size: 0.75rem;
 }
 
 .loop__pace,
 .source-settings__segment {
   border: 0;
-  border-radius: var(--r-pill);
+  border-radius: var(--r-control);
   background: none;
   color: var(--ink-2);
   font-weight: 600;
@@ -577,14 +605,14 @@ fieldset legend,
 }
 
 .loop__dwell input {
-  /* A number input keeps room for its spinner; 40px clipped "20" to "2(". */
-  width: 58px;
-  padding: 4px 6px;
+  width: 60px;
+  min-height: 36px;
+  padding: 6px;
   border: 1px solid var(--hairline);
-  border-radius: 8px;
+  border-radius: var(--r-control);
   background: var(--tile);
   color: var(--ink);
-  font-size: 0.72rem;
+  font-size: 0.8125rem;
   text-align: right;
 }
 
@@ -600,17 +628,17 @@ fieldset legend,
 
 .loop__body {
   display: grid;
-  grid-template-columns: 124px minmax(0, 1fr);
+  grid-template-columns: 104px minmax(0, 1fr);
   align-items: center;
-  gap: 14px;
+  gap: 24px;
 }
 
 .loop__ring {
   display: grid;
   position: relative;
   place-items: center;
-  width: 124px;
-  height: 124px;
+  width: 104px;
+  height: 104px;
 }
 
 .loop__ring svg {
@@ -622,14 +650,14 @@ fieldset legend,
 .loop__track {
   fill: none;
   stroke: var(--tile-3);
-  stroke-width: 15;
+  stroke-width: 9;
 }
 
 .loop__arc {
   fill: none;
   stroke: color-mix(in oklab, var(--arc-a), var(--arc-b) calc(var(--arc-step, 0) * 100%));
-  stroke-width: 15;
-  stroke-linecap: round;
+  stroke-width: 9;
+  stroke-linecap: butt;
   /* Not live yet: present, legible, and plainly not the one on the panel. */
   opacity: 0.62;
   transition:
@@ -639,8 +667,8 @@ fieldset legend,
 
 .loop__arc.is-live {
   opacity: 1;
-  stroke-width: 19;
-  filter: drop-shadow(0 0 7px color-mix(in srgb, var(--live) 55%, transparent));
+  stroke: var(--act);
+  stroke-width: 12;
 }
 
 .loop__marker {
@@ -657,17 +685,24 @@ fieldset legend,
   display: grid;
   position: absolute;
   justify-items: center;
-  gap: 1px;
-  max-width: 88px;
+  gap: 4px;
+  max-width: 76px;
   text-align: center;
   pointer-events: none;
 }
 
 .loop__total {
-  font-size: 1.75rem;
-  font-weight: 540;
+  font-size: 1.5rem;
+  font-weight: 550;
   letter-spacing: -0.02em;
   line-height: 1;
+}
+
+.loop__centre .tile-label {
+  font-size: 0.625rem;
+  font-weight: 500;
+  letter-spacing: normal;
+  text-transform: none;
 }
 
 .loop__transport {
@@ -677,12 +712,13 @@ fieldset legend,
 }
 
 .loop__play {
-  padding: 5px 12px;
+  min-height: 36px;
+  padding: 6px 10px;
   border: 1px solid var(--hairline);
-  border-radius: var(--r-pill);
-  background: var(--tile-2);
-  font-size: 0.71rem;
-  font-weight: 600;
+  border-radius: var(--r-control);
+  background: transparent;
+  font-size: 0.75rem;
+  font-weight: 550;
   transition: background 150ms var(--ease);
 }
 
@@ -715,8 +751,8 @@ fieldset legend,
 .loop__entry {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 5px 6px;
+  gap: 10px;
+  padding: 0 8px;
   border-radius: var(--r-control);
   transition: background 150ms var(--ease);
 }
@@ -726,7 +762,7 @@ fieldset legend,
 }
 
 .loop__entry.is-live {
-  background: color-mix(in srgb, var(--live) 10%, var(--tile));
+  background: transparent;
 }
 
 .loop__swatch {
@@ -737,13 +773,18 @@ fieldset legend,
   background: color-mix(in oklab, var(--arc-a), var(--arc-b) calc(var(--arc-step, 0) * 100%));
 }
 
+.loop__entry.is-live .loop__swatch {
+  background: var(--act);
+}
+
 .loop__entry-body {
   display: flex;
   flex: 1;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 0;
+  min-height: 36px;
+  padding: 5px 0;
   min-width: 0;
   border: 0;
   background: none;
@@ -783,8 +824,8 @@ fieldset legend,
 .network-panel {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 4px 2px 20px;
+  gap: 20px;
+  padding: 0 0 28px;
   border-bottom: 1px solid var(--hairline);
 }
 
@@ -801,9 +842,21 @@ fieldset legend,
 
 .panel-heading {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
+}
+
+.library {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.library .panel-heading h2 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: -0.03em;
 }
 
 .panel-heading__right {
@@ -813,12 +866,8 @@ fieldset legend,
 }
 
 .keyboard-hint {
-  padding: 3px 8px;
-  border-radius: 6px;
-  background: var(--tile-2);
   color: var(--ink-3);
-  font-family: var(--round);
-  font-size: 0.66rem;
+  font-size: 0.75rem;
 }
 
 /* The editor heading uses the same single identity as every card surface. */
@@ -830,12 +879,9 @@ fieldset legend,
 }
 
 .count-badge {
-  padding: 3px 9px;
-  border-radius: var(--r-pill);
-  background: var(--tile-2);
   color: var(--ink-3);
-  font-size: 0.7rem;
-  font-weight: 620;
+  font-size: 0.75rem;
+  font-weight: 500;
 }
 
 fieldset {
@@ -854,21 +900,23 @@ fieldset legend {
 .card-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
-  gap: 8px;
+  gap: 10px;
 }
 
 .card-tile {
   display: flex;
   position: relative;
   flex-direction: column;
-  padding: 11px 12px 10px;
-  border-radius: 14px;
-  background: var(--tile);
-  border: 1.5px solid var(--hairline);
+  min-width: 0;
+  min-height: 144px;
+  padding: 12px 10px 38px;
+  border: 0;
+  border-bottom: 1px solid var(--hairline);
+  border-radius: 0;
+  background: transparent;
   transition:
     border-color 160ms var(--ease),
-    background 160ms var(--ease),
-    transform 200ms var(--spring);
+    background 160ms var(--ease);
 }
 
 .card-tile:hover {
@@ -880,22 +928,24 @@ fieldset legend {
   transform: translateY(-3px);
 }
 
-/* Selection inverts the tile rather than adding a ring beside it. */
+/* An underline connects selection to the editor without boxing every card. */
 .card-tile.is-selected {
-  border-color: var(--act);
-  background: color-mix(in srgb, var(--act) 12%, var(--tile));
+  border-bottom: 2px solid var(--act);
+  padding-bottom: 37px;
+  background: transparent;
 }
 
 .card-tile.has-issue {
   border-color: var(--bad);
-  background: color-mix(in srgb, var(--bad) 9%, var(--tile));
+  background: color-mix(in srgb, var(--bad) 5%, transparent);
 }
 
 .card-tile__body {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 6px;
   padding: 0;
+  min-width: 0;
   border: 0;
   background: none;
   text-align: left;
@@ -909,26 +959,44 @@ fieldset legend {
   position: absolute;
   inset: 0;
   content: "";
-  border-radius: 13px;
+}
+
+.card-tile__index {
+  margin-bottom: 6px;
+  color: var(--ink-3);
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.card-tile.is-selected .card-tile__index {
+  color: var(--act);
 }
 
 .card-tile__value {
-  font-size: 1.75rem;
-  font-weight: 500;
-  letter-spacing: -0.025em;
-  line-height: 1.15;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  line-height: 1.3;
 }
 
 .card-tile.is-selected .card-tile__value {
-  color: var(--act);
+  color: var(--ink);
+}
+
+.card-tile__value--timer {
+  font-size: 1.375rem;
+  font-weight: 550;
+  line-height: 1;
 }
 
 /* The optional owner-set Pomodoro label shown beneath its countdown. */
 .card-tile__name {
   overflow: hidden;
   color: var(--ink-2);
-  font-size: 0.72rem;
-  font-weight: 550;
+  font-size: 0.875rem;
+  font-weight: 500;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
@@ -941,18 +1009,13 @@ fieldset legend {
 }
 
 .flag {
-  padding: 2px 6px;
-  border-radius: 5px;
-  background: var(--tile-3);
   color: var(--ink-2);
-  font-size: 0.6rem;
-  font-weight: 640;
-  letter-spacing: 0.03em;
+  font-size: 0.6875rem;
+  font-weight: 500;
 }
 
 .flag--alert {
-  background: color-mix(in srgb, var(--live) 18%, transparent);
-  color: var(--live);
+  color: var(--ink-2);
 }
 
 .card-tile__remove {
@@ -963,10 +1026,10 @@ fieldset legend {
   top: 7px;
   right: 7px;
   place-items: center;
-  width: 20px;
-  height: 20px;
+  width: 28px;
+  height: 28px;
   border: 0;
-  border-radius: 50%;
+  border-radius: 5px;
   opacity: 0;
   background: var(--tile-3);
   color: var(--ink-2);
@@ -994,7 +1057,7 @@ fieldset legend {
 
 .card-tile[draggable="true"] .card-tile__flags,
 .card-tile[draggable="true"] .card-tile__issues {
-  padding-right: 46px;
+  padding-right: 0;
 }
 
 .card-tile__moves {
@@ -1016,10 +1079,10 @@ fieldset legend {
 .card-tile__moves button {
   display: grid;
   place-items: center;
-  width: 20px;
-  height: 20px;
+  width: 28px;
+  height: 28px;
   border: 0;
-  border-radius: 50%;
+  border-radius: 5px;
   background: var(--tile-3);
   color: var(--ink-2);
   font-size: 0.8rem;
@@ -1036,30 +1099,30 @@ fieldset legend {
 
 .card-tile--add {
   justify-content: center;
-  min-height: 92px;
-  border-style: dashed;
-  background: none;
+  padding: 12px 10px;
+  border-bottom-color: transparent;
+  background: transparent;
 }
 
 .card-tile--add:hover,
 .card-tile--add:focus-within {
-  border-style: solid;
-  border-color: var(--act);
-  background: color-mix(in srgb, var(--act) 8%, transparent);
+  background: var(--tile-2);
 }
 
 .card-tile--add:has(.card-tile__add:disabled) {
   border-color: var(--hairline);
-  border-style: dashed;
+  border-style: solid;
   background: none;
   opacity: 0.55;
 }
 
 .card-tile__add {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
   flex: 1;
-  gap: 9px;
+  gap: 12px;
   padding: 0;
   border: 0;
   background: none;
@@ -1075,19 +1138,16 @@ fieldset legend {
 .card-tile__add small {
   display: block;
   color: var(--ink-3);
-  font-size: 0.66rem;
+  font-size: 0.75rem;
 }
 
 .card-tile__plus {
   display: grid;
-  flex-shrink: 0;
   place-items: center;
   width: 22px;
   height: 22px;
-  border-radius: 50%;
-  background: var(--tile-2);
   color: var(--ink-2);
-  font-size: 0.8rem;
+  font-size: 1.125rem;
 }
 
 /*
@@ -1126,6 +1186,7 @@ fieldset legend {
 }
 
 .menu__item {
+  min-height: 44px;
   display: flex;
   align-items: center;
   gap: 9px;
@@ -1152,7 +1213,7 @@ fieldset legend {
 .menu__item small {
   display: block;
   color: var(--ink-3);
-  font-size: 0.66rem;
+  font-size: 0.75rem;
 }
 
 .menu__item:disabled {
@@ -1165,7 +1226,7 @@ fieldset legend {
 .form-grid {
   display: flex;
   flex-direction: column;
-  gap: 13px;
+  gap: 22px;
 }
 
 .source-settings {
@@ -1188,18 +1249,20 @@ fieldset legend {
 .source-settings__fields > legend,
 .source-settings__enum > legend {
   padding: 0;
+  margin-bottom: 10px;
+  color: var(--ink);
+  font-size: 1rem;
+  font-weight: 550;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.source-settings__fields > legend {
+  font-weight: 600;
 }
 
 .source-settings__enum {
   gap: 6px;
-}
-
-.source-settings__enum > legend {
-  color: var(--ink-2);
-  font-size: 0.73rem;
-  font-weight: 560;
-  letter-spacing: normal;
-  text-transform: none;
 }
 
 .source-settings__segments {
@@ -1208,8 +1271,9 @@ fieldset legend {
 }
 
 .source-settings__segment {
-  padding: 5px 11px;
-  font-size: 0.72rem;
+  min-height: 36px;
+  padding: 7px 12px;
+  font-size: 0.875rem;
 }
 
 .source-settings__actions {
@@ -1222,9 +1286,10 @@ fieldset legend {
 .source-settings__actions small,
 .source-settings__status {
   margin: 0;
-  color: var(--ink-3);
-  font-size: 0.69rem;
-  line-height: 1.45;
+  max-width: 65ch;
+  color: var(--ink-2);
+  font-size: 0.875rem;
+  line-height: 1.5;
 }
 
 .field {
@@ -1236,23 +1301,30 @@ fieldset legend {
 
 .field > span:first-child,
 .field > label:first-child {
-  color: var(--ink-2);
-  font-size: 0.73rem;
-  font-weight: 560;
+  color: var(--ink);
+  font-size: 1rem;
+  font-weight: 550;
+  line-height: 1.4;
 }
 
 .field input,
 .field select {
-  padding: 8px 11px;
+  min-height: 40px;
+  padding: 9px 12px;
   width: 100%;
   border: 1px solid var(--hairline);
   border-radius: var(--r-control);
-  background: var(--tile-2);
+  background: var(--tile);
   color: var(--ink);
-  font-size: 0.8rem;
+  font-size: 1rem;
   transition:
     border-color 150ms var(--ease),
     background 150ms var(--ease);
+}
+
+.field input::placeholder {
+  color: var(--ink-3);
+  opacity: 1;
 }
 
 .brightness-label {
@@ -1289,9 +1361,10 @@ fieldset legend {
 }
 
 .field small {
-  color: var(--ink-3);
-  font-size: 0.69rem;
-  line-height: 1.45;
+  max-width: 65ch;
+  color: var(--ink-2);
+  font-size: 0.875rem;
+  line-height: 1.5;
 }
 
 /* Card and source failures keep long server explanations contained within the editor. */
@@ -1303,7 +1376,8 @@ fieldset legend {
   border-radius: var(--r-control);
   background: color-mix(in srgb, var(--bad) 10%, var(--tile));
   color: var(--bad);
-  font-size: 0.74rem;
+  font-size: 0.875rem;
+  line-height: 1.5;
   font-weight: 560;
 }
 
@@ -1316,41 +1390,43 @@ fieldset legend {
 .check-field {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  padding: 10px 12px;
-  border-radius: var(--r-control);
-  background: var(--tile-2);
+  gap: 12px;
+  padding: 8px 0;
   cursor: pointer;
 }
 
 .check-field input {
-  margin: 1px 0 0;
+  margin: 2px 0 0;
   flex-shrink: 0;
-  width: 15px;
-  height: 15px;
+  width: 18px;
+  height: 18px;
   accent-color: var(--act);
 }
 
 .check-field strong {
   display: block;
-  font-size: 0.78rem;
-  font-weight: 570;
+  font-size: 1rem;
+  font-weight: 550;
+  line-height: 1.4;
 }
 
 .check-field small {
   display: block;
-  color: var(--ink-3);
-  font-size: 0.69rem;
+  max-width: 65ch;
+  color: var(--ink-2);
+  font-size: 0.875rem;
+  line-height: 1.5;
 }
 
 .field-errors,
 .field-error {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
   color: var(--bad);
-  font-size: 0.7rem;
-  font-weight: 540;
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.5;
 }
 
 .field-errors li {
@@ -1381,7 +1457,7 @@ fieldset legend {
 
 .empty-state span {
   color: var(--ink-3);
-  font-size: 0.73rem;
+  font-size: 0.8125rem;
 }
 
 .empty-state--large {
@@ -1396,23 +1472,43 @@ fieldset legend {
 }
 
 .timer-controls {
+  padding: 0;
+  border: 0;
+  min-height: 44px;
   flex-direction: row;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
 }
 
+.alert-fieldset {
+  padding: 16px 0 0;
+  border: 0;
+  border-top: 1px solid var(--hairline);
+  border-radius: 0;
+}
+
+.alert-fieldset > legend {
+  padding: 0 8px 0 0;
+  color: var(--ink);
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
 .timer-controls > span strong {
   display: block;
-  font-size: 0.82rem;
-  font-weight: 620;
+  font-size: 0.9375rem;
+  font-weight: 600;
   text-transform: capitalize;
 }
 
 .timer-controls > span small {
   display: block;
-  color: var(--ink-3);
-  font-size: 0.7rem;
+  color: var(--ink-2);
+  font-size: 0.875rem;
+  line-height: 1.5;
 }
 
 .timer-controls > div {
@@ -1425,23 +1521,50 @@ fieldset legend {
   gap: 7px;
 }
 
-.gesture-note {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  padding: 11px 13px;
-  border-radius: var(--r-control);
-  background: var(--tile-2);
-  color: var(--ink-3);
-  font-size: 0.71rem;
+/* Optional reference material is disclosed on demand, not repeated as fine print. */
+.editor-help {
+  color: var(--ink);
+  font-size: 0.875rem;
   line-height: 1.5;
+}
+
+.editor-help > summary {
+  width: fit-content;
+  max-width: 100%;
+  padding-block: 6px;
+  cursor: pointer;
+  font-weight: 550;
+}
+
+.editor-help > summary:hover {
+  color: var(--act);
+}
+
+.editor-help > summary::marker {
+  color: var(--ink-2);
+}
+
+.editor-help > p,
+.editor-help > .field {
+  margin-top: 8px;
+  max-width: 65ch;
+}
+
+.editor-help--gestures {
+  padding-top: 12px;
+  border-top: 1px solid var(--hairline);
+}
+
+.source-identifier {
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
 }
 
 /* ── Network ───────────────────────────────────────────────────────────── */
 
 .ownership-badge {
   padding: 4px 11px;
-  border-radius: var(--r-pill);
+  border-radius: var(--r-control);
   background: var(--tile-2);
   font-size: 0.7rem;
   font-weight: 620;
@@ -1458,9 +1581,7 @@ fieldset legend {
 }
 
 .settings-destination {
-  padding: 10px 13px;
-  border-radius: var(--r-control);
-  background: var(--tile-2);
+  padding: 0;
   color: var(--ink-2);
   font-size: 0.75rem;
 }
@@ -1473,9 +1594,7 @@ fieldset legend {
 }
 
 .network-status > div {
-  padding: 8px 11px;
-  border-radius: var(--r-control);
-  background: var(--tile-2);
+  padding: 8px 0;
 }
 
 .network-status dd {
@@ -1495,7 +1614,7 @@ fieldset legend {
 
 .network-error {
   color: var(--bad);
-  font-size: 0.73rem;
+  font-size: 0.8125rem;
 }
 
 .network-form {
@@ -1533,7 +1652,7 @@ fieldset legend {
   padding: 13px 15px;
   border-radius: var(--r-tile);
   border: 1px solid;
-  font-size: 0.78rem;
+  font-size: 0.875rem;
   line-height: 1.5;
 }
 
@@ -1592,7 +1711,7 @@ fieldset legend {
 
 .first-run__count {
   padding: 3px 10px;
-  border-radius: var(--r-pill);
+  border-radius: var(--r-control);
   background: color-mix(in srgb, var(--act) 14%, transparent);
   color: var(--act);
   font-size: 0.72rem;
@@ -1609,7 +1728,7 @@ fieldset legend {
   display: flex;
   align-items: center;
   gap: 10px;
-  font-size: 0.78rem;
+  font-size: 0.875rem;
 }
 
 .first-run__steps li.is-done {
@@ -1626,7 +1745,7 @@ fieldset legend {
   border-radius: 50%;
   background: var(--tile-3);
   color: var(--ink-2);
-  font-size: 0.66rem;
+  font-size: 0.75rem;
   font-weight: 700;
 }
 
@@ -1639,15 +1758,15 @@ fieldset legend {
 
 .button {
   flex-shrink: 0;
-  padding: 8px 16px;
+  min-height: 38px;
+  padding: 9px 16px;
   border: 1px solid transparent;
-  border-radius: var(--r-pill);
+  border-radius: var(--r-control);
   background: var(--tile-2);
-  font-size: 0.76rem;
-  font-weight: 600;
+  font-size: 0.8125rem;
+  font-weight: 550;
   transition:
     background 150ms var(--ease),
-    transform 160ms var(--spring),
     opacity 150ms var(--ease);
 }
 
@@ -1677,10 +1796,7 @@ fieldset legend {
   background: color-mix(in srgb, var(--act) 85%, #000);
 }
 
-/*
- * A barred control is drawn as barred, not merely faded: the hatch says a
- * condition is holding it, which a lower opacity alone never communicates.
- */
+/* The adjacent save message explains why the action is unavailable. */
 .button:disabled {
   opacity: 0.5;
   color: var(--ink-3);
@@ -1688,22 +1804,18 @@ fieldset legend {
 
 .button--primary:disabled {
   opacity: 1;
-  background-color: var(--tile-2);
-  background-image: repeating-linear-gradient(
-    -45deg,
-    transparent 0 5px,
-    color-mix(in srgb, var(--ink) 14%, transparent) 5px 6px
-  );
+  background: var(--tile-3);
   color: var(--ink-3);
 }
 
 .text-button {
-  padding: 4px 8px;
+  min-height: 32px;
+  padding: 5px 8px;
   border: 0;
   border-radius: 7px;
   background: none;
-  font-size: 0.72rem;
-  font-weight: 570;
+  font-size: 0.875rem;
+  font-weight: 550;
 }
 
 .text-button--danger {
@@ -1724,13 +1836,15 @@ fieldset legend {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 11px 18px;
+  gap: 20px;
+  min-height: 72px;
+  padding: 16px max(24px, calc((100% - 1168px) / 2));
   border-top: 1px solid var(--hairline);
   background: var(--tile);
 }
 /* The sheet's own save bar sits at the end of its scroll, not pinned to the viewport. */
 .save-bar--sheet {
+  padding: 16px 20px;
   position: sticky;
   bottom: -20px;
   margin: 4px -20px -20px;
@@ -1739,7 +1853,7 @@ fieldset legend {
 
 .save-bar__state {
   min-width: 0;
-  font-size: 0.76rem;
+  font-size: 0.8125rem;
   color: var(--ink-2);
 }
 
@@ -1856,99 +1970,143 @@ a.button {
 
 /* ── Adaptation ────────────────────────────────────────────────────────── */
 
-@media (max-width: 940px) {
+@media (min-width: 1041px) and (max-height: 800px) {
+  .face {
+    padding-top: 20px;
+    padding-bottom: 8px;
+  }
+  .face__rail {
+    gap: 16px;
+    padding-bottom: 0;
+  }
+  .loop {
+    gap: 8px;
+  }
+  .loop__head {
+    gap: 8px;
+  }
+}
+
+@media (max-width: 1040px) {
   .face {
     display: block;
+    width: 100%;
+    padding: 32px 24px;
     overflow-y: auto;
   }
-
   .face__rail,
   .face__work {
-    display: block;
     overflow: visible;
-    padding: 14px 16px;
+    max-width: 640px;
+    margin-inline: auto;
+    padding: 0;
   }
-
-  .face__rail > * + *,
-  .face__work > * + * {
-    margin-top: 12px;
+  .face__rail {
+    width: 448px;
+    max-width: 100%;
+    margin-bottom: 36px;
   }
-
-  .face__work {
-    padding-top: 0;
-  }
-
-  .loop__body {
-    grid-template-columns: minmax(0, 1fr);
-    justify-items: center;
-  }
-
-  .loop__legend {
-    width: 100%;
+  .card-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
 @media (max-width: 540px) {
+  .topbar {
+    min-height: 64px;
+    padding: 12px 20px;
+  }
+  .face {
+    padding: 24px 20px;
+  }
   .stage__frame {
     width: 224px;
     height: 184px;
     margin: 0 auto;
   }
-
   .stage__screen {
     width: 224px;
     height: 184px;
     border-radius: 13px;
   }
-
   .stage__screen img {
     width: 448px;
     height: 368px;
     transform: scale(0.5);
     transform-origin: top left;
-    /* The exactness rationale only holds at 1:1. At a half scale, nearest-neighbour
-       throws away every other pixel row and visibly roughens the firmware's thin
-       strokes, so a faithful 2:1 downscale is the more honest picture of the panel. */
+    /* A faithful 2:1 downscale preserves the firmware's thin strokes. */
     image-rendering: auto;
+  }
+  .loop__head-right {
+    gap: 6px;
+  }
+  .loop__body {
+    gap: 16px;
+  }
+  .card-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .panel-heading__right {
+    flex-wrap: wrap;
+  }
+  .card-tile {
+    padding-bottom: 44px;
+  }
+  .card-tile--add {
+    padding-bottom: 14px;
+  }
+  .card-tile__remove,
+  .card-tile__moves {
+    opacity: 1;
+  }
+  .network-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .field input,
+  .field select {
+    font-size: 1rem;
+  }
+  .save-bar {
+    padding: 12px 20px;
   }
 }
 
 @media (max-width: 430px) {
-  .topbar {
-    gap: 10px;
-    padding: 10px 12px;
+  .loop__head-right {
+    width: 100%;
   }
-
-  .face__rail,
-  .face__work {
-    padding: 12px;
+  .loop__transport {
+    margin-left: auto;
   }
-
-  .card-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .card-tile {
-    padding-bottom: 34px;
-  }
-
-  .network-fields {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
   .save-bar {
     flex-direction: column;
     align-items: stretch;
-    gap: 9px;
+    gap: 10px;
   }
-
   .save-bar .button {
     width: 100%;
   }
+  .sheet {
+    width: calc(100vw - 24px);
+    max-height: calc(100dvh - 24px);
+  }
+}
 
+@media (hover: none) {
   .card-tile__remove,
   .card-tile__moves {
     opacity: 1;
+  }
+  .card-tile__remove,
+  .card-tile__moves button {
+    width: 32px;
+    height: 32px;
+  }
+  .card-tile {
+    padding-bottom: 48px;
+  }
+  .card-tile--add {
+    padding-bottom: 14px;
   }
 }
 

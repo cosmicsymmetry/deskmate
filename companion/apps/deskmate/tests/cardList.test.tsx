@@ -51,7 +51,7 @@ test("a picture tile leads with its source and names every entry control", () =>
   expect(html).not.toContain('class="tile-label">Picture<');
   // The tile's one fact is the source; generic format and kind labels would not
   // distinguish one picture from another.
-  expect(html).toContain('<strong class="card-tile__value numeral">Claude limits</strong>');
+  expect(html).toContain('<strong class="card-tile__value">Claude limits</strong>');
   expect(html).not.toContain('numeral">PNG<');
   // No second line: a picture's title is its source name, said once.
   expect(html).not.toContain('class="card-tile__name"');
@@ -67,7 +67,7 @@ test("picture tiles preserve missing and empty source identities", () => {
       config={{ ...cardListConfig([missing]), image_sources: [] }}
     />,
   );
-  expect(missingHtml).toContain('<strong class="card-tile__value numeral">Missing source</strong>');
+  expect(missingHtml).toContain('<strong class="card-tile__value">Missing source</strong>');
 
   const empty = pictureCard("empty-source-name");
   const emptyHtml = renderToStaticMarkup(
@@ -79,7 +79,7 @@ test("picture tiles preserve missing and empty source identities", () => {
       }}
     />,
   );
-  expect(emptyHtml).toContain('<strong class="card-tile__value numeral"></strong>');
+  expect(emptyHtml).toContain('<strong class="card-tile__value"></strong>');
   expect(emptyHtml).not.toContain('numeral">Missing source</strong>');
 });
 
@@ -110,7 +110,9 @@ test("pomodoro tiles suppress blank labels and labels equal to the countdown", (
     <CardList {...cardListDefaults()} config={cardListConfig([blank, repeated])} />,
   );
 
-  expect(html.match(/class="card-tile__value numeral">25:00<\/strong>/g)).toHaveLength(2);
+  expect(
+    html.match(/class="card-tile__value card-tile__value--timer numeral">25:00<\/strong>/g),
+  ).toHaveLength(2);
   expect(html).not.toContain("card-tile__name");
 });
 
@@ -120,7 +122,7 @@ test("a tile does not print the source name twice when the title repeats it", ()
     <CardList {...cardListDefaults()} config={cardListConfig([named])} selectedCardId={named.id} />,
   );
 
-  expect(html).toContain('numeral">Claude limits</strong>');
+  expect(html).toContain('card-tile__value">Claude limits</strong>');
   expect(html).not.toContain("card-tile__name");
 });
 

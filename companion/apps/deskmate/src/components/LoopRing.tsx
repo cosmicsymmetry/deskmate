@@ -209,9 +209,7 @@ export function LoopRing({ config, issues, selectedCardId, onSelect, onChange }:
   const head = (
     <>
       <div className="loop__head">
-        <p className="tile-label" id="loop-heading">
-          The loop
-        </p>
+        <h2 id="loop-heading">Rotation</h2>
         <div className="loop__head-right">
           {pacing}
           {isTimed && segments.length > 1 && (

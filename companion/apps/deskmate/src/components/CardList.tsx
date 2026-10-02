@@ -377,9 +377,14 @@ export function CardList({
           onClick={() => onSelect(card.id)}
           onKeyDown={(event) => onTileKeyDown(event, card.id)}
         >
-          {/* The card's live value or identity is enough; a template label would
-              only classify what the tile already makes visible. */}
-          <strong className="card-tile__value numeral">{value}</strong>
+          <span className="card-tile__index numeral" aria-hidden="true">
+            {String(index + 1).padStart(2, "0")}
+          </span>
+          <strong
+            className={`card-tile__value${card.kind === "pomodoro" ? " card-tile__value--timer numeral" : ""}`}
+          >
+            {value}
+          </strong>
           {/* Only a name the owner can set. The pomodoro label qualifies because
               it is editable and drawn on the panel; frozen creation defaults do not. */}
           {ownerSetName(card) && ownerSetName(card) !== value && (

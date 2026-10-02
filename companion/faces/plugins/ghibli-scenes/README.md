@@ -91,7 +91,7 @@ preview is deliberately not committed. This establishes local source/sandbox/ras
 behavior, not server persistence, browser setup or physical-panel delivery. Hosted
 release remains a separate operator action.
 
-Local validation: **29 shared behavioral tests passed**, both plugin checkers passed
+Local validation: **31 shared behavioral tests passed**, both plugin checkers passed
 (three art cases and two synthetic Ghibli cases), and faces typecheck, lint and
 format checks passed. The Impeccable mechanical detector returned no findings.
 All 32 downloaded source JPEGs also rendered through QuickJS and the real

@@ -205,8 +205,9 @@ function selection(context) {
   const event = context.event;
   const taps =
     event && Number.isInteger(event.taps) && event.taps > 0 ? Math.min(32, event.taps) : 0;
-  let index =
-    valid && (mode === "shuffle" || state.day === day) ? state.index : hash(day) % items.length;
+  const ordinal = Math.floor(Date.UTC(local.year, local.month - 1, local.day) / 86400000);
+  const dailyIndex = ((ordinal % items.length) + items.length) % items.length;
+  let index = valid && (mode === "shuffle" || state.day === day) ? state.index : dailyIndex;
   if (taps) index = (index + taps) % items.length;
   else if (mode === "shuffle" && valid) {
     // A deterministic shuffle for this input, without an immediate repeat.

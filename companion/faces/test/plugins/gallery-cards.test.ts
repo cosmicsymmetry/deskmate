@@ -203,6 +203,22 @@ for (const id of ["art-of-the-day", "ghibli-scenes"]) {
       expect(before.state).toEqual(after.state);
     });
 
+    test("consecutive local days always select a different work, across month and year boundaries", async () => {
+      for (const midnight of [
+        "2026-11-01T00:00:00Z",
+        "2027-01-01T00:00:00Z",
+        "2028-03-01T00:00:00Z",
+      ]) {
+        const after = new Date(midnight);
+        const before = new Date(after.getTime() - 60000);
+        const previous = await draw({ date: before, state: {} });
+        const next = await draw({ date: after, state: previous.state });
+        expect((next.state as GalleryState).index).toBe(
+          ((previous.state as GalleryState).index + 1) % count,
+        );
+      }
+    });
+
     test("shuffle changes each successful refresh without an immediate repeat", async () => {
       const settings = { collection: firstCollection, change: "shuffle" };
       const first = await draw({ settings, state: {} });

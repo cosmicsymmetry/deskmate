@@ -88,7 +88,7 @@ An actual guarded-network render of the Great Wave also produced a 448×368 PNG 
 verifies local sandbox/network/raster behavior, not server storage, browser setup,
 or delivery to a physical panel. Hosted deployment is a separate operator action.
 
-Local validation: **29 shared behavioral tests passed**, both plugin checkers passed
+Local validation: **31 shared behavioral tests passed**, both plugin checkers passed
 (three art cases and two synthetic Ghibli cases), and faces typecheck, lint and
 format checks passed. The Impeccable mechanical detector returned no findings.
 All 32 downloaded source JPEGs also rendered through QuickJS and the real

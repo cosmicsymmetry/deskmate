@@ -3,14 +3,13 @@
 The operator installs only plugin bytes recorded in
 [`releases.json`](../../companion/faces/plugins/releases.json). Each entry contains
 `id`, manifest `version`, and lowercase `sha256`. Previous entries stay unchanged
-for rollback history. The initial entries cover the reviewed `days-left-this-year`
-and `github-stats` plugins. A hash identifies content; **an owner commit to this
+for rollback history. The initial entries cover the reviewed `days-left-this-year`,
+`github-stats` and `moon-phase` plugins. A hash identifies content; **an owner commit to this
 index is the approval**.
 
-Moon Phase arrived through PR #16 while this index was being implemented. Its
-source and directory listing are included, but the initial approval seeds remain
-the two shipped plugins above. CI reports Moon Phase as pending; deployment of
-this revision is intentionally refused until the owner approves its exact entry.
+Moon Phase's seed records the exact content accepted by the owner in merged
+PR #16, alongside the two previously shipped plugins. All three pass strict
+installation verification.
 
 ## Submissions and approval
 

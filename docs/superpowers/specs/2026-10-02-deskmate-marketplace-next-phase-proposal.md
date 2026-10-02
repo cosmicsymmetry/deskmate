@@ -89,9 +89,9 @@ stalls. PNG evidence supplements review; it never proves physical-panel delivery
   Symlinks and special files are refused. No extension-based exclusions; consequently
   any file change inside a reviewed folder requires a new version and review.
   The two reviewed shipped plugins seed the index; GitHub stats gains a setup README.
-  Main's subsequent Moon Phase submission (PR #16) is integrated into the directory
-  but left pending, without inferring release approval from a source merge. The
-  install gate refuses it until an owner-approved entry records its exact bytes.
+  Moon Phase joins the seeds at its exact merged content: the owner accepted PR #16
+  and explicitly directed its inclusion. All three plugins pass strict install
+  verification and appear in the documentation directory.
 - Owner-authored index PRs are the approval source. Previous entries are immutable
   rollback history. A trusted-base `pull_request_target` workflow checks PR identity
   without executing submitted code; CODEOWNERS is documentation, with no repository
@@ -128,8 +128,9 @@ stalls. PNG evidence supplements review; it never proves physical-panel delivery
 - The faces bundle was copied to an isolated temporary directory without repository
   docs or deploy scripts. Its complete suite and cold describe pass. Reviewed fixture
   bytes pass the real verification CLI; changed bytes stop the extracted deploy
-  preflight before gates or VM-command stubs. Actual Moon Phase bytes produce the
-  expected pending-CI/install-refusal result. Neither deploy nor its dry-run was run;
+  preflight before gates or VM-command stubs. All three seeded plugins, including
+  the owner's accepted Moon Phase release, pass strict verification. Unindexed
+  fixture versions pass CI but fail installation. Neither deploy nor its dry-run was run;
   no VM contact or hardware verification was performed.
 - Built-in SVG goldens are unchanged. All 18 Days Left checker PNGs match the prior
   accepted output byte-for-byte; its three desk-scale layouts were inspected again.

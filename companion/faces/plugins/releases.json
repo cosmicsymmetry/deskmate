@@ -8,5 +8,10 @@
     "id": "github-stats",
     "version": "1.0.0",
     "sha256": "b573ae0a714ffb51855c00ff9a8a17a44027125361d197af588789228139f633"
+  },
+  {
+    "id": "moon-phase",
+    "version": "1.0.0",
+    "sha256": "cb94239cb46e51f09abaf2bcd1a8378fa8407f65b1d94efa19971f88bfdbd339"
   }
 ]

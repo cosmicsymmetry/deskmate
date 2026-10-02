@@ -154,7 +154,7 @@ jobs:
         working-directory: companion/faces
         run: bun test
       - name: plugin directory and isolated deploy preflight
-        run: bun test tools/plugins/releases.test.ts
+        run: bun test ./tools/plugins/releases.test.ts
       - name: reviewed release content and pending submissions
         working-directory: companion/faces
         run: bun run src/author/releases.ts check

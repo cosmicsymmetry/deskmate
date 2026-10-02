@@ -158,9 +158,11 @@ both must be absolute because the subprocess gets a cleared environment:
   `curl -fsSL https://bun.sh/install | bash && sudo install -m 0755 ~/.bun/bin/bun /usr/local/bin/bun`.
 
 `deploy.sh` does all of this: it ships the directory, installs on the VM, runs the faces
-suite there, and adds `DESKMATE_FACES_DIR` to `server.env` if it is missing. Like the web
-directory, the package is read at use -- `deploy.sh --faces-only` needs no Rust build and
-no restart, and a new face appears in the add menu within a minute.
+suite there, and adds `DESKMATE_FACES_DIR` to `server.env` if it is missing. First-time
+activation requires a restart after installing the package and setting the variable:
+`sudo systemctl restart deskmate-server` (or restart the launchd job). Subsequent package
+updates are read at use -- `deploy.sh --faces-only` needs no Rust build and no restart,
+and a new face appears in the add menu within a minute.
 
 Create a face in the browser companion: select it from the add menu, fill in its fields,
 and save the card/configuration. The server persists the spec and starts fetching once
@@ -299,9 +301,11 @@ can reproduce), skips the restart when the binary came out byte-identical, and
 checks the public endpoint afterwards.
 
 ```sh
-companion/crates/server/deploy/deploy.sh              # binary + UI
+companion/crates/server/deploy/deploy.sh              # binary + UI + faces
 companion/crates/server/deploy/deploy.sh --ui-only    # just the companion
+companion/crates/server/deploy/deploy.sh --faces-only # just the server-rendered faces
 companion/crates/server/deploy/deploy.sh --dry-run    # build, do not install
+companion/crates/server/deploy/deploy.sh --status     # last shipped commit for each part
 ```
 
 Measured on the live deployment, 2026-09-18:

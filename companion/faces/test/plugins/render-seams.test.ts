@@ -27,16 +27,17 @@ export function render(c){
   return { ...c.settings.card, state: { timezone: c.now.timezone, taps: c.event?.taps ?? 0 } };
 }`,
   );
-  return (verb: string, request: object) => {
+  const env = {
+    ...process.env,
+    TZ: "UTC",
+    DESKMATE_PLUGINS_DIR: plugins,
+    DESKMATE_CONFIG_DIR: root,
+  };
+  const invoke = (verb: string, request: object) => {
     // These are complete fixture requests, not an interactive pipe test. Let
     // spawnSync own stdin/EOF and bound each child, including failure cleanup.
     const child = Bun.spawnSync([process.execPath, "run", main, verb], {
-      env: {
-        ...process.env,
-        TZ: "UTC",
-        DESKMATE_PLUGINS_DIR: plugins,
-        DESKMATE_CONFIG_DIR: root,
-      },
+      env,
       stdin: Buffer.from(`${JSON.stringify(request)}\n`),
       stdout: "pipe",
       stderr: "pipe",
@@ -46,14 +47,57 @@ export function render(c){
     if (child.signalCode) throw new Error(`${error} (stopped by ${child.signalCode})`);
     return { output: child.stdout.toString(), error, status: child.exitCode };
   };
+  const select = async (request: object) => {
+    // The server keeps this process alive between requests. Observe its framed
+    // reply with stdin still open; process exit/EOF is not the seam under test.
+    const child = Bun.spawn([process.execPath, "run", main, "tap-worker"], {
+      env,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const errors = new Response(child.stderr).text();
+    const reader = child.stdout.getReader();
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    let output: string;
+    try {
+      child.stdin.write(`${JSON.stringify(request)}\n`);
+      await child.stdin.flush();
+      const reply = async () => {
+        let output = "";
+        const decoder = new TextDecoder();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) throw new Error("selector closed stdout before replying");
+          output += decoder.decode(value, { stream: true });
+          const newline = output.indexOf("\n");
+          if (newline !== -1) return output.slice(0, newline);
+        }
+      };
+      output = await Promise.race([
+        reply(),
+        new Promise<never>((_, reject) => {
+          deadline = setTimeout(() => reject(new Error("selector did not reply in 10s")), 10_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(deadline);
+      child.kill();
+      await child.exited;
+      await reader.cancel();
+      await errors;
+    }
+    const error = await errors;
+    if (error) throw new Error(`tap-worker: ${error}`);
+    return JSON.parse(output);
+  };
+  return { invoke, select };
 }
 
 test("the real warm selector defers plugin taps to a render carrying the owner's zone", async () => {
-  const invoke = await fixture();
+  const { invoke, select } = await fixture();
   const request = { kind: "sample", settings: { card: valid }, event };
-  const selected = await invoke("tap-worker", request);
-  expect(selected.status, selected.error).toBe(0);
-  const reply = JSON.parse(selected.output);
+  const reply = await select(request);
   expect(reply.code).toBe(1);
   expect(reply.error).toContain("this face handles taps through render");
   expect(reply.result).toBeUndefined();
@@ -77,7 +121,7 @@ for (const [name, context] of [
   ["staged-view envelope", { view: "page-1" }],
 ] as const) {
   test(`${name} shares timezone and external-resource validation in the live render process`, async () => {
-    const invoke = await fixture();
+    const { invoke } = await fixture();
     const request = { kind: "sample", timezone: "Asia/Tokyo", ...context };
     const accepted = await invoke("render", { ...request, settings: { card: valid } });
     expect(accepted.status, accepted.error).toBe(0);

@@ -200,3 +200,51 @@ installation because the live UI had advanced to merged PR #22 (`0c7ecbb`). That
 merge preserves the deployed UI exactly and changes no faces, server, firmware,
 approval tooling or workflow bytes. The web gates pass again (225 tests); final
 CI and deployment evidence follow in PR #19.
+
+All seven CI jobs passed again at `72173e1` (run 37004982968), including the Hacker
+News case in 3.058 seconds. Full deployment passed the local and VM gates and
+installed all components; another authorized deployment then replaced faces with
+owner-merged PR #24 (`9e2bb7e`) seconds later. This branch integrates that removal
+rather than restoring Calvin. Its index retains every prior entry, including
+Calvin's history, and versions the merged xkcd/Anime README corrections at 1.0.1:
+documentation bytes are part of a release too. Runtime plugin code and permissions
+are unchanged; the directory now lists eleven plugins, with fourteen release
+entries including rollback history. The final deployment restores verification
+and withdrawal controls around this current catalog.
+
+Post-removal verification: 762 faces tests, all eleven offline author checks,
+strict release verification, directory/cold discovery, and all three repository
+checks pass. Typecheck, lint, formatting and dump pass. Server, web, firmware,
+approval checker and workflow bytes are unchanged from the seven-green-job head;
+the 884 Rust, 225 web and 14 policy test results remain applicable. Final CI runs
+the complete job set again.
+
+All seven jobs passed at `81a1f58` (run 37006364170), with the Hacker News case
+in 3.540 seconds. The live-revision guard then found the other track's reviewed
+reconciliation `c8fe780` (PR #27) already deployed. It independently preserves
+this policy and Calvin's removal; its only faces differences were explicit
+1.0.1 README notes, the associated hashes, and a Calvin-absence assertion.
+This branch merges that deployed history and keeps its exact fourteen-entry
+index. The two alternate 1.0.1 draft hashes from `81a1f58` were never installed;
+no deployed history is overwritten. Runtime, server, UI, firmware and approval
+machinery remain byte-identical to the previously green revision. The complete
+faces tree now matches the already deployed reconciliation.
+
+CI on `74d4797` exposed a different existing fixture timeout: the warm-selector
+seam test waited for the retained child to exit and hit its ten-second subprocess
+deadline. RSS and Hacker News passed in that run (1.642 and 1.784 seconds). The
+fixture now sends a framed request with stdin open, reads the real reply, and
+terminates/reaps the child explicitly. It keeps the ten-second reply deadline and
+all timezone/resource assertions; production code is byte-identical. Twenty
+repeats under four local CPU-load workers passed (whole-test median 0.589 s, max
+0.666 s); twenty isolated repeats against the installed Linux runtime passed
+(median 0.392 s, max 0.409 s). Mutating timezone forwarding and suppressing the
+worker reply each failed the revised test, bringing the caught-probe total to 55.
+
+The owner merged PR #27 while the final fixture change was running, carrying
+the shared review fixes into main. The first trusted approval job for this PR
+failed closed: its event still named the older `9e2bb7e` base, which predates the
+checker. Current main (`0e16762`) is merged, retaining Track D's new board facts
+and Track H's released lock. The remaining PR difference is the fixture and
+documentation; the owner-merged release/runtime controls and deployed hashes
+are preserved unchanged.

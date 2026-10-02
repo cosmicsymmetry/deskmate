@@ -349,6 +349,7 @@ export function CardList({
     const pomodoro = pomodoros.find((candidate) => candidate.card_id === card.id);
     const label = controlLabel(card, config.image_sources);
     const value = tileValue(card, pomodoro, config.image_sources);
+    const name = ownerSetName(card);
     return (
       <li
         key={`loop:${index}:${card.id}`}
@@ -387,9 +388,7 @@ export function CardList({
           </strong>
           {/* Only a name the owner can set. The pomodoro label qualifies because
               it is editable and drawn on the panel; frozen creation defaults do not. */}
-          {ownerSetName(card) && ownerSetName(card) !== value && (
-            <span className="card-tile__name">{ownerSetName(card)}</span>
-          )}
+          {name && name !== value && <span className="card-tile__name">{name}</span>}
         </button>
         <span className="card-tile__flags">
           {hasAlert && <span className="flag flag--alert">alerts</span>}

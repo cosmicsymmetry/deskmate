@@ -1,4 +1,5 @@
 import { request, resetAccountState } from "./backend";
+import type { DeviceRow } from "./types";
 
 export type Instance = {
   setup_required: boolean;
@@ -15,13 +16,7 @@ export type Account = {
   is_instance_owner: boolean;
 };
 
-export type PanelRow = {
-  id: string;
-  connected: boolean;
-  has_saved_config: boolean;
-  configured_at: number | null;
-  state: "pending" | "active";
-};
+export type PanelRow = DeviceRow;
 
 type AccountResponse = { account: Account };
 type SignupsResponse = { signups_open: boolean };

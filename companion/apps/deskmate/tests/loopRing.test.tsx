@@ -84,50 +84,42 @@ test("the loop ring owns pacing and writes the active loop advance mode", async 
     );
   }
 
-  const { container, root, cleanup } = await mount();
-  try {
-    await act(async () => root.render(<Harness />));
-    expect(container.querySelector("#loop-heading")?.textContent).toBe("Rotation");
-    expect(container.textContent).not.toContain("Workday");
-    const dwell = container.querySelector<HTMLInputElement>(".loop__dwell input");
-    expect(dwell?.getAttribute("aria-invalid")).toBe("true");
-    expect(dwell?.getAttribute("aria-describedby")).toBe("loop-pacing-issues");
-    expect(container.querySelector("#loop-pacing-issues")?.tagName).toBe("UL");
-    expect(container.textContent).toContain("Default dwell is out of range.");
-    const manual = buttonWithText(container, "Manual");
-    expect(manual?.getAttribute("aria-pressed")).toBe("false");
-    await act(async () => manual?.click());
-    expect(latest.advance).toEqual({ kind: "manual" });
-    expect(buttonWithText(container, "Manual")?.getAttribute("aria-pressed")).toBe("true");
-  } finally {
-    await cleanup();
-  }
+  const { container, root } = await mount();
+  await act(async () => root.render(<Harness />));
+  expect(container.querySelector("#loop-heading")?.textContent).toBe("Rotation");
+  expect(container.textContent).not.toContain("Workday");
+  const dwell = container.querySelector<HTMLInputElement>(".loop__dwell input");
+  expect(dwell?.getAttribute("aria-invalid")).toBe("true");
+  expect(dwell?.getAttribute("aria-describedby")).toBe("loop-pacing-issues");
+  expect(container.querySelector("#loop-pacing-issues")?.tagName).toBe("UL");
+  expect(container.textContent).toContain("Default dwell is out of range.");
+  const manual = buttonWithText(container, "Manual");
+  expect(manual?.getAttribute("aria-pressed")).toBe("false");
+  await act(async () => manual?.click());
+  expect(latest.advance).toEqual({ kind: "manual" });
+  expect(buttonWithText(container, "Manual")?.getAttribute("aria-pressed")).toBe("true");
 });
 
 test("clicking the already-selected pacing mode does not emit a draft change", async () => {
   const config = loopConfig();
   let changeCount = 0;
-  const { container, root, cleanup } = await mount();
+  const { container, root } = await mount();
 
-  try {
-    await act(async () =>
-      root.render(
-        <LoopRing
-          config={config}
-          issues={[]}
-          selectedCardId="first"
-          onSelect={() => {}}
-          onChange={() => {
-            changeCount += 1;
-          }}
-        />,
-      ),
-    );
-    await act(async () => buttonWithText(container, "Timed")?.click());
-    expect(changeCount).toBe(0);
-  } finally {
-    await cleanup();
-  }
+  await act(async () =>
+    root.render(
+      <LoopRing
+        config={config}
+        issues={[]}
+        selectedCardId="first"
+        onSelect={() => {}}
+        onChange={() => {
+          changeCount += 1;
+        }}
+      />,
+    ),
+  );
+  await act(async () => buttonWithText(container, "Timed")?.click());
+  expect(changeCount).toBe(0);
 });
 
 test("clearing the default dwell input keeps an empty edit without writing zero", async () => {
@@ -148,22 +140,18 @@ test("clearing the default dwell input keeps an empty edit without writing zero"
     );
   }
 
-  const { container, root, cleanup } = await mount();
-  try {
-    await act(async () => root.render(<Harness />));
-    const dwell = container.querySelector<HTMLInputElement>(".loop__dwell input");
-    await act(async () => {
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(dwell, "");
-      dwell?.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    expect(dwell?.value).toBe("");
-    expect(latest.advance).toEqual({
-      kind: "timed",
-      default_dwell_seconds: 20,
-    });
-  } finally {
-    await cleanup();
-  }
+  const { container, root } = await mount();
+  await act(async () => root.render(<Harness />));
+  const dwell = container.querySelector<HTMLInputElement>(".loop__dwell input");
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(dwell, "");
+    dwell?.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  expect(dwell?.value).toBe("");
+  expect(latest.advance).toEqual({
+    kind: "timed",
+    default_dwell_seconds: 20,
+  });
 });
 
 test("the loop legend only displays and selects; it has no reorder affordance", () => {

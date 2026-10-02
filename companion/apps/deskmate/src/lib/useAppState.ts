@@ -103,7 +103,6 @@ export interface AppStateValue {
    * and telemetry-only deliveries cannot trigger identical preview requests.
    */
   dataGeneration: number;
-  networkSettings: NetworkSettings;
   ownershipTier: DeviceTier | null;
   saveConfig: (config: AppConfig) => Promise<ConfigApplyResult>;
 }
@@ -214,7 +213,6 @@ export function useAppState(): AppStateValue {
     error,
     refresh,
     dataGeneration,
-    networkSettings,
     ownershipTier,
     saveConfig,
   };

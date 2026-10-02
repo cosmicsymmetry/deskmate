@@ -9,13 +9,7 @@
  * against Rust serialization in CI — so a drift in the backend contract breaks this
  * harness at type-check time rather than silently rendering a lie.
  */
-import type {
-  AppConfig,
-  AppSnapshot,
-  CardDataSnapshot,
-  DeviceCounters,
-  NetworkSettings,
-} from "../lib/types";
+import type { AppConfig, AppSnapshot, DeviceCounters, NetworkSettings } from "../lib/types";
 import { apiContractFixtures } from "../lib/types.contract";
 
 export const MOCK_COUNTERS: DeviceCounters = {
@@ -85,10 +79,6 @@ export function mockConfig(): AppConfig {
   };
 }
 
-export function mockCardData(): CardDataSnapshot[] {
-  return [];
-}
-
 export function mockNetworkSettings(): NetworkSettings {
   return { server_url: "https://deskmate.rodi.one", device_id: "desk-01", tier: "networked" };
 }
@@ -148,7 +138,7 @@ export function mockSnapshot(config: AppConfig): AppSnapshot {
         remaining_seconds: 764,
       },
     ],
-    card_data: mockCardData(),
+    card_data: [],
     card_errors: [],
     persistence: { kind: "clean" },
     diagnostics: {

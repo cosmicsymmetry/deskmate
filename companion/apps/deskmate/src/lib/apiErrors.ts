@@ -35,3 +35,35 @@ export function isSessionMissing(error: ApiError): boolean {
 export function isNoPanels(error: ApiError): boolean {
   return error.category === "not-found" && error.message === NO_PANELS_MESSAGE;
 }
+
+const API_ERROR_CATEGORIES = new Set<ApiError["category"]>([
+  "invalid-payload",
+  "payload-too-large",
+  "validation",
+  "persistence",
+  "runtime-unavailable",
+  "not-found",
+  "device",
+  "internal",
+]);
+
+export function toApiError(error: unknown): ApiError {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "category" in error &&
+    "message" in error &&
+    typeof error.category === "string" &&
+    API_ERROR_CATEGORIES.has(error.category as ApiError["category"]) &&
+    typeof error.message === "string"
+  ) {
+    return error as ApiError;
+  }
+  if (error instanceof DeskmateApiError) {
+    return error.details;
+  }
+  return {
+    category: "internal",
+    message: error instanceof Error ? error.message : String(error),
+  };
+}

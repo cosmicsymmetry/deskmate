@@ -26,7 +26,12 @@ import type {
   PreviewFrame,
 } from "./types";
 
-import { DeskmateApiError, NO_PANELS_MESSAGE, SESSION_REQUIRED_MESSAGE } from "./apiErrors";
+import {
+  DeskmateApiError,
+  NO_PANELS_MESSAGE,
+  SESSION_REQUIRED_MESSAGE,
+  toApiError,
+} from "./apiErrors";
 
 export {
   DeskmateApiError,
@@ -34,42 +39,11 @@ export {
   SESSION_REQUIRED_MESSAGE,
   isNoPanels,
   isSessionMissing,
+  toApiError,
 } from "./apiErrors";
 
 const APP_STATE_EVENT = "app-state";
 const MAX_DRAFT_BYTES = 64 * 1024;
-
-const API_ERROR_CATEGORIES = new Set<ApiError["category"]>([
-  "invalid-payload",
-  "payload-too-large",
-  "validation",
-  "persistence",
-  "runtime-unavailable",
-  "not-found",
-  "device",
-  "internal",
-]);
-
-export function toApiError(error: unknown): ApiError {
-  if (
-    typeof error === "object" &&
-    error !== null &&
-    "category" in error &&
-    "message" in error &&
-    typeof error.category === "string" &&
-    API_ERROR_CATEGORIES.has(error.category as ApiError["category"]) &&
-    typeof error.message === "string"
-  ) {
-    return error as ApiError;
-  }
-  if (error instanceof DeskmateApiError) {
-    return error.details;
-  }
-  return {
-    category: "internal",
-    message: error instanceof Error ? error.message : String(error),
-  };
-}
 
 function fail(details: ApiError): never {
   throw new DeskmateApiError(details);

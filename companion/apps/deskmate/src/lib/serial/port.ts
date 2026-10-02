@@ -17,7 +17,7 @@ export interface PanelPort {
   onDisconnect(listener: () => void): void;
 }
 
-export const PANEL_USB_FILTER = { usbVendorId: 0x303a, usbProductId: 0x1001 } as const;
+const PANEL_USB_FILTER = { usbVendorId: 0x303a, usbProductId: 0x1001 } as const;
 
 type BrowserSerialPort = EventTarget & {
   readable: ReadableStream<Uint8Array> | null;

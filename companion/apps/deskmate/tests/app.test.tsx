@@ -9,7 +9,7 @@ import { apiContractFixtures } from "../src/lib/types.contract";
 
 import { backendModule, backendMocks, resetBackendMocks } from "./support/backendMock";
 import { snapshot, clockCard, pomodoroCard, cardListConfig } from "./support/fixtures";
-import { installDomLifecycle, renderPreviewInto, waitFor, buttonWithText } from "./support/dom";
+import { installDomLifecycle, waitFor, buttonWithText } from "./support/dom";
 import {
   installHttpLifecycle,
   httpState,
@@ -24,6 +24,9 @@ beforeEach(resetBackendMocks);
 const { mount, cleanupMountedRoots } = installDomLifecycle();
 installHttpLifecycle(cleanupMountedRoots);
 afterEach(resetBackendMocks);
+
+const previewFrame = { png_base64: "cHJldmlldw==", sample: false, state: null };
+const emptyPreviewFrame = { png_base64: null, sample: false, state: null };
 
 test("renders a non-blocking loading state before the first backend snapshot", () => {
   const html = renderToStaticMarkup(<App />);
@@ -43,51 +46,33 @@ test("the page mints and adds a picture while keeping the token ephemeral", asyn
     card_data: [],
     card_errors: [],
   });
-  backendMocks.networkSettingsImpl = async () => ({
-    server_url: "https://desk.example",
-    device_id: "desk-1",
-    tier: "networked",
-  });
-  backendMocks.previewImpl = async () => ({ png_base64: null, sample: false, state: null });
+  backendMocks.previewImpl = async () => emptyPreviewFrame;
   httpCalls.length = 0;
 
-  const { container, root, cleanup } = await mount();
-  try {
-    await renderPreviewInto(root, <App />);
-    await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
-    const pictureMenuItem = [
-      ...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
-    ].find((button) => button.textContent?.includes("New picture source"));
-    await act(async () => pictureMenuItem?.click());
+  const { container } = await mount(<App />);
+  await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
+  const pictureMenuItem = [
+    ...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
+  ].find((button) => button.textContent?.includes("New picture source"));
+  await act(async () => pictureMenuItem?.click());
 
-    await waitFor(() => {
-      expect(container.querySelectorAll(".card-tile__body")).toHaveLength(2);
-      expect(container.querySelector<HTMLInputElement>("#picture-source-token")?.value).toBe(
-        "plaintext-once",
-      );
-    });
-    expect(httpCalls).toContainEqual({
-      method: "POST",
-      path: "/v1/images",
-      body: { name: "Picture", face_kind: null },
-    });
+  await waitFor(() => {
+    expect(container.querySelectorAll(".card-tile__body")).toHaveLength(2);
+    expect(container.querySelector<HTMLInputElement>("#picture-source-token")?.value).toBe(
+      "plaintext-once",
+    );
+  });
+  expect(httpCalls).toContainEqual({
+    method: "POST",
+    path: "/v1/images",
+    body: { name: "Picture", face_kind: null },
+  });
 
-    const tiles = container.querySelectorAll<HTMLButtonElement>(".card-tile__body");
-    await act(async () => tiles[0]?.click());
-    expect(container.querySelector("#picture-source-token")).toBeNull();
-    await act(async () => tiles[1]?.click());
-    expect(container.querySelector("#picture-source-token")).toBeNull();
-  } finally {
-    await cleanup();
-    backendMocks.snapshotImpl = async () => snapshot;
-    backendMocks.networkSettingsImpl = async () => ({
-      server_url: "https://desk.example",
-      device_id: "desk-1",
-      tier: "networked",
-    });
-    backendMocks.previewImpl = () =>
-      Promise.reject(new Error("renderCardPreview not configured for this test"));
-  }
+  const tiles = container.querySelectorAll<HTMLButtonElement>(".card-tile__body");
+  await act(async () => tiles[0]?.click());
+  expect(container.querySelector("#picture-source-token")).toBeNull();
+  await act(async () => tiles[1]?.click());
+  expect(container.querySelector("#picture-source-token")).toBeNull();
 });
 
 test("the page mints a server-listed face as a picture without producer credentials", async () => {
@@ -107,52 +92,43 @@ test("the page mints a server-listed face as a picture without producer credenti
     card_errors: [],
   });
   httpState.creatableFacesResponse = [{ kind: "weather", label: "Weather", fields: [] }];
-  backendMocks.previewImpl = async () => ({ png_base64: null, sample: false, state: null });
+  backendMocks.previewImpl = async () => emptyPreviewFrame;
   httpCalls.length = 0;
 
-  const { container, root, cleanup } = await mount();
-  try {
-    await renderPreviewInto(root, <App />);
-    await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
-    await waitFor(() => expect(container.textContent).toContain("Weather"));
-    const weather = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(
-      (button) => button.querySelector("strong")?.textContent === "Weather",
-    );
-    await act(async () => weather?.click());
-    expect(container.querySelector('[role="menu"]') === null).toBe(true);
-    const add = container.querySelector<HTMLButtonElement>(".card-tile__add");
-    expect(add?.disabled).toBe(true);
-    await act(async () => add?.click());
-    expect(container.querySelector('[role="menu"]')).toBeNull();
-    expect(httpCalls.filter((call) => call.path === "/v1/images")).toHaveLength(1);
-    await act(async () =>
-      mint.resolve(jsonResponse({ id: "picture-source", token: "plaintext-once" })),
-    );
+  const { container } = await mount(<App />);
+  await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
+  await waitFor(() => expect(container.textContent).toContain("Weather"));
+  const weather = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(
+    (button) => button.querySelector("strong")?.textContent === "Weather",
+  );
+  await act(async () => weather?.click());
+  expect(container.querySelector('[role="menu"]') === null).toBe(true);
+  const add = container.querySelector<HTMLButtonElement>(".card-tile__add");
+  expect(add?.disabled).toBe(true);
+  await act(async () => add?.click());
+  expect(container.querySelector('[role="menu"]')).toBeNull();
+  expect(httpCalls.filter((call) => call.path === "/v1/images")).toHaveLength(1);
+  await act(async () =>
+    mint.resolve(jsonResponse({ id: "picture-source", token: "plaintext-once" })),
+  );
 
-    await waitFor(() => {
-      const tiles = container.querySelectorAll<HTMLButtonElement>(".card-tile__body");
-      expect(tiles).toHaveLength(2);
-      expect(tiles[1]?.textContent).toContain("Weather");
-      expect(tiles[1]?.getAttribute("aria-pressed")).toBe("true");
-      expect(container.querySelector("#editor-heading")?.textContent).toBe("Weather");
-      expect(container.textContent).toContain("Picture source");
-      expect(container.textContent).toContain("picture-source");
-    });
-    expect(httpCalls).toContainEqual({
-      method: "POST",
-      path: "/v1/images",
-      body: { name: "Weather", face_kind: "weather" },
-    });
-    expect(container.textContent).toContain("Weather");
-    expect(container.querySelector("#picture-push-url")).toBeNull();
-    expect(container.querySelector("#picture-source-token")).toBeNull();
-  } finally {
-    await cleanup();
-    backendMocks.snapshotImpl = async () => snapshot;
-    httpState.creatableFacesResponse = [];
-    backendMocks.previewImpl = () =>
-      Promise.reject(new Error("renderCardPreview not configured for this test"));
-  }
+  await waitFor(() => {
+    const tiles = container.querySelectorAll<HTMLButtonElement>(".card-tile__body");
+    expect(tiles).toHaveLength(2);
+    expect(tiles[1]?.textContent).toContain("Weather");
+    expect(tiles[1]?.getAttribute("aria-pressed")).toBe("true");
+    expect(container.querySelector("#editor-heading")?.textContent).toBe("Weather");
+    expect(container.textContent).toContain("Picture source");
+    expect(container.textContent).toContain("picture-source");
+  });
+  expect(httpCalls).toContainEqual({
+    method: "POST",
+    path: "/v1/images",
+    body: { name: "Weather", face_kind: "weather" },
+  });
+  expect(container.textContent).toContain("Weather");
+  expect(container.querySelector("#picture-push-url")).toBeNull();
+  expect(container.querySelector("#picture-source-token")).toBeNull();
 });
 
 test("editing an already-saved config does not resurface first-run guidance", async () => {
@@ -168,38 +144,26 @@ test("editing an already-saved config does not resurface first-run guidance", as
     liveSnapshot = { ...liveSnapshot, config };
     return { save: { generation: 2, warning: null } };
   };
-  backendMocks.previewImpl = async () => ({
-    png_base64: "cHJldmlldw==",
-    sample: false,
-    state: null,
+  backendMocks.previewImpl = async () => previewFrame;
+
+  const { container } = await mount(<App />);
+  await waitFor(() => expect(buttonWithText(container, "Manual")).toBeDefined());
+  expect(container.textContent).not.toContain("Make the display yours");
+
+  const manualTab = buttonWithText(container, "Manual");
+  expect(manualTab).not.toBeUndefined();
+  await act(async () => manualTab?.click());
+
+  await waitFor(() => expect(container.textContent).toContain("Unsaved changes"));
+  expect(container.textContent).not.toContain("Make the display yours");
+  expect(buttonWithText(container, "Manual")?.getAttribute("aria-pressed")).toBe("true");
+  await waitFor(() => {
+    const save = buttonWithText(container, "Save to server");
+    expect(save?.disabled).toBe(false);
   });
-
-  const { container, root, cleanup } = await mount();
-  try {
-    await act(async () => root.render(<App />));
-    await waitFor(() => expect(buttonWithText(container, "Manual")).toBeDefined());
-    expect(container.textContent).not.toContain("Make the display yours");
-
-    const manualTab = buttonWithText(container, "Manual");
-    expect(manualTab).not.toBeUndefined();
-    await act(async () => manualTab?.click());
-
-    await waitFor(() => expect(container.textContent).toContain("Unsaved changes"));
-    expect(container.textContent).not.toContain("Make the display yours");
-    expect(buttonWithText(container, "Manual")?.getAttribute("aria-pressed")).toBe("true");
-    await waitFor(() => {
-      const save = buttonWithText(container, "Save to server");
-      expect(save?.disabled).toBe(false);
-    });
-    await act(async () => buttonWithText(container, "Save to server")?.click());
-    await waitFor(() => expect(saved).toHaveLength(1));
-    expect(saved[0].advance).toEqual({ kind: "manual" });
-  } finally {
-    await cleanup();
-    backendMocks.snapshotImpl = async () => snapshot;
-    backendMocks.validateImpl = async () => ({ valid: true, issues: [] });
-    backendMocks.saveConfigImpl = async () => ({ save: { generation: 1, warning: null } });
-  }
+  await act(async () => buttonWithText(container, "Save to server")?.click());
+  await waitFor(() => expect(saved).toHaveLength(1));
+  expect(saved[0].advance).toEqual({ kind: "manual" });
 });
 
 test("fresh default settings show first-run guidance until they have been saved", async () => {
@@ -212,35 +176,24 @@ test("fresh default settings show first-run guidance until they have been saved"
     liveSnapshot = { ...liveSnapshot, config, has_saved_config: true };
     return { save: { generation: 1, warning: null } };
   };
-  backendMocks.previewImpl = async () => ({
-    png_base64: "cHJldmlldw==",
-    sample: false,
-    state: null,
+  backendMocks.previewImpl = async () => previewFrame;
+
+  const { container } = await mount(<App />);
+  await waitFor(() => expect(container.textContent).toContain("Make the display yours"));
+  expect(container.textContent).toContain("Save your settings");
+
+  await act(async () => buttonWithText(container, "Manual")?.click());
+  await waitFor(() => expect(container.textContent).toContain("Unsaved changes"));
+  expect(container.textContent).toContain("Make the display yours");
+  await waitFor(() => {
+    expect(buttonWithText(container, "Save to server")?.disabled).toBe(false);
   });
+  await act(async () => buttonWithText(container, "Save to server")?.click());
+  await waitFor(() => expect(container.textContent).not.toContain("Make the display yours"));
 
-  const { container, root, cleanup } = await mount();
-  try {
-    await act(async () => root.render(<App />));
-    await waitFor(() => expect(container.textContent).toContain("Make the display yours"));
-    expect(container.textContent).toContain("Save your settings");
-
-    await act(async () => buttonWithText(container, "Manual")?.click());
-    await waitFor(() => expect(container.textContent).toContain("Unsaved changes"));
-    expect(container.textContent).toContain("Make the display yours");
-    await waitFor(() => {
-      expect(buttonWithText(container, "Save to server")?.disabled).toBe(false);
-    });
-    await act(async () => buttonWithText(container, "Save to server")?.click());
-    await waitFor(() => expect(container.textContent).not.toContain("Make the display yours"));
-
-    await act(async () => buttonWithText(container, "Timed")?.click());
-    await waitFor(() => expect(container.textContent).toContain("Unsaved changes"));
-    expect(container.textContent).not.toContain("Make the display yours");
-  } finally {
-    await cleanup();
-    backendMocks.snapshotImpl = async () => snapshot;
-    backendMocks.saveConfigImpl = async () => ({ save: { generation: 1, warning: null } });
-  }
+  await act(async () => buttonWithText(container, "Timed")?.click());
+  await waitFor(() => expect(container.textContent).toContain("Unsaved changes"));
+  expect(container.textContent).not.toContain("Make the display yours");
 });
 
 test("the mounted app saves an offline display configuration through the server", async () => {
@@ -254,40 +207,19 @@ test("the mounted app saves an offline display configuration through the server"
   };
   let serverWrites = 0;
   backendMocks.snapshotImpl = async () => liveSnapshot;
-  backendMocks.networkSettingsImpl = async () => ({
-    server_url: "https://desk.example",
-    device_id: "desk-1",
-    tier: "networked",
-  });
   backendMocks.saveConfigImpl = async (config) => {
     serverWrites += 1;
     liveSnapshot = { ...liveSnapshot, config };
     return { save: { generation: 2, warning: null } };
   };
-  backendMocks.previewImpl = async () => ({
-    png_base64: "cHJldmlldw==",
-    sample: false,
-    state: null,
-  });
+  backendMocks.previewImpl = async () => previewFrame;
 
-  const { container, root, cleanup } = await mount();
-  try {
-    await act(async () => root.render(<App />));
-    await waitFor(() => expect(buttonWithText(container, "Save to server")).toBeDefined());
-    await act(async () => buttonWithText(container, "Manual")?.click());
-    await waitFor(() => expect(buttonWithText(container, "Save to server")?.disabled).toBe(false));
-    await act(async () => buttonWithText(container, "Save to server")?.click());
-    await waitFor(() => expect(serverWrites).toBe(1));
-  } finally {
-    await cleanup();
-    backendMocks.snapshotImpl = async () => snapshot;
-    backendMocks.networkSettingsImpl = async () => ({
-      server_url: "https://desk.example",
-      device_id: "desk-1",
-      tier: "networked",
-    });
-    backendMocks.saveConfigImpl = async () => ({ save: { generation: 1, warning: null } });
-  }
+  const { container } = await mount(<App />);
+  await waitFor(() => expect(buttonWithText(container, "Save to server")).toBeDefined());
+  await act(async () => buttonWithText(container, "Manual")?.click());
+  await waitFor(() => expect(buttonWithText(container, "Save to server")?.disabled).toBe(false));
+  await act(async () => buttonWithText(container, "Save to server")?.click());
+  await waitFor(() => expect(serverWrites).toBe(1));
 });
 
 test("the mounted app refuses saving beside the button until ownership loads", async () => {
@@ -299,31 +231,16 @@ test("the mounted app refuses saving beside the button until ownership loads", a
     },
   });
   backendMocks.networkSettingsImpl = () => new Promise<NetworkSettings>(() => {});
-  backendMocks.previewImpl = async () => ({
-    png_base64: "cHJldmlldw==",
-    sample: false,
-    state: null,
-  });
+  backendMocks.previewImpl = async () => previewFrame;
 
-  const { container, root, cleanup } = await mount();
-  try {
-    await act(async () => root.render(<App />));
-    await waitFor(() => expect(buttonWithText(container, "Manual")).toBeDefined());
-    const unavailable = buttonWithText(container, "Ownership unavailable");
-    expect(unavailable?.disabled).toBe(true);
-    expect(container.textContent).toContain(
-      "Server ownership is unavailable. Check the device link before saving.",
-    );
-    expect(buttonWithText(container, "Save & apply")).toBeUndefined();
-  } finally {
-    await cleanup();
-    backendMocks.snapshotImpl = async () => snapshot;
-    backendMocks.networkSettingsImpl = async () => ({
-      server_url: "https://desk.example",
-      device_id: "desk-1",
-      tier: "networked",
-    });
-  }
+  const { container } = await mount(<App />);
+  await waitFor(() => expect(buttonWithText(container, "Manual")).toBeDefined());
+  const unavailable = buttonWithText(container, "Ownership unavailable");
+  expect(unavailable?.disabled).toBe(true);
+  expect(container.textContent).toContain(
+    "Server ownership is unavailable. Check the device link before saving.",
+  );
+  expect(buttonWithText(container, "Save & apply")).toBeUndefined();
 });
 
 test("a local tier in the server snapshot renders the neutral ownership fallback", async () => {
@@ -334,27 +251,17 @@ test("a local tier in the server snapshot renders the neutral ownership fallback
       tier: "local",
     },
   });
-  backendMocks.previewImpl = async () => ({
-    png_base64: "cHJldmlldw==",
-    sample: false,
-    state: null,
-  });
+  backendMocks.previewImpl = async () => previewFrame;
 
-  const { container, root, cleanup } = await mount();
-  try {
-    await act(async () => root.render(<App />));
-    await waitFor(() => expect(buttonWithText(container, "Ownership unavailable")).toBeDefined());
-    const settingsButton = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
-      (button) => button.textContent?.includes("Settings"),
-    );
-    await act(async () => settingsButton?.click());
-    const badge = container.querySelector(".ownership-badge");
-    expect(badge?.textContent).toBe("Ownership unavailable");
-    expect(badge?.classList.contains("ownership-badge--unknown")).toBe(true);
-  } finally {
-    await cleanup();
-    backendMocks.snapshotImpl = async () => snapshot;
-  }
+  const { container } = await mount(<App />);
+  await waitFor(() => expect(buttonWithText(container, "Ownership unavailable")).toBeDefined());
+  const settingsButton = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+    (button) => button.textContent?.includes("Settings"),
+  );
+  await act(async () => settingsButton?.click());
+  const badge = container.querySelector(".ownership-badge");
+  expect(badge?.textContent).toBe("Ownership unavailable");
+  expect(badge?.classList.contains("ownership-badge--unknown")).toBe(true);
 });
 
 test("server validation rejections show a bounded issue list beside the save action", async () => {
@@ -367,11 +274,6 @@ test("server validation rejections show a bounded issue list beside the save act
     },
   };
   backendMocks.snapshotImpl = async () => networkedSnapshot;
-  backendMocks.networkSettingsImpl = async () => ({
-    server_url: "https://desk.example",
-    device_id: "desk-1",
-    tier: "networked",
-  });
   backendMocks.saveConfigImpl = async () => {
     throw new backendModule.DeskmateApiError({
       category: "validation",
@@ -383,41 +285,25 @@ test("server validation rejections show a bounded issue list beside the save act
       })),
     });
   };
-  backendMocks.previewImpl = async () => ({
-    png_base64: "cHJldmlldw==",
-    sample: false,
-    state: null,
-  });
+  backendMocks.previewImpl = async () => previewFrame;
 
-  const { container, root, cleanup } = await mount();
-  try {
-    await act(async () => root.render(<App />));
-    await waitFor(() => expect(buttonWithText(container, "Manual")).toBeDefined());
-    await act(async () => buttonWithText(container, "Manual")?.click());
-    await waitFor(() => expect(buttonWithText(container, "Save to server")?.disabled).toBe(false));
-    await act(async () => buttonWithText(container, "Save to server")?.click());
+  const { container } = await mount(<App />);
+  await waitFor(() => expect(buttonWithText(container, "Manual")).toBeDefined());
+  await act(async () => buttonWithText(container, "Manual")?.click());
+  await waitFor(() => expect(buttonWithText(container, "Save to server")?.disabled).toBe(false));
+  await act(async () => buttonWithText(container, "Save to server")?.click());
 
-    await waitFor(() =>
-      expect(container.textContent).toContain(
-        "the server rejected this configuration with 7 validation issue(s)",
-      ),
-    );
-    expect(container.textContent).toContain("Server issue 1.");
-    expect(container.textContent).toContain("Server issue 5.");
-    expect(container.textContent).not.toContain("Server issue 6.");
-    expect(container.textContent).not.toContain("Server issue 7.");
-    expect(container.textContent).toContain("and 2 more");
-    expect(container.textContent).not.toContain("last working");
-  } finally {
-    await cleanup();
-    backendMocks.snapshotImpl = async () => snapshot;
-    backendMocks.networkSettingsImpl = async () => ({
-      server_url: "https://desk.example",
-      device_id: "desk-1",
-      tier: "networked",
-    });
-    backendMocks.saveConfigImpl = async () => ({ save: { generation: 1, warning: null } });
-  }
+  await waitFor(() =>
+    expect(container.textContent).toContain(
+      "the server rejected this configuration with 7 validation issue(s)",
+    ),
+  );
+  expect(container.textContent).toContain("Server issue 1.");
+  expect(container.textContent).toContain("Server issue 5.");
+  expect(container.textContent).not.toContain("Server issue 6.");
+  expect(container.textContent).not.toContain("Server issue 7.");
+  expect(container.textContent).toContain("and 2 more");
+  expect(container.textContent).not.toContain("last working");
 });
 
 test("validation-failed persistence shows the saved-settings banner and issue messages", async () => {
@@ -435,26 +321,16 @@ test("validation-failed persistence shows the saved-settings banner and issue me
     },
   };
   backendMocks.snapshotImpl = async () => invalidSnapshot;
-  backendMocks.previewImpl = async () => ({
-    png_base64: "cHJldmlldw==",
-    sample: false,
-    state: null,
-  });
+  backendMocks.previewImpl = async () => previewFrame;
 
-  const { container, root, cleanup } = await mount();
-  try {
-    await act(async () => root.render(<App />));
-    await waitFor(() =>
-      expect(container.textContent).toContain(
-        "Your saved settings failed validation and were not applied",
-      ),
-    );
-    expect(container.textContent).toContain("The picture card references a missing image source.");
-    expect(container.textContent).not.toContain("Using your last working settings");
-  } finally {
-    await cleanup();
-    backendMocks.snapshotImpl = async () => snapshot;
-  }
+  const { container } = await mount(<App />);
+  await waitFor(() =>
+    expect(container.textContent).toContain(
+      "Your saved settings failed validation and were not applied",
+    ),
+  );
+  expect(container.textContent).toContain("The picture card references a missing image source.");
+  expect(container.textContent).not.toContain("Using your last working settings");
 });
 
 test("unsupported saved settings use the generic recoverable-error banner", async () => {
@@ -465,17 +341,11 @@ test("unsupported saved settings use the generic recoverable-error banner", asyn
     persistence: { kind: "recoverable-error", message },
   });
 
-  const { container, root, cleanup } = await mount();
-  try {
-    await act(async () => root.render(<App />));
-    await waitFor(() => expect(container.textContent).toContain("Settings file needs attention"));
-    expect(container.textContent).toContain(message);
-    expect(container.textContent).toContain("The unreadable file was left untouched");
-    expect(container.textContent).not.toContain("Make the display yours");
-  } finally {
-    await cleanup();
-    backendMocks.snapshotImpl = async () => snapshot;
-  }
+  const { container } = await mount(<App />);
+  await waitFor(() => expect(container.textContent).toContain("Settings file needs attention"));
+  expect(container.textContent).toContain(message);
+  expect(container.textContent).toContain("The unreadable file was left untouched");
+  expect(container.textContent).not.toContain("Make the display yours");
 });
 
 test("a display speaking the server's own protocol raises nothing", async () => {
@@ -486,29 +356,19 @@ test("a display speaking the server's own protocol raises nothing", async () => 
     host_protocol_version: 2,
     device: { ...snapshot.device, protocol_version: 2 },
   });
-  backendMocks.previewImpl = async () => ({
-    png_base64: "cHJldmlldw==",
-    sample: false,
-    state: null,
-  });
+  backendMocks.previewImpl = async () => previewFrame;
 
-  const { container, root, cleanup } = await mount();
-  try {
-    await act(async () => root.render(<App />));
-    // Wait for the main page, then assert by absence. The save button's
-    // label depends on ownership, so it is the wrong thing to wait on here.
-    await waitFor(() =>
-      expect(
-        [...container.querySelectorAll("button")].some((button) =>
-          button.textContent?.includes("Settings"),
-        ),
-      ).toBe(true),
-    );
-    expect(container.textContent).not.toContain("speaks protocol");
-  } finally {
-    await cleanup();
-    backendMocks.snapshotImpl = async () => snapshot;
-  }
+  const { container } = await mount(<App />);
+  // Wait for the main page, then assert by absence. The save button's
+  // label depends on ownership, so it is the wrong thing to wait on here.
+  await waitFor(() =>
+    expect(
+      [...container.querySelectorAll("button")].some((button) =>
+        button.textContent?.includes("Settings"),
+      ),
+    ).toBe(true),
+  );
+  expect(container.textContent).not.toContain("speaks protocol");
 });
 
 test("a protocol the server cannot speak is stated in the work column and flags Settings", async () => {
@@ -519,26 +379,16 @@ test("a protocol the server cannot speak is stated in the work column and flags 
     host_protocol_version: 2,
     device: { ...snapshot.device, protocol_version: 3 },
   });
-  backendMocks.previewImpl = async () => ({
-    png_base64: "cHJldmlldw==",
-    sample: false,
-    state: null,
-  });
+  backendMocks.previewImpl = async () => previewFrame;
 
-  const { container, root, cleanup } = await mount();
-  try {
-    await act(async () => root.render(<App />));
-    await waitFor(() =>
-      expect(container.textContent).toContain(
-        "This display speaks protocol 3; this server speaks protocol 2.",
-      ),
-    );
-    // And the door to the settings sheet says something is wrong with it.
-    expect(container.querySelector(".topbar__settings.has-attention")).not.toBeNull();
-  } finally {
-    await cleanup();
-    backendMocks.snapshotImpl = async () => snapshot;
-  }
+  const { container } = await mount(<App />);
+  await waitFor(() =>
+    expect(container.textContent).toContain(
+      "This display speaks protocol 3; this server speaks protocol 2.",
+    ),
+  );
+  // And the door to the settings sheet says something is wrong with it.
+  expect(container.querySelector(".topbar__settings.has-attention")).not.toBeNull();
 });
 
 test.each([
@@ -567,22 +417,12 @@ test.each([
     ...(structuredClone(snapshot) as AppSnapshot),
     card_errors: structuredClone([...cardErrors]),
   });
-  backendMocks.previewImpl = async () => ({
-    png_base64: "cHJldmlldw==",
-    sample: false,
-    state: null,
-  });
+  backendMocks.previewImpl = async () => previewFrame;
 
-  const { container, root, cleanup } = await mount();
-  try {
-    await act(async () => root.render(<App />));
-    await waitFor(() => expect(container.textContent).toContain(heading));
-    expect(container.textContent).toContain(message);
-    expect(container.textContent).not.toContain(absent);
-  } finally {
-    await cleanup();
-    backendMocks.snapshotImpl = async () => snapshot;
-  }
+  const { container } = await mount(<App />);
+  await waitFor(() => expect(container.textContent).toContain(heading));
+  expect(container.textContent).toContain(message);
+  expect(container.textContent).not.toContain(absent);
 });
 
 test("the mounted app routes validation issues to their visible owning surfaces", async () => {
@@ -612,70 +452,60 @@ test("the mounted app routes validation issues to their visible owning surfaces"
       message: "The connected firmware does not support asset transfer.",
     },
   ];
-  const previous = { ...backendMocks };
   backendMocks.snapshotImpl = async () => ({ ...snapshot, config, pomodoros: [], card_errors: [] });
   backendMocks.validateImpl = async () => ({ valid: false, issues });
-  backendMocks.previewImpl = async () => ({ png_base64: null, sample: false, state: null });
-  const { container, root, cleanup } = await mount();
-  try {
-    await act(async () => root.render(<App />));
-    await waitFor(() =>
-      expect(container.querySelector(".library > .field-errors")?.textContent).toBe(
-        issues[0].message,
-      ),
-    );
-    const tiles = [...container.querySelectorAll<HTMLLIElement>(".card-tile")];
-    const first = tiles.find((tile) => tile.textContent?.includes("Desk"));
-    const second = tiles.find((tile) => tile.textContent?.includes("Up next"));
-    if (!first || !second) throw new Error("Both timer tiles must be rendered");
-    expect(first.querySelector(".card-tile__issues")?.textContent).toBe(issues[1].message);
-    expect(first.textContent).not.toContain(issues[2].message);
-    expect(first.textContent).not.toContain(issues[3].message);
-    expect(second.querySelector(".card-tile__issues")?.textContent).toBe(
-      issues[2].message + issues[3].message,
-    );
-    expect(second.textContent).not.toContain(issues[1].message);
-    expect(container.querySelector("#loop-pacing-issues")?.textContent).toBe(issues[4].message);
+  backendMocks.previewImpl = async () => emptyPreviewFrame;
+  const { container } = await mount(<App />);
+  await waitFor(() =>
+    expect(container.querySelector(".library > .field-errors")?.textContent).toBe(
+      issues[0].message,
+    ),
+  );
+  const tiles = [...container.querySelectorAll<HTMLLIElement>(".card-tile")];
+  const first = tiles.find((tile) => tile.textContent?.includes("Desk"));
+  const second = tiles.find((tile) => tile.textContent?.includes("Up next"));
+  if (!first || !second) throw new Error("Both timer tiles must be rendered");
+  expect(first.querySelector(".card-tile__issues")?.textContent).toBe(issues[1].message);
+  expect(first.textContent).not.toContain(issues[2].message);
+  expect(first.textContent).not.toContain(issues[3].message);
+  expect(second.querySelector(".card-tile__issues")?.textContent).toBe(
+    issues[2].message + issues[3].message,
+  );
+  expect(second.textContent).not.toContain(issues[1].message);
+  expect(container.querySelector("#loop-pacing-issues")?.textContent).toBe(issues[4].message);
 
-    const selectSecond = second.querySelector<HTMLButtonElement>(".card-tile__body");
-    if (!selectSecond) throw new Error("Missing second timer selection control");
-    await act(async () => selectSecond.click());
-    const editor = container.querySelector('[aria-labelledby="editor-heading"]');
-    expect(editor?.querySelector("#editor-heading")?.textContent).toBe("Up next");
-    expect(
-      editor
-        ?.querySelector('input[aria-label="Stays on the panel for Up next"]')
-        ?.closest("label")
-        ?.querySelector(".field-errors")?.textContent,
-    ).toBe(issues[3].message);
+  const selectSecond = second.querySelector<HTMLButtonElement>(".card-tile__body");
+  if (!selectSecond) throw new Error("Missing second timer selection control");
+  await act(async () => selectSecond.click());
+  const editor = container.querySelector('[aria-labelledby="editor-heading"]');
+  expect(editor?.querySelector("#editor-heading")?.textContent).toBe("Up next");
+  expect(
+    editor
+      ?.querySelector('input[aria-label="Stays on the panel for Up next"]')
+      ?.closest("label")
+      ?.querySelector(".field-errors")?.textContent,
+  ).toBe(issues[3].message);
 
-    const settings = container.querySelector<HTMLButtonElement>(".topbar__settings");
-    if (!settings) throw new Error("Missing Settings control");
-    await act(async () => settings.click());
-    const dialog = container.querySelector("dialog");
-    expect(dialog?.open).toBe(true);
-    const timezone = dialog?.querySelector('input[list="common-timezones"]');
-    expect(timezone?.closest("label")?.querySelector(".field-error")?.textContent).toBe(
-      issues[5].message,
-    );
+  const settings = container.querySelector<HTMLButtonElement>(".topbar__settings");
+  if (!settings) throw new Error("Missing Settings control");
+  await act(async () => settings.click());
+  const dialog = container.querySelector("dialog");
+  expect(dialog?.open).toBe(true);
+  const timezone = dialog?.querySelector('input[list="common-timezones"]');
+  expect(timezone?.closest("label")?.querySelector(".field-error")?.textContent).toBe(
+    issues[5].message,
+  );
 
-    const heading = [...container.querySelectorAll("aside strong")].find(
-      (node) => node.textContent === "One more thing needs attention",
-    );
-    const fallback = heading?.closest("aside");
-    expect(fallback).toBeDefined();
-    expect([...(fallback?.querySelectorAll("p") ?? [])].map((node) => node.textContent)).toEqual([
-      issues[6].message,
-    ]);
-    for (const issue of issues.slice(0, -1))
-      expect(fallback?.textContent).not.toContain(issue.message);
-  } finally {
-    try {
-      await cleanup();
-    } finally {
-      Object.assign(backendMocks, previous);
-    }
-  }
+  const heading = [...container.querySelectorAll("aside strong")].find(
+    (node) => node.textContent === "One more thing needs attention",
+  );
+  const fallback = heading?.closest("aside");
+  expect(fallback).toBeDefined();
+  expect([...(fallback?.querySelectorAll("p") ?? [])].map((node) => node.textContent)).toEqual([
+    issues[6].message,
+  ]);
+  for (const issue of issues.slice(0, -1))
+    expect(fallback?.textContent).not.toContain(issue.message);
 });
 
 for (const outcome of ["success", "rejection"] as const) {
@@ -686,7 +516,7 @@ for (const outcome of ["success", "rejection"] as const) {
     let refreshStarted = false;
     const saved: AppConfig[] = [];
     backendMocks.snapshotImpl = async () => liveSnapshot;
-    backendMocks.previewImpl = async () => ({ png_base64: null, sample: false, state: null });
+    backendMocks.previewImpl = async () => emptyPreviewFrame;
     backendMocks.saveConfigImpl = async (config) => {
       saved.push(config);
       if (saved.length === 1) {
@@ -1040,7 +870,8 @@ for (const supported of [false, true]) {
       return { save: { generation: 1, warning: null } };
     };
     const { container } = await mount(<App />);
-    await act(async () => container.querySelector<HTMLButtonElement>(".settings-trigger")?.click());
+    await act(async () => container.querySelector<HTMLButtonElement>(".topbar__settings")?.click());
+    expect(container.querySelector("dialog")?.open).toBe(true);
     const slider = container.querySelector<HTMLInputElement>("#display-brightness");
     expect(slider).not.toBeNull();
     expect(

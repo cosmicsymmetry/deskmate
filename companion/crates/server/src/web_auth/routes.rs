@@ -440,7 +440,7 @@ impl RouteError {
         Self::BadRequest(message)
     }
 
-    fn rate_limited(retry_after: std::time::Duration) -> Self {
+    pub(super) fn rate_limited(retry_after: std::time::Duration) -> Self {
         let partial_second = u64::from(retry_after.subsec_nanos() != 0);
         Self::RateLimited(retry_after.as_secs().saturating_add(partial_second).max(1))
     }

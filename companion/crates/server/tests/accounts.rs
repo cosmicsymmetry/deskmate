@@ -1151,6 +1151,117 @@ async fn a_second_sign_in_does_not_invalidate_the_first_session() {
     );
 }
 
+async fn google_start_from(
+    client: &reqwest::Client,
+    server: &HttpTestServer,
+    ip: &str,
+) -> reqwest::Response {
+    client
+        .get(format!("{}/v1/app/auth/google/start", server.base_url))
+        .header("x-forwarded-for", ip)
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn google_starts_are_limited_per_client_without_spending_the_callback_budget() {
+    let (state, transport) = google_world(false);
+    let server = spawn_http(app(state)).await;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let first = google_start_from(&client, &server, "198.51.100.7").await;
+    assert_eq!(first.status(), StatusCode::SEE_OTHER);
+    for _ in 1..10 {
+        assert_eq!(
+            google_start_from(&client, &server, "198.51.100.7")
+                .await
+                .status(),
+            StatusCode::SEE_OTHER
+        );
+    }
+    for _ in 0..30 {
+        let refused = google_start_from(&client, &server, "198.51.100.7").await;
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry = json_body(refused).await["retry_after_seconds"]
+            .as_u64()
+            .unwrap();
+        assert!((1..=600).contains(&retry));
+    }
+    assert_eq!(
+        google_start_from(&client, &server, "203.0.113.9")
+            .await
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    let location = first.headers()["location"].to_str().unwrap();
+    let flow = query_param(location, "state");
+    let nonce = query_param(location, "nonce");
+    transport.answer_id_token(&google_claims("owner", "owner@example.com", true, &nonce));
+    let callback = client
+        .get(format!(
+            "{}/v1/app/auth/google/callback?state={flow}&code=c",
+            server.base_url
+        ))
+        .header("x-forwarded-for", "198.51.100.7")
+        .header("cookie", google_cookie(&first))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(callback.status(), StatusCode::SEE_OTHER);
+    assert_eq!(callback.headers()["location"], "/");
+    assert!(
+        callback
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .any(|cookie| cookie
+                .to_str()
+                .unwrap()
+                .starts_with("__Host-deskmate_session="))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_google_starts_admit_only_the_client_limit() {
+    let (state, _) = google_world(false);
+    let server = spawn_http(app(state)).await;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let barrier = Arc::new(tokio::sync::Barrier::new(40));
+    let mut starts = tokio::task::JoinSet::new();
+    for _ in 0..40 {
+        let barrier = barrier.clone();
+        let client = client.clone();
+        let server = HttpTestServer::at(server.base_url.clone());
+        starts.spawn(async move {
+            barrier.wait().await;
+            google_start_from(&client, &server, "198.51.100.7")
+                .await
+                .status()
+        });
+    }
+    let mut admitted = 0;
+    while let Some(status) = starts.join_next().await {
+        match status.unwrap() {
+            StatusCode::SEE_OTHER => admitted += 1,
+            StatusCode::TOO_MANY_REQUESTS => (),
+            status => panic!("unexpected start status: {status}"),
+        }
+    }
+    assert_eq!(admitted, 10);
+    assert_eq!(
+        google_start_from(&client, &server, "203.0.113.9")
+            .await
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+}
+
 #[tokio::test]
 async fn google_callback_is_bound_to_the_starting_browser_and_cannot_be_replayed() {
     let (state, transport) = google_world(false);

@@ -33,6 +33,20 @@ impl RateLimiter {
             attempts.by_key.remove(key);
             return Ok(());
         }
+        self.check_entries(entries, now)
+    }
+
+    /// Admit and record under one lock so concurrent starts share one budget.
+    pub(crate) fn check_and_record(&self, key: &str, now: Instant) -> Result<(), Duration> {
+        let mut attempts = self.expire(now);
+        let entries = attempts.by_key.entry(key.to_owned()).or_default();
+        prune(entries, now, self.window);
+        self.check_entries(entries, now)?;
+        entries.push_back(now);
+        Ok(())
+    }
+
+    fn check_entries(&self, entries: &VecDeque<Instant>, now: Instant) -> Result<(), Duration> {
         if entries.len() < self.limit {
             return Ok(());
         }

@@ -1605,3 +1605,32 @@ would have needed a session to diagnose if that sentence had been on screen.
 
 Which of the three it was on the owner's panel is not known, and none of the fixes has
 been seen on the device.
+
+## 2026-10-02 -- review sweep 2: five areas, five PRs, deployed at `f1724de`
+
+The first sweep since `f26fac2` (2026-09-19), over the code written since by parallel tracks.
+Firmware and `companion/faces/plugins/*/` were excluded on purpose (OTA layout risk; hashed
+releases). Pipeline: Fable 5.1 found (85 findings across faces, server data path, server
+accounts/API, web app, tooling/CI), GPT-6 Astra cross-examined every finding against the code
+(roughly 70 kept or adjusted, 10 dropped -- several "duplicates" differed in negative-number
+normalisation, rate-limit edges at exactly 600 s, or wire traffic), Astra implemented one PR per
+area, Fable reviewed each PR, merged one at a time with CI checked on `main` in between:
+#28 server data path, #29 tooling/CI/deploy, #30 faces (goldens byte-identical), #32 web app
+(pixelab 252 states, 0 different), #31 server accounts/API (one fix round).
+
+**Decision recorded in #31:** the per-client Google sign-in start budget stays at 32/600 s, not
+the 10 the finding proposed, because on the hosted topology `client_ip` resolves to the proxy, so
+every per-IP auth budget is instance-wide. It drops to 10 in the same change that makes the
+proxy forward the real client IP (the `docs/self-host.md` recipe; tracked on Track A's board row).
+
+**Follow-ups left open:**
+- The hosted proxy does not forward the client IP (above). Until it does, five failed
+  link/setup/callback attempts from anyone lock those paths for everyone for 15 minutes.
+- Flaky tests seen on `main` CI, each passing on rerun of the same commit:
+  `data_cards::tests::a_tap_reschedules_the_interval_rather_than_adding_a_refresh` (wall-clock
+  500 ms interval with 300/250 ms sleeps), `accounts::removing_a_panel_revokes_it_and_drops_its_live_link`
+  (`tests/accounts.rs:222`), plus the earlier HN page-four tap timeout and the faces `describe`
+  cold start. Each should move to a controllable clock rather than a longer sleep.
+- `tools/webcheck/pixelab.py` reports two A/A differences on identical builds (scroll position,
+  rasterisation); #32's evidence used a local copy with a scroll reset and
+  `--disable-gpu --disable-lcd-text --force-color-profile=srgb`. Fold those into the tracked tool.

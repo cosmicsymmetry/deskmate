@@ -81,6 +81,9 @@ command contacts the network, reads credentials, or runs plugin source.
 
 Every `deploy.sh` mode that ships faces uses `verify` before any faces-related VM
 contact and again on the staged target bytes after its tests, before installation.
+Package tests isolate their policy path; the staging catalog check uses a temporary
+empty policy because the build user has no operator instance. This does not change
+the live service's explicit instance policy path or its fail-closed behavior.
 A missing entry or mismatch names the plugin and version and refuses the entire
 faces install. **`deploy.sh --dry-run` still synchronizes to the VM.** To check only
 approval, run the isolated verification command above.

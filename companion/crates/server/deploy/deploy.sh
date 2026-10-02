@@ -116,6 +116,13 @@ ship_faces() {
 	ssh "$VM" "set -e
 		cd /tmp/deskmate-faces
 		$BUN install --frozen-lockfile --production >/dev/null
+		# The staging user has no operator instance and cannot traverse its
+		# protected config directory. Test the package with an empty policy;
+		# the live service still supplies its own instance policy path.
+		policy_dir=\$(mktemp -d)
+		trap 'rm -rf \"\$policy_dir\"' EXIT
+		printf '[]\\n' > \"\$policy_dir/denylist.json\"
+		export DESKMATE_PLUGIN_DENYLIST=\"\$policy_dir/denylist.json\"
 		# The suite again, HERE: the goldens are byte-exact and this is the platform
 		# that draws for the panel, with its own native resvg build. Then the cold
 		# start the server performs. A package that fails either must not replace

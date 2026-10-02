@@ -130,8 +130,9 @@ stalls. PNG evidence supplements review; it never proves physical-panel delivery
   bytes pass the real verification CLI; changed bytes stop the extracted deploy
   preflight before gates or VM-command stubs. All three seeded plugins, including
   the owner's accepted Moon Phase release, pass strict verification. Unindexed
-  fixture versions pass CI but fail installation. Neither deploy nor its dry-run was run;
-  no VM contact or hardware verification was performed.
+  fixture versions pass CI but fail installation. Before the subsequent deployment
+  authorization, neither deploy nor its dry-run was run, and no VM contact or
+  hardware verification was performed.
 - Built-in SVG goldens are unchanged. All 18 Days Left checker PNGs match the prior
   accepted output byte-for-byte; its three desk-scale layouts were inspected again.
 
@@ -140,3 +141,12 @@ selector subprocess tests (idle reaping, inherited-pipe timing and a worker refu
 Ten consecutive focused selector runs then passed, followed by the complete Rust
 workspace run. Selector lifecycle code and its deadlines are unchanged by this work;
 the initial failures are disclosed rather than hidden by a timeout change.
+
+The owner subsequently authorized deployment. Its first attempt stopped before
+installation: the VM build user could not traverse the live config directory,
+which correctly made ordinary package tests treat the denylist as unreadable.
+Tests now use an isolated policy path, and the staging catalog check receives a
+temporary empty policy removed on exit. The live service's path and policy guards
+are unchanged. All 631 faces tests pass under an inherited malformed policy; three
+repository integration checks pass, and deleting either isolation guard fails its
+regression check (34 caught mutations total).

@@ -89,3 +89,54 @@ ship_faces
   expect(result.stderr.toString()).toContain("sample@1.0.0: hash mismatch");
   expect(() => readFileSync(marker)).toThrow();
 });
+
+test("staged package checks use a temporary empty policy and leave instance policy alone", () => {
+  const root = mkdtempSync(join(tmpdir(), "faces-stage-policy-"));
+  roots.push(root);
+  const operator = join(root, "operator.json");
+  writeFileSync(operator, "unreadable operator policy");
+  const marker = join(root, "policy-path");
+  const bun = join(root, "bun");
+  writeFileSync(
+    bun,
+    `#!/bin/sh
+set -eu
+if [ "$1" = test ] || [ "$2" = src/main.ts ]; then
+  [ "$(cat "$DESKMATE_PLUGIN_DENYLIST")" = '[]' ] || exit 19
+  printf '%s' "$DESKMATE_PLUGIN_DENYLIST" > "$POLICY_MARKER"
+fi
+`,
+  );
+  chmodSync(bun, 0o700);
+  const deploy = readFileSync(
+    join(import.meta.dir, "../../companion/crates/server/deploy/deploy.sh"),
+    "utf8",
+  );
+  const start = deploy.indexOf('\tssh "$VM" "set -e\n\t\tcd /tmp/deskmate-faces');
+  const end = '\n\t\t$BUN run src/author/releases.ts verify"';
+  expect(start).toBeGreaterThan(0);
+  const stage = deploy
+    .slice(start, deploy.indexOf(end, start) + end.length)
+    .replace("cd /tmp/deskmate-faces", 'cd \\"\\$STAGED_FACES\\"');
+  // Execute only the captured staging body locally. ssh is a shell stub; no VM
+  // contact, installation, service restart or live policy edit is possible.
+  const result = Bun.spawnSync(
+    ["/bin/sh", "-c", `set -eu\nssh() { /bin/sh -c "$2"; }\n${stage}`],
+    {
+      env: {
+        ...process.env,
+        VM: "local-stub",
+        BUN: bun,
+        STAGED_FACES: root,
+        POLICY_MARKER: marker,
+        DESKMATE_PLUGIN_DENYLIST: operator,
+      },
+      timeout: 10_000,
+    },
+  );
+  expect(result.exitCode, result.stderr.toString()).toBe(0);
+  const policy = readFileSync(marker, "utf8");
+  expect(policy).not.toBe(operator);
+  expect(() => readFileSync(policy)).toThrow(); // The EXIT trap cleaned it up.
+  expect(readFileSync(operator, "utf8")).toBe("unreadable operator policy");
+});

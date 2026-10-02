@@ -17,7 +17,7 @@
 
 import { isIP } from "node:net";
 import { ConfigurationError } from "../face";
-import { type HttpRequest, type RequestFn, ResponseTooLargeError } from "../kit/http";
+import { bareHost, type HttpRequest, type RequestFn, ResponseTooLargeError } from "../kit/http";
 import { type Ink, textInk, textWidth } from "../kit/raster";
 import type { PluginManifest } from "./manifest";
 
@@ -311,11 +311,6 @@ function bytesContainSecret(bytes: Uint8Array, secrets: Record<string, string>):
     if (haystack.includes(asBase64, 0, "utf-8")) return true;
   }
   return false;
-}
-
-/** Strips brackets from an IPv6 literal the way `URL.hostname` presents it. */
-function bareHost(hostname: string): string {
-  return hostname.replace(/^\[|\]$/g, "");
 }
 
 /**

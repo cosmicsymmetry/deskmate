@@ -6,7 +6,7 @@ import { INGEST_CAP_BYTES } from "../kit/limits";
 import { CANVAS_HEIGHT, CANVAS_WIDTH } from "../kit/theme";
 import satori from "satori";
 import { CardError } from "./card-error";
-import { embeddedImage, layoutStyle, svgResources } from "./resources";
+import { BASE64, embeddedImage, layoutStyle, svgResources } from "./resources";
 export { CardError } from "./card-error";
 
 const MAX_BOXES = 2_000;
@@ -123,8 +123,6 @@ function toCardError(error: unknown): CardError {
  * resolves BY READING THAT FILE FROM OUR DISK -- the exact reference
  * `svgResources` exists to refuse on the `{svg}` branch.
  */
-const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-
 function refuseNonBase64(png: string): void {
   if (!BASE64.test(png)) {
     throw new CardError(

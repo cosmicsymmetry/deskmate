@@ -400,3 +400,42 @@ describe("createRequest end to end, with an injected transport", () => {
     expect((failure as Error).message).toContain("api.example");
   });
 });
+
+describe("shared HTTP error classification", () => {
+  async function requestWithFailure(client: string, failure: Error) {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw failure;
+    }) as unknown as typeof fetch;
+    try {
+      const url = "https://example.com:8443/?secret=hidden";
+      return await (client === "fetchText"
+        ? createFetchText(async () => [PUBLIC])(url)
+        : createRequest(async () => [PUBLIC])({ url, as: "text" }));
+    } finally {
+      globalThis.fetch = original;
+    }
+  }
+
+  for (const client of ["fetchText", "request"]) {
+    test.each([
+      new ConfigurationError("change this setting"),
+      new TransientError("retry this response"),
+    ])(`${client} preserves classified errors`, async (failure) => {
+      await expect(requestWithFailure(client, failure)).rejects.toBe(failure);
+    });
+
+    test.each(["TimeoutError", "AbortError", "Error"])(
+      `${client} names the host and port for %s`,
+      async (name) => {
+        const failure = new Error("private detail");
+        failure.name = name;
+        const caught = await requestWithFailure(client, failure).catch((error: unknown) => error);
+        expect(caught).toBeInstanceOf(TransientError);
+        expect((caught as Error).message).toBe(
+          `example.com:8443 ${name === "Error" ? "could not be fetched" : "timed out"}`,
+        );
+      },
+    );
+  }
+});

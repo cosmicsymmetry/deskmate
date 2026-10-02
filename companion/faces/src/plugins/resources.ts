@@ -7,7 +7,7 @@ import { CardError } from "./card-error";
 
 const MAX_IMAGES = 4;
 const MAX_TOTAL_IMAGE_BYTES = 3 * INGEST_CAP_BYTES;
-const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+export const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 export interface ResourceBudget {
   images: number;

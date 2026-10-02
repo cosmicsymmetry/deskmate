@@ -13,8 +13,6 @@ const root = join(import.meta.dir, "../../plugins");
 const fixture = JSON.parse(readFileSync(join(root, "xkcd/check.json"), "utf8"));
 const png = Buffer.from(fixture.cases[0].responses[1].base64, "base64");
 const now = new Date("2026-10-02T12:00:00Z");
-const official = "https://assets.amuniversal.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const another = "https://assets.amuniversal.com/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 function input(id: string, extra: Partial<RunPluginInput> = {}): RunPluginInput {
   return {
     manifest: parseManifest(JSON.parse(readFileSync(join(root, id, "plugin.json"), "utf8")), id),
@@ -105,60 +103,6 @@ describe("xkcd media plugin", () => {
         input("xkcd", {
           request: async (r) =>
             response(r, r.as === "json" ? JSON.stringify(metadata) : "not an image"),
-        }),
-      ),
-    ).rejects.toBeInstanceOf(TransientError);
-  });
-});
-
-describe("supplied Calvin and Hobbes strips", () => {
-  test("empty configuration is actionable and has no outbound calls", async () => {
-    await expect(runPlugin(input("calvin-and-hobbes"))).rejects.toThrow(
-      "Add an authorized Calvin and Hobbes image URL",
-    );
-  });
-  test("only exact official CDN URLs are accepted", async () => {
-    for (const strips of [
-      "https://assets.amuniversal.com.evil.example/aaa",
-      "http://assets.amuniversal.com/aaa",
-      "https://www.gocomics.com/calvinandhobbes",
-      Array(9).fill(official).join(" "),
-    ]) {
-      await expect(
-        runPlugin(input("calvin-and-hobbes", { settings: { strips } })),
-      ).rejects.toBeInstanceOf(ConfigurationError);
-    }
-  });
-  test("tap advances supplied list and changed settings reset old selection", async () => {
-    const seen: string[] = [];
-    const result = await runPlugin(
-      input("calvin-and-hobbes", {
-        settings: { strips: `${official} ${another}` },
-        state: { version: 1, url: official },
-        event: { taps: 3, point: null },
-        request: async (r) => {
-          seen.push(r.url);
-          return response(r, png);
-        },
-      }),
-    );
-    expect(seen).toEqual([another]);
-    expect(result.state).toEqual({ version: 1, url: another });
-    const reset = await runPlugin(
-      input("calvin-and-hobbes", {
-        settings: { strips: official },
-        state: result.state,
-        request: (r) => response(r, png),
-      }),
-    );
-    expect(reset.state).toEqual({ version: 1, url: official });
-  });
-  test("upstream failure throws so the host retains its frame", async () => {
-    await expect(
-      runPlugin(
-        input("calvin-and-hobbes", {
-          settings: { strips: official },
-          request: (r) => response(r, "No strip", 403),
         }),
       ),
     ).rejects.toBeInstanceOf(TransientError);
@@ -278,22 +222,6 @@ test("Anime skips one unavailable curated entry without losing the last frame", 
   expect(result.state).toMatchObject({ artist: "Hong" });
 });
 
-test("Calvin accepts the current official CDN without following the legacy redirect", async () => {
-  const url = "https://featureassets.gocomics.com/assets/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-  const seen: string[] = [];
-  const result = await runPlugin(
-    input("calvin-and-hobbes", {
-      settings: { strips: url },
-      request: (r) => {
-        seen.push(r.url);
-        return response(r, png);
-      },
-    }),
-  );
-  expect(seen).toEqual([url]);
-  expect(result.state).toEqual({ version: 1, url });
-});
-
 // These fixtures contain only synthetic artwork; original source images stay out
 // of the repository. Exercise the complete sandbox and production raster path.
 const animeCases = JSON.parse(readFileSync(join(root, "anime-images/check.json"), "utf8"));
@@ -302,14 +230,7 @@ const jpeg = Buffer.from(
     .base64,
   "base64",
 );
-const calvinCases = JSON.parse(readFileSync(join(root, "calvin-and-hobbes/check.json"), "utf8"));
-const gif = Buffer.from(
-  calvinCases.cases.find((entry: { name: string }) => entry.name.includes("GIF")).responses[0]
-    .base64,
-  "base64",
-);
-
-for (const id of ["xkcd", "calvin-and-hobbes", "anime-images"]) {
+for (const id of ["xkcd", "anime-images"]) {
   for (const [format, bytes] of [
     ["PNG", png],
     ["JPEG", jpeg],
@@ -317,12 +238,13 @@ for (const id of ["xkcd", "calvin-and-hobbes", "anime-images"]) {
     for (const end of [33, 100, bytes.length - 24]) {
       test(`${id} refuses truncated ${format} at ${end} bytes without advancing state`, async () => {
         const state =
-          id === "xkcd" ? { version: 1, mode: "compact", index: 0 } : { version: 1, url: official };
+          id === "xkcd"
+            ? { version: 1, mode: "compact", index: 0 }
+            : { version: 1, url: artist.url };
         const saved = JSON.stringify(state);
         await expect(
           runPlugin(
             input(id, {
-              settings: id === "calvin-and-hobbes" ? { strips: official } : {},
               state,
               request: (r) =>
                 response(r, r.as === "json" ? JSON.stringify(metadata) : bytes.subarray(0, end)),
@@ -339,37 +261,12 @@ for (const id of ["xkcd", "calvin-and-hobbes", "anime-images"]) {
     await expect(
       runPlugin(
         input(id, {
-          settings: id === "calvin-and-hobbes" ? { strips: official } : {},
           request: (r) => response(r, r.as === "json" ? JSON.stringify(metadata) : corrupt),
         }),
       ),
     ).rejects.toBeInstanceOf(TransientError);
   });
 }
-
-for (const end of [33, 100, gif.length - 24, gif.length - 1]) {
-  test(`Calvin refuses a truncated GIF at ${end} bytes`, async () => {
-    await expect(
-      runPlugin(
-        input("calvin-and-hobbes", {
-          settings: { strips: official },
-          request: (r) => response(r, gif.subarray(0, end)),
-        }),
-      ),
-    ).rejects.toBeInstanceOf(TransientError);
-  });
-}
-
-test("Calvin renders a complete synthetic GIF through the production rasterizer", async () => {
-  const result = await runPlugin(
-    input("calvin-and-hobbes", {
-      settings: { strips: official },
-      request: (r) => response(r, gif),
-    }),
-  );
-  expect(result.svg).toContain("data:image/gif;base64,");
-  expect(pngFromSvg(result.svg).length).toBeGreaterThan(1000);
-});
 
 test("Anime uses its third-round fallback when a fresh PNG has a valid but truncated header", async () => {
   let count = 0;

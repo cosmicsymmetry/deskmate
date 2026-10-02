@@ -1,3 +1,4 @@
+import { PLUGIN_ID } from "./id";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ConfigurationError } from "../face";
@@ -32,7 +33,7 @@ export function readDenylist(path?: string | null): Denylist {
       const e = entry as Record<string, unknown>;
       if (
         typeof e.id !== "string" ||
-        !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(e.id) ||
+        !PLUGIN_ID.test(e.id) ||
         typeof e.reason !== "string" ||
         !e.reason.trim() ||
         (e.version !== undefined &&

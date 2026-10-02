@@ -75,21 +75,12 @@ impl RefresherJob {
     }
 }
 
-fn spawn_refresher_with_refresh(
+pub(super) fn spawn_refresher_with_refresh(
     runtime: &tokio::runtime::Handle,
     job: RefresherJob,
     refresh: Duration,
 ) -> JoinHandle<()> {
     runtime.spawn(refresh_loop(job, refresh))
-}
-
-#[cfg(test)]
-pub(super) fn spawn_refresher_for_test(
-    runtime: &tokio::runtime::Handle,
-    job: RefresherJob,
-    refresh: Duration,
-) -> JoinHandle<()> {
-    spawn_refresher_with_refresh(runtime, job, refresh)
 }
 
 fn clamped_refresh(refresh_seconds: u64) -> Duration {
@@ -125,6 +116,9 @@ struct RenderedFrame {
 /// `account_dir` is this refresh's account's own directory (`AccountSpace::root`),
 /// forwarded to the child as `DESKMATE_CONFIG_DIR` so a plugin can read its own
 /// stored credential and never another account's.
+/// The view goes to the package as `view`, never as a tap count: a staged view is
+/// not a tap, and telling the face otherwise would stamp "the owner just tapped"
+/// into its state and hold the wrong view on the next scheduled refresh.
 fn render_frame(
     faces: &FaceCommand,
     account_dir: &Path,
@@ -132,6 +126,7 @@ fn render_frame(
     spec: &DataCardSpec,
     state: Option<&serde_json::Value>,
     taps: u32,
+    view: Option<&str>,
 ) -> Result<RenderedFrame, RefreshFailure> {
     let rendered = faces_package::render(
         faces,
@@ -141,43 +136,7 @@ fn render_frame(
             settings: &spec.face.settings,
             state,
             taps,
-            view: None,
-        },
-        account_dir,
-    )
-    .map_err(|error| match error {
-        FaceRenderError::Configuration(message) => RefreshFailure::Configuration(message),
-        FaceRenderError::Malformed(message) => RefreshFailure::NotAFrame(message),
-        FaceRenderError::Transient(message) => RefreshFailure::Transient(message),
-    })?;
-    let faces_package::Rendered { png, state } = rendered;
-    let frame = canonical_frame_from_png(&png)
-        .map_err(|error| RefreshFailure::NotAFrame(error.to_string()))?;
-    Ok(RenderedFrame { frame, state })
-}
-
-/// Draws one named view of a face, for staging.
-///
-/// The view goes to the package as `view`, never as a tap count: a staged view is
-/// not a tap, and telling the face otherwise would stamp "the owner just tapped"
-/// into its state and hold the wrong view on the next scheduled refresh.
-fn render_view_frame(
-    faces: &FaceCommand,
-    account_dir: &Path,
-    timezone: &str,
-    spec: &DataCardSpec,
-    state: Option<&serde_json::Value>,
-    view: &str,
-) -> Result<RenderedFrame, RefreshFailure> {
-    let rendered = faces_package::render(
-        faces,
-        RenderRequest {
-            kind: &spec.face.kind,
-            timezone,
-            settings: &spec.face.settings,
-            state,
-            taps: 0,
-            view: Some(view),
+            view,
         },
         account_dir,
     )
@@ -234,18 +193,20 @@ async fn refresh_once(
             "tap render started");
         }
         let transition = face_state.transition(source_id);
-        let (previous_state, generation) = {
-            let guard = transition
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            (face_state.get(source_id), *guard)
-        };
         let render_faces = faces.clone();
         let render_spec = spec.clone();
         let render_account_dir = space.root.clone();
         let clock_state = state.clone();
         let clock_space = Arc::clone(space);
+        let render_transition = Arc::clone(&transition);
+        let render_face_state = Arc::clone(face_state);
         let rendered = tokio::task::spawn_blocking(move || {
+            let (previous_state, generation) = {
+                let guard = render_transition
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (render_face_state.get(&render_spec.source_id), *guard)
+            };
             let timezone =
                 clock::source_timezone(&clock_state, &clock_space, &render_spec.source_id);
             render_frame(
@@ -255,7 +216,9 @@ async fn refresh_once(
                 &render_spec,
                 previous_state.as_ref(),
                 taps,
+                None,
             )
+            .map(|rendered| (rendered, generation))
         })
         .await;
         if taps > 0 {
@@ -264,7 +227,7 @@ async fn refresh_once(
             elapsed_us = started.elapsed().as_micros(), ok = matches!(&rendered, Ok(Ok(_))),
             "tap render completed");
         }
-        let rendered = match rendered {
+        let (rendered, generation) = match rendered {
             Ok(Ok(rendered)) => rendered,
             Ok(Err(RefreshFailure::Configuration(error))) => {
                 tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error,
@@ -415,13 +378,14 @@ async fn stage_other_views(
         let drawn = tokio::task::spawn_blocking(move || {
             let timezone =
                 clock::source_timezone(&clock_state, &clock_space, &render_spec.source_id);
-            render_view_frame(
+            render_frame(
                 &render_faces,
                 &render_account_dir,
                 &timezone,
                 &render_spec,
                 render_state.as_ref(),
-                &render_view,
+                0,
+                Some(&render_view),
             )
         })
         .await;
@@ -769,6 +733,7 @@ mod tests {
             &spec("Dubai"),
             None,
             0,
+            None,
         )
         .expect("a frame");
         let posted = canonical_frame_from_png(
@@ -793,6 +758,7 @@ mod tests {
                     &spec(steer),
                     None,
                     0,
+                    None,
                 ),
                 Err(RefreshFailure::NotAFrame(_))
             ));
@@ -809,6 +775,7 @@ mod tests {
                 &spec("refuse-as-configuration"),
                 None,
                 0,
+                None,
             ),
             Err(RefreshFailure::Configuration(_))
         ));
@@ -820,9 +787,44 @@ mod tests {
                 &spec("refuse-as-transient"),
                 None,
                 0,
+                None,
             ),
             Err(RefreshFailure::Transient(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_contended_transition_does_not_block_the_executor_heartbeat() {
+        let directory = tempfile::tempdir().unwrap();
+        let face_state = Arc::new(FaceStateStore::load(directory.path().join("state.json")));
+        let state = ServerState::in_memory();
+        let space = test_space(&state);
+        let transition = face_state.transition("source");
+        let (locked, ready) = tokio::sync::oneshot::channel();
+        let (heartbeat, received) = std::sync::mpsc::channel();
+        // Model a tap holding the per-source transition while its selector works.
+        // The independent deadline also releases the lock on the broken path.
+        let selector = std::thread::spawn(move || {
+            let _guard = transition.lock().unwrap();
+            locked.send(()).unwrap();
+            received.recv_timeout(Duration::from_secs(2)).is_ok()
+        });
+        ready.await.unwrap();
+        let faces = faces_package::fake();
+        let spec = spec("echo-the-request");
+        let (outcome, ()) = tokio::join!(
+            refresh_once(&state, &space, &faces, &face_state, &spec, 0),
+            async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                let _ = heartbeat.send(());
+            }
+        );
+        assert!(
+            selector.join().unwrap(),
+            "the executor heartbeat stalled behind the transition lock"
+        );
+        assert!(matches!(outcome, Some(RefreshOutcome::Retrying(_))));
+        state.shutdown();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -850,13 +852,14 @@ mod tests {
                 let request: serde_json::Value = serde_json::from_str(&message).unwrap();
                 assert_eq!(request["timezone"], zone);
             }
-            let error = render_view_frame(
+            let error = render_frame(
                 &faces_package::fake(),
                 &space.root,
                 &clock::source_timezone(&state, &space, "source"),
                 &spec("echo-the-request"),
                 None,
-                "page-1",
+                0,
+                Some("page-1"),
             )
             .err()
             .unwrap();
@@ -1120,6 +1123,7 @@ mod tests {
                 &spec(steer),
                 None,
                 0,
+                None,
             )
             .map(|rendered| {
                 store

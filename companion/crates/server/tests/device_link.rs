@@ -17,28 +17,11 @@ async fn spawn() -> (String, server::registry::DeviceIdentity) {
     (format!("127.0.0.1:{}", address.port()), identity)
 }
 
-fn link_request(host: &str, authorization: Option<&str>) -> http::Request<()> {
-    let mut request = http::Request::builder()
-        .uri(format!("ws://{host}/v1/device/link"))
-        .header("Host", host)
-        .header("Connection", "Upgrade")
-        .header("Upgrade", "websocket")
-        .header("Sec-WebSocket-Version", "13")
-        .header(
-            "Sec-WebSocket-Key",
-            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
-        );
-    if let Some(authorization) = authorization {
-        request = request.header("Authorization", authorization);
-    }
-    request.body(()).unwrap()
-}
-
 #[tokio::test]
 async fn device_link_accepts_a_minted_token() {
     let (host, identity) = spawn().await;
     let authorization = format!("Bearer {}", identity.token);
-    let request = link_request(&host, Some(&authorization));
+    let request = support::link_request(&host, Some(&authorization));
     let (_stream, response) = tokio_tungstenite::connect_async(request).await.unwrap();
     assert_eq!(response.status(), 101);
 }
@@ -50,7 +33,7 @@ async fn device_link_refuses_invalid_authorization() {
         ("missing-authorization-header", None),
     ] {
         let (host, _identity) = spawn().await;
-        let request = link_request(&host, authorization);
+        let request = support::link_request(&host, authorization);
         assert!(
             tokio_tungstenite::connect_async(request).await.is_err(),
             "{name}"
@@ -97,8 +80,9 @@ async fn device_link_refuses_a_device_no_account_owns() {
         axum::serve(listener, app(state)).await.unwrap();
     });
     let authorization = format!("Bearer {}", orphan.token);
-    let error = tokio_tungstenite::connect_async(link_request(&host, Some(&authorization)))
-        .await
-        .expect_err("an unowned device must not link");
+    let error =
+        tokio_tungstenite::connect_async(support::link_request(&host, Some(&authorization)))
+            .await
+            .expect_err("an unowned device must not link");
     assert!(error.to_string().contains("401"), "{error}");
 }

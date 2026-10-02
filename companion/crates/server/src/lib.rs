@@ -385,23 +385,7 @@ impl ServerState {
 
     #[doc(hidden)]
     pub fn account_space(&self, account: &identity::AccountId) -> Arc<AccountSpace> {
-        let (space, opened) = {
-            let mut spaces = self
-                .inner
-                .accounts
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(space) = spaces.get(account) {
-                (Arc::clone(space), false)
-            } else {
-                let space = Arc::new(AccountSpace::open(
-                    &self.inner.config_directory,
-                    account.clone(),
-                ));
-                spaces.insert(account.clone(), Arc::clone(&space));
-                (space, true)
-            }
-        };
+        let (space, opened) = self.acquire_account_space(account);
         if opened && let Err(error) = data_cards::start_account_data_cards(self, &space) {
             tracing::error!(
                 account_id = %account,
@@ -410,6 +394,28 @@ impl ServerState {
             );
         }
         space
+    }
+
+    /// Acquires the cached space without starting cards; startup propagates load errors.
+    pub(crate) fn acquire_account_space(
+        &self,
+        account: &identity::AccountId,
+    ) -> (Arc<AccountSpace>, bool) {
+        let mut spaces = self
+            .inner
+            .accounts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(space) = spaces.get(account) {
+            (Arc::clone(space), false)
+        } else {
+            let space = Arc::new(AccountSpace::open(
+                &self.inner.config_directory,
+                account.clone(),
+            ));
+            spaces.insert(account.clone(), Arc::clone(&space));
+            (space, true)
+        }
     }
 
     // Task 7 uses this when account deletion evicts the cached space.

@@ -22,7 +22,7 @@ use sha2::{Digest, Sha256};
 
 use crate::credential::{DigestDecodeError, decode_digest as decode_credential_digest};
 use crate::credential::{random_token, token_digest};
-use crate::image_ingest::CanonicalFrame;
+use crate::image_ingest::{CANONICAL_FRAME_BYTES, CanonicalFrame};
 use crate::image_staleness::{PUSH_TIME_RING, is_stale};
 use crate::registry::constant_time_eq;
 
@@ -32,16 +32,11 @@ pub(crate) const MIN_PUSH_INTERVAL: Duration = Duration::from_secs(5);
 
 const STORE_SCHEMA_VERSION: u32 = 1;
 const MAX_STORE_FILE_BYTES: usize = 64 * 1_024;
-const LVGL_IMAGE_HEADER_BYTES: usize = 12;
-const CANONICAL_FRAME_BYTES: usize = LVGL_IMAGE_HEADER_BYTES
-    + protocol::SCENE_CANVAS_WIDTH as usize * protocol::SCENE_CANVAS_HEIGHT as usize * 2;
 const SOURCE_ID_RANDOM_HEX_LEN: usize = 24;
 /// Long enough for a readable view name, short enough that a source's frame
 /// paths stay well inside any filesystem's component limit.
 const MAX_VIEW_ID_LEN: usize = 32;
-/// How many frames one source may hold. The real ceiling is the wire's
-/// 32-digest `AssetRelease`, which the staged total has to fit; this bounds
-/// what a single misbehaving face can do to the store on its own.
+/// Legacy disk-cache bound, applied before pruning to the resident budget.
 const MAX_VIEWS_PER_SOURCE: usize = 16;
 /// Reserve a resting frame for every source the config can contain, including
 /// sources minted later. The remaining seven slots are shared staged views.
@@ -173,8 +168,6 @@ pub(crate) enum ImageSourceError {
     TooSoon,
     #[error("the view name is not a valid frame key")]
     InvalidView,
-    #[error("the image source already holds {MAX_VIEWS_PER_SOURCE} views")]
-    TooManyViews,
     #[error("the account's resident-frame staging budget has been reached")]
     StagingCapacity,
 }
@@ -270,7 +263,7 @@ impl ImageSourceStore {
         frame: CanonicalFrame,
         now: DateTime<Utc>,
     ) -> Result<AcceptOutcome, ImageSourceError> {
-        self.accept_paced(id, frame, now, true)
+        self.accept_into_view(id, RESTING_VIEW, frame, now, true)
     }
 
     /// Accepts a frame the SERVER drew, without the producer rate limit.
@@ -289,7 +282,7 @@ impl ImageSourceStore {
         frame: CanonicalFrame,
         now: DateTime<Utc>,
     ) -> Result<AcceptOutcome, ImageSourceError> {
-        self.accept_paced(id, frame, now, false)
+        self.accept_into_view(id, RESTING_VIEW, frame, now, false)
     }
 
     /// Accepts a frame the SERVER drew for one named view, without the producer
@@ -304,16 +297,6 @@ impl ImageSourceStore {
         now: DateTime<Utc>,
     ) -> Result<AcceptOutcome, ImageSourceError> {
         self.accept_into_view(id, view, frame, now, false)
-    }
-
-    fn accept_paced(
-        &self,
-        id: &str,
-        frame: CanonicalFrame,
-        now: DateTime<Utc>,
-        rate_limited: bool,
-    ) -> Result<AcceptOutcome, ImageSourceError> {
-        self.accept_into_view(id, RESTING_VIEW, frame, now, rate_limited)
     }
 
     fn accept_into_view(
@@ -341,9 +324,6 @@ impl ImageSourceStore {
             if now - *last < minimum {
                 return Err(ImageSourceError::TooSoon);
             }
-        }
-        if !source.frames.contains_key(view) && source.frames.len() >= MAX_VIEWS_PER_SOURCE {
-            return Err(ImageSourceError::TooManyViews);
         }
         if view != RESTING_VIEW
             && !source.frames.contains_key(view)
@@ -875,6 +855,36 @@ mod tests {
         for id in &ids {
             assert!(reloaded.frame(id, at(0)).is_some());
             assert!(frame_path(dir.path(), id, "page-4").exists());
+        }
+    }
+
+    #[test]
+    fn one_sources_legacy_cache_accepts_nine_through_sixteen_disk_frames() {
+        for count in 9..=16 {
+            let dir = tempfile::tempdir().unwrap();
+            let store = ImageSourceStore::new(dir.path().to_path_buf()).unwrap();
+            let source = store.mint("Legacy pages").unwrap();
+            store
+                .accept_server_rendered(&source.id, canonical_frame(0), at(0))
+                .unwrap();
+            for page in 1..count {
+                write_frame(
+                    dir.path(),
+                    &source.id,
+                    &format!("page-{page:02}"),
+                    &canonical_frame(page).bytes,
+                )
+                .unwrap();
+            }
+            let reloaded = ImageSourceStore::new(dir.path().to_path_buf()).unwrap();
+            assert_eq!(reloaded.desired_assets().len(), 1 + STAGED_VIEW_BUDGET);
+            assert_eq!(
+                reloaded.frame(&source.id, at(0)).unwrap().digest,
+                canonical_frame(0).digest
+            );
+            for page in 1..count {
+                assert!(frame_path(dir.path(), &source.id, &format!("page-{page:02}")).exists());
+            }
         }
     }
 

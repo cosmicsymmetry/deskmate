@@ -590,7 +590,7 @@ async fn save_config(
             },
         })?;
 
-    reconcile_image_sources(&state, Arc::clone(&space), &config).await?;
+    reconcile_image_sources(Arc::clone(&space), &config).await?;
 
     if let Some(runtime) = live_runtime(&state, &device_id) {
         tokio::task::spawn_blocking(move || runtime.apply_config(config))
@@ -621,7 +621,6 @@ async fn save_config(
 /// not declare -- so a config that authorises a deletion is one that provably
 /// still names every source a card uses. Do not move this above the validation.
 async fn reconcile_image_sources(
-    state: &ServerState,
     space: Arc<AccountSpace>,
     config: &AppConfig,
 ) -> Result<(), AppApiError> {
@@ -642,13 +641,7 @@ async fn reconcile_image_sources(
     }
 
     for source_id in undeclared {
-        match crate::images::revoke_image_source(
-            state.clone(),
-            Arc::clone(&space),
-            source_id.clone(),
-        )
-        .await
-        {
+        match crate::images::revoke_image_source(Arc::clone(&space), source_id.clone()).await {
             Ok(()) => {}
             Err(crate::images::RevokeImageSourceError::WorkerFailed) => {
                 return Err(worker_failed());
@@ -975,7 +968,7 @@ mod tests {
                 .join(crate::image_sources::IMAGE_SOURCE_STORE_FILE),
         );
 
-        reconcile_image_sources(&state, Arc::clone(&space), &AppConfig::default())
+        reconcile_image_sources(Arc::clone(&space), &AppConfig::default())
             .await
             .expect("ordinary source storage failure does not fail a saved config");
 
@@ -993,7 +986,7 @@ mod tests {
         let source = mint_face(&state);
         replace_file_with_directory(&space.root.join("data-cards.json"));
 
-        reconcile_image_sources(&state, Arc::clone(&space), &AppConfig::default())
+        reconcile_image_sources(Arc::clone(&space), &AppConfig::default())
             .await
             .expect("ordinary face storage failure does not fail a saved config");
 

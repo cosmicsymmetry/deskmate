@@ -527,9 +527,6 @@ impl WebSocketRuntimeDevice {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
 
-        self.latest_data_revision = status.latest_revision;
-        self.latest_config_revision = status.config_revision;
-
         if let Some((mut sync, synchronized_at)) = replay.time_sync {
             if let Ok(elapsed) = i64::try_from(synchronized_at.elapsed().as_secs())
                 && let Some(adjusted) = sync.unix_seconds.checked_add(elapsed)

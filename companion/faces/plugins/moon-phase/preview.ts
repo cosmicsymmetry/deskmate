@@ -1,5 +1,6 @@
 // Runs the shipped sandbox and renderer; no alternate drawing implementation.
 import { join } from "node:path";
+import { Resvg } from "@resvg/resvg-js";
 import { pngFromSvg } from "../../src/kit/raster";
 import { renderRequest } from "../../src/main";
 import { discoverPlugins } from "../../src/plugins/discovery";
@@ -32,8 +33,12 @@ for (const [index, { name, now, settings }] of cases.entries()) {
 }
 await Bun.write(
   join(import.meta.dir, "previews", "phases.png"),
-  pngFromSvg(
+  // Author-only contact sheet of the real PNGs, larger than the panel. The
+  // production pngFromSvg deliberately refuses non-panel dimensions.
+  new Resvg(
     `<svg xmlns="http://www.w3.org/2000/svg" width="1792" height="736">${panels.join("")}</svg>`,
-  ),
+  )
+    .render()
+    .asPng(),
 );
 console.log("Rendered eight phases, Southern view and year rollover at full and desk scale.");

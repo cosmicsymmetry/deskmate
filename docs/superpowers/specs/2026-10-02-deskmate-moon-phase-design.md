@@ -36,8 +36,17 @@ phase-name windows, UTC dates, year rollover and the schematic hemisphere view.
 - [x] The real renderer produces 448×368 PNGs in both settings.
 - [x] Reproducible full/desk previews cover all eight phases, Southern view and the
   longer year-rollover footer. Local inspection found no clipping or overlaps.
-- [ ] Full faces tests, typecheck, lint, format and catalog checks pass.
-- [ ] Independent visual/code review and public PR with reproducible evidence.
+- [x] Full faces tests, typecheck, lint, format and catalog checks pass: after
+  integrating main's PRs #14/#15, **612 tests, 0 failures, 3384 assertions**. The
+  plugin's focused suite has 56 tests / 184 assertions. No lint warnings remain.
+- [x] `plugin:check moon-phase` passes all ten fixtures, with no errors or limit
+  notices. Its 20 full/desk PNGs are byte-identical to the reviewed samples.
+- [x] Fresh independent visual/code review: **ship**, no material findings.
+  Reviewer inspected all eight full-size phases, Southern/year-end variants and
+  all ten desk images; independently reran the focused suite and checked the
+  orbital terms against the original reference. Documentation review also passed;
+  no design-system changes are needed.
+- [ ] Public PR with reproducible evidence and CI results.
 
 No physical panel observation or production deployment is claimed. Existing
 PRODUCT.md/ DESIGN.md contain older product prose; this local card addition does

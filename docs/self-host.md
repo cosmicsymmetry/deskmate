@@ -165,11 +165,11 @@ Paths below should be absolute. Optional variables should be omitted, not set em
 | `DESKMATE_SIGNUPS` | `closed` (default) or `open`; seeds the stored setting. Owner changes it in account settings after setup. |
 | `DESKMATE_OWNER_EMAIL` | Only for migration from legacy flat config; not required for a fresh instance. |
 | `DESKMATE_SMTP_URL`, `DESKMATE_MAIL_FROM` | Both or neither. Without them, sign-in links are logged. Example: `smtps://user:password@smtp.example.org:465` and quoted `Deskmate <mail@example.org>`. URL-encode credential special characters. |
-| `DESKMATE_GOOGLE_CLIENT_ID` | Optional operator-owned Google OAuth web client; requires secret and redirect URI together. |
+| `DESKMATE_GOOGLE_CLIENT_ID` | Optional operator-owned Google OAuth web client; requires a client secret. Sign-in derives its callback from `DESKMATE_PUBLIC_URL`. |
 | `DESKMATE_GOOGLE_CLIENT_SECRET_FILE` | Preferred secret source, owner-only file (0600); wins over inline secret. |
 | `DESKMATE_GOOGLE_CLIENT_SECRET` | Inline alternative, kept only in private environment. |
-| `DESKMATE_GOOGLE_REDIRECT_URI` | Required when Google is enabled: `https://desk.example.org/v1/integrations/google/callback` for the integration path. Sign-in separately derives `/v1/app/auth/google/callback` from the public URL. Register both with Google. |
-| `DESKMATE_SECRETS_KEY_FILE` | Google also opens the encrypted integration store. File containing a base64-encoded 32-byte key; protect as 0600 outside the configs directory and back it up separately. |
+| `DESKMATE_GOOGLE_REDIRECT_URI` | Optional: enables the separate OAuth integration path, usually `https://desk.example.org/v1/integrations/google/callback`. Register this additional URI only when using integrations. Omit for sign-in alone. |
+| `DESKMATE_SECRETS_KEY_FILE` | Required for the encrypted integration store when `DESKMATE_GOOGLE_REDIRECT_URI` is set; sign-in alone needs no store/key. File containing a base64-encoded 32-byte key; protect as 0600 outside the configs directory and back it up separately. |
 | `DESKMATE_SECRETS_KEY` | Inline base64 alternative; file wins. Never replace the key on an existing encrypted store. |
 | `DESKMATE_GOOGLE_AUTH_URI`, `DESKMATE_GOOGLE_TOKEN_URI`, `DESKMATE_GOOGLE_REVOKE_URI` | Normally unset. Defaults are Google's authorize/token/revoke endpoints; all overrides must be HTTPS and outbound token transport remains constrained. Not a generic OAuth-provider switch. |
 | `RUST_LOG` | Default `info`. Keep info enabled for setup/log-mail. |
@@ -183,8 +183,23 @@ does not make them available to plugins.
 SMTP and Google are optional. Use your own configured service/client and enable only
 services whose costs you accept; the package provisions none. Generate a master key
 with `umask 077; openssl rand -base64 32 > /absolute/private/secrets.key` if enabling
-Google, and store the client secret in another 0600 file. Google's sign-in setup is
+Google integrations, and store the client secret in another 0600 file. Google's sign-in setup is
 separate from any future per-account plugin OAuth support.
+
+For email delivery, set both SMTP variables above and restart. The sign-in page reports
+whether delivery is by email or server log. Without SMTP, a person who cannot read the
+log needs the server owner to retrieve their link; no email is sent. Email delivery
+failures are recorded in the server log without revealing account existence in the UI.
+
+For Google sign-in alone, create a Google OAuth **Web application** client, register
+`https://desk.example.org/v1/app/auth/google/callback` as an authorized redirect URI
+(using your actual public origin), and set `DESKMATE_GOOGLE_CLIENT_ID` plus
+`DESKMATE_GOOGLE_CLIENT_SECRET_FILE`. Restart and use **Sign in with Google**. No
+integration redirect or encryption key is needed. Configure the consent screen and its
+test users/publishing status for your intended audience. Existing email-link accounts
+are automatically matched only for Google-managed mailboxes (Gmail or Workspace);
+other existing addresses must use an email link. Returning Google users are matched by
+their stable Google identity even if their Google email changes.
 
 Built-in weather uses Open-Meteo without a key; Hacker News and RSS need no built-in
 credentials. RSS needs a public feed URL. Token uses CoinGecko; its renderer accepts

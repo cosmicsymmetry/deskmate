@@ -88,6 +88,7 @@ describe("mock backend contract", () => {
         "isSessionMissing",
         "toApiError",
         "request",
+        "resetAccountState",
         "getAppSnapshot",
         "validateConfigDraft",
         "saveConfig",

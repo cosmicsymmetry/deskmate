@@ -12,7 +12,7 @@ import { PanelSetup } from "./components/PanelSetup";
 import { SaveBar, type SaveState, type ValidationState } from "./components/SaveBar";
 import { SettingsSheet } from "./components/SettingsSheet";
 import { TopBar } from "./components/TopBar";
-import { getInstance, type Instance } from "./lib/account";
+import { getInstance, signOut, type Instance } from "./lib/account";
 import {
   type AddCardRequest,
   addCard,
@@ -265,6 +265,10 @@ function DeviceApp({
     };
   }, [draft]);
 
+  if (stateError && isSessionMissing(stateError)) {
+    return <SignInScreen instance={instance} signInError={signInError} />;
+  }
+
   if (loading && !snapshot) {
     return (
       <main className="startup" aria-busy="true">
@@ -279,13 +283,30 @@ function DeviceApp({
     // A missing session is the one failure with a specific answer, so it gets a
     // specific screen. Everything else is "retry"; offering only that when the
     // real problem is "sign in" would make the page a dead end.
-    if (stateError && isSessionMissing(stateError)) {
-      return <SignInScreen instance={instance} signInError={signInError} />;
-    }
     if (stateError && isNoPanels(stateError)) {
       return (
         <main className="startup">
           <PanelSetup standalone onDone={() => window.location.assign("/")} />
+          <button
+            className="button button--quiet"
+            type="button"
+            disabled={busyAction === "sign-out"}
+            onClick={() => {
+              setBusyAction("sign-out");
+              setActionError(null);
+              void signOut()
+                .then(onSessionEnded)
+                .catch((next) => setActionError(toApiError(next)))
+                .finally(() => setBusyAction(null));
+            }}
+          >
+            {busyAction === "sign-out" ? "Signing out…" : "Sign out"}
+          </button>
+          {actionError && (
+            <p className="save-error" role="alert">
+              {actionError.message}
+            </p>
+          )}
         </main>
       );
     }

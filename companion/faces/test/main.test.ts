@@ -1,14 +1,18 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { storyFromItem } from "../src/faces/hackernews";
 import { describeCatalog, renderRequest, tapRequest } from "../src/main";
 import { pluginFolders } from "../src/plugins/releases";
+import {
+  ONE_BOX_CARD,
+  SQUARE_SVG,
+  minimalManifest,
+  tempPlugins,
+  writePluginFolder,
+} from "./plugins/test_support";
 
+const temporaryRoot = tempPlugins();
 const MAIN = `${import.meta.dir}/../src/main.ts`;
-const SQUARE_SVG =
-  '<svg xmlns="http://www.w3.org/2000/svg" width="448" height="368"><rect width="448" height="368" fill="black"/></svg>';
 
 async function run(
   verb: string,
@@ -264,63 +268,31 @@ test(
     // `load_catalog` on the Rust side treats a failed `describe` as an EMPTY catalog --
     // an empty add menu -- so this is the property Task 9 exists to guarantee, driven
     // through the real CLI subprocess boundary the server actually uses.
-    const root = join(tmpdir(), `main-plugins-${Math.random().toString(36).slice(2)}`);
-    const write = (folder: string, manifest: unknown, source: string) => {
-      mkdirSync(join(root, folder), { recursive: true });
-      writeFileSync(join(root, folder, "plugin.json"), JSON.stringify(manifest));
-      writeFileSync(join(root, folder, "index.js"), source);
-    };
-    write(
+    const root = temporaryRoot("main-plugins-");
+    writePluginFolder(
+      root,
       "sound-plugin",
-      {
-        api: 1,
-        id: "sound-plugin",
-        version: "1.0.0",
-        label: "Sound plugin",
-        description: "d",
-        author: "a",
-        hosts: [],
-        secrets: [],
-        fields: [],
-      },
+      minimalManifest("sound-plugin", { label: "Sound plugin" }),
       `export function plan(){ return []; }
-     export function render(){ return { layout: { type: "div", style: { display: "flex", width: 448, height: 368, background: "#000" }, children: "ok" } }; }`,
+     export function render(){ return ${ONE_BOX_CARD}; }`,
     );
-    write(
+    writePluginFolder(
+      root,
       "broken-plugin",
-      {
-        api: 1,
-        id: "broken-plugin",
-        version: "1.0.0",
-        label: "Broken plugin",
-        description: "d",
-        author: "a",
-        hosts: [],
-        secrets: [],
-        fields: [],
-      },
+      minimalManifest("broken-plugin", { label: "Broken plugin" }),
       "export function plan(){ this does not parse }",
     );
-    write(
+    writePluginFolder(
+      root,
       "hostile-plugin",
-      {
-        api: 1,
-        id: "hostile-plugin",
-        version: "1.0.0",
-        label: "Hostile plugin",
-        description: "d",
-        author: "a",
-        hosts: [],
-        secrets: [],
-        fields: [],
-      },
+      minimalManifest("hostile-plugin", { label: "Hostile plugin" }),
       // A `plan` that never returns is exactly what discovery's own short probe
       // deadline (`DISCOVERY_PROBE_DEADLINE_MS`, `src/plugins/discovery.ts`) exists
       // to catch quickly -- at the render path's full 2000 ms deadline this one
       // folder alone would cost two seconds of every 60 s catalog re-read, and this
       // test used to time out on a slower machine because of exactly that.
       `export function plan(){ while(true){} }
-     export function render(){ return { layout: { type: "div", style: { display: "flex", width: 448, height: 368, background: "#000" }, children: "ok" } }; }`,
+     export function render(){ return ${ONE_BOX_CARD}; }`,
     );
 
     const malformed = [
@@ -332,20 +304,10 @@ test(
       { refreshSeconds: 1e20 },
     ];
     for (const [i, extra] of malformed.entries()) {
-      write(
+      writePluginFolder(
+        root,
         `malformed-${i}`,
-        {
-          api: 1,
-          id: `malformed-${i}`,
-          version: "1.0.0",
-          label: "Malformed",
-          description: "d",
-          author: "a",
-          hosts: [],
-          secrets: [],
-          fields: [],
-          ...extra,
-        },
+        minimalManifest(`malformed-${i}`, { label: "Malformed", ...extra }),
         `export function plan(){ return []; }
           export function render(){ return { svg: ${JSON.stringify(SQUARE_SVG)} }; }`,
       );

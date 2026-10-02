@@ -5,9 +5,9 @@ import { renderRequest, tapRequest, viewsRequest } from "../../src/main";
 import type { HttpReply, RequestFn } from "../../src/kit/http";
 import { textWidth } from "../../src/kit/raster";
 import { discoverPlugins } from "../../src/plugins/discovery";
-import { parseManifest } from "../../src/plugins/manifest";
 import { runPlugin } from "../../src/plugins/run";
 import { runInSandbox, warmSandbox } from "../../src/plugins/sandbox";
+import { shippedPlugin } from "./test_support";
 
 interface Item {
   id: number | string;
@@ -35,8 +35,7 @@ const jpeg = Buffer.from(fixture.cases[0].responses[0].base64, "base64");
 beforeAll(warmSandbox);
 
 for (const id of ["art-of-the-day", "ghibli-scenes"]) {
-  const source = load(id, "index.js");
-  const manifest = parseManifest(JSON.parse(load(id, "plugin.json")), id);
+  const { source, manifest } = shippedPlugin(id);
   const catalog = JSON.parse(load(id, "catalog.json")) as Item[];
   const isArt = id === "art-of-the-day";
   const firstCollection = isArt ? "prints" : "totoro";

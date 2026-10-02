@@ -5,21 +5,16 @@ import { ResponseTooLargeError } from "../../src/kit/http";
 import { performRequests, validateRequests } from "../../src/plugins/requests";
 import { parseManifest } from "../../src/plugins/manifest";
 import { textInk, textWidth } from "../../src/kit/raster";
+import { minimalManifest } from "./test_support";
 
 const manifest = parseManifest(
-  {
-    api: 1,
-    id: "p",
-    version: "1.0.0",
+  minimalManifest("p", {
     label: "P",
-    description: "d",
-    author: "a",
     hosts: ["api.github.com"],
     secrets: [
       { key: "token", label: "T", kind: "api_key", host: "api.github.com", send_as: "bearer" },
     ],
-    fields: [],
-  },
+  }),
   "p",
 );
 const budget = { requests: 8, bytes: 4 * 1024 * 1024, measurements: 64 };
@@ -227,21 +222,15 @@ describe("performRequests", () => {
 
 describe("performRequests: send_as decides the one position a secret may land in", () => {
   const positioned = parseManifest(
-    {
-      api: 1,
-      id: "p",
-      version: "1.0.0",
+    minimalManifest("p", {
       label: "P",
-      description: "d",
-      author: "a",
       hosts: ["bearer.example", "header.example", "query.example"],
       secrets: [
         { key: "b", label: "B", kind: "api_key", host: "bearer.example", send_as: "bearer" },
         { key: "h", label: "H", kind: "api_key", host: "header.example", send_as: "header" },
         { key: "q", label: "Q", kind: "api_key", host: "query.example", send_as: "query" },
       ],
-      fields: [],
-    },
+    }),
     "p",
   );
   const secrets = { b: "SECRET_B", h: "SECRET_H", q: "SECRET_Q" };
@@ -863,13 +852,8 @@ describe("validateRequests / performRequests: measure requests", () => {
 
 describe("a manifest that names a header or param pins the credential there", () => {
   const pinned = parseManifest(
-    {
-      api: 1,
-      id: "p",
-      version: "1.0.0",
+    minimalManifest("p", {
       label: "P",
-      description: "d",
-      author: "a",
       hosts: ["header.example", "query.example"],
       secrets: [
         {
@@ -889,8 +873,7 @@ describe("a manifest that names a header or param pins the credential there", ()
           param: "apikey",
         },
       ],
-      fields: [],
-    },
+    }),
     "p",
   );
   const secrets = { h: "SECRET_H", q: "SECRET_Q" };

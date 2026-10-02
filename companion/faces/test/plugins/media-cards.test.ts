@@ -4,9 +4,9 @@ import { join } from "node:path";
 import { ConfigurationError, TransientError } from "../../src/face";
 import { type HttpRequest, replyFrom } from "../../src/kit/http";
 import { pngFromSvg } from "../../src/kit/raster";
-import { parseManifest } from "../../src/plugins/manifest";
 import { type RunPluginInput, runPlugin } from "../../src/plugins/run";
 import { warmSandbox } from "../../src/plugins/sandbox";
+import { shippedPlugin } from "./test_support";
 
 beforeAll(warmSandbox);
 const root = join(import.meta.dir, "../../plugins");
@@ -15,8 +15,7 @@ const png = Buffer.from(fixture.cases[0].responses[1].base64, "base64");
 const now = new Date("2026-10-02T12:00:00Z");
 function input(id: string, extra: Partial<RunPluginInput> = {}): RunPluginInput {
   return {
-    manifest: parseManifest(JSON.parse(readFileSync(join(root, id, "plugin.json"), "utf8")), id),
-    source: readFileSync(join(root, id, "index.js"), "utf8"),
+    ...shippedPlugin(id),
     settings: {},
     now,
     timezone: "UTC",

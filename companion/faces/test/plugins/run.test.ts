@@ -3,23 +3,14 @@ import { ConfigurationError, TransientError } from "../../src/face";
 import { parseManifest } from "../../src/plugins/manifest";
 import { runPlugin } from "../../src/plugins/run";
 import { warmSandbox } from "../../src/plugins/sandbox";
+import { ONE_BOX_CARD, minimalManifest } from "./test_support";
 
 beforeAll(async () => {
   await warmSandbox();
 });
 
 const manifest = parseManifest(
-  {
-    api: 1,
-    id: "p",
-    version: "1.0.0",
-    label: "P",
-    description: "d",
-    author: "a",
-    hosts: ["api.example.com"],
-    secrets: [],
-    fields: [],
-  },
+  minimalManifest("p", { label: "P", hosts: ["api.example.com"] }),
   "p",
 );
 
@@ -30,7 +21,7 @@ const base = {
   timezone: "Asia/Dubai",
   secrets: {},
 };
-const card = `{ layout: { type: "div", style: { display: "flex", width: 448, height: 368, background: "#000" }, children: "ok" } }`;
+const card = ONE_BOX_CARD;
 
 describe("runPlugin", () => {
   test("plans, fetches, renders", async () => {
@@ -340,13 +331,8 @@ describe("runPlugin", () => {
     // budget spent and never reach the network.
     const credential = "ghp_SECRETVALUE";
     const withSecret = parseManifest(
-      {
-        api: 1,
-        id: "p",
-        version: "1.0.0",
+      minimalManifest("p", {
         label: "P",
-        description: "d",
-        author: "a",
         hosts: ["api.example.com"],
         secrets: [
           {
@@ -357,8 +343,7 @@ describe("runPlugin", () => {
             send_as: "bearer",
           },
         ],
-        fields: [],
-      },
+      }),
       "p",
     );
     const body = Buffer.concat([

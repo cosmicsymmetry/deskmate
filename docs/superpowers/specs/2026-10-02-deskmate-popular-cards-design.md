@@ -191,7 +191,8 @@ and Anime retain their media validation coverage without depending on deleted Ca
 fixtures. Their READMEs no longer describe Calvin-only GIF checks. No saved account
 configuration is rewritten. Local validation passes: **737 faces tests / 4046
 assertions**, typecheck, lint, formatting, cold discovery (15 faces, no Calvin), and
-xkcd/Anime author checks (8 cases / 16 PNGs). CI, merge and deployment are pending.
+xkcd/Anime author checks (8 cases / 16 PNGs). PR #24 merged and deployed; the
+final policy-preserving reconciliation is recorded below.
 
 
 ### Concurrent release-policy deployment
@@ -211,3 +212,23 @@ Calvin; its old approval entry remains historical.
 
 Reconciled local checks: 762 faces tests / 4177 assertions, typecheck, lint,
 formatting and strict approval verification for all eleven installed plugins pass.
+
+
+### Final removal deployment
+
+**Complete:** [PR #27](https://github.com/cosmicsymmetry/deskmate/pull/27) merged as
+`8cc69ad5c5299b301b49698d57e04c121a95f55e` and deployed faces-only at **2026-10-02T12:39:59Z**. This makes the
+Calvin removal and the previously deployed release/withdrawal policy repeatable
+from main. All seven jobs passed in [CI run 37006723615, attempt two](https://github.com/cosmicsymmetry/deskmate/actions/runs/37006723615);
+the first attempt timed out in the unchanged RSS subprocess integration fixture.
+The retry used identical source. Independent reconciliation review found no material
+issues, and all 16 xkcd/Anime CI PNGs matched the reviewed local renders.
+
+Before shipping, the merged revision was checked to include every live component:
+faces `c8fe780`, web/binary `72173e1`. The deploy again passed local/Linux suites
+and strict approval verification. The installed CLI, using the operator's actual
+policy location, has **15 catalog entries, no Calvin, and 11 approved plugins**.
+An isolated temporary policy verified that withdrawal still blocks rendering with
+exit 2; the real operator policy was never modified. Service active, root HTTP 200,
+unauthenticated app API HTTP 401. Web/binary stayed at `72173e1`. No account loop
+was rewritten; physical-panel appearance remains unobserved.

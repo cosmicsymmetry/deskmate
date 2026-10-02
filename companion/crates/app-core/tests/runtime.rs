@@ -172,7 +172,11 @@ fn push_gate_waiter_panics_when_the_gate_is_not_opened() {
         let _ = result_sender.send(panicked);
     });
 
-    let while_closed = result_receiver.recv_timeout(Duration::from_millis(100));
+    // Start the observation after the worker enters the gate. Its 20 ms timeout
+    // tests the closed-gate behavior; reporting the caught panic can take longer
+    // on a busy runner, especially with backtraces enabled.
+    gate.wait_until_entered();
+    let while_closed = result_receiver.recv_timeout(Duration::from_secs(1));
     gate.open();
     let eventual = while_closed.or_else(|_| result_receiver.recv_timeout(Duration::from_secs(1)));
     waiter.join().unwrap();

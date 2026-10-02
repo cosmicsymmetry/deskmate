@@ -134,5 +134,14 @@ PRODUCT.md/DESIGN.md drift belongs to this card batch.
 template. The initial CI run passed faces, previews, firmware and firmware host
 tests; companion failed the unchanged `push_gate_waiter_panics_when_the_gate_is_not_opened`
 fixture because its 100 ms scheduling deadline elapsed before the worker reported.
-The final submission reruns the repository gates; no skipped or failing gate is
-accepted as a release pass.
+A second run reproduced the same outer scheduling failure even though the gate
+correctly panicked (`eventual=Ok(true)`). The test now waits until the worker enters
+the gate before observing its result, and uses the surrounding fixture's one-second
+budget for cross-thread panic reporting. The actual closed-gate timeout remains
+20 ms, and the existing open/join cleanup and closed-gate assertion remain intact.
+This changes only a test; no runtime behavior is changed. Independent code review
+accepted the correction. The final submission reruns the repository gates; no
+skipped or failing gate is accepted as a release pass.
+
+Integration also includes main `149d07f`, the sign-in release that reached production
+while this batch was under review. That merge changes no faces-package files.

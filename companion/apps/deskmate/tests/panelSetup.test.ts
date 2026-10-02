@@ -356,7 +356,6 @@ test("a v1 board or one without Networking is refused before any config write", 
   await v1.setup.connect();
   expect(v1.steps.at(-1)).toEqual({
     kind: "incompatible",
-    message: "This panel needs a firmware update first",
   });
   expect(v1Port.written.map((frame) => frame.type)).toEqual(["status-request"]);
 
@@ -365,7 +364,6 @@ test("a v1 board or one without Networking is refused before any config write", 
   await missingCapability.setup.connect();
   expect(missingCapability.steps.at(-1)).toEqual({
     kind: "incompatible",
-    message: "This panel needs a firmware update first",
   });
   expect(missingCapabilityPort.written.map((frame) => frame.type)).toEqual(["status-request"]);
 });

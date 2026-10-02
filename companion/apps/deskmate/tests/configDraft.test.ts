@@ -242,8 +242,6 @@ describe("configuration draft helpers", () => {
     // 45 of 65 total seconds, and 20 of 65 — proportional to dwell, not count.
     expect(segments[0].widthPercent).toBeCloseTo((45 / 65) * 100, 5);
     expect(segments[1].widthPercent).toBeCloseTo((20 / 65) * 100, 5);
-    expect(segments[0].offsetPercent).toBe(0);
-    expect(segments[1].offsetPercent).toBeCloseTo((45 / 65) * 100, 5);
   });
 
   test("loopSegments gives every card an equal share under manual advance, where there is no dwell to encode", () => {

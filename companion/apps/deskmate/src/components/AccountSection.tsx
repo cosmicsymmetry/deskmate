@@ -45,7 +45,6 @@ export function AccountSection({
   api = browserApi,
   serialSupported = browserSerialSupported,
   onSessionEnded,
-  onSignupsChanged,
   onPanelsChanged,
   open,
 }: {
@@ -53,7 +52,6 @@ export function AccountSection({
   api?: AccountSectionApi;
   serialSupported?: () => boolean;
   onSessionEnded: () => void;
-  onSignupsChanged: (open: boolean) => void;
   onPanelsChanged: () => void;
   /** Whether the settings sheet is showing; each opening reloads the account and panels. */
   open: boolean;
@@ -125,7 +123,6 @@ export function AccountSection({
                       try {
                         const saved = await api.setSignupsOpen(requested);
                         setLocalSignupsOpen(saved);
-                        onSignupsChanged(saved);
                       } catch (next) {
                         setLocalSignupsOpen(previous);
                         throw next;

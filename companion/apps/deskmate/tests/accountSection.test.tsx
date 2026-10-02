@@ -68,7 +68,6 @@ test("unsupported browsers replace Add a panel with the desktop Chromium require
       serialSupported={() => false}
       open
       onSessionEnded={() => {}}
-      onSignupsChanged={() => {}}
       onPanelsChanged={() => {}}
     />,
   );
@@ -121,7 +120,7 @@ test("PanelSetup renders every setup state and keeps the Wi-Fi form for a retry"
     await act(async () => emit?.({ kind: "connecting" }));
     expect(container.textContent).toContain("Connecting to the panel…");
 
-    await act(async () => emit?.({ kind: "incompatible", message: "ignored by the view" }));
+    await act(async () => emit?.({ kind: "incompatible" }));
     expect(container.textContent).toContain("This panel needs a firmware update first.");
 
     await act(async () => emit?.({ kind: "no-response" }));
@@ -206,7 +205,6 @@ test("deleting an account requires the in-sheet confirmation", async () => {
       serialSupported={() => true}
       open
       onSessionEnded={() => {}}
-      onSignupsChanged={() => {}}
       onPanelsChanged={() => {}}
     />,
   );
@@ -235,7 +233,6 @@ test("a non-owner does not see the sign-ups switch", async () => {
       serialSupported={() => true}
       open
       onSessionEnded={() => {}}
-      onSignupsChanged={() => {}}
       onPanelsChanged={() => {}}
     />,
   );
@@ -260,7 +257,6 @@ test("removing a panel confirms, calls the server, and drops its row", async () 
       serialSupported={() => true}
       open
       onSessionEnded={() => {}}
-      onSignupsChanged={() => {}}
       onPanelsChanged={() => {}}
     />,
   );

@@ -3,9 +3,9 @@ import { PanelDeviceError, PanelDisconnectedError, PanelLink, type PanelPort } f
 
 export type SetupStep =
   | { kind: "connecting" }
-  | { kind: "incompatible"; message: string }
+  | { kind: "incompatible" }
   | { kind: "no-response" }
-  | { kind: "wifi-form"; error?: string }
+  | { kind: "wifi-form" }
   | { kind: "writing" }
   | { kind: "wifi-joining" }
   | { kind: "wifi-failed"; boardError: string }
@@ -24,7 +24,6 @@ export type SetupDeps = {
   now: () => number;
 };
 
-const INCOMPATIBLE_MESSAGE = "This panel needs a firmware update first";
 const CONNECT_DEADLINE_MS = 10_000;
 const STATUS_INTERVAL_MS = 500;
 const REOPEN_INTERVAL_MS = 1_000;
@@ -69,14 +68,14 @@ export class PanelSetup {
           status.protocolVersion !== PROTOCOL_VERSION ||
           (status.capabilities & CAPABILITY_NETWORKING) === 0n
         ) {
-          this.onStep({ kind: "incompatible", message: INCOMPATIBLE_MESSAGE });
+          this.onStep({ kind: "incompatible" });
           return;
         }
         this.onStep({ kind: "wifi-form" });
         return;
       } catch (error) {
         if (error instanceof PanelDeviceError && error.deviceError.code === 3) {
-          this.onStep({ kind: "incompatible", message: INCOMPATIBLE_MESSAGE });
+          this.onStep({ kind: "incompatible" });
           return;
         }
       }

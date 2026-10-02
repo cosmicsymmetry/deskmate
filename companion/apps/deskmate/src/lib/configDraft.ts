@@ -316,10 +316,10 @@ export function loopSeconds(config: AppConfig): number | null {
   );
 }
 
-/// One ribbon segment: a card plus its resolved dwell and the
-/// proportional width/offset (both 0-100) that dwell earns in the loop
-/// ribbon. Pure and independent of any DOM/flex mechanics so the width math
-/// — the whole point of the ribbon — can be unit-tested without rendering
+/// One ring segment: a card plus its resolved dwell and the
+/// proportional width (0-100) that dwell earns in the loop
+/// ring. Pure and independent of any DOM/flex mechanics so the width math
+/// — the whole point of the ring — can be unit-tested without rendering
 /// anything.
 export interface LoopSegment {
   cardId: string;
@@ -327,12 +327,11 @@ export interface LoopSegment {
   name: string;
   dwellSeconds: number;
   widthPercent: number;
-  offsetPercent: number;
 }
 
-/// Builds the ribbon's segments from the card list, which IS the loop. Under
+/// Builds the ring's segments from the card list, which IS the loop. Under
 /// manual advance there is no dwell to speak of, so every segment is given
-/// equal width instead of a zero-width one, which is what lets the ribbon
+/// equal width instead of a zero-width one, which is what lets the ring
 /// still show order (just not timing) in that mode.
 export function loopSegments(config: AppConfig): LoopSegment[] {
   const advance = config.advance;
@@ -341,7 +340,6 @@ export function loopSegments(config: AppConfig): LoopSegment[] {
   );
   const total = dwellSeconds.reduce((sum, seconds) => sum + seconds, 0);
   const equalShare = config.cards.length > 0 ? 100 / config.cards.length : 0;
-  let offset = 0;
   return config.cards.map((card, index) => {
     const widthPercent = total > 0 ? (dwellSeconds[index] / total) * 100 : equalShare;
     const segment: LoopSegment = {
@@ -349,14 +347,12 @@ export function loopSegments(config: AppConfig): LoopSegment[] {
       name: cardIdentity(card, config.image_sources),
       dwellSeconds: dwellSeconds[index],
       widthPercent,
-      offsetPercent: offset,
     };
-    offset += widthPercent;
     return segment;
   });
 }
 
-/// The segment the ribbon's play control should move to next, wrapping past
+/// The segment the ring's play control should move to next, wrapping past
 /// the end. Returns `null` only when there is nothing to advance to.
 export function nextLoopCardId(
   segments: LoopSegment[],
@@ -375,7 +371,7 @@ export function nextLoopCardId(
 /// zero/negative dwell from producing an immediately-due, tight-loop
 /// advance. Kept as its own function so a caller can compute a deadline
 /// once and then only ever compare it against "now" — never re-derive it
-/// from a relative duration on every check, which is what let the ribbon's
+/// from a relative duration on every check, which is what let the ring's
 /// old relative `setTimeout` get silently re-armed by unrelated re-renders
 /// before it ever had a chance to fire.
 export function loopDeadline(startedAtMs: number, dwellSeconds: number): number {
@@ -416,7 +412,7 @@ export function loopAdvance(
 
 /// Renders a whole-second duration as "1 hr 2 min 3 s", dropping leading
 /// zero units (but never the trailing seconds, so `0` still reads as "0 s"
-/// rather than an empty string). Used for the ribbon's total loop length;
+/// rather than an empty string). Used for the ring's total loop length;
 /// tabular-numeral styling is applied by the caller's CSS, not here.
 export function formatDuration(totalSeconds: number): string {
   const whole = Math.max(0, Math.round(totalSeconds));
@@ -471,7 +467,6 @@ function claimedIssues(issues: ValidationIssue[], config: AppConfig): Validation
     claim(issuesForCard(issues, config, card.id));
   }
   claim(issuesForPath(issues, "advance"));
-  claim(issuesForPath(issues, "advance.default_dwell_seconds"));
   claim(issuesForPath(issues, "preferences.timezone"));
   claim(issuesForPath(issues, "preferences.brightness"));
   return [...claimed];

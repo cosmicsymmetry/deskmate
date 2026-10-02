@@ -193,11 +193,7 @@ export function PanelSetup({
     <h3 id={headingId}>Add your panel</h3>
   );
   const wifiError =
-    step.kind === "wifi-failed"
-      ? `The panel couldn't join ${ssid}: ${step.boardError}`
-      : step.kind === "wifi-form"
-        ? step.error
-        : undefined;
+    step.kind === "wifi-failed" ? `The panel couldn't join ${ssid}: ${step.boardError}` : undefined;
 
   return (
     <div className="form-grid" aria-live="polite">

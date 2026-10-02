@@ -6,7 +6,6 @@ export const MessageType = {
   Ack: 4,
   Error: 8,
   NetworkConfig: 13,
-  FactoryReset: 14,
 } as const;
 
 export const CAPABILITY_NETWORKING = 1n << 7n;

@@ -743,7 +743,6 @@ function DeviceApp({
             open={settingsOpen}
             instance={instance}
             onSessionEnded={onSessionEnded}
-            onSignupsChanged={() => {}}
             onPanelsChanged={() => void refresh()}
           />
         )}

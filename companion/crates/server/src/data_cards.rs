@@ -366,6 +366,8 @@ pub(crate) struct DataCardSpecs {
     face_state: Arc<FaceStateStore>,
     specs: Vec<DataCardSpec>,
     tasks: HashMap<String, Refresher>,
+    #[cfg(test)]
+    spawned_tasks: Vec<tokio::task::Id>,
     /// Taps the server could not route to a live, tappable face refresher.
     taps_dropped: u64,
     /// The last refresh outcome per source. Forgotten whenever that source's
@@ -396,6 +398,8 @@ impl DataCardSpecs {
             face_state,
             specs: Vec::new(),
             tasks: HashMap::new(),
+            #[cfg(test)]
+            spawned_tasks: Vec::new(),
             taps_dropped: 0,
             outcomes: HashMap::new(),
         }
@@ -432,6 +436,8 @@ impl DataCardSpecs {
                     Arc::clone(&taps),
                     spec.clone(),
                 );
+                #[cfg(test)]
+                self.spawned_tasks.push(task.id());
                 self.tasks
                     .insert(spec.source_id.clone(), Refresher::new(task, taps));
             }
@@ -561,7 +567,7 @@ pub fn start_data_cards(state: &ServerState) -> Result<(), String> {
         tracing::info!(target: "server", "no server-rendered data cards configured");
     }
     for account in accounts {
-        let space = state.account_space(&account.id);
+        let (space, _) = state.acquire_account_space(&account.id);
         start_account_data_cards(state, &space)?;
     }
     start_catalog_reloader(state);
@@ -581,7 +587,7 @@ pub(crate) fn start_account_data_cards(
             .clone()
     };
     let specs = load_specs(&spec_path)?;
-    spawn_refreshers(state, space, specs);
+    spawn_refreshers(state, space, &spec_path, specs);
     Ok(())
 }
 
@@ -626,15 +632,12 @@ fn load_specs(path: &Path) -> Result<Vec<DataCardSpec>, String> {
 /// [`ServerState`]. Each card gets its own task so a slow feed cannot delay a
 /// token price, and retaining the handles lets a settings update replace only
 /// the source it changed.
-fn spawn_refreshers(state: &ServerState, space: &Arc<AccountSpace>, specs: Vec<DataCardSpec>) {
-    let spec_path = {
-        space
-            .data_cards
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .spec_path
-            .clone()
-    };
+fn spawn_refreshers(
+    state: &ServerState,
+    space: &Arc<AccountSpace>,
+    spec_path: &Path,
+    specs: Vec<DataCardSpec>,
+) {
     // Drop specs whose image source no longer exists, before anything is
     // spawned for them. Until `revoke_source` learned to remove a face, every
     // revoke left its spec behind and its refresher fetching on schedule: the
@@ -660,7 +663,7 @@ fn spawn_refreshers(state: &ServerState, space: &Arc<AccountSpace>, specs: Vec<D
     }
     if !orphaned.is_empty()
         && let Ok(bytes) = serde_json::to_vec_pretty(&specs)
-        && let Err(error) = app_core::secure_file::write_and_replace(&spec_path, &bytes)
+        && let Err(error) = app_core::secure_file::write_and_replace(spec_path, &bytes)
     {
         let (operation, message) = error.into_strings("data-card spec");
         // Not fatal: the in-memory set below is already correct, so this start
@@ -674,7 +677,6 @@ fn spawn_refreshers(state: &ServerState, space: &Arc<AccountSpace>, specs: Vec<D
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         data_cards.specs = specs;
-        data_cards.spec_path = spec_path;
         return;
     };
     let mut data_cards = space
@@ -688,7 +690,6 @@ fn spawn_refreshers(state: &ServerState, space: &Arc<AccountSpace>, specs: Vec<D
     data_cards.face_state = Arc::new(FaceStateStore::load(
         spec_path.with_file_name("face-state.json"),
     ));
-    data_cards.spec_path = spec_path;
     data_cards.specs = specs;
     for spec in data_cards.specs.clone() {
         data_cards.start_if_complete(&runtime, state, Arc::clone(space), &spec);
@@ -1287,18 +1288,97 @@ mod tests {
         state.account_space(&account.id)
     }
 
-    fn start_at(
-        state: &ServerState,
-        space: &Arc<AccountSpace>,
-        path: PathBuf,
-    ) -> Result<(), String> {
-        let specs = load_specs(&path)?;
+    #[tokio::test]
+    async fn startup_launches_each_saved_face_once_and_records_its_current_task() {
+        for cached in [false, true] {
+            let state = ServerState::in_memory();
+            let account = state
+                .identity()
+                .create_account("startup@example.com", true, true, chrono::Utc::now())
+                .unwrap();
+            let space = if cached {
+                state.account_space(&account.id)
+            } else {
+                Arc::new(AccountSpace::open(
+                    &state.inner.config_directory,
+                    account.id.clone(),
+                ))
+            };
+            let source = space.image_sources.mint("Weather").unwrap();
+            let spec = DataCardSpec {
+                source_id: source.id.clone(),
+                face: weather("Dubai"),
+                refresh_seconds: 900,
+            };
+            std::fs::write(
+                space.root.join("data-cards.json"),
+                serde_json::to_vec(&vec![spec]).unwrap(),
+            )
+            .unwrap();
+            start_data_cards(&state).unwrap();
+            let loaded = state.account_space(&account.id);
+            let task_id = {
+                let cards = loaded.data_cards.lock().unwrap();
+                assert_eq!(
+                    cards.spawned_tasks.len(),
+                    1,
+                    "cached={cached}: one launch, even if abort would prevent a duplicate render"
+                );
+                assert_eq!(cards.tasks.len(), 1);
+                let task_id = cards.tasks[&source.id].task.id();
+                assert_eq!(cards.spawned_tasks, [task_id]);
+                task_id
+            };
+            status_when(&state, &loaded, &source.id, |status| {
+                status.state == FaceState::Drawn
+            })
+            .await;
+            let cards = loaded.data_cards.lock().unwrap();
+            assert_eq!(cards.tasks[&source.id].task.id(), task_id);
+            assert!(matches!(
+                cards.outcomes[&source.id].0,
+                RefreshOutcome::Drawn
+            ));
+            drop(cards);
+            state.shutdown();
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_rejects_malformed_specs_for_new_and_cached_spaces() {
+        for cached in [false, true] {
+            let state = ServerState::in_memory();
+            let account = state
+                .identity()
+                .create_account("startup@example.com", true, true, chrono::Utc::now())
+                .unwrap();
+            let space = if cached {
+                state.account_space(&account.id)
+            } else {
+                Arc::new(AccountSpace::open(
+                    &state.inner.config_directory,
+                    account.id.clone(),
+                ))
+            };
+            let path = space.root.join("data-cards.json");
+            std::fs::write(&path, "{").unwrap();
+            assert!(
+                start_data_cards(&state)
+                    .unwrap_err()
+                    .contains(&path.display().to_string())
+            );
+            state.shutdown();
+        }
+    }
+
+    fn start_at(state: &ServerState, space: &Arc<AccountSpace>, path: &Path) -> Result<(), String> {
+        let specs = load_specs(path)?;
         space
             .data_cards
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .spec_path = path;
-        spawn_refreshers(state, space, specs);
+            .spec_path = path.to_path_buf();
+        spawn_refreshers(state, space, path, specs);
         Ok(())
     }
 
@@ -1680,7 +1760,7 @@ mod tests {
                 .insert("old".into(), Refresher::for_test(task));
         }
 
-        start_at(&state, &space, path.clone()).expect("missing specs are valid");
+        start_at(&state, &space, &path).expect("missing specs are valid");
         tokio::task::yield_now().await;
         {
             let retained = space.data_cards.lock().expect("data cards");
@@ -1718,7 +1798,7 @@ mod tests {
             retained.spec_path.clone()
         };
 
-        assert_eq!(start_at(&state, &space, path.clone()), Err(expected_error));
+        assert_eq!(start_at(&state, &space, &path), Err(expected_error));
         tokio::task::yield_now().await;
         {
             let retained = space.data_cards.lock().expect("data cards");
@@ -1845,7 +1925,7 @@ mod tests {
         let path = directory.path().join("cards.json");
         let bytes = std::fs::read(&path).expect("original bytes");
 
-        start_at(&state, &space, path.clone()).expect("an unknown kind is not a load error");
+        start_at(&state, &space, &path).expect("an unknown kind is not a load error");
         {
             let retained = space.data_cards.lock().expect("data cards");
             assert_eq!(retained.specs.len(), 1, "the spec is kept");
@@ -3179,10 +3259,15 @@ esac
                 let blocker = directory.path().join("not-a-directory");
                 std::fs::write(&blocker, b"blocked").unwrap();
                 space.data_cards.lock().unwrap().spec_path = blocker.join("cards.json");
-                spawn_refreshers(&state, &space, load_specs(&path).unwrap());
+                spawn_refreshers(
+                    &state,
+                    &space,
+                    &blocker.join("cards.json"),
+                    load_specs(&path).unwrap(),
+                );
                 assert_eq!(load_specs(&path).unwrap(), original);
             } else {
-                start_at(&state, &space, path.clone()).unwrap();
+                start_at(&state, &space, &path).unwrap();
                 assert_eq!(load_specs(&path).unwrap(), original[1..]);
             }
             {

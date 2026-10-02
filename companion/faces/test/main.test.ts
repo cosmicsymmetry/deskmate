@@ -47,6 +47,7 @@ test("describe prints the catalog the server builds the add menu from", async ()
     "token",
     "days-left-this-year",
     "github-stats",
+    "moon-phase",
   ]);
   for (const face of catalog) {
     for (const field of face.fields) {

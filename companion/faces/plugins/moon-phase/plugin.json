@@ -1,0 +1,23 @@
+{
+  "api": 1,
+  "id": "moon-phase",
+  "version": "1.0.0",
+  "label": "Moon Phase",
+  "description": "The current moon, illumination and next full moon date (UTC). No account needed.",
+  "author": "Deskmate contributors",
+  "hosts": [],
+  "secrets": [],
+  "fields": [
+    {
+      "type": "enum",
+      "key": "hemisphere",
+      "label": "Hemisphere",
+      "default": "north",
+      "options": [
+        { "value": "north", "label": "Northern" },
+        { "value": "south", "label": "Southern" }
+      ]
+    }
+  ],
+  "refreshSeconds": 900
+}

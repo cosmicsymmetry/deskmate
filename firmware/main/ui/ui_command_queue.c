@@ -33,7 +33,8 @@ static bool same_coalescing_key(const ui_command_t *pending,
     return incoming->type == pending->type &&
            (incoming->type == UI_COMMAND_SHOW_CARD_FALLBACK ||
             incoming->type == UI_COMMAND_LINK_STATE ||
-            incoming->type == UI_COMMAND_TIME_OFFSET);
+            incoming->type == UI_COMMAND_TIME_OFFSET ||
+            incoming->type == UI_COMMAND_BRIGHTNESS);
 }
 
 static bool is_view_work(ui_command_type_t type)

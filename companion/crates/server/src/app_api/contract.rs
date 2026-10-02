@@ -117,6 +117,7 @@ fn contract_fixtures() -> ContractFixtures {
             autostart: true,
             paused: false,
             orientation: DisplayOrientation::LandscapeFlipped,
+            brightness: 78,
         },
         cards: cards.clone(),
         image_sources: vec![app_core::config::ImageSource {
@@ -604,6 +605,7 @@ fn contract_fixture_covers_scalar_config_enums() {
         DeviceCapability::SceneRender => "scene-render",
         DeviceCapability::VolatileAssets => "volatile-assets",
         DeviceCapability::DurableAssetEncoding => "durable-asset-encoding",
+        DeviceCapability::DisplayBrightness => "display-brightness",
     });
     assert_enum_contract!(&fixtures.validation_codes, ValidationCode, string_contract_tag, {
         ValidationCode::UnsupportedVersion => "unsupported-version",

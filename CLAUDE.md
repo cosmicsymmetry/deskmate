@@ -18,7 +18,7 @@ Read these before changing code:
    acceptance criteria.
 4. `docs/hardware/board-notes.md` - verified board facts, component versions, and
    hardware quirks.
-5. The frozen contracts: `docs/config/v10.md` (config) and `docs/protocol/v2.md` (wire).
+5. The frozen contracts: `docs/config/v11.md` (config) and `docs/protocol/v2.md` (wire).
    These state the contracts; nothing else does, including this file.
 
 `docs/history.md` is the narrative record. It is not normative and several of its
@@ -33,9 +33,9 @@ of letting code and documentation diverge.
 The narrative of how the project got here is `docs/history.md`, which nothing loads by
 default. This section states only what is true now.
 
-- **Config schema v10** (`docs/config/v10.md`), **protocol v2** (`docs/protocol/v2.md`,
+- **Config schema v11** (`docs/config/v11.md`), **protocol v2** (`docs/protocol/v2.md`,
   frozen; v1 is marked superseded and kept as the record of what flashed firmware
-  speaks), `PROTOCOL_CURRENT_CAPABILITIES` **2016**. Protocol v2 is **NOT additive**: it
+  speaks), `PROTOCOL_CURRENT_CAPABILITIES` **4064**. Protocol v2 is **NOT additive over v1**: it
   removes `PushData` (type 5 is now `PushTimer`), the template/size-class/
   interrupt-policy registry, `ApplyConfig.screens`, `DeviceEvent`'s second identifier,
   the `field.*` scene binding, error codes 11-13 and capability bits 0-4. A v1 host and a
@@ -44,12 +44,16 @@ default. This section states only what is true now.
   two. Retired message-type, error-code and capability-bit numbers are never re-issued.
   The device models three things per card and nothing else: its id and tap meaning
   (`ApplyConfig`), its timer (`PushTimer`), and its face (`PushScene`).
-  **v10 is the only config version the store can read** (v4-v9 were retired on
-  2026-09-19, once the last pre-v10 documents -- two dead identities' configs -- were
-  gone); any other `schema_version` is a typed `UnsupportedVersion` refusal, the refused
-  file is never overwritten on load, and the refusal stays visible in the panel's snapshot
-  until an explicit successful save. The rule that made that cheap still holds for the
-  next bump: a `docs/config/vN.md` exists if and only if the store can still read vN.
+  **The v11 store reads v10 and v11**. v10 migrates in memory with brightness 78%
+  (raw 200, the existing final boot level); load never rewrites the file. Other
+  integer versions are typed `UnsupportedVersion` refusals, preserved until an
+  explicit successful save. A `docs/config/vN.md` exists iff the store reads vN.
+  **The 2026-10-02 brightness amendment is additive within v2**: ApplyConfig key 4
+  is sent only to firmware advertising bit 11 (`DisplayBrightness`), including replay.
+  The replay cache retains desired brightness across upgrade/downgrade cycles. The
+  older decoder skips unknown key 4; the gate enforces advertised feature support.
+  Existing `v2.2.0-psram` keeps working; there is **no flash-first order** for Track H.
+  Deploy the v11 server before its SPA; firmware installation remains separate.
 - **Three card kinds: clock, pomodoro, picture.** Clock and pomodoro tick on the device
   between host pushes. A picture card's face is a raster frame, frozen between pushes,
   from one of two producers: an external one POSTing a PNG, or **the server itself**. The
@@ -62,8 +66,8 @@ default. This section states only what is true now.
   These are **not new card kinds**: each is an image source the server pushes to itself,
   named by an ordinary picture card, configured in each account's `data-cards.json`
   under `DESKMATE_CONFIG_DIR/accounts/<account_id>/`; `DESKMATE_DATA_CARDS` is gone
-  because one global override cannot name per-account files. Schema stays v10 and the
-  wire is untouched. The split: `crates/server/src/data_cards.rs` owns the specs, the
+  because one global override cannot name per-account files. Faces do not require a schema or
+  wire change. The split: `crates/server/src/data_cards.rs` owns the specs, the
   browser's settings contract, validation and the refresh schedule, and **names no face kind**; the
   package owns what a face fetches and how it is drawn. The seam has four public verbs
   (`data_cards/faces_package.rs` <-> `faces/src/main.ts`): `describe` prints the catalog
@@ -404,9 +408,14 @@ These are decisions, not defaults. Changing one needs the owner, not a judgement
 - **`preferences.timezone` is seeded from the host's IANA zone on FIRST RUN ONLY.** An
   existing saved configuration is never rewritten, because a timezone change moves the
   clock on a physical panel and that is the owner's decision.
-- **Brightness is not a feature, and its old branch is deleted (2026-09-22).** Its
-  "schema v6" collided with the real v6. Reviving brightness is new work: a fresh schema
-  bump, a wire change, a firmware change, and an on-board OTA re-verification.
+- **Brightness was revived on explicit owner authorization (2026-10-02, Track H).**
+  Schema v11 stores integer `preferences.brightness` (10..100%, default 78%, raw 200).
+  It is one SettingsSheet control using the existing Save; the preview stays upright
+  and undimmed. ApplyConfig key 4 is gated by bit 11; unsupported firmware never blocks
+  saving. Firmware applies from the LVGL UI queue, RAM only, and reboots at raw 200.
+  The standalone diagnostic stays. The dead branch's colliding "schema v6" is still
+  not reusable. New firmware's USB flash, OTA download and both-mounting glass checks
+  remain UNOBSERVED; see the Track H entry in board notes.
 
 ### Hardware verification still owed
 

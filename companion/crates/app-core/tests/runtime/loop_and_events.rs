@@ -55,7 +55,10 @@ fn a_tap_naming_a_card_that_does_not_exist_is_counted_and_dropped() {
     wait_until_online(&runtime);
 
     control.push_event(tap_event(1, "ghost"));
-    wait_for(Duration::from_secs(1), || runtime.taps_dropped() == 1);
+    // The atomic accessor advances before the worker publishes its snapshot.
+    let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.diagnostics.taps_dropped == 1
+    });
 
     assert!(sink.taken().is_empty());
     assert_eq!(runtime.taps_dropped(), 1);
@@ -65,8 +68,7 @@ fn a_tap_naming_a_card_that_does_not_exist_is_counted_and_dropped() {
     // companion read. On 2026-09-24 it was asked of `dev-0005` and could not be
     // answered, because the snapshot carries every other counter but this one.
     assert_eq!(
-        runtime.snapshot().unwrap().diagnostics.taps_dropped,
-        1,
+        snapshot.diagnostics.taps_dropped, 1,
         "a dropped tap must be visible in the snapshot, not only through the accessor"
     );
     runtime.shutdown().unwrap();

@@ -116,6 +116,7 @@ impl ConfigStore {
 pub enum ConfigOrigin {
     Defaults,
     Current,
+    Migrated,
     LastGood,
 }
 
@@ -229,17 +230,70 @@ fn parse_json<T: DeserializeOwned>(text: &str) -> Result<T, StoreError> {
 fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> {
     let text = std::str::from_utf8(bytes).map_err(|_| StoreError::InvalidUtf8)?;
     let header: VersionHeader = parse_json(text)?;
-    if header.schema_version != CURRENT_SCHEMA_VERSION {
+    if header.schema_version != 10 && header.schema_version != CURRENT_SCHEMA_VERSION {
         return Err(StoreError::UnsupportedVersion {
             found: header.schema_version,
             supported: CURRENT_SCHEMA_VERSION,
         });
     }
-    let config: AppConfig = parse_json(text)?;
+    let (config, origin) = if header.schema_version == 10 {
+        (
+            parse_json::<ConfigV10>(text)?.migrate(),
+            ConfigOrigin::Migrated,
+        )
+    } else {
+        (parse_json::<AppConfig>(text)?, ConfigOrigin::Current)
+    };
     config.validate().map_err(|error| StoreError::Validation {
         issues: error.issues,
     })?;
-    Ok((config, ConfigOrigin::Current))
+    Ok((config, origin))
+}
+
+// Keep v10's closed shape: accepting a v11 brightness key in a v10 document
+// would silently reinterpret an unsupported extension during migration.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreferencesV10 {
+    timezone: String,
+    autostart: bool,
+    paused: bool,
+    #[serde(default)]
+    orientation: crate::DisplayOrientation,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfigV10 {
+    schema_version: u32,
+    preferences: PreferencesV10,
+    cards: Vec<crate::CardSettings>,
+    #[serde(default)]
+    image_sources: Vec<crate::config::ImageSource>,
+    assets: Vec<crate::AssetSettings>,
+    advance: crate::CarouselAdvance,
+    updater: crate::UpdaterSettings,
+}
+
+impl ConfigV10 {
+    fn migrate(self) -> AppConfig {
+        debug_assert_eq!(self.schema_version, 10);
+        AppConfig {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            preferences: crate::AppPreferences {
+                timezone: self.preferences.timezone,
+                autostart: self.preferences.autostart,
+                paused: self.preferences.paused,
+                orientation: self.preferences.orientation,
+                ..crate::AppPreferences::default()
+            },
+            cards: self.cards,
+            image_sources: self.image_sources,
+            assets: self.assets,
+            advance: self.advance,
+            updater: self.updater,
+        }
+    }
 }
 
 fn read_bounded(path: &Path) -> Result<Option<Vec<u8>>, StoreError> {

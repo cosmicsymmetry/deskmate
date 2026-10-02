@@ -7,6 +7,7 @@ typedef enum {
     UI_COMMAND_SHOW_CARD_FALLBACK = 0,
     UI_COMMAND_LINK_STATE,
     UI_COMMAND_TIME_OFFSET,
+    UI_COMMAND_BRIGHTNESS,
 } ui_command_type_t;
 
 typedef enum {
@@ -14,6 +15,7 @@ typedef enum {
     UI_COMMAND_ACTION_SHOW_STANDALONE_CLOCK,
     UI_COMMAND_ACTION_APPLY_LINK_STATE,
     UI_COMMAND_ACTION_APPLY_TIME_OFFSET,
+    UI_COMMAND_ACTION_APPLY_BRIGHTNESS,
 } ui_command_action_t;
 
 ui_command_action_t ui_command_action(ui_command_type_t type);

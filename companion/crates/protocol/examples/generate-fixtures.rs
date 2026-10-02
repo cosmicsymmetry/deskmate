@@ -206,6 +206,7 @@ fn minimal_scene() -> Scene {
 
 fn minimum_config() -> ApplyConfig {
     ApplyConfig {
+        brightness: None,
         revision: 1,
         rotation: 90,
         cards: vec![CardConfig {
@@ -232,6 +233,7 @@ fn maximum_config() -> ApplyConfig {
         })
         .collect::<Vec<_>>();
     ApplyConfig {
+        brightness: None,
         revision: u32::MAX,
         rotation: 270,
         cards,
@@ -675,7 +677,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("usage: generate-fixtures OUTPUT_DIRECTORY")?;
     fs::create_dir_all(&output)?;
 
-    let messages = fixture_messages();
+    let mut messages = fixture_messages();
+    for (name, level) in [
+        ("apply_config_brightness_min.bin", 26),
+        ("apply_config_brightness_default.bin", 200),
+        ("apply_config_brightness_max.bin", 255),
+    ] {
+        messages.push((
+            name,
+            40,
+            Message::ApplyConfig(ApplyConfig {
+                revision: 1,
+                rotation: 90,
+                brightness: Some(level),
+                cards: vec![CardConfig {
+                    card_id: "clock".into(),
+                    tap_action: TapAction::None,
+                }],
+            }),
+        ));
+    }
     let mut manifest =
         String::from("Deskmate protocol v2 deterministic fixtures\n\nValid frames:\n");
     let mut maximum_config_payload = None;
@@ -699,6 +720,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         manifest,
         "\nMaximum config payload: {maximum_config_payload}/{MAX_PAYLOAD_SIZE} bytes"
     )?;
+
+    // The prefix is the valid no-brightness config, then a hostile raw key 4.
+    for (name, value) in [
+        ("brightness_zero.bin", vec![0]),
+        ("brightness_below_floor.bin", vec![0x18, 25]),
+        ("brightness_overflow.bin", vec![0x19, 1, 26]),
+        ("brightness_negative.bin", vec![0x20]),
+        ("brightness_boolean.bin", vec![0xf5]),
+    ] {
+        let wire = fs::read(output.join("apply_config_brightness_default.bin"))?;
+        let mut frame = protocol::decode_wire_frame(&wire)?;
+        frame.payload.truncate(frame.payload.len() - 2);
+        frame.payload.extend(value);
+        fs::write(output.join(name), protocol::encode_frame(&frame)?)?;
+        writeln!(manifest, "- {name}: invalid ApplyConfig brightness")?;
+    }
 
     let mut bad_crc = encode_message(1, &Message::StatusRequest)?;
     let last_data = bad_crc.len() - 2;

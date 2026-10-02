@@ -12,6 +12,7 @@
 typedef struct {
     ui_command_type_t type;
     bool online;
+    uint8_t brightness; /* Uses existing alignment padding. */
     int16_t utc_offset_minutes;
 } ui_command_t;
 
@@ -33,7 +34,7 @@ void ui_command_queue_init(ui_command_queue_t *queue);
  * scalar state commands replace their pending predecessor. A full
  * non-coalescible queue drops the newest command
  * and increments the pressure counter. Since template patches were removed,
- * normal traffic has only three coalescing categories for four slots; a drop
+ * normal traffic has four coalescing categories for four slots; a drop
  * now signals an unexpected command mix rather than ordinary render pressure,
  * and the high-water metric is correspondingly a coarse compatibility
  * diagnostic rather than the signal it was for template-bearing traffic.

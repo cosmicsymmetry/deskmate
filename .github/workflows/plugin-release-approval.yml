@@ -1,0 +1,30 @@
+name: plugin release approval
+
+# This workflow and its checker execute from main, never from an author's PR.
+# Fetching Git objects for a diff does not check out or execute them. No secrets,
+# dependency install, PR scripts, artifacts or caches enter this job.
+on:
+  pull_request_target:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  owner-release-approval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: require owner identity for index changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          git fetch --no-tags origin "$HEAD_SHA"
+          python3 tools/plugins/check_release_approval.py

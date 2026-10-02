@@ -5,6 +5,10 @@ Submit a hosted plugin as a pull request to
 The first submission trial uses this manual process. Review and merge do not deploy
 your plugin; hosted release is a separate operator action.
 
+Your publishing identity is your GitHub account and the PR record. Manifest `author`
+text is unverified attribution; no panel or hosted Deskmate account is needed to contribute.
+Browse the [plugin directory](index.md) for the existing plugins and their READMEs.
+
 ## Prepare the plugin
 
 Read [contract v1](contract-v1.md) first. It describes the actual sandbox, manifest,
@@ -47,6 +51,8 @@ server `renderRequest` entrypoint, and rasterizer. It writes to
 
 - A **448×368 PNG** and a **0.4× desk-scale PNG**, scaled from that same rendered frame.
 - `report.json` listing errors, plugin logs and runtime limit notices for each case.
+- The release hash and exact `{id, version, sha256}` an owner could approve. A new
+  version not yet in the release index is informational, not a failed submission.
 
 It exits nonzero for manifest, discovery or render failures and still attempts every
 case. It reports limits reached during those cases, including dropped oversized
@@ -139,11 +145,24 @@ The reviewer records the reviewed head commit and checks:
 
 For the first trial, the project owner makes the acceptance decision after review.
 Requested changes are commits on the same PR, followed by another review of the
-affected behavior. New executable versions or changed permissions require another
-PR and review; increment the manifest version when behavior changes. The runtime
-does not itself enforce reviewed hashes or version increments.
+affected behavior. **Bump the manifest version for every code or permission change.**
+Each needs another PR and review. The [release index](releases.md) covers every file
+inside the plugin folder, so documentation, test and asset edits there also need a
+new version. Leave `plugins/releases.json` unchanged in an outside author's PR;
+only the owner can approve its entry. CI refuses reused versions with changed bytes,
+while a new unindexed version can be green. Deployment refuses unreviewed content.
+
+After adding a plugin or changing its label/version/description, regenerate the
+documentation directory from `companion/faces` with
+`bun run src/author/directory.ts`. Repository tests in CI check that it matches all manifests
+and that each plugin has a README.
 
 Merging accepts code into the repository. An operator separately chooses a reviewed
 revision for release. Until that deployment, there is no promise that the plugin is
 available on the hosted service. After deployment, the existing catalog can expose
-the plugin in the add-card menu; a separate public directory is not yet defined.
+the plugin in the add-card menu unless the operator has withdrawn it. The
+[documentation directory](index.md) links the available source and setup guides;
+it is not an installation service or a hosted availability promise.
+
+The next outside author is invited to follow this guide unaided and open an issue
+at the step where they got stuck.

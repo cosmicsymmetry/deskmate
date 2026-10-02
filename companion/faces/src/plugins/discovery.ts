@@ -19,6 +19,7 @@ import type { TapEvent } from "./run";
 import { runPlugin } from "./run";
 import { readPluginSecrets } from "./secrets";
 import { SANDBOX_LIMITS, SandboxError, runInSandbox } from "./sandbox";
+import { assertNotWithdrawn, PluginWithdrawnError, readDenylist } from "./denylist";
 
 const MANIFEST_FILE = "plugin.json";
 const SOURCE_FILE = "index.js";
@@ -26,6 +27,7 @@ const SOURCE_FILE = "index.js";
 export interface DiscoveredSkip {
   folder: string;
   reason: string;
+  withdrawn?: true;
 }
 
 export interface DiscoverPluginsResult {
@@ -91,7 +93,11 @@ interface LoadedPlugin {
   source: string;
 }
 
-function loadFolder(directory: string, folder: string): LoadedPlugin {
+function loadFolder(
+  directory: string,
+  folder: string,
+  policy: ReturnType<typeof readDenylist>,
+): LoadedPlugin {
   const manifestPath = join(directory, folder, MANIFEST_FILE);
   const sourcePath = join(directory, folder, SOURCE_FILE);
 
@@ -108,6 +114,7 @@ function loadFolder(directory: string, folder: string): LoadedPlugin {
     throw new Error(`${MANIFEST_FILE} is not valid JSON: ${reasonFor(error)}`);
   }
   const manifest = parseManifest(parsed, folder);
+  assertNotWithdrawn(policy, manifest.id, manifest.version);
 
   let source: string;
   try {
@@ -132,6 +139,8 @@ export interface PluginHost {
   request?: RequestFn;
   readSecrets?: typeof readPluginSecrets;
   onLog?: (line: string) => void;
+  /** Explicit instance policy path; null isolates author previews from the operator. */
+  denylistPath?: string | null;
 }
 
 function toFaceDefinition(
@@ -146,6 +155,8 @@ function toFaceDefinition(
     ...(manifest.tap === undefined ? {} : { tap: manifest.tap }),
     ...(manifest.refreshSeconds === undefined ? {} : { refreshSeconds: manifest.refreshSeconds }),
     async render(settings: Settings, now: Date, context: FaceRenderContext = {}) {
+      // A retained FaceDefinition must observe removal after discovery too.
+      assertNotWithdrawn(readDenylist(host.denylistPath), manifest.id, manifest.version);
       const secrets = await (host.readSecrets ?? readPluginSecrets)(manifest.id);
       const timezone =
         context.timezone !== undefined && context.timezone.trim() !== ""
@@ -192,6 +203,7 @@ export async function discoverPlugins(
   folders?: readonly string[],
 ): Promise<DiscoverPluginsResult> {
   const root = directory ?? defaultPluginsDir();
+  const policy = readDenylist(host.denylistPath);
 
   let entries: string[];
   try {
@@ -211,7 +223,9 @@ export async function discoverPlugins(
 
   for (const folder of entries) {
     try {
-      const { manifest, source } = loadFolder(root, folder);
+      // An unreadable list or id-wide withdrawal prevents even the discovery probe.
+      assertNotWithdrawn(policy, folder);
+      const { manifest, source } = loadFolder(root, folder, policy);
       if (seenIds.has(manifest.id)) {
         throw new Error(`duplicate id ${JSON.stringify(manifest.id)}`);
       }
@@ -220,7 +234,11 @@ export async function discoverPlugins(
     } catch (error) {
       const reason =
         error instanceof SandboxError ? `failed to load: ${error.message}` : reasonFor(error);
-      skipped.push({ folder, reason });
+      skipped.push({
+        folder,
+        reason,
+        ...(error instanceof PluginWithdrawnError ? { withdrawn: true as const } : {}),
+      });
       process.stderr.write(
         `plugin ${folder} skipped: ${reason.replace(/\s+/g, " ").slice(0, 300)}\n`,
       );

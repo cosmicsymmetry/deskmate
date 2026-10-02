@@ -1,0 +1,3 @@
+# Documents who approves reviewed plugin releases. Approval CI enforces owner PR
+# identity; no required code-owner-review repository setting is needed.
+/companion/faces/plugins/releases.json @cosmicsymmetry

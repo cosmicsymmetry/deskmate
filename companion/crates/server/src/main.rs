@@ -386,7 +386,7 @@ async fn main() {
     // graceful shutdown below drains connections, and an in-flight fetch is
     // abandoned with it. That is safe because a card's durable state is the
     // frame already in the store: losing a refresh loses nothing but the tick.
-    if let Some(faces) = faces_command() {
+    if let Some(faces) = faces_command(&config_dir) {
         server::set_faces(&state, faces);
     } else {
         tracing::info!("no faces package configured (DESKMATE_FACES_DIR unset)");
@@ -507,7 +507,7 @@ fn required_firmware_version(value: Result<String, std::env::VarError>) -> Strin
 /// `DESKMATE_BUN` names the runtime; both must be absolute, because the child's
 /// environment is cleared and a relative path would resolve against nothing the
 /// operator chose.
-fn faces_command() -> Option<server::FaceCommand> {
+fn faces_command(config_dir: &std::path::Path) -> Option<server::FaceCommand> {
     let faces_dir = PathBuf::from(std::env::var("DESKMATE_FACES_DIR").ok()?);
     let bun =
         std::env::var("DESKMATE_BUN").map_or_else(|_| "/usr/local/bin/bun".into(), PathBuf::from);
@@ -527,7 +527,38 @@ fn faces_command() -> Option<server::FaceCommand> {
         "DESKMATE_BUN ({}) does not exist; the faces package needs the Bun runtime",
         bun.display()
     );
-    Some(server::FaceCommand::bun(bun, &faces_dir))
+    let denylist = plugin_denylist_path(
+        config_dir,
+        &faces_dir,
+        std::env::var_os("DESKMATE_PLUGIN_DENYLIST"),
+    );
+    Some(server::FaceCommand::bun(bun, &faces_dir).with_denylist(denylist))
+}
+
+fn plugin_denylist_path(
+    config_dir: &std::path::Path,
+    faces_dir: &std::path::Path,
+    configured: Option<std::ffi::OsString>,
+) -> PathBuf {
+    let denylist =
+        configured.map_or_else(|| config_dir.join("plugin-denylist.json"), PathBuf::from);
+    assert!(
+        denylist.is_absolute(),
+        "DESKMATE_PLUGIN_DENYLIST must be an absolute path"
+    );
+    // A faces deployment must never replace operator withdrawal policy.
+    let resolved = denylist.canonicalize().unwrap_or_else(|_| {
+        denylist
+            .parent()
+            .and_then(|p| p.canonicalize().ok())
+            .zip(denylist.file_name())
+            .map_or_else(|| denylist.clone(), |(p, name)| p.join(name))
+    });
+    assert!(
+        !resolved.starts_with(faces_dir.canonicalize().expect("faces directory exists")),
+        "DESKMATE_PLUGIN_DENYLIST must be outside DESKMATE_FACES_DIR"
+    );
+    denylist
 }
 
 /// `axum::serve` can drain in-flight connections before the process exits.
@@ -560,6 +591,50 @@ async fn shutdown_signal(state: ServerState) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn operator_policy_defaults_to_instance_root_and_stays_outside_faces() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("configs");
+        let faces = root.path().join("faces");
+        std::fs::create_dir(&config).unwrap();
+        std::fs::create_dir(&faces).unwrap();
+        assert_eq!(
+            super::plugin_denylist_path(&config, &faces, None),
+            config.join("plugin-denylist.json")
+        );
+        let override_path = root.path().join("withdrawn.json");
+        assert_eq!(
+            super::plugin_denylist_path(&config, &faces, Some(override_path.clone().into())),
+            override_path
+        );
+        for path in [
+            std::path::PathBuf::from("relative.json"),
+            faces.join("withdrawn.json"),
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| super::plugin_denylist_path(
+                    &config,
+                    &faces,
+                    Some(path.into())
+                ))
+                .is_err()
+            );
+        }
+        #[cfg(unix)]
+        {
+            let link = root.path().join("faces-link");
+            std::os::unix::fs::symlink(&faces, &link).unwrap();
+            assert!(
+                std::panic::catch_unwind(|| super::plugin_denylist_path(
+                    &config,
+                    &faces,
+                    Some(link.join("withdrawn.json").into())
+                ))
+                .is_err()
+            );
+        }
+    }
+
     fn server_options(
         public_url: &str,
         signups: Option<&str>,

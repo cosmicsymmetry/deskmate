@@ -89,6 +89,9 @@ record() {
 # --- the faces --------------------------------------------------------------
 ship_faces() {
 	say "shipping the faces"
+	# Local approval check before any VM contact; the same module produces the
+	# author's hash and CI's pending-release report. All faces-shipping modes use it.
+	(cd companion/faces && bun run src/author/releases.ts verify) || exit 1
 	# The gates run here, on the machine that has the sources: a face that does not
 	# type-check or whose golden moved must not reach the panel.
 	(cd companion/faces && bun install --frozen-lockfile >/dev/null 2>&1 && bun run check >/dev/null 2>&1 && bun test >/dev/null 2>&1) ||
@@ -118,7 +121,9 @@ ship_faces() {
 		# start the server performs. A package that fails either must not replace
 		# one that works.
 		$BUN test >/dev/null 2>&1 || { echo 'the faces suite fails on the VM' >&2; exit 1; }
-		$BUN run src/main.ts describe >/dev/null"
+		$BUN run src/main.ts describe >/dev/null
+		# Verify the exact staged bytes immediately before the install below.
+		$BUN run src/author/releases.ts verify"
 
 	if [ "$dry_run" = false ]; then
 		# shellcheck disable=SC2029  # the variables are meant to expand here.

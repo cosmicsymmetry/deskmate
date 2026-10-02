@@ -15,6 +15,12 @@ same 448x368 PNG on the same picture-card asset path.
 
 ## What a plugin is
 
+Installed releases are verified against the owner's [reviewed release index](releases.md).
+The operator may withdraw a plugin id or version through the
+[denylist](../self-host.md#operator-plugin-withdrawal). Discovery and every refresh
+read that policy again; a withdrawn plugin returns a configuration error and the
+last stored frame stays visible. Built-in faces are outside this plugin policy.
+
 **A plugin makes no calls.** It exports two functions:
 
 ```ts

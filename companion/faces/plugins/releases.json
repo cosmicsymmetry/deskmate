@@ -1,0 +1,12 @@
+[
+  {
+    "id": "days-left-this-year",
+    "version": "1.1.0",
+    "sha256": "93ac865ceeaf224ae172e07d8995db778cc4891f908580fe7e20b514c75f4727"
+  },
+  {
+    "id": "github-stats",
+    "version": "1.0.0",
+    "sha256": "b573ae0a714ffb51855c00ff9a8a17a44027125361d197af588789228139f633"
+  }
+]

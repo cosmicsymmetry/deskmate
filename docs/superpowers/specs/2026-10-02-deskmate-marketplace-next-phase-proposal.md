@@ -1,6 +1,9 @@
-# DRAFT -- NOT APPROVED -- owner decision needed
+# APPROVED by the owner 2026-10-02 -- all four recommendations
 
-2026-10-02 · Track B · Decision request, not implementation scope.
+2026-10-02 · Track B · Approved decision record.
+
+The owner approved all four recommendations as written: “do as recommended”.
+The original alternatives and recommendations below remain as decision history.
 
 The [submission trial](2026-10-01-deskmate-plugin-marketplace-design.md) produced
 Days Left This Year through PR #12, then the owner-approved three-face update in
@@ -58,8 +61,9 @@ Revocation must distinguish removal from the catalog (blocks new use) from stopp
 existing refreshers. Choose an operator denylist checked during discovery/refresh
 for urgent removal; document that an already stored frame remains visible and stale.
 Clearing a frame or removing a user's card is a separate owner-visible decision.
-Deploy-time hashes alone cannot provide immediate runtime revocation. No denylist,
-release index, version enforcement or runtime service is implemented by this proposal.
+Deploy-time hashes alone cannot provide runtime revocation. The approved follow-up
+implements the release index and operator denylist; a runtime release service remains
+outside the decision.
 
 ## 4. Author tooling after this follow-up
 
@@ -73,3 +77,34 @@ release index, version enforcement or runtime service is implemented by this pro
 was concrete friction; an online IDE is hypothetical. Ask the next outside author
 to follow the guide unaided, then invest in the steps where that attempt actually
 stalls. PNG evidence supplements review; it never proves physical-panel delivery.
+
+## Decisions taken while implementing
+
+- Directory and identity remain documentation: a generated, test-checked
+  [plugin index](../../plugins/index.md) links each README. GitHub account and PR
+  history identify contributors; manifest author text is unverified attribution.
+  No panel or hosted account is required to submit.
+- The [canonical release hash](../../plugins/releases.md) covers every regular file,
+  including tests, docs and assets, with UTF-8 byte ordering and length framing.
+  Symlinks and special files are refused. No extension-based exclusions; consequently
+  any file change inside a reviewed folder requires a new version and review.
+  The two reviewed shipped plugins seed the index; GitHub stats gains a setup README.
+- Owner-authored index PRs are the approval source. Previous entries are immutable
+  rollback history. A trusted-base `pull_request_target` workflow checks PR identity
+  without executing submitted code; CODEOWNERS is documentation, with no repository
+  settings changed. An outside PR can pass with a pending new version, but cannot
+  change the index or reuse an indexed version for different bytes.
+- The deploy verifies locally before faces-related VM contact and re-verifies the
+  staged target bytes immediately before installation. All modes that ship faces
+  share this path. Its verification command is tested in isolation: `--dry-run`
+  still touches the VM and is not used for this work.
+- Operator withdrawal defaults to the instance config root's `plugin-denylist.json`,
+  outside deployed faces; the cleared child environment receives only its explicit
+  path. Discovery retains private withdrawal metadata for existing-card status while
+  hiding those plugins from creation. Every refresh checks again. Missing file means
+  no denials; malformed/unreadable policy fails closed for plugins and logs an error.
+  Existing pixels remain stored and visible; built-ins are unaffected. Catalog changes
+  appear within its minute-level reload; refresh and recovery keep the existing cadence.
+- Author previews stay offline and independent of instance secrets/withdrawal policy.
+  The next outside author is invited to use the existing guide unaided and report
+  where they get stuck. No preview UI, install API or account/publisher service is added.

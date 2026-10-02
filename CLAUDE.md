@@ -54,6 +54,13 @@ default. This section states only what is true now.
   older decoder skips unknown key 4; the gate enforces advertised feature support.
   Existing `v2.2.0-psram` keeps working; there is **no flash-first order** for Track H.
   Deploy the v11 server before its SPA; firmware installation remains separate.
+  **Track H merged as PR #18 (`4f13dd3`) and its server/SPA are deployed; the
+  schema/wire lock is RELEASED.** Track B's release-index follow-up (PR #19)
+  retains v11 and the deployed sign-in/Deskboy changes; its reviewed release hashes
+  cover Days Left This Year, GitHub stats and the owner-accepted Moon Phase.
+  The approval checker protects the full verification machinery, and operator
+  withdrawal policy lives outside the deployed faces tree; see
+  `docs/plugins/releases.md` for the approval boundary and bootstrap limit.
 - **Three card kinds: clock, pomodoro, picture.** Clock and pomodoro tick on the device
   between host pushes. A picture card's face is a raster frame, frozen between pushes,
   from one of two producers: an external one POSTing a PNG, or **the server itself**. The

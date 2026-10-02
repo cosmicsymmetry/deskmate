@@ -167,7 +167,8 @@ regression check (34 caught mutations total).
   additions/changes, nested removal/rename, exact CRLF bytes and non-ASCII UTF-8 ordering.
   The ordering case uses a fixed digest independently calculated from the documented format.
 
-Full local gates pass: Rust 868 tests (two existing ignored), web 216, faces 637,
+After merging the already deployed passwordless sign-in fix from main (`149d07f`),
+full local gates pass: Rust 876 tests (two existing ignored), web 222, faces 637,
 three repository integration checks and 14 approval-policy tests, plus formatting,
 linting, typechecks, builds, doctests, actionlint, shell syntax and all three release
 hashes. All 19 review-specific mutations were caught (53 probes across the initial,

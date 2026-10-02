@@ -42,7 +42,9 @@ impl GoogleSignIn {
             config,
             transport,
             pending: Mutex::new(HashMap::new()),
-            start_limiter: RateLimiter::new(10, std::time::Duration::from_secs(600)),
+            // The hosted proxy still makes this an instance-wide bucket. Lower it to 10
+            // in the same change that makes the proxy forward the real client IP.
+            start_limiter: RateLimiter::new(MAX_PENDING_AUTHS, std::time::Duration::from_secs(600)),
         }
     }
 
@@ -562,7 +564,7 @@ mod tests {
     fn start_budget_expires_without_extending_the_window_on_rejection() {
         let runtime = runtime();
         let now = std::time::Instant::now();
-        for _ in 0..10 {
+        for _ in 0..MAX_PENDING_AUTHS {
             runtime
                 .start_limiter
                 .check_and_record("client", now)
@@ -574,7 +576,7 @@ mod tests {
                 .check_and_record("client", now + std::time::Duration::from_secs(599)),
             Err(std::time::Duration::from_secs(1))
         );
-        for _ in 0..10 {
+        for _ in 0..MAX_PENDING_AUTHS {
             runtime
                 .start_limiter
                 .check_and_record("client", now + std::time::Duration::from_secs(600))

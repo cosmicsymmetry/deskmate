@@ -16,6 +16,7 @@ struct Attempts {
 
 impl RateLimiter {
     pub(crate) fn new(limit: usize, window: Duration) -> Self {
+        debug_assert!(limit > 0, "rate-limit budget must be positive");
         Self {
             limit,
             window,
@@ -95,6 +96,13 @@ fn prune(entries: &mut VecDeque<Instant>, now: Instant, window: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "rate-limit budget must be positive")]
+    fn a_zero_limit_is_rejected() {
+        RateLimiter::new(0, Duration::from_secs(60));
+    }
 
     #[test]
     fn checks_do_not_allocate_unrecorded_keys() {

@@ -162,11 +162,8 @@ The fixture runs the documented proxy against a loopback echo server: two visito
 addresses remain distinct, forged XFF is replaced, and untrusted or malformed
 visitor-IP headers cannot supply an address. It does not contact Cloudflare.
 
-Read-only inspection on 2026-10-02 found the hosted instance using Caddy 2.11.4 in a
-Docker bridge, with a plain proxy to a LAN-bound Deskmate listener and no client-IP
-normalization. That topology collapses client limits onto the proxy peer. It needs
-an operator topology/configuration change following this recipe; the inspection
-and local fixture did not change or verify the live tunnel end to end.
+The Deskmate listener behind the tunnel must be on loopback; a bridge or LAN peer
+is not trusted.
 
 Use **Add a panel** in Chrome/Edge on a computer connected to the panel by USB. The
 claimed link URL will be `wss://desk.example.org/v1/device/link`. The panel's Wi-Fi

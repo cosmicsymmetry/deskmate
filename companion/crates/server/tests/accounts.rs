@@ -1146,7 +1146,7 @@ async fn google_starts_are_limited_per_client_without_spending_the_callback_budg
         .unwrap();
     let first = google_start_from(&client, &server, "198.51.100.7").await;
     assert_eq!(first.status(), StatusCode::SEE_OTHER);
-    for _ in 1..10 {
+    for _ in 1..32 {
         assert_eq!(
             google_start_from(&client, &server, "198.51.100.7")
                 .await
@@ -1162,12 +1162,6 @@ async fn google_starts_are_limited_per_client_without_spending_the_callback_budg
             .unwrap();
         assert!((1..=600).contains(&retry));
     }
-    assert_eq!(
-        google_start_from(&client, &server, "203.0.113.9")
-            .await
-            .status(),
-        StatusCode::SEE_OTHER
-    );
     let location = first.headers()["location"].to_str().unwrap();
     let flow = query_param(location, "state");
     let nonce = query_param(location, "nonce");
@@ -1194,11 +1188,24 @@ async fn google_starts_are_limited_per_client_without_spending_the_callback_budg
                 .unwrap()
                 .starts_with("__Host-deskmate_session="))
     );
+    // The successful callback frees a global pending slot, but not this client's budget.
+    assert_eq!(
+        google_start_from(&client, &server, "198.51.100.7")
+            .await
+            .status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        google_start_from(&client, &server, "203.0.113.9")
+            .await
+            .status(),
+        StatusCode::SEE_OTHER
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_google_starts_admit_only_the_client_limit() {
-    let (state, _) = google_world(false);
+    let (state, transport) = google_world(false);
     let server = spawn_http(app(state)).await;
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -1212,20 +1219,48 @@ async fn concurrent_google_starts_admit_only_the_client_limit() {
         let server = HttpTestServer::at(server.base_url.clone());
         starts.spawn(async move {
             barrier.wait().await;
-            google_start_from(&client, &server, "198.51.100.7")
-                .await
-                .status()
+            google_start_from(&client, &server, "198.51.100.7").await
         });
     }
-    let mut admitted = 0;
-    while let Some(status) = starts.join_next().await {
-        match status.unwrap() {
-            StatusCode::SEE_OTHER => admitted += 1,
-            StatusCode::TOO_MANY_REQUESTS => (),
+    let mut admitted = Vec::new();
+    while let Some(response) = starts.join_next().await {
+        let response = response.unwrap();
+        match response.status() {
+            StatusCode::SEE_OTHER => admitted.push(response),
+            StatusCode::TOO_MANY_REQUESTS => {
+                // A bare 429 from the global pending cap would hide a missing client limiter.
+                let retry = json_body(response).await["retry_after_seconds"]
+                    .as_u64()
+                    .unwrap();
+                assert!((1..=600).contains(&retry));
+            }
             status => panic!("unexpected start status: {status}"),
         }
     }
-    assert_eq!(admitted, 10);
+    assert_eq!(admitted.len(), 32);
+    let first = &admitted[0];
+    let location = first.headers()["location"].to_str().unwrap();
+    let flow = query_param(location, "state");
+    let nonce = query_param(location, "nonce");
+    transport.answer_id_token(&google_claims("owner", "owner@example.com", true, &nonce));
+    let callback = client
+        .get(format!(
+            "{}/v1/app/auth/google/callback?state={flow}&code=c",
+            server.base_url
+        ))
+        .header("x-forwarded-for", "198.51.100.7")
+        .header("cookie", google_cookie(first))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(callback.status(), StatusCode::SEE_OTHER);
+    assert_eq!(callback.headers()["location"], "/");
+    assert_eq!(
+        google_start_from(&client, &server, "198.51.100.7")
+            .await
+            .status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
     assert_eq!(
         google_start_from(&client, &server, "203.0.113.9")
             .await

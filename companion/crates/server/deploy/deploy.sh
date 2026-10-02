@@ -57,6 +57,10 @@ for arg in "$@"; do
 		;;
 	esac
 done
+if [ "$ui_only" = true ] && [ "$faces_only" = true ]; then
+	echo "choose one of --ui-only / --faces-only" >&2
+	exit 2
+fi
 
 repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
@@ -94,11 +98,16 @@ ship_faces() {
 	(cd companion/faces && bun run src/author/releases.ts verify) || exit 1
 	# The gates run here, on the machine that has the sources: a face that does not
 	# type-check or whose golden moved must not reach the panel.
-	(cd companion/faces && bun install --frozen-lockfile >/dev/null 2>&1 && bun run check >/dev/null 2>&1 && bun test >/dev/null 2>&1) ||
+	local gate_log
+	gate_log=$(mktemp)
+	(cd companion/faces && bun install --frozen-lockfile && bun run check && bun test) >"$gate_log" 2>&1 ||
 		{
+			cat "$gate_log" >&2
+			rm -f "$gate_log"
 			echo "refusing to ship: companion/faces does not pass its own gates" >&2
 			exit 1
 		}
+	rm -f "$gate_log"
 	# shellcheck disable=SC2029  # $BUN is meant to expand here.
 	ssh "$VM" "test -x $BUN" || {
 		cat >&2 <<-MISSING

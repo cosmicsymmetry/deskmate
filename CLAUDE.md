@@ -243,7 +243,7 @@ Each of these cost this project real time at least once.
   never applies one: deleting a selected-state rule, swapping an error colour and breaking
   a transform origin each left all component tests green. For a CSS or markup refactor
   the check is `tools/webcheck/pixelab.py` (is build B pixel-identical to build A across
-  252 states); for anything that needs the server it is `tools/webcheck/smoke.sh`. Both
+  236 states); for anything that needs the server it is `tools/webcheck/smoke.sh`. Both
   READMEs say why a naive screenshot diff lies: capture A and B in ONE browser launch,
   and drive the clock rather than merely setting it.
 - **A harness must not offer what the shipped app does not have.** When the cable

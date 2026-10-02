@@ -118,16 +118,6 @@ impl FaceCommand {
     }
 }
 
-impl PartialEq for FaceCommand {
-    fn eq(&self, other: &Self) -> bool {
-        self.program == other.program
-            && self.arguments == other.arguments
-            && self.denylist == other.denylist
-    }
-}
-
-impl Eq for FaceCommand {}
-
 /// One face the package can draw, as `describe` states it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub(crate) struct CatalogFace {

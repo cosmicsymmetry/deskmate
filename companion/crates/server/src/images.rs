@@ -268,15 +268,11 @@ async fn mint_source(
     {
         return Err(ImageRouteError::EntitlementCapacity { maximum });
     }
-    let mint_state = state.clone();
     let mint_space = Arc::clone(&space);
-    let minted = tokio::task::spawn_blocking(move || {
-        let _ = mint_state;
-        mint_space.image_sources.mint(&request.name)
-    })
-    .await
-    .map_err(|_| ImageRouteError::WorkerFailed)?
-    .map_err(|error| map_mint_error(&error))?;
+    let minted = tokio::task::spawn_blocking(move || mint_space.image_sources.mint(&request.name))
+        .await
+        .map_err(|_| ImageRouteError::WorkerFailed)?
+        .map_err(|error| map_mint_error(&error))?;
 
     // A server-drawn face is attached in the same request. If attaching fails the
     // source is revoked rather than left behind: a half-made source shows up in
@@ -291,14 +287,10 @@ async fn mint_source(
         .await
         .map_err(|_| ImageRouteError::WorkerFailed)?;
         if let Err(error) = attached {
-            let revoke_state = state.clone();
             let revoke_space = Arc::clone(&space);
             let orphan = minted.id.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                let _ = revoke_state;
-                revoke_space.image_sources.revoke(&orphan)
-            })
-            .await;
+            let _ = tokio::task::spawn_blocking(move || revoke_space.image_sources.revoke(&orphan))
+                .await;
             return Err(map_face_update_error(&error));
         }
     }
@@ -315,7 +307,7 @@ async fn revoke_source(
     Path(source_id): Path<String>,
 ) -> Result<StatusCode, ImageRouteError> {
     let space = account_space(&state, &session).await?;
-    revoke_image_source(state, space, source_id)
+    revoke_image_source(space, source_id)
         .await
         .map_err(|error| match error {
             RevokeImageSourceError::WorkerFailed => ImageRouteError::WorkerFailed,
@@ -336,7 +328,6 @@ pub(crate) enum RevokeImageSourceError {
 }
 
 pub(crate) async fn revoke_image_source(
-    state: ServerState,
     space: Arc<AccountSpace>,
     source_id: String,
 ) -> Result<(), RevokeImageSourceError> {
@@ -349,13 +340,10 @@ pub(crate) async fn revoke_image_source(
 
     // Keep face removal in its own awaited phase. If the request is cancelled
     // while source persistence is pending, this write must never begin.
-    tokio::task::spawn_blocking(move || {
-        let _ = state;
-        crate::data_cards::remove_face(&space, &source_id)
-    })
-    .await
-    .map_err(|_| RevokeImageSourceError::WorkerFailed)?
-    .map_err(RevokeImageSourceError::Face)
+    tokio::task::spawn_blocking(move || crate::data_cards::remove_face(&space, &source_id))
+        .await
+        .map_err(|_| RevokeImageSourceError::WorkerFailed)?
+        .map_err(RevokeImageSourceError::Face)
 }
 
 async fn push_image(
@@ -686,7 +674,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert_task_for_test(removed.id.clone(), task);
 
-        revoke_image_source(state.clone(), Arc::clone(&space), removed.id.clone())
+        revoke_image_source(Arc::clone(&space), removed.id.clone())
             .await
             .expect("revoke source and face");
 
@@ -721,7 +709,7 @@ mod tests {
                 .join(crate::image_sources::IMAGE_SOURCE_STORE_FILE),
         );
 
-        let error = revoke_image_source(state.clone(), Arc::clone(&space), source.id.clone())
+        let error = revoke_image_source(Arc::clone(&space), source.id.clone())
             .await
             .expect_err("source persistence must fail");
 
@@ -743,7 +731,7 @@ mod tests {
         let backup = replace_file_with_directory(&spec_path);
         let before = std::fs::read(&backup).expect("preserved specs");
 
-        let error = revoke_image_source(state.clone(), Arc::clone(&space), source.id.clone())
+        let error = revoke_image_source(Arc::clone(&space), source.id.clone())
             .await
             .expect_err("face persistence must fail");
 
@@ -774,8 +762,7 @@ mod tests {
             });
             started_rx.await.expect("blocking worker started");
 
-            let operation =
-                revoke_image_source(state.clone(), Arc::clone(&space), source.id.clone());
+            let operation = revoke_image_source(Arc::clone(&space), source.id.clone());
             assert!(
                 operation.now_or_never().is_none(),
                 "source revocation was not pending at its first await"

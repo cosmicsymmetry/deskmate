@@ -985,22 +985,18 @@ pub(crate) fn status_for_source(
         .face_catalog
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(message) = catalog
-        .catalog()
-        .iter()
-        .find(|candidate| candidate.kind == face.kind)
-        .and_then(|candidate| candidate.withdrawn.as_ref())
-    {
+    let catalog = catalog.catalog();
+    let Some(entry) = catalog.iter().find(|candidate| candidate.kind == face.kind) else {
+        return Some(plain(FaceState::Unavailable));
+    };
+    if let Some(message) = &entry.withdrawn {
         return Some(FaceStatus {
             state: FaceState::NeedsAttention,
             message: Some(message.clone()),
             at_unix_seconds: None,
         });
     }
-    let descriptor = catalog.descriptor(&face);
-    let Some(descriptor) = descriptor else {
-        return Some(plain(FaceState::Unavailable));
-    };
+    let descriptor = describe_face(entry, &face.settings);
     if !face_is_complete(&descriptor) {
         return Some(plain(FaceState::NeedsSettings));
     }

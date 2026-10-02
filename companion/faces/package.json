@@ -8,7 +8,9 @@
     "format": "biome format --write .",
     "format:check": "biome format .",
     "lint": "biome lint .",
-    "dump": "bun run src/dump.ts"
+    "dump": "bun run src/dump.ts",
+    "plugin:new": "bun run src/author/new.ts",
+    "plugin:check": "bun run src/author/check.ts"
   },
   "dependencies": {
     "@resvg/resvg-js": "2.6.2",

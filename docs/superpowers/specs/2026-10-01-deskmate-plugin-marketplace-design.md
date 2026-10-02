@@ -48,10 +48,11 @@ ordinary non-plugin PRs retain their existing workflow.
 - No outbound requests, secrets, account credentials or tap behavior are required.
 - The author must state whether today is included and test that exact convention
   on January 1, December 31, the year rollover, and leap-year boundaries.
-- The count uses the host-provided calendar date. The current runtime does not pass
-  the panel owner's configured timezone to plugins; the host's zone is the effective
-  zone. This must be documented, not represented as owner-local midnight behavior.
-  Fixing the host's timezone contract is separate work.
+- The count uses the host-provided calendar date. The initial trial exposed that
+  the server omitted the owner's timezone. The 2026-10-02 follow-up forwards the
+  existing saved preference and checks successful faces for date changes once a
+  minute; [contract v1](../../plugins/contract-v1.md#now) states the shared-source
+  rule and freshness bound. This remains a host fix, not plugin timezone arithmetic.
 - The frame changes on scheduled renders. The plugin must document its requested
   cadence and cannot promise an exact midnight update or device-local ticking.
 

@@ -155,7 +155,7 @@ export async function renderWeatherRequest(
   // and this package deploy independently.
   const answeringATap = context.view !== undefined || context.event !== undefined;
   const cached = answeringATap ? cachedForecast(previous, now) : undefined;
-  const face = cached ?? (await fetchWeather(settings, get));
+  const face = cached ?? (await fetchWeather(settings, get, context.timezone));
   const fetchedAt = cached === undefined ? now.toISOString() : previous.fetchedAt;
   const result = renderWeatherResult(face, now, context);
   const drawn = typeof result === "string" ? { svg: result } : result;
@@ -332,7 +332,7 @@ export function parseForecast(body: string, place: string): WeatherFace {
 }
 
 /**
- * The next hours, starting at the current one. `timezone=auto` makes every
+ * The next hours, starting at the current one. The requested timezone makes every
  * timestamp local to the place, so the hour is read straight off the string
  * ("2026-09-12T14:00") and never converted.
  */
@@ -442,7 +442,11 @@ function dailySteps(document: Json): DailyStep[] {
   return steps;
 }
 
-export async function fetchWeather(settings: Settings, get: FetchText): Promise<WeatherFace> {
+export async function fetchWeather(
+  settings: Settings,
+  get: FetchText,
+  timezone?: string,
+): Promise<WeatherFace> {
   const location = text(settings, "location");
   if (location === "") {
     throw new ConfigurationError("the location is empty");
@@ -482,7 +486,7 @@ export async function fetchWeather(settings: Settings, get: FetchText): Promise<
     ["daily", "weather_code,temperature_2m_max,temperature_2m_min"],
     ["hourly", "temperature_2m,weather_code,is_day"],
     ["forecast_days", "6"],
-    ["timezone", "auto"],
+    ["timezone", timezone || "auto"],
   ];
   if (text(settings, "units") === "imperial") {
     query.push(["temperature_unit", "fahrenheit"]);

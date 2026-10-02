@@ -243,6 +243,7 @@ impl AssetSync {
     }
 
     /// Reconciles desired assets and returns the exact keep-set sent to the device.
+    #[cfg(test)]
     pub(crate) fn reconcile(
         device: &mut dyn RuntimeDevice,
         desired: &[DesiredAsset],

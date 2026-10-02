@@ -48,6 +48,8 @@ use serde::Deserialize;
 
 use super::FaceFieldOption;
 
+mod selector;
+
 /// A face fetches over the network, so this is generous; it bounds a hung child,
 /// not a slow API -- the package applies its own tighter request timeout.
 const RENDER_TIMEOUT: Duration = Duration::from_secs(45);
@@ -72,10 +74,11 @@ const EOF_GRACE: Duration = Duration::from_millis(250);
 const EXIT_CONFIGURATION: i32 = 2;
 
 /// How to run the faces package. The verb is appended to `arguments`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct FaceCommand {
     program: PathBuf,
     arguments: Vec<OsString>,
+    selector: Option<Arc<selector::Selector>>,
 }
 
 impl FaceCommand {
@@ -85,6 +88,7 @@ impl FaceCommand {
         Self {
             program: bun,
             arguments: vec!["run".into(), faces_dir.join("src/main.ts").into()],
+            selector: Some(Arc::new(selector::Selector::default())),
         }
     }
 
@@ -94,9 +98,18 @@ impl FaceCommand {
         Self {
             program,
             arguments: Vec::new(),
+            selector: None,
         }
     }
 }
+
+impl PartialEq for FaceCommand {
+    fn eq(&self, other: &Self) -> bool {
+        self.program == other.program && self.arguments == other.arguments
+    }
+}
+
+impl Eq for FaceCommand {}
 
 /// One face the package can draw, as `describe` states it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -176,6 +189,7 @@ pub(crate) enum FaceRenderError {
 #[derive(Clone, Copy)]
 pub(crate) struct RenderRequest<'a> {
     pub(crate) kind: &'a str,
+    pub(crate) timezone: &'a str,
     pub(crate) settings: &'a std::collections::BTreeMap<String, serde_json::Value>,
     pub(crate) state: Option<&'a serde_json::Value>,
     /// Zero means this is a scheduled refresh rather than a response to taps.
@@ -265,14 +279,7 @@ fn take(collected: &Mutex<Collected>) -> Collected {
     )
 }
 
-fn run(
-    command: &FaceCommand,
-    verb: &str,
-    stdin: &[u8],
-    stdout_cap: usize,
-    timeout: Duration,
-    account_dir: Option<&Path>,
-) -> Result<Finished, String> {
+fn builder(command: &FaceCommand, verb: &str, account_dir: Option<&Path>) -> Command {
     let mut builder = Command::new(&command.program);
     builder
         .args(&command.arguments)
@@ -292,7 +299,18 @@ fn run(
         // never passes one -- it draws for no account, so there is nothing to scope.
         builder.env("DESKMATE_CONFIG_DIR", account_dir);
     }
-    let mut child = builder
+    builder
+}
+
+fn run(
+    command: &FaceCommand,
+    verb: &str,
+    stdin: &[u8],
+    stdout_cap: usize,
+    timeout: Duration,
+    account_dir: Option<&Path>,
+) -> Result<Finished, String> {
+    let mut child = builder(command, verb, account_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -447,10 +465,16 @@ pub(crate) fn tap(
     if let Some(state) = state {
         body["state"] = state.clone();
     }
+    let input = body.to_string();
+    if let Some(selector) = &command.selector
+        && let Some(answer) = selector.tap(command, input.as_bytes())
+    {
+        return answer;
+    }
     let finished = run(
         command,
         "tap",
-        body.to_string().as_bytes(),
+        input.as_bytes(),
         MAX_PLAN_BYTES,
         PLAN_TIMEOUT,
         None,
@@ -480,6 +504,7 @@ pub(crate) fn render(
 ) -> Result<Rendered, FaceRenderError> {
     let mut body = serde_json::json!({
         "kind": request.kind,
+        "timezone": request.timezone,
         "settings": request.settings,
     });
     if let Some(state) = request.state {
@@ -583,6 +608,7 @@ mod tests {
     ) -> RenderRequest<'a> {
         RenderRequest {
             kind,
+            timezone: "UTC",
             settings,
             state,
             taps,

@@ -5,26 +5,9 @@
 import { INGEST_CAP_BYTES } from "../kit/limits";
 import { CANVAS_HEIGHT, CANVAS_WIDTH } from "../kit/theme";
 import satori from "satori";
-
-export class CardError extends Error {
-  override name = "CardError";
-  /**
-   * True when one of THIS file's own explicit checks fired -- a cap, a shape, a
-   * reference we refuse. Those are deterministic and the plugin author's to fix, so
-   * the runtime reports them to the owner and does not retry. False only for
-   * `toCardError`, which wraps a foreign exception out of satori: we do not know that
-   * is the plugin's fault rather than ours, and telling the owner to change a setting
-   * they cannot change is worse than retrying. Defaults to true because every literal
-   * `new CardError(...)` in this file is one of our own checks; the single wrapping
-   * site passes false explicitly.
-   */
-  configuration: boolean;
-
-  constructor(message: string, configuration = true) {
-    super(message);
-    this.configuration = configuration;
-  }
-}
+import { CardError } from "./card-error";
+import { embeddedImage, layoutStyle, svgResources } from "./resources";
+export { CardError } from "./card-error";
 
 const MAX_BOXES = 2_000;
 const MAX_SVG_BYTES = 512 * 1024;
@@ -36,18 +19,6 @@ const MAX_PNG_BYTES = INGEST_CAP_BYTES;
 // that corrupts satori's shared module for every later render in this process, not
 // just this one card. 400 leaves margin below the observed 501 boundary.
 const MAX_DEPTH = 400;
-// An img inside a {layout} card is otherwise uncapped: MAX_SVG_BYTES/MAX_PNG_BYTES
-// only guard the two top-level shapes, so a plugin can defeat both entirely by
-// embedding an oversized image as img.src instead (observed: a 5 MB data: URI
-// produced a 6.99 MB SVG). Each image gets the same 1 MB ceiling the {png} shape
-// itself uses, per the spec's card-limits table.
-const MAX_IMAGES = 4;
-// Kept below MAX_IMAGES x MAX_PNG_BYTES (4 MB) on purpose, mirroring the spec's own
-// "N MB total, tighter than count x per-item" pattern (the fetch response-body cap
-// is 4 MB total against 8 requests x 1 MB each) -- at exactly 4 MB this check could
-// never fire independently of the per-image and count caps, which would make it
-// dead code rather than an actual third guard.
-const MAX_TOTAL_IMAGE_BYTES = 3 * 1024 * 1024;
 // A few hundred characters is enough to identify what satori rejected; a hostile
 // style value has been observed echoed back whole (megabytes) in a raw error's
 // message, which is a log-flooding footgun once that message reaches anywhere logs
@@ -78,24 +49,6 @@ async function loadFonts() {
   return fonts;
 }
 
-/** Decoded byte size of a `data:` URI's payload -- without ever allocating the bytes. */
-function dataUriByteLength(uri: string): number {
-  const comma = uri.indexOf(",");
-  if (comma === -1) {
-    throw new CardError("an img src's data: URI has no payload");
-  }
-  const header = uri.slice(5, comma); // after "data:"
-  const payload = uri.slice(comma + 1);
-  if (/;base64/i.test(header)) {
-    return Buffer.byteLength(payload, "base64");
-  }
-  try {
-    return Buffer.byteLength(decodeURIComponent(payload), "utf8");
-  } catch {
-    throw new CardError("an img src's data: URI could not be decoded");
-  }
-}
-
 function toElement(
   node: unknown,
   counter: { boxes: number; images: number; imageBytes: number },
@@ -121,42 +74,13 @@ function toElement(
   const kind = type === "img" ? "img" : "div";
   let imgSrc: string | undefined;
   if (kind === "img") {
-    if (typeof src !== "string" || !src.startsWith("data:")) {
-      // satori 0.33.5 does refuse a non-http(s) src outright and, for an http(s) src,
-      // resolves the hostname and refuses a private/loopback/link-local address --
-      // it is not undefended. But it validates with ONE DNS lookup and then fetches
-      // the hostname again, resolving a SECOND time: the classic DNS-rebinding
-      // time-of-check/time-of-use gap that kit/http.ts exists to close, by pinning
-      // the validated address and dialling that literal instead of re-resolving the
-      // name. We do not control or test satori's guard, so depending on a
-      // third-party SSRF check with a known-weaker threat model than our own is
-      // reason enough to require an embedded data: URI instead.
-      throw new CardError(
-        `an img src must be an embedded data: URI, not ${JSON.stringify(
-          typeof src === "string" ? src.slice(0, 40) : typeof src,
-        )}`,
-      );
-    }
-    counter.images += 1;
-    if (counter.images > MAX_IMAGES) {
-      throw new CardError(`this card has more than ${MAX_IMAGES} images`);
-    }
-    const bytes = dataUriByteLength(src);
-    if (bytes > MAX_PNG_BYTES) {
-      throw new CardError(`an image in this card may not exceed ${MAX_PNG_BYTES / 1024} KB`);
-    }
-    counter.imageBytes += bytes;
-    if (counter.imageBytes > MAX_TOTAL_IMAGE_BYTES) {
-      throw new CardError(
-        `the images in this card total more than ${MAX_TOTAL_IMAGE_BYTES / 1024} KB`,
-      );
-    }
-    imgSrc = src;
+    embeddedImage(src, counter, "an img src");
+    imgSrc = src as string;
   }
   return {
     type: kind,
     props: {
-      style: (typeof style === "object" && style !== null ? style : {}) as Record<string, unknown>,
+      style: layoutStyle(style, counter),
       ...(imgSrc === undefined ? {} : { src: imgSrc }),
       ...(children === undefined
         ? {}
@@ -167,51 +91,6 @@ function toElement(
           }),
     },
   };
-}
-
-/** Every reference an SVG card may carry: embedded data only. */
-function refuseExternalReferences(svg: string): void {
-  // XML permits either quote style for an attribute value and is case-sensitive on
-  // the attribute name -- but usvg's own href lookup is not guaranteed to be
-  // stricter than a hostile author, so this matches "href" case-insensitively and
-  // both quote styles rather than trusting either narrowing to hold downstream.
-  //
-  // This regex is NOT the whole boundary. usvg parses strict XML before it ever
-  // resolves an href, and refuses both an unquoted attribute value and an
-  // entity-encoded attribute name (e.g. `&#104;ref="..."`) as malformed XML --
-  // neither form reaches image resolution even though this regex does not match
-  // either of them. That parse-time rejection is load-bearing here, not incidental:
-  // do not read this function as the sole guard when touching the regex.
-  for (const match of svg.matchAll(/(?:xlink:)?href\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)) {
-    const value = (match[1] ?? match[2] ?? "").trim();
-    if (!value.startsWith("data:") && !value.startsWith("#")) {
-      // usvg resolves a path href FROM OUR DISK by default (usvg-0.45.1
-      // src/parser/image.rs:85-100), so this is a file-read surface, not a nicety.
-      throw new CardError(
-        `an SVG card may only reference embedded data, not ${JSON.stringify(value.slice(0, 40))}`,
-      );
-    }
-  }
-}
-
-/** Refuses a declared root size other than the panel's, if the card bothered to declare one. */
-function refuseWrongDimensions(svg: string): void {
-  const tag = svg.match(/<svg\b[^>]*>/i)?.[0];
-  if (tag === undefined) return;
-  const width = tag.match(/\bwidth\s*=\s*"([^"]*)"|\bwidth\s*=\s*'([^']*)'/i);
-  const height = tag.match(/\bheight\s*=\s*"([^"]*)"|\bheight\s*=\s*'([^']*)'/i);
-  const declaredWidth = width?.[1] ?? width?.[2];
-  const declaredHeight = height?.[1] ?? height?.[2];
-  if (declaredWidth !== undefined && Number.parseFloat(declaredWidth) !== CANVAS_WIDTH) {
-    throw new CardError(
-      `an SVG card must be ${CANVAS_WIDTH}x${CANVAS_HEIGHT}, not width="${declaredWidth}"`,
-    );
-  }
-  if (declaredHeight !== undefined && Number.parseFloat(declaredHeight) !== CANVAS_HEIGHT) {
-    throw new CardError(
-      `an SVG card must be ${CANVAS_WIDTH}x${CANVAS_HEIGHT}, not height="${declaredHeight}"`,
-    );
-  }
 }
 
 /**
@@ -242,7 +121,7 @@ function toCardError(error: unknown): CardError {
  * SVG document. Without this check `AAAA"/><image href="/etc/passwd" x="0"/><x y="`
  * closes our own `<image>` element and opens one pointing at a path, which usvg
  * resolves BY READING THAT FILE FROM OUR DISK -- the exact reference
- * `refuseExternalReferences` exists to refuse on the `{svg}` branch.
+ * `svgResources` exists to refuse on the `{svg}` branch.
  */
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
@@ -257,7 +136,7 @@ function refuseNonBase64(png: string): void {
 /**
  * The branch that turns one of the three card shapes into an SVG document. Its result
  * is NOT the function's guarantee -- `cardToSvg` below is, because it runs
- * `refuseExternalReferences` over whatever this returns. That is deliberate: the PNG
+ * `svgResources` over whatever this returns. That is deliberate: the PNG
  * branch below builds its document by string concatenation, and before the
  * whole-branch review only the `svg` branch was guarded, so a plugin could put an
  * arbitrary `href` into the frame simply by picking the other shape. The guarantee
@@ -277,7 +156,6 @@ async function buildCardSvg(card: unknown): Promise<string> {
     const svgBytes = Buffer.byteLength(svg, "utf8");
     if (svgBytes > MAX_SVG_BYTES)
       throw new CardError(`an SVG card may not exceed ${MAX_SVG_BYTES / 1024} KB`);
-    refuseWrongDimensions(svg);
     return svg;
   }
   if (typeof png === "string") {
@@ -321,11 +199,11 @@ async function buildCardSvg(card: unknown): Promise<string> {
 /**
  * The card a plugin returned, as an SVG document -- and the one place that decides
  * what an SVG document this package will rasterize may reference. Every path out of
- * `buildCardSvg` passes through `refuseExternalReferences` here, so "no card can make
+ * `buildCardSvg` passes through `svgResources` here, so "no card can make
  * usvg read our disk" is a property of the return value rather than of any one branch.
  */
 export async function cardToSvg(card: unknown): Promise<string> {
   const svg = await buildCardSvg(card);
-  refuseExternalReferences(svg);
+  svgResources(svg);
   return svg;
 }

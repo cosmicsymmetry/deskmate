@@ -35,20 +35,18 @@ pub(super) fn synchronize_full(
     // would issue that wipe on every full synchronize. Skip the pass entirely
     // instead: having nothing to say is not the same as asking for everything
     // to be dropped.
-    let asset_result = state.image_source_host.as_mut().and_then(|host| {
-        let desired = host.desired_assets();
-        if desired.is_empty() {
-            return None;
-        }
-        let digests: Vec<_> = desired.iter().map(|asset| asset.digest).collect();
-        Some((
-            digests,
-            AssetSync::reconcile(device, &desired, state.device.capability_bits()),
-        ))
-    });
+    let desired = state
+        .image_source_host
+        .as_mut()
+        .map(|host| host.desired_assets())
+        .unwrap_or_default();
+    let asset_result = if desired.is_empty() {
+        None
+    } else {
+        Some(reconcile_assets(state, device, &desired, true))
+    };
     match asset_result {
-        Some((digests, Ok(_))) => {
-            state.confirmed_resident_assets = digests.into_iter().collect();
+        Some(Ok(_)) => {
             // A reconnect reconciles from scratch and always releases: it is
             // rare, the device may have been away for days, and this is the one
             // moment nobody is watching a tap land. Restart the cadence from
@@ -56,7 +54,7 @@ pub(super) fn synchronize_full(
             state.last_asset_release = Some(Instant::now());
             clear_asset_sync_refusals(state);
         }
-        Some((_, Err(error))) => record_asset_sync_refusals(state, &error.to_string()),
+        Some(Err(error)) => record_asset_sync_refusals(state, &error.to_string()),
         None => {}
     }
     if !sync_device_result(

@@ -6065,3 +6065,17 @@ Every item below needs the owner at the desk with the panel powered.
 - **A timed release with an empty durable store.** Key 31 held 4 records on 09-30 and the
   board has not been up since to drain them.
 - **The framebuffer matrix**, still its own sitting.
+
+## 2026-10-02 -- the owner measured the deployed tap and closed the chase
+
+On the morning after PR #15 (`aad9017`, live at `424c8a7` with Track B) the owner measured
+tap latency on dev-0005 themselves and judged it **"pretty much satisfying now"**. This is
+the owner's report, taken as the evidence; no numbers were recorded in the repository and no
+journal window was captured alongside it. On the owner's direction the **filmed residual is
+dropped**: nobody owes a video, and the 250 ms chase is closed at the server reductions.
+The local bench figures in `2026-10-01-tap-latency-budget.md` stay what they are -- local
+server measurements -- and the costed firmware/wire reductions there remain unimplemented
+and unneeded unless the owner reopens them.
+
+Still not observed and still listed above: the rendered (fourth-page) tap, a
+`hackernews`-kind card, a face at 90 degrees, and the framebuffer matrix.

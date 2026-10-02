@@ -5,6 +5,7 @@ use std::time::Duration;
 use chrono::Utc;
 use tokio::task::JoinHandle;
 
+use super::clock;
 use super::face_state::FaceStateStore;
 use super::faces_package::{self, FaceCommand, FaceRenderError, RenderRequest};
 use super::{DataCardSpec, RefreshOutcome, TapSignal, record_outcome};
@@ -48,6 +49,9 @@ pub(super) struct RefresherJob {
     face_state: Arc<FaceStateStore>,
     taps: Arc<TapSignal>,
     spec: DataCardSpec,
+    /// Wall time is separate from Tokio's elapsed-time scheduler. Tests drive
+    /// both clocks together while exercising the real refresh loop.
+    now: Arc<dyn Fn() -> chrono::DateTime<Utc> + Send + Sync>,
 }
 
 impl RefresherJob {
@@ -66,6 +70,7 @@ impl RefresherJob {
             face_state,
             taps,
             spec,
+            now: Arc::new(Utc::now),
         }
     }
 }
@@ -75,18 +80,7 @@ fn spawn_refresher_with_refresh(
     job: RefresherJob,
     refresh: Duration,
 ) -> JoinHandle<()> {
-    runtime.spawn(async move {
-        refresh_loop(
-            job.state,
-            job.space,
-            job.faces,
-            job.face_state,
-            job.taps,
-            job.spec,
-            refresh,
-        )
-        .await;
-    })
+    runtime.spawn(refresh_loop(job, refresh))
 }
 
 #[cfg(test)]
@@ -134,6 +128,7 @@ struct RenderedFrame {
 fn render_frame(
     faces: &FaceCommand,
     account_dir: &Path,
+    timezone: &str,
     spec: &DataCardSpec,
     state: Option<&serde_json::Value>,
     taps: u32,
@@ -142,6 +137,7 @@ fn render_frame(
         faces,
         RenderRequest {
             kind: &spec.face.kind,
+            timezone,
             settings: &spec.face.settings,
             state,
             taps,
@@ -168,6 +164,7 @@ fn render_frame(
 fn render_view_frame(
     faces: &FaceCommand,
     account_dir: &Path,
+    timezone: &str,
     spec: &DataCardSpec,
     state: Option<&serde_json::Value>,
     view: &str,
@@ -176,6 +173,7 @@ fn render_view_frame(
         faces,
         RenderRequest {
             kind: &spec.face.kind,
+            timezone,
             settings: &spec.face.settings,
             state,
             taps: 0,
@@ -218,6 +216,7 @@ fn next_attempt(
 
 /// One refresh: render, accept, notify. `None` means a blocking task panicked, which
 /// is a bug rather than an outcome, and ends the refresher.
+#[allow(clippy::too_many_lines)] // Render, generation-checked commit, and staging form one refresh.
 async fn refresh_once(
     state: &ServerState,
     space: &std::sync::Arc<AccountSpace>,
@@ -226,109 +225,144 @@ async fn refresh_once(
     spec: &DataCardSpec,
     taps: u32,
 ) -> Option<RefreshOutcome> {
-    let (source_id, kind) = (&spec.source_id, &spec.face.kind);
-    let started = std::time::Instant::now();
-    if taps > 0 {
-        tracing::info!(target: "server::tap_latency", account_id = %space.account_id,
+    loop {
+        let (source_id, kind) = (&spec.source_id, &spec.face.kind);
+        let started = std::time::Instant::now();
+        if taps > 0 {
+            tracing::info!(target: "server::tap_latency", account_id = %space.account_id,
             source_id = %source_id, taps, unix_us = chrono::Utc::now().timestamp_micros(),
             "tap render started");
-    }
-    let previous_state = face_state.get(source_id);
-    let render_faces = faces.clone();
-    let render_spec = spec.clone();
-    let render_account_dir = space.root.clone();
-    let rendered = tokio::task::spawn_blocking(move || {
-        render_frame(
-            &render_faces,
-            &render_account_dir,
-            &render_spec,
-            previous_state.as_ref(),
-            taps,
-        )
-    })
-    .await;
-    if taps > 0 {
-        tracing::info!(target: "server::tap_latency", account_id = %space.account_id,
+        }
+        let transition = face_state.transition(source_id);
+        let (previous_state, generation) = {
+            let guard = transition
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (face_state.get(source_id), *guard)
+        };
+        let render_faces = faces.clone();
+        let render_spec = spec.clone();
+        let render_account_dir = space.root.clone();
+        let clock_state = state.clone();
+        let clock_space = Arc::clone(space);
+        let rendered = tokio::task::spawn_blocking(move || {
+            let timezone =
+                clock::source_timezone(&clock_state, &clock_space, &render_spec.source_id);
+            render_frame(
+                &render_faces,
+                &render_account_dir,
+                &timezone,
+                &render_spec,
+                previous_state.as_ref(),
+                taps,
+            )
+        })
+        .await;
+        if taps > 0 {
+            tracing::info!(target: "server::tap_latency", account_id = %space.account_id,
             source_id = %source_id, taps, unix_us = chrono::Utc::now().timestamp_micros(),
             elapsed_us = started.elapsed().as_micros(), ok = matches!(&rendered, Ok(Ok(_))),
             "tap render completed");
-    }
-    let rendered = match rendered {
-        Ok(Ok(rendered)) => rendered,
-        Ok(Err(RefreshFailure::Configuration(error))) => {
-            tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error,
+        }
+        let rendered = match rendered {
+            Ok(Ok(rendered)) => rendered,
+            Ok(Err(RefreshFailure::Configuration(error))) => {
+                tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error,
                 "the face's settings need the owner's attention; keeping the stored frame unchanged");
-            return Some(RefreshOutcome::NeedsAttention(error));
-        }
-        Ok(Err(RefreshFailure::Transient(error))) => {
-            tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error,
-                "the data fetch failed; keeping the stored frame unchanged");
-            return Some(RefreshOutcome::Retrying(error));
-        }
-        Ok(Err(RefreshFailure::NotAFrame(error))) => {
-            tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error,
-                "the faces package did not produce an acceptable frame");
-            return Some(RefreshOutcome::Retrying(format!(
-                "the face could not be drawn: {error}"
-            )));
-        }
-        Err(error) => {
-            tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error, "the render task panicked");
-            return None;
-        }
-    };
-
-    let accept_source = source_id.clone();
-    let accept_space = Arc::clone(space);
-    let face_state_for_staging = Arc::clone(face_state);
-    let next_face_state = rendered.state;
-    let face_state = Arc::clone(face_state);
-    let accepted = tokio::task::spawn_blocking(move || {
-        let outcome = accept_space.image_sources.accept_server_rendered(
-            &accept_source,
-            rendered.frame,
-            Utc::now(),
-        );
-        if outcome.is_ok()
-            && let Some(next_face_state) = next_face_state
-        {
-            face_state.put(&accept_source, next_face_state);
-        }
-        outcome
-    })
-    .await;
-    match accepted {
-        Ok(Ok(outcome)) => {
-            if !notify_image_source_outcome(state, space, source_id, &outcome) {
-                tracing::debug!(target: "server::data_cards", source_id = %source_id, kind, "the face is unchanged");
+                return Some(RefreshOutcome::NeedsAttention(error));
             }
-            stage_other_views(space, faces, face_state_for_staging, spec).await;
-            Some(RefreshOutcome::Drawn)
-        }
-        Ok(Err(error)) => {
-            tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error, "the frame was not stored");
-            Some(RefreshOutcome::Retrying(format!(
-                "the frame was not stored: {error}"
-            )))
-        }
-        Err(error) => {
-            tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error, "the store task panicked");
-            None
-        }
+            Ok(Err(RefreshFailure::Transient(error))) => {
+                tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error,
+                "the data fetch failed; keeping the stored frame unchanged");
+                return Some(RefreshOutcome::Retrying(error));
+            }
+            Ok(Err(RefreshFailure::NotAFrame(error))) => {
+                tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error,
+                "the faces package did not produce an acceptable frame");
+                return Some(RefreshOutcome::Retrying(format!(
+                    "the face could not be drawn: {error}"
+                )));
+            }
+            Err(error) => {
+                tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error, "the render task panicked");
+                return None;
+            }
+        };
+
+        let accept_source = source_id.clone();
+        let accept_space = Arc::clone(space);
+        let face_state_for_staging = Arc::clone(face_state);
+        let next_face_state = rendered.state;
+        let face_state = Arc::clone(face_state);
+        let accepted = tokio::task::spawn_blocking(move || {
+            let mut guard = transition
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if *guard != generation {
+                // Selection is allowed during this render. Its newer frame and
+                // durable state win; never rewind the page when stale work finishes.
+                return Ok(None);
+            }
+            let outcome = accept_space.image_sources.accept_server_rendered(
+                &accept_source,
+                rendered.frame,
+                Utc::now(),
+            );
+            // A fallback's result lives in the resting slot. Selecting a staged
+            // view meanwhile must not leave the newly committed tap invisible,
+            // even when these pixels equal the previous resting frame.
+            let outcome = if taps > 0 && outcome.is_ok() {
+                accept_space
+                    .image_sources
+                    .select_view(&accept_source, "")
+                    .map(|digest| AcceptOutcome::Changed { digest })
+                    .ok_or(crate::image_sources::ImageSourceError::UnknownToken)
+            } else {
+                outcome
+            };
+            if outcome.is_ok()
+                && let Some(next_face_state) = next_face_state
+            {
+                face_state.put(&accept_source, next_face_state);
+            }
+            if outcome.is_ok() {
+                *guard = guard.wrapping_add(1);
+            }
+            outcome.map(Some)
+        })
+        .await;
+        return match accepted {
+            // A staged selection won the race, but it consumed only its own tap.
+            // Rebase this already-consumed batch onto the winner's durable state.
+            Ok(Ok(None)) if taps > 0 => continue,
+            Ok(Ok(None)) => Some(RefreshOutcome::Drawn),
+            Ok(Ok(Some(outcome))) => {
+                if !notify_image_source_outcome(state, space, source_id, &outcome) {
+                    tracing::debug!(target: "server::data_cards", source_id = %source_id, kind, "the face is unchanged");
+                }
+                stage_other_views(state, space, faces, face_state_for_staging, spec).await;
+                Some(RefreshOutcome::Drawn)
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error, "the frame was not stored");
+                Some(RefreshOutcome::Retrying(format!(
+                    "the frame was not stored: {error}"
+                )))
+            }
+            Err(error) => {
+                tracing::error!(target: "server::data_cards", source_id = %source_id, kind, %error, "the store task panicked");
+                None
+            }
+        };
     }
 }
 
 /// How many frames one source may hold, resting view included.
 ///
-/// The real ceilings are the device's fifteen resident slots and the wire's
-/// 32-digest `AssetRelease`, and both are shared across every picture card. Four
-/// cards at four views each would exceed the first and approach the second, so
-/// this is deliberately conservative: it keeps a four-card loop inside both with
-/// room to spare. The spec's proportional budget -- `floor(15 / picture_cards)`
-/// with the remainder to the cards that declared the most -- needs the device's
-/// card count here, which this worker does not have; a flat cap is the honest
-/// version of it until it does.
-const MAX_STAGED_FRAMES_PER_SOURCE: usize = 3;
+/// The store admits extras atomically against an account-wide fifteen-frame
+/// budget, reserving all eight possible resting frames. Four is the per-source
+/// fairness ceiling, not the device capacity; a refused extra stays a fallback.
+const MAX_STAGED_FRAMES_PER_SOURCE: usize = 4;
 
 /// Draws the face's other views and stores each, so a tap on one costs a scene
 /// and nothing else.
@@ -340,6 +374,7 @@ const MAX_STAGED_FRAMES_PER_SOURCE: usize = 3;
 /// that is not staged is simply rendered on the tap that asks for it, which is
 /// what happened before any of this existed.
 async fn stage_other_views(
+    state: &ServerState,
     space: &Arc<AccountSpace>,
     faces: &FaceCommand,
     face_state: Arc<FaceStateStore>,
@@ -375,10 +410,15 @@ async fn stage_other_views(
         let render_state = stored.clone();
         let render_view = view.clone();
         let render_account_dir = space.root.clone();
+        let clock_state = state.clone();
+        let clock_space = Arc::clone(space);
         let drawn = tokio::task::spawn_blocking(move || {
+            let timezone =
+                clock::source_timezone(&clock_state, &clock_space, &render_spec.source_id);
             render_view_frame(
                 &render_faces,
                 &render_account_dir,
+                &timezone,
                 &render_spec,
                 render_state.as_ref(),
                 &render_view,
@@ -426,15 +466,16 @@ async fn stage_other_views(
     }
 }
 
-async fn refresh_loop(
-    state: ServerState,
-    space: std::sync::Arc<AccountSpace>,
-    faces: FaceCommand,
-    face_state: Arc<FaceStateStore>,
-    taps: Arc<TapSignal>,
-    spec: DataCardSpec,
-    refresh: Duration,
-) {
+async fn refresh_loop(job: RefresherJob, refresh: Duration) {
+    let RefresherJob {
+        state,
+        space,
+        faces,
+        face_state,
+        taps,
+        spec,
+        now,
+    } = job;
     tracing::info!(target: "server::data_cards",
         source_id = %spec.source_id,
         kind = %spec.face.kind,
@@ -449,6 +490,8 @@ async fn refresh_loop(
     // The first attempt is immediate, which is what fills a freshly started server's
     // panels instead of leaving them blank for fifteen minutes.
     loop {
+        let started = tokio::time::Instant::now();
+        let calendar = clock::sample(&state, &space, &spec.source_id, now.as_ref()).await;
         let Some(outcome) =
             refresh_once(&state, &space, &faces, &face_state, &spec, tap_count).await
         else {
@@ -459,11 +502,29 @@ async fn refresh_loop(
             RefreshOutcome::Drawn | RefreshOutcome::NeedsAttention(_) => 0,
         };
         let wait = next_attempt(refresh, &outcome, consecutive_failures);
+        let drawn = matches!(outcome, RefreshOutcome::Drawn);
         record_outcome(&space, &spec.source_id, task, outcome);
-        tap_count = tokio::select! {
-            () = tokio::time::sleep(wait) => 0,
-            () = taps.notify.notified() => taps.take().max(1),
-        };
+        let due = tokio::time::Instant::now() + wait;
+        loop {
+            tap_count = tokio::select! {
+                () = tokio::time::sleep_until(due.min(tokio::time::Instant::now() + MIN_REFRESH)) => 0,
+                () = taps.notify.notified() => taps.take().max(1),
+            };
+            if tap_count > 0 || tokio::time::Instant::now() >= due {
+                break;
+            }
+            // No date-face flag exists in contract v1. Check every drawn source;
+            // at most one extra scheduled render per local date (or zone change).
+            // Keep failures on their existing backoff and never spin at midnight.
+            if clock::should_refresh(
+                drawn,
+                started.elapsed(),
+                &calendar,
+                &clock::sample(&state, &space, &spec.source_id, now.as_ref()).await,
+            ) {
+                break;
+            }
+        }
     }
 }
 
@@ -490,6 +551,7 @@ fn notify_image_source_outcome(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
     use crate::data_cards::FaceSpec;
@@ -520,11 +582,190 @@ mod tests {
         Path::new("/test-account")
     }
 
+    struct CalendarWorker {
+        state: ServerState,
+        space: Arc<AccountSpace>,
+        directory: tempfile::TempDir,
+        source: String,
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl CalendarWorker {
+        async fn start(zone: &str, instant: &str) -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let directory = tempfile::tempdir().unwrap();
+            let wrapper = directory.path().join("faces");
+            let quote =
+                |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
+            let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake-faces.sh");
+            std::fs::write(
+                &wrapper,
+                format!(
+                    "#!/bin/sh\nexport DESKMATE_FAKE_FACES_REQUEST_DIR={}\nexec {} \"$@\"\n",
+                    quote(directory.path()),
+                    quote(&fake),
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let state = ServerState::in_memory();
+            let space = test_space(&state);
+            let source = space.image_sources.mint("Calendar").unwrap().id;
+            clock::tests::save_device(&state, &space, "dev-0001", zone, Some(&source));
+            let face_state = Arc::new(FaceStateStore::load(directory.path().join("state.json")));
+            let taps = Arc::new(TapSignal::default());
+            let mut spec = spec("Dubai");
+            spec.source_id.clone_from(&source);
+            spec.refresh_seconds = MAX_REFRESH.as_secs();
+            let mut job = RefresherJob::new(
+                state.clone(),
+                Arc::clone(&space),
+                FaceCommand::program(wrapper),
+                face_state,
+                Arc::clone(&taps),
+                spec,
+            );
+            let wall: chrono::DateTime<Utc> = instant.parse().unwrap();
+            let elapsed = tokio::time::Instant::now();
+            let polls = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::clone(&polls);
+            job.now = Arc::new(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                wall + chrono::Duration::from_std(elapsed.elapsed()).unwrap()
+            });
+            let task =
+                spawn_refresher_with_refresh(&tokio::runtime::Handle::current(), job, MAX_REFRESH);
+            space.data_cards.lock().unwrap().tasks.insert(
+                source.clone(),
+                crate::data_cards::Refresher::new(task, taps),
+            );
+            let worker = Self {
+                state,
+                space,
+                directory,
+                source,
+                polls,
+            };
+            worker.wait_for_draws(1).await;
+            worker
+        }
+
+        fn requests(&self) -> Vec<serde_json::Value> {
+            std::fs::read_to_string(self.directory.path().join("requests.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect()
+        }
+
+        async fn wait_for_draws(&self, count: usize) {
+            Self::until(|| {
+                self.requests().len() == count
+                    && self
+                        .space
+                        .data_cards
+                        .lock()
+                        .unwrap()
+                        .outcomes
+                        .get(&self.source)
+                        .is_some_and(|(outcome, _)| *outcome == RefreshOutcome::Drawn)
+            })
+            .await;
+            self.space
+                .data_cards
+                .lock()
+                .unwrap()
+                .outcomes
+                .remove(&self.source);
+        }
+
+        async fn until(ready: impl Fn() -> bool) {
+            // Keep a task runnable so Tokio cannot auto-advance through the
+            // six-hour timer while the real subprocess is doing blocking I/O.
+            // Only a watchdog for native subprocess work under concurrent test
+            // load. Calendar timing is asserted with the paused Tokio clock,
+            // so this deadline must not impose a three-second latency budget.
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            while !ready() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the running calendar worker did not reach the expected render/poll"
+                );
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+
+    impl Drop for CalendarWorker {
+        fn drop(&mut self) {
+            self.state.shutdown();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn running_worker_refreshes_at_local_midnight_and_saved_zone_change() {
+        // Ahead of UTC and behind UTC, including New Year into a leap year.
+        // The replacement zones share the same local date/offset: that second
+        // refresh must be caused by the saved zone changing, not midnight.
+        for (zone, replacement, instant) in [
+            ("Asia/Tokyo", "Asia/Seoul", "2027-12-31T14:59:30Z"),
+            (
+                "America/Los_Angeles",
+                "America/Vancouver",
+                "2028-01-01T07:59:30Z",
+            ),
+        ] {
+            let worker = CalendarWorker::start(zone, instant).await;
+            tokio::time::advance(Duration::from_secs(29)).await;
+            assert_eq!(
+                worker.requests().len(),
+                1,
+                "no render before midnight or the minimum interval"
+            );
+            tokio::time::advance(Duration::from_secs(31)).await;
+            worker.wait_for_draws(2).await;
+            assert_eq!(worker.requests()[1]["timezone"], zone);
+
+            tokio::time::advance(MIN_REFRESH).await;
+            CalendarWorker::until(|| worker.polls.load(Ordering::SeqCst) >= 4).await;
+            assert_eq!(
+                worker.requests().len(),
+                2,
+                "an unchanged date must not refresh every minute"
+            );
+
+            clock::tests::save_device(
+                &worker.state,
+                &worker.space,
+                "dev-0001",
+                replacement,
+                Some(&worker.source),
+            );
+            tokio::time::advance(Duration::from_secs(59)).await;
+            assert_eq!(worker.requests().len(), 2);
+            tokio::time::advance(Duration::from_secs(1)).await;
+            worker.wait_for_draws(3).await;
+            assert_eq!(worker.requests()[2]["timezone"], replacement);
+            assert!(
+                worker
+                    .requests()
+                    .iter()
+                    .all(|request| request.get("event").is_none()),
+                "no tap caused these refreshes"
+            );
+            tokio::time::advance(MIN_REFRESH).await;
+            CalendarWorker::until(|| worker.polls.load(Ordering::SeqCst) >= 7).await;
+            assert_eq!(worker.requests().len(), 3);
+        }
+    }
+
     #[test]
     fn a_rendered_png_becomes_the_frame_a_producers_post_would() {
         let rendered = render_frame(
             &faces_package::fake(),
             test_account_dir(),
+            "UTC",
             &spec("Dubai"),
             None,
             0,
@@ -548,6 +789,7 @@ mod tests {
                 render_frame(
                     &faces_package::fake(),
                     test_account_dir(),
+                    "UTC",
                     &spec(steer),
                     None,
                     0,
@@ -563,6 +805,7 @@ mod tests {
             render_frame(
                 &faces_package::fake(),
                 test_account_dir(),
+                "UTC",
                 &spec("refuse-as-configuration"),
                 None,
                 0,
@@ -573,12 +816,58 @@ mod tests {
             render_frame(
                 &faces_package::fake(),
                 test_account_dir(),
+                "UTC",
                 &spec("refuse-as-transient"),
                 None,
                 0,
             ),
             Err(RefreshFailure::Transient(_))
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn owner_timezone_reaches_scheduled_tap_and_staged_renders() {
+        let directory = tempfile::tempdir().unwrap();
+        let face_state = Arc::new(FaceStateStore::load(directory.path().join("state.json")));
+        let state = ServerState::in_memory();
+        let space = test_space(&state);
+        for zone in ["Asia/Tokyo", "America/Los_Angeles"] {
+            clock::tests::save_device(&state, &space, "dev-0001", zone, None);
+            for taps in [0, 2] {
+                let outcome = refresh_once(
+                    &state,
+                    &space,
+                    &faces_package::fake(),
+                    &face_state,
+                    &spec("echo-the-request"),
+                    taps,
+                )
+                .await
+                .unwrap();
+                let RefreshOutcome::Retrying(message) = outcome else {
+                    panic!("echo request")
+                };
+                let request: serde_json::Value = serde_json::from_str(&message).unwrap();
+                assert_eq!(request["timezone"], zone);
+            }
+            let error = render_view_frame(
+                &faces_package::fake(),
+                &space.root,
+                &clock::source_timezone(&state, &space, "source"),
+                &spec("echo-the-request"),
+                None,
+                "page-1",
+            )
+            .err()
+            .unwrap();
+            let RefreshFailure::Transient(message) = error else {
+                panic!("echo request")
+            };
+            let request: serde_json::Value = serde_json::from_str(&message).unwrap();
+            assert_eq!(request["timezone"], zone);
+            assert_eq!(request["view"], "page-1");
+        }
+        state.shutdown();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -827,6 +1116,7 @@ mod tests {
             render_frame(
                 &faces_package::fake(),
                 test_account_dir(),
+                "UTC",
                 &spec(steer),
                 None,
                 0,

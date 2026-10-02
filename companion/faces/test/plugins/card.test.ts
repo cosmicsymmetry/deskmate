@@ -1,4 +1,5 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
+import { Resvg } from "@resvg/resvg-js";
 import { CardError, cardToSvg } from "../../src/plugins/card";
 import { pngFromSvg } from "../../src/kit/raster";
 
@@ -184,15 +185,48 @@ describe("cardToSvg", () => {
     ).rejects.toThrow(CardError);
   });
 
-  test("refuses an SVG card whose declared size is not the panel's", async () => {
-    await expect(
-      cardToSvg({ svg: '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"></svg>' }),
-    ).rejects.toThrow(/448x368/);
-    await expect(
-      cardToSvg({
-        svg: '<svg xmlns="http://www.w3.org/2000/svg" width="448" height="200"></svg>',
-      }),
-    ).rejects.toThrow(/448x368/);
+  test("the shared raster boundary refuses an SVG card with the wrong actual size", async () => {
+    for (const dimensions of [
+      'width="100" height="100"',
+      'width="448" height="200"',
+      'viewBox="0 0 100 100"',
+      'width="448pt" height="368pt"',
+    ]) {
+      const svg = await cardToSvg({
+        svg: `<svg xmlns="http://www.w3.org/2000/svg" ${dimensions}/>`,
+      });
+      expect(() => pngFromSvg(svg)).toThrow(/448x368/);
+    }
+  });
+
+  test("the raster boundary checks dimensions before allocating a huge pixel buffer", () => {
+    const render = spyOn(Resvg.prototype, "render").mockImplementation(() => {
+      throw new Error("pixel allocation must not be reached");
+    });
+    try {
+      expect(() =>
+        pngFromSvg('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100000 100000"/>'),
+      ).toThrow(/must be exactly 448x368/);
+      expect(render).not.toHaveBeenCalled();
+    } finally {
+      render.mockRestore();
+    }
+  });
+
+  test("the raster boundary validates the returned image, not just the parsed SVG", () => {
+    const render = spyOn(Resvg.prototype, "render").mockReturnValue({
+      width: 100,
+      height: 100,
+      pixels: Buffer.alloc(0),
+      asPng: () => Buffer.alloc(0),
+    });
+    try {
+      expect(() =>
+        pngFromSvg('<svg xmlns="http://www.w3.org/2000/svg" width="448" height="368"/>'),
+      ).toThrow(/picture is 100x100/);
+    } finally {
+      render.mockRestore();
+    }
   });
 
   test("prefers svg over layout when a card sets both", async () => {

@@ -10,61 +10,102 @@ your plugin; hosted release is a separate operator action.
 Read [contract v1](contract-v1.md) first. It describes the actual sandbox, manifest,
 request and rendering behavior, including known limitations.
 
-Add a folder at `companion/faces/plugins/<id>/` with:
-
-- `plugin.json`: unique stable id matching the folder, version, author attribution,
-  description, settings, requested refresh cadence, hosts and secrets.
-- `index.js`: sandbox-compatible `plan` and `render` exports. No imports, filesystem
-  access or direct network calls. `plan({})` must work during discovery.
-- `README.md`: what it displays, settings, data sources, date/time conventions,
-  credentials if required, requested cadence and known limitations.
-
-Use `companion/faces/plugins/github-stats/` as a working example. Check for id
-collisions with other plugins and built-in faces. A plugin supplies a picture; it
-does not add a card kind or change the device schema or protocol.
-
-Include meaningful tests under `companion/faces/test/plugins/`. Exercise the real
-sandbox with fixed inputs and recorded responses. Cover the behavior a reviewer
-could otherwise misunderstand: date boundaries, missing data, request failure,
-credential absence, and declared interactions, as applicable. Never use live
-credentials or personal API responses in a test or preview.
-
-## Verify and show the result
-
-From `companion/faces/`, install the pinned dependencies and run:
+From `companion/faces/`, install dependencies and scaffold a plugin:
 
 ```sh
 bun install --frozen-lockfile
+bun run plugin:new your-plugin-id
+bun run plugin:check your-plugin-id
+```
+
+Use lowercase letters, digits and hyphens for the id. The generator refuses existing
+folders and built-in names. It creates `plugins/<id>/plugin.json`, `index.js`,
+`index.test.js` and a README with the submission template's sections. The sample
+already renders a calendar date. Replace its display, description and attribution;
+keep `plan({})` safe for discovery. A plugin supplies a picture, never a card kind.
+
+The executable `index.js` runs in QuickJS: no imports, direct networking, filesystem,
+environment or `Intl`. Only `plan` declares requests. Tests and preview fixtures run
+on the author side and must contain public, synthetic or sanitized data only.
+Add meaningful sandbox tests for date boundaries, missing data, API failures,
+credential absence and taps, as applicable. Tests may live beside the plugin or in
+`test/plugins/`; the generated test demonstrates the real runtime.
+
+## Verify and show the result
+
+```sh
+bun run plugin:check your-plugin-id
 bun test
 bun run check
 bun run lint
 bun run format:check
-bun run src/main.ts describe
 ```
 
-Render through the real entrypoint, substituting your id and settings:
+The checker uses the real manifest parser, discovery's QuickJS `plan({})` probe,
+server `renderRequest` entrypoint, and rasterizer. It writes to
+`out/plugins/<id>/` (or `<directory>/<id>/` with `--out <directory>`):
 
-```sh
-echo '{"kind":"your-plugin-id","settings":{}}' \
-  | bun run src/main.ts render > /tmp/deskmate-plugin-preview.json
+- A **448×368 PNG** and a **0.4× desk-scale PNG**, scaled from that same rendered frame.
+- `report.json` listing errors, plugin logs and runtime limit notices for each case.
+
+It exits nonzero for manifest, discovery or render failures and still attempts every
+case. It reports limits reached during those cases, including dropped oversized
+state, shortened logs and exhausted planning/request budgets. A passing check says
+nothing about paths the fixtures did not exercise. Inspect both PNG sizes yourself.
+
+**Network is always disabled; stored secrets are never read**, even when your shell
+has a server config directory. A request without a recorded reply becomes the normal
+failed-request answer and is listed in the report. This exercises your fallback.
+For useful success-path evidence, add `plugins/<id>/check.json`, for example:
+
+```json
+{
+  "cases": [
+    {
+      "name": "New Year ahead of UTC",
+      "now": "2027-12-31T15:00:00Z",
+      "timezone": "Asia/Tokyo",
+      "settings": {},
+      "responses": [
+        {
+          "url": "https://api.example.com/value",
+          "status": 200,
+          "body": "{\"value\":42}"
+        }
+      ]
+    }
+  ]
+}
 ```
 
-The response is a JSON envelope, not raw PNG. Decode its `png` field as base64
-and inspect the resulting image at 448×368 and at roughly 40% scale. See the
-[contract's local testing instructions](contract-v1.md#testing-a-plugin-locally).
-Provide a preview image and the command/fixtures that reproduce it in the PR;
-a small committed sample under the plugin folder is acceptable. A local image
-path alone is not accessible evidence for a GitHub reviewer.
+Omit `responses` for a plugin without requests. Replies match the exact URL and
+method (`GET` by default); repeated requests receive the same recorded reply.
+Use `base64` instead of `body` for a binary response. The real host response decoder
+still enforces its body limit. `settings` overlays manifest defaults; optional
+`state` and `event` exercise saved state and taps. Without a fixture file, the
+checker renders once at `2026-10-01T12:00:00Z` in UTC with default settings and no
+recorded replies. Case names are labels, never output paths.
 
-State exactly what was checked: sandbox render, PNG inspection, server frame store,
-browser flow or physical panel. Those are different observations. A render succeeding
-does not establish that a panel received it.
+For every PR changing `companion/faces/plugins/**`, the **plugin-previews** CI job
+checks every changed plugin and uploads `plugin-previews-<head-sha>` with the PNGs
+and reports, even when a case fails. Open the PR's **ci** run and download that
+artifact. Fully removed folders are listed in `removed.json`; no render is possible
+for deleted code. This job needs no secrets and works for fork PRs. GitHub may still
+require a maintainer to approve a first-time contributor's workflow run.
 
-The current plugin runtime uses the host's timezone unless a caller explicitly
-supplies one; the server does not currently forward the owner's configured timezone.
-Date-sensitive plugins must disclose this. Requested refresh cadence is clamped to
-the scheduler's current range, and a raster frame does not tick between refreshes.
-Do not promise exact midnight updates.
+Include an accessible preview (a PR attachment or committed sanitized sample) and
+link the CI run/artifact. Artifacts expire after 14 days, so use a committed sample
+when evidence must survive that. State exactly what was checked: sandbox render,
+PNG inspection, server frame store, browser flow or physical panel. Those are
+different observations; a rendered PNG does not establish delivery to a panel.
+
+Date-sensitive faces receive the owner's configured timezone. Since image sources
+are shared per account and preferences are per device, the first active consuming
+device in device-id order supplies it; before attachment, the first active saved
+config supplies it, otherwise UTC. Successful faces get a date/zone-change check
+once a minute; allow roughly 60 seconds plus render/delivery time after midnight.
+Failures can stay stale longer. Ordinary cadence remains clamped to 60 seconds
+through six hours. A raster frame never ticks by itself.
 
 ## Open the pull request
 

@@ -27,12 +27,14 @@ use crate::{
     build_analog_clock_scene, build_digital_clock_scene, build_progress_ring_scene,
 };
 
+mod asset_cache;
 mod link;
 mod scene;
 mod snapshot;
 mod sync;
 mod timers;
 
+use asset_cache::{prepare_asset_transfer, reconcile_assets};
 pub use link::*;
 pub use scene::*;
 pub use snapshot::*;
@@ -83,7 +85,7 @@ impl Default for RuntimeOptions {
 }
 
 pub struct RuntimeHandle {
-    sender: SyncSender<RuntimeCommand>,
+    sender: Arc<SyncSender<RuntimeCommand>>,
     worker: Mutex<Option<RuntimeWorker>>,
     publisher: Arc<SnapshotPublisher>,
     diagnostics: Arc<RuntimeDiagnosticCounters>,
@@ -115,7 +117,7 @@ impl RuntimeHandle {
 
     pub fn start_with_ports(
         config: AppConfig,
-        device: Box<dyn RuntimeDevice>,
+        mut device: Box<dyn RuntimeDevice>,
         options: RuntimeOptions,
         image_source_host: Option<Box<dyn ImageSourceHost>>,
         tap_sink: Option<Arc<dyn CardTapSink>>,
@@ -135,6 +137,15 @@ impl RuntimeHandle {
             diagnostics: Arc::clone(&diagnostics),
         });
         let (sender, receiver) = mpsc::sync_channel(options.command_capacity.max(1));
+        let sender = Arc::new(sender);
+        let event_sender = Arc::downgrade(&sender);
+        device.set_event_waker(Arc::new(move || {
+            // A full queue already wakes the worker. Never block the socket
+            // reader or replace the event queue's own bounded delivery policy.
+            if let Some(sender) = event_sender.upgrade() {
+                let _ = sender.try_send(RuntimeCommand::DeviceEventsReady);
+            }
+        }));
         let worker_publisher = Arc::clone(&publisher);
         let worker_diagnostics = Arc::clone(&diagnostics);
         let worker_inputs = RuntimeWorkerInputs {
@@ -415,6 +426,8 @@ struct WorkerState {
     /// volatile ones do not, which is why this is rebuilt from the keep-set on
     /// every reconcile rather than accumulated.
     confirmed_resident_assets: BTreeSet<[u8; protocol::ASSET_DIGEST_LEN]>,
+    /// Assets in the last accepted scene; protect them until another scene lands.
+    live_scene_assets: BTreeSet<[u8; protocol::ASSET_DIGEST_LEN]>,
     /// When this runtime last asked the device to reclaim replaced assets.
     /// `None` until the first pass, which always releases.
     last_asset_release: Option<Instant>,
@@ -477,6 +490,7 @@ impl WorkerState {
             ownership_refused: false,
             next_scene_revision: 0,
             confirmed_resident_assets: BTreeSet::new(),
+            live_scene_assets: BTreeSet::new(),
             last_asset_release: None,
             next_connect: now,
             last_published: None,
@@ -823,6 +837,7 @@ fn process_command(
         .commands_processed
         .fetch_add(1, Ordering::Relaxed);
     match command {
+        RuntimeCommand::DeviceEventsReady => {}
         RuntimeCommand::ApplyConfig { config, reply } => {
             let now = Instant::now();
             state.replace_config(config, now, scheduler);
@@ -853,9 +868,15 @@ fn process_command(
         }
         RuntimeCommand::PushScene { push, reply } => {
             let result = if state.connected {
-                device.push_scene(push).map_err(|error| {
-                    runtime_command_device_error(state, &error, reconnect_interval)
-                })
+                let assets = render_negotiation::analyze_scene(&push.scene).asset_digests;
+                device
+                    .push_scene(push)
+                    .map(|()| {
+                        state.live_scene_assets = assets;
+                    })
+                    .map_err(|error| {
+                        runtime_command_device_error(state, &error, reconnect_interval)
+                    })
             } else {
                 Err(RuntimeError::DeviceDisconnected)
             };
@@ -931,9 +952,7 @@ fn reclaim_superseded_frames(
     device: &mut dyn RuntimeDevice,
     desired: &[DesiredAsset],
 ) {
-    if let Ok(keep_set) =
-        AssetSync::reconcile_releasing(device, desired, state.device.capability_bits(), true)
-    {
+    if let Ok(keep_set) = reconcile_assets(state, device, desired, true) {
         state.last_asset_release = Some(Instant::now());
         state.confirmed_resident_assets = keep_set.into_iter().collect();
     }
@@ -1011,6 +1030,18 @@ fn apply_image_source_update(
         return Ok(());
     }
 
+    // A staged selection already has a confirmed digest on this connection.
+    // Even an already-present AssetBegin costs a device round trip; the scene
+    // alone is enough. Keep the authoritative host checks above this shortcut.
+    if state.confirmed_resident_assets.contains(&digest) {
+        clear_asset_sync_refusals(state);
+        if visible_picture_card_id.is_some() {
+            state.active_scene_dirty = true;
+            push_active_scene(state, device, reconnect_interval);
+        }
+        return Ok(());
+    }
+
     // EVERY picture frame is volatile, not just the one on the glass.
     //
     // A durable pass costs an `AssetCommit` that writes flash and then an
@@ -1032,7 +1063,9 @@ fn apply_image_source_update(
     if state.device.capability_bits() & protocol::CAPABILITY_VOLATILE_ASSETS != 0
         && let Some(frame) = desired.iter().find(|asset| asset.digest == digest)
     {
-        match AssetSync::transfer_volatile(device, frame, state.device.capability_bits()) {
+        match prepare_asset_transfer(state, device, &desired).and_then(|()| {
+            AssetSync::transfer_volatile(device, frame, state.device.capability_bits())
+        }) {
             Ok(()) => {
                 // The device holds it now, in PSRAM. Without this the scene gate
                 // would refuse to name the digest and the picture would wait for
@@ -1045,10 +1078,9 @@ fn apply_image_source_update(
                     state.active_scene_dirty = true;
                     push_active_scene(state, device, reconnect_interval);
                 }
-                // Reclaim AFTER the picture has landed, never before it, and only
-                // when the pool is filling: a release still runs the flash store's
-                // compaction planner, which is seconds while any durable record
-                // remains. See `volatile_pool_is_pressed`.
+                // Replacement room was secured before the upload. Reconcile
+                // other changed views after this scene lands; each pass keeps
+                // the last accepted scene alive while reclaiming obsolete frames.
                 if volatile_pool_is_pressed(state) {
                     reclaim_superseded_frames(state, device, &desired);
                 }
@@ -1071,12 +1103,7 @@ fn apply_image_source_update(
     // device-wide KEEP-SET, so reconciling only this source would delete every
     // other picture digest omitted from the partial list.
     let release = claim_asset_release(state, Instant::now());
-    let keep_set = match AssetSync::reconcile_releasing(
-        device,
-        &desired,
-        state.device.capability_bits(),
-        release,
-    ) {
+    let keep_set = match reconcile_assets(state, device, &desired, release) {
         Ok(keep_set) => keep_set,
         Err(error) => {
             let message = error.to_string();
@@ -1107,6 +1134,7 @@ fn attempt_connect(
     now: Instant,
     options: &RuntimeOptions,
 ) {
+    state.confirmed_resident_assets.clear();
     state.device.connection = ConnectionState::Connecting;
     match device.connect() {
         Ok(connection) => {

@@ -135,6 +135,7 @@ describe("runPlugin", () => {
     };
     const result = await runPlugin({ ...base, source, request });
     expect(calls).toBe(3);
+    expect(result.log.join(" ")).toContain("3-round limit");
     expect(result.svg).toContain("3");
   });
 
@@ -246,8 +247,9 @@ describe("runPlugin", () => {
 
     test("a card over one of our own caps", async () => {
       const source = `export function plan(){ return []; }
-        export function render(){ return { svg: '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"></svg>' }; }`;
+        export function render(){ return { svg: '<svg>' + ' '.repeat(512 * 1024) + '</svg>' }; }`;
       await expect(runPlugin({ ...base, source })).rejects.toThrow(ConfigurationError);
+      await expect(runPlugin({ ...base, source })).rejects.toThrow(/512 KB/);
     });
   });
 

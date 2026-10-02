@@ -351,6 +351,9 @@ pub(super) fn execute_native_push(
     state.active_scene_dirty = false;
     match device.push_scene(push) {
         Ok(()) => {
+            state
+                .live_scene_assets
+                .clone_from(&requirements.asset_digests);
             clear_scene_refusal(state, &card_id);
         }
         Err(error) => {
@@ -411,8 +414,7 @@ pub(super) fn ensure_durable_assets_for_scene(
         return Err(AssetSyncError::MissingRequiredAsset { digest: *digest });
     }
     let release = claim_asset_release(state, Instant::now());
-    let keep_set =
-        AssetSync::reconcile_releasing(device, &desired, state.device.capability_bits(), release)?;
+    let keep_set = reconcile_assets(state, device, &desired, release)?;
     state.confirmed_resident_assets = keep_set.into_iter().collect();
     Ok(())
 }

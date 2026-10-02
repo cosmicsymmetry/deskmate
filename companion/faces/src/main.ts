@@ -22,7 +22,6 @@
 import {
   ConfigurationError,
   type FaceDefinition,
-  type RenderContext,
   type Settings,
   type TapEvent,
   type ViewId,
@@ -203,6 +202,11 @@ async function tap(input: string): Promise<string> {
 
 async function main(): Promise<number> {
   const verb = process.argv[2];
+  if (verb === "tap-worker") {
+    const { serveTapWorker } = await import("./tap-worker");
+    await serveTapWorker(tap);
+    return 0;
+  }
   if (verb === "describe") {
     // Discovery verifies each plugin folder by running its `plan()` in the sandbox
     // (`plugins/discovery.ts`), and a render that resolves to a plugin runs its

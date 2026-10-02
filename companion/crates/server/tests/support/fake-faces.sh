@@ -1,7 +1,8 @@
 #!/bin/sh
 # A stand-in for `bun run companion/faces/src/main.ts`, so the Rust suite exercises the
 # real subprocess seam -- spawn, stdin, stdout, exit codes, timeout -- without needing
-# Bun or the network. It speaks the same two verbs. `render` is steered by words in
+# Bun or the network. It speaks the four public verbs, without `tap-worker`.
+# `render` is steered by words in
 # the settings it is handed, which is how a test asks for a particular failure.
 here=$(dirname "$0")
 case "$1" in

@@ -1,4 +1,4 @@
-//! The faces package, seen from the server: a program that speaks two verbs.
+//! The faces package, seen from the server: four public verbs and an optional private worker.
 //!
 //! The faces themselves -- what they fetch and how they draw -- live in
 //! `companion/faces/` as TypeScript. The server runs that package as a subprocess:
@@ -10,6 +10,8 @@
 //!   legacy package may still write a bare PNG. Either frame goes through
 //!   [`crate::image_ingest::canonical_frame_from_png`] exactly as an external
 //!   producer's POST would. The server is just another producer.
+//! - `views` lists stageable views; `tap` selects a view and state without drawing.
+//!   The production package also offers private `tap-worker` IPC for warm selection.
 //!
 //! # Exit codes are the error taxonomy
 //!
@@ -57,7 +59,6 @@ mod selector;
 /// not a slow API -- the package applies its own tighter request timeout.
 const RENDER_TIMEOUT: Duration = Duration::from_secs(45);
 const DESCRIBE_TIMEOUT: Duration = Duration::from_secs(15);
-/// The ingest route's own body limit: a face may not be larger than a producer's.
 /// The cap on `render`'s stdout. It bounds the ENVELOPE, not the frame inside it:
 /// base64 inflates a PNG by a third, so the largest frame this admits is about
 /// 1.5 MB. The biggest face measured off-panel is 61 KB, so the headroom is real.
@@ -97,7 +98,7 @@ impl FaceCommand {
         }
     }
 
-    /// Any program that speaks the two verbs. The test suites use a shell script.
+    /// Any program that speaks the four public verbs. Tests use a shell script.
     #[must_use]
     pub fn program(program: PathBuf) -> Self {
         Self {

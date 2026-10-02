@@ -46,7 +46,9 @@ phase-name windows, UTC dates, year rollover and the schematic hemisphere view.
   all ten desk images; independently reran the focused suite and checked the
   orbital terms against the original reference. Documentation review also passed;
   no design-system changes are needed.
-- [ ] Public PR with reproducible evidence and CI results.
+- [x] Public [PR #16](https://github.com/cosmicsymmetry/deskmate/pull/16) includes
+  reproducible previews and the review record. CI is pending on the submitted head;
+  local gates above are complete.
 
 No physical panel observation or production deployment is claimed. Existing
 PRODUCT.md/ DESIGN.md contain older product prose; this local card addition does

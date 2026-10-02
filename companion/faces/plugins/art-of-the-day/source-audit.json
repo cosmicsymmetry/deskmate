@@ -1,0 +1,160 @@
+{
+  "checked": "2026-10-02",
+  "method": "GET every image; exact URL and status verified, no redirects. Met object JSON or official Ghibli gallery HTML verified before image requests.",
+  "images": [
+    {
+      "id": 45434,
+      "source": "https://www.metmuseum.org/art/collection/search/45434",
+      "image": "https://images.metmuseum.org/CRDImages/as/web-large/DP130155.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 166452,
+      "sha256": "b76ccf0710b8e4b32e778a45e5398a0cf4777994523116f994a0430f4ee6a841",
+      "metadata": "https://collectionapi.metmuseum.org/public/collection/v1/objects/45434",
+      "isPublicDomain": true
+    },
+    {
+      "id": 55739,
+      "source": "https://www.metmuseum.org/art/collection/search/55739",
+      "image": "https://images.metmuseum.org/CRDImages/as/web-large/DP140974.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 93255,
+      "sha256": "9f878a55ebc9bed8efdbae6d9573c6ea5c5ac6d19508e319002c615972675449",
+      "metadata": "https://collectionapi.metmuseum.org/public/collection/v1/objects/55739",
+      "isPublicDomain": true
+    },
+    {
+      "id": 56683,
+      "source": "https://www.metmuseum.org/art/collection/search/56683",
+      "image": "https://images.metmuseum.org/CRDImages/as/web-large/DP146846.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 55251,
+      "sha256": "c2dbf1f3608aee1c572832f688adb04d247a328d2c6c466a6afda660b21865e7",
+      "metadata": "https://collectionapi.metmuseum.org/public/collection/v1/objects/56683",
+      "isPublicDomain": true
+    },
+    {
+      "id": 56906,
+      "source": "https://www.metmuseum.org/art/collection/search/56906",
+      "image": "https://images.metmuseum.org/CRDImages/as/web-large/DP123209.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 93104,
+      "sha256": "93f2a002f67d53df9542d67157201ed9499828ace3641adc44c4535df1f1c6f1",
+      "metadata": "https://collectionapi.metmuseum.org/public/collection/v1/objects/56906",
+      "isPublicDomain": true
+    },
+    {
+      "id": 45294,
+      "source": "https://www.metmuseum.org/art/collection/search/45294",
+      "image": "https://images.metmuseum.org/CRDImages/as/web-large/DP123224.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 106003,
+      "sha256": "1a89135d000e69b31fdda2aaf99e611055c6a94b41b0b4bfee4d34f9c3f3024d",
+      "metadata": "https://collectionapi.metmuseum.org/public/collection/v1/objects/45294",
+      "isPublicDomain": true
+    },
+    {
+      "id": 436535,
+      "source": "https://www.metmuseum.org/art/collection/search/436535",
+      "image": "https://images.metmuseum.org/CRDImages/ep/web-large/DP-42549-001.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 221383,
+      "sha256": "af0e3486621c210b54932d055294051b5601aa3362af4b84ab97e2831f8163bc",
+      "metadata": "https://collectionapi.metmuseum.org/public/collection/v1/objects/436535",
+      "isPublicDomain": true
+    },
+    {
+      "id": 435973,
+      "source": "https://www.metmuseum.org/art/collection/search/435973",
+      "image": "https://images.metmuseum.org/CRDImages/ep/web-large/DP332568.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 63038,
+      "sha256": "c8b7f7450210b3254ba70e4948d228557b3e7ab71a365b9bb1048bd2a22f43da",
+      "metadata": "https://collectionapi.metmuseum.org/public/collection/v1/objects/435973",
+      "isPublicDomain": true
+    },
+    {
+      "id": 435964,
+      "source": "https://www.metmuseum.org/art/collection/search/435964",
+      "image": "https://images.metmuseum.org/CRDImages/ep/web-large/DP-16064-001.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 110933,
+      "sha256": "0871ea42c5ba343150727301433f5adf5663bd580e950ca8528f29dc84ec8234",
+      "metadata": "https://collectionapi.metmuseum.org/public/collection/v1/objects/435964",
+      "isPublicDomain": true
+    },
+    {
+      "id": 435983,
+      "source": "https://www.metmuseum.org/art/collection/search/435983",
+      "image": "https://images.metmuseum.org/CRDImages/ep/web-large/DP-14936-055.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 89437,
+      "sha256": "6c4c396032cb2131a2b2105adb913ea5c70623a330943d12dbbb562a0cc42a58",
+      "metadata": "https://collectionapi.metmuseum.org/public/collection/v1/objects/435983",
+      "isPublicDomain": true
+    },
+    {
+      "id": 436965,
+      "source": "https://www.metmuseum.org/art/collection/search/436965",
+      "image": "https://images.metmuseum.org/CRDImages/ep/web-large/DP-25465-001.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 138552,
+      "sha256": "91f80cb6421e6d63912ecfa0afb67dcb944498f58aec3f905e72119e20801ca7",
+      "metadata": "https://collectionapi.metmuseum.org/public/collection/v1/objects/436965",
+      "isPublicDomain": true
+    },
+    {
+      "id": 436532,
+      "source": "https://www.metmuseum.org/art/collection/search/436532",
+      "image": "https://images.metmuseum.org/CRDImages/ep/web-large/DT1502_cropped2.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 299280,
+      "sha256": "03e6bb58feb2e091dbd56adb601b3fccba17386402d5676c994b806058a797da",
+      "metadata": "https://collectionapi.metmuseum.org/public/collection/v1/objects/436532",
+      "isPublicDomain": true
+    },
+    {
+      "id": 435882,
+      "source": "https://www.metmuseum.org/art/collection/search/435882",
+      "image": "https://images.metmuseum.org/CRDImages/ep/web-large/DT47.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 89209,
+      "sha256": "0ec6f1ae08cbcf6eceffb729759c21051fc061840146b97279875fcccaa1cc22",
+      "metadata": "https://collectionapi.metmuseum.org/public/collection/v1/objects/435882",
+      "isPublicDomain": true
+    },
+    {
+      "id": 436524,
+      "source": "https://www.metmuseum.org/art/collection/search/436524",
+      "image": "https://images.metmuseum.org/CRDImages/ep/web-large/DP-41223-001.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 208766,
+      "sha256": "e84f82f453c52151d3a28ef22a22faeefdd5dda51f656c4b089c4b88dab8b508",
+      "metadata": "https://collectionapi.metmuseum.org/public/collection/v1/objects/436524",
+      "isPublicDomain": true
+    },
+    {
+      "id": 436105,
+      "source": "https://www.metmuseum.org/art/collection/search/436105",
+      "image": "https://images.metmuseum.org/CRDImages/ep/web-large/DP-13139-001.jpg",
+      "httpStatus": 200,
+      "redirected": false,
+      "bytes": 120447,
+      "sha256": "c6795036db3547c886d248ab7c05bdb9878e9ae6d7a32a8f3f201a6a63ccdc61",
+      "metadata": "https://collectionapi.metmuseum.org/public/collection/v1/objects/436105",
+      "isPublicDomain": true
+    }
+  ]
+}

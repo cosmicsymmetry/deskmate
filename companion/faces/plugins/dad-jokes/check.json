@@ -1,0 +1,28 @@
+{
+  "cases": [
+    {
+      "name": "Recorded live source: October 2",
+      "now": "2026-10-02T12:00:00Z",
+      "timezone": "UTC",
+      "responses": [
+        {
+          "url": "https://icanhazdadjoke.com/",
+          "status": 200,
+          "body": "{\"id\": \"RZv4h3gV0g\", \"joke\": \"Is the pool safe for diving? It deep ends.\", \"status\": 200}"
+        }
+      ]
+    },
+    {
+      "name": "Longer recorded joke",
+      "now": "2026-10-02T12:00:00Z",
+      "timezone": "UTC",
+      "responses": [
+        {
+          "url": "https://icanhazdadjoke.com/",
+          "status": 200,
+          "body": "{\"id\": \"0189hNRf2g\", \"joke\": \"I'm tired of following my dreams. I'm just going to ask them where they are going and meet up with them later.\"}"
+        }
+      ]
+    }
+  ]
+}

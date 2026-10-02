@@ -1,0 +1,21 @@
+{
+  "api": 1,
+  "version": "1.0.0",
+  "author": "Deskmate contributors",
+  "secrets": [],
+  "refreshSeconds": 21600,
+  "id": "calvin-and-hobbes",
+  "label": "Calvin and Hobbes",
+  "description": "Display supplied official Calvin and Hobbes image URLs. Requires your authorized strip URLs; no automatic archive.",
+  "hosts": ["assets.amuniversal.com", "featureassets.gocomics.com"],
+  "fields": [
+    {
+      "type": "text",
+      "key": "strips",
+      "label": "Official image URLs (up to 8, space separated)",
+      "placeholder": "https://featureassets.gocomics.com/assets/IMAGE_ID",
+      "default": ""
+    }
+  ],
+  "tap": "Tap to cycle your supplied strips. A single URL refreshes the same strip."
+}

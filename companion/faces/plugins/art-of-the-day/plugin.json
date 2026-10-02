@@ -1,0 +1,73 @@
+{
+  "api": 1,
+  "id": "art-of-the-day",
+  "version": "1.0.0",
+  "label": "Art of the Day",
+  "description": "Public-domain art from The Met: Japanese prints, landscapes and paintings. Tap for the next work.",
+  "author": "Deskmate contributors",
+  "hosts": [
+    "collectionapi.metmuseum.org",
+    "images.metmuseum.org"
+  ],
+  "secrets": [],
+  "fields": [
+    {
+      "type": "enum",
+      "key": "collection",
+      "label": "Collection",
+      "default": "all",
+      "options": [
+        {
+          "value": "all",
+          "label": "All art"
+        },
+        {
+          "value": "prints",
+          "label": "Japanese prints"
+        },
+        {
+          "value": "landscapes",
+          "label": "Landscapes"
+        },
+        {
+          "value": "paintings",
+          "label": "Paintings"
+        }
+      ]
+    },
+    {
+      "type": "enum",
+      "key": "change",
+      "label": "Change image",
+      "default": "daily",
+      "options": [
+        {
+          "value": "daily",
+          "label": "Each day"
+        },
+        {
+          "value": "shuffle",
+          "label": "Shuffle each refresh"
+        }
+      ]
+    },
+    {
+      "type": "enum",
+      "key": "framing",
+      "label": "Framing",
+      "default": "fit",
+      "options": [
+        {
+          "value": "fit",
+          "label": "Show entire image"
+        },
+        {
+          "value": "fill",
+          "label": "Fill image area (crop)"
+        }
+      ]
+    }
+  ],
+  "refreshSeconds": 21600,
+  "tap": "Next artwork. Fetches a new image before updating the panel."
+}

@@ -47,9 +47,25 @@ phase-name windows, UTC dates, year rollover and the schematic hemisphere view.
   orbital terms against the original reference. Documentation review also passed;
   no design-system changes are needed.
 - [x] Public [PR #16](https://github.com/cosmicsymmetry/deskmate/pull/16) includes
-  reproducible previews and the review record. CI is pending on the submitted head;
-  local gates above are complete.
+  reproducible previews and the review record. All six CI jobs passed on submitted
+  head `4252e38` ([run](https://github.com/cosmicsymmetry/deskmate/actions/runs/36992891706));
+  no skipped jobs. All 20 Linux artifact PNGs matched the reviewed local samples.
 
-No physical panel observation or production deployment is claimed. Existing
-PRODUCT.md/ DESIGN.md contain older product prose; this local card addition does
-not revise those unrelated contracts or change the established visual system.
+## Merge and deployment
+
+The owner authorized “merge and deploy” on 2026-10-02. PR #16 merged as
+`122faf7c8ed3a62961f33a8a6701c4658dfa3a45`; that clean merged revision shipped via
+`deploy.sh --faces-only` at **2026-10-02 10:22:16 UTC**. Before shipping, ancestry
+checks confirmed it contains every live component revision (`424c8a7`, A/B/C1/D
+history); Track H's schema/wire lock is preserved and this release crosses neither.
+
+The deployment's full faces checks passed locally and on the VM. The installed
+catalog exposes Moon Phase and its Northern/Southern setting at a 900-second
+requested cadence. Both settings rendered distinct 448×368 PNGs through the
+installed entrypoint; those server outputs were inspected. The server stayed active
+with the same process, web/binary stayed at `424c8a7`, and HTTP checks returned 200
+for the app and the expected 401 for unauthenticated devices.
+
+No physical panel observation is claimed. Existing PRODUCT.md/DESIGN.md contain
+older product prose; this local card addition does not revise those unrelated
+contracts or change the established visual system.

@@ -14,31 +14,24 @@ export interface NowContext {
 }
 
 export function buildNow(instant: Date, timezone: string): NowContext {
+  const partsIn = (zone: string) =>
+    new Intl.DateTimeFormat("en-GB", {
+      timeZone: zone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      weekday: "short",
+      hour12: false,
+    }).formatToParts(instant);
   let parts: Intl.DateTimeFormatPart[];
   let zone = timezone;
   try {
-    parts = new Intl.DateTimeFormat("en-GB", {
-      timeZone: timezone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      weekday: "short",
-      hour12: false,
-    }).formatToParts(instant);
+    parts = partsIn(timezone);
   } catch {
     zone = "UTC";
-    parts = new Intl.DateTimeFormat("en-GB", {
-      timeZone: "UTC",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      weekday: "short",
-      hour12: false,
-    }).formatToParts(instant);
+    parts = partsIn(zone);
   }
   const at = (type: string): string => parts.find((part) => part.type === type)?.value ?? "";
   const [year, month, day] = [Number(at("year")), Number(at("month")), Number(at("day"))];

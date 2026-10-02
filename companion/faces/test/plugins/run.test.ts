@@ -111,6 +111,69 @@ describe("runPlugin", () => {
     expect(first).toContain("second line");
   });
 
+  test.each([
+    {
+      name: "10 strings with non-string entries",
+      raw: [null, 7, ...Array(10).fill("ok"), {}],
+      lines: Array(10).fill("ok"),
+      notices: [],
+    },
+    {
+      name: "11 strings",
+      raw: Array(11).fill("ok"),
+      lines: Array(10).fill("ok"),
+      notices: ["Plugin log was limited to 10 lines."],
+    },
+    {
+      name: "200 sanitized characters",
+      raw: [` \u001b[31m${"x".repeat(200)}\u001b[0m `],
+      lines: ["x".repeat(200)],
+      notices: [],
+    },
+    {
+      name: "201 sanitized characters",
+      raw: [` \u001b[31m${"x".repeat(201)}\u001b[0m `],
+      lines: ["x".repeat(200)],
+      notices: ["Plugin log lines were shortened to 200 characters."],
+    },
+    {
+      name: "long eleventh string",
+      raw: [...Array(10).fill("ok"), null, "x".repeat(201)],
+      lines: Array(10).fill("ok"),
+      notices: [
+        "Plugin log was limited to 10 lines.",
+        "Plugin log lines were shortened to 200 characters.",
+      ],
+    },
+    { name: "non-array log", raw: "ignored", lines: [], notices: [] },
+  ])("log cap notices: $name", async ({ raw, lines, notices }) => {
+    const seen: string[] = [];
+    const source = `export function plan(){ return []; }
+      export function render(){ return { ...${card}, log: ${JSON.stringify(raw)} }; }`;
+    const result = await runPlugin({ ...base, source, onNotice: (line) => seen.push(line) });
+    expect(result.log).toEqual([...lines, ...notices]);
+    expect(seen).toEqual([...notices]);
+  });
+
+  test("planning notices precede both log notices in the result and callback", async () => {
+    const seen: string[] = [];
+    const source = `export function plan(){ return [{url: "https://api.example.com/", as: "text"}]; }
+      export function render(){ return { ...${card}, log: Array(11).fill("x".repeat(201)) }; }`;
+    const result = await runPlugin({
+      ...base,
+      source,
+      request: async () => ({ status: 200, body: "ok" }),
+      onNotice: (line) => seen.push(line),
+    });
+    const notices = [
+      "Planning stopped at the 3-round limit; return [] as soon as all answers are available.",
+      "Plugin log was limited to 10 lines.",
+      "Plugin log lines were shortened to 200 characters.",
+    ];
+    expect(seen).toEqual([...notices]);
+    expect(result.log).toEqual([...Array(10).fill("x".repeat(200)), ...notices]);
+  });
+
   test("a tap reaches the plugin as an event", async () => {
     const source = `export function plan(){ return []; }
       export function render(c){ return ${card.replace('"ok"', "String(c.event ? c.event.taps : 0)")}; }`;

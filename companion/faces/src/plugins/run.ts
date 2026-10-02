@@ -7,7 +7,7 @@
 // plugin never calls anything itself, it only declares what it needs, and the host
 // performs it.
 
-import { ConfigurationError, type Settings, TransientError } from "../face";
+import { ConfigurationError, type Settings, type TapEvent, TransientError } from "../face";
 import type { RequestFn } from "../kit/http";
 import { INGEST_CAP_BYTES } from "../kit/limits";
 import { CardError, cardToSvg } from "./card";
@@ -16,19 +16,11 @@ import type { PluginManifest } from "./manifest";
 import {
   type Answer,
   type Budget,
-  type PluginMeasureRequest,
-  type ValidatedRequest,
+  isMeasureRequest,
   performRequests,
   validateRequests,
 } from "./requests";
 import { SandboxError, runInSandbox } from "./sandbox";
-
-/** A tap, coalesced by the host: three quick taps can arrive as one render with
- * `taps: 3`. `point` is always `null` until a later track carries one. */
-export interface TapEvent {
-  taps: number;
-  point: { x: number; y: number } | null;
-}
 
 /** What `plan` is handed. `answers` accumulates across rounds -- empty on the first
  * call, growing on the second and third -- which is what lets a plugin that got what
@@ -44,13 +36,7 @@ export interface PlanContext {
 
 /** What `render` is handed: the same context, with every answer collected across
  * every round that ran. */
-export interface RenderContext {
-  settings: Settings;
-  now: NowContext;
-  state?: unknown;
-  event?: TapEvent;
-  answers: Answer[];
-}
+export type RenderContext = PlanContext;
 
 export interface RunPluginInput {
   manifest: PluginManifest;
@@ -94,10 +80,6 @@ const STATE_CAP_BYTES = 16 * 1024;
  * after this cap runs, because the cap is on what the plugin wrote, not on the total. */
 const LOG_MAX_LINES = 10;
 const LOG_MAX_CHARS = 200;
-
-function isMeasure(request: ValidatedRequest): request is PluginMeasureRequest {
-  return "measure" in request;
-}
 
 /**
  * The error taxonomy this task exists to build. `SandboxError` covers several distinct
@@ -147,12 +129,18 @@ const CONTROL = /[\u0000-\u001f\u007f-\u009f]/g;
  * entry and an escape sequence drives the reader's terminal. Sanitized first, then
  * capped, so truncation cannot leave a half-sequence behind.
  */
-function capLog(raw: unknown): string[] {
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .filter((line): line is string => typeof line === "string")
-    .slice(0, LOG_MAX_LINES)
-    .map((line) => line.replace(ANSI, "").replace(CONTROL, " ").trim().slice(0, LOG_MAX_CHARS));
+function capLog(raw: unknown): { lines: string[]; overLines: boolean; overChars: boolean } {
+  const strings = Array.isArray(raw)
+    ? raw.filter((line): line is string => typeof line === "string")
+    : [];
+  const lines: string[] = [];
+  let overChars = false;
+  for (const [index, line] of strings.entries()) {
+    const sanitized = line.replace(ANSI, "").replace(CONTROL, " ").trim();
+    if (sanitized.length > LOG_MAX_CHARS) overChars = true;
+    if (index < LOG_MAX_LINES) lines.push(sanitized.slice(0, LOG_MAX_CHARS));
+  }
+  return { lines, overLines: strings.length > LOG_MAX_LINES, overChars };
 }
 
 /**
@@ -196,14 +184,16 @@ export async function runPlugin(input: RunPluginInput): Promise<RunPluginResult>
     input.onNotice?.(line);
   };
 
+  const context = (answers: Answer[]): PlanContext => ({
+    settings: input.settings,
+    now,
+    ...(input.state === undefined ? {} : { state: input.state }),
+    ...(input.event === undefined ? {} : { event: input.event }),
+    answers,
+  });
+
   for (let round = 0; round < MAX_ROUNDS; round += 1) {
-    const planContext: PlanContext = {
-      settings: input.settings,
-      now,
-      ...(input.state === undefined ? {} : { state: input.state }),
-      ...(input.event === undefined ? {} : { event: input.event }),
-      answers: [...answers],
-    };
+    const planContext = context([...answers]);
     const planned = invokeSandbox<unknown>(source, "plan", planContext);
 
     const budget: Budget = {
@@ -233,9 +223,9 @@ export async function runPlugin(input: RunPluginInput): Promise<RunPluginResult>
     );
     answers.push(...performed.answers);
 
-    remainingRequests -= validated.filter((request) => !isMeasure(request)).length;
+    remainingRequests -= validated.filter((request) => !isMeasureRequest(request)).length;
     remainingMeasurements -= validated
-      .filter(isMeasure)
+      .filter(isMeasureRequest)
       .reduce((sum, request) => sum + request.measure.length, 0);
     // The spend `performRequests` MEASURED, never a re-derivation from the answers:
     // an answer is redacted, refused or absent, and each of those understates what
@@ -243,13 +233,7 @@ export async function runPlugin(input: RunPluginInput): Promise<RunPluginResult>
     remainingBytes -= performed.bytesSpent;
   }
 
-  const renderContext: RenderContext = {
-    settings: input.settings,
-    now,
-    ...(input.state === undefined ? {} : { state: input.state }),
-    ...(input.event === undefined ? {} : { event: input.event }),
-    answers,
-  };
+  const renderContext = context(answers);
   const rendered = invokeSandbox<unknown>(source, "render", renderContext);
   const record =
     typeof rendered === "object" && rendered !== null ? (rendered as Record<string, unknown>) : {};
@@ -273,18 +257,9 @@ export async function runPlugin(input: RunPluginInput): Promise<RunPluginResult>
     throw error;
   }
 
-  const log = capLog(record.log);
-  if (Array.isArray(record.log)) {
-    const lines = record.log.filter((line): line is string => typeof line === "string");
-    if (lines.length > LOG_MAX_LINES) notice(`Plugin log was limited to ${LOG_MAX_LINES} lines.`);
-    if (
-      lines.some(
-        (line) => line.replace(ANSI, "").replace(CONTROL, " ").trim().length > LOG_MAX_CHARS,
-      )
-    ) {
-      notice(`Plugin log lines were shortened to ${LOG_MAX_CHARS} characters.`);
-    }
-  }
+  const { lines: log, overLines, overChars } = capLog(record.log);
+  if (overLines) notice(`Plugin log was limited to ${LOG_MAX_LINES} lines.`);
+  if (overChars) notice(`Plugin log lines were shortened to ${LOG_MAX_CHARS} characters.`);
   log.push(...notices);
   let state: unknown = record.state;
   if (state !== undefined) {

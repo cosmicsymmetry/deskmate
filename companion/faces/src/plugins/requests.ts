@@ -66,7 +66,7 @@ export interface PluginMeasureRequest {
 /** Everything `validateRequests` can return: a network request, or a measure batch. */
 export type ValidatedRequest = PluginRequest | PluginMeasureRequest;
 
-function isMeasureRequest(request: ValidatedRequest): request is PluginMeasureRequest {
+export function isMeasureRequest(request: ValidatedRequest): request is PluginMeasureRequest {
   return "measure" in request;
 }
 

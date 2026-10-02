@@ -14,7 +14,7 @@
 static const char *TAG = "deskmate";
 
 // M0's fallback brightness level (0-255 DCS "Write Display Brightness"
-// value); later milestones will make this configurable.
+// value). ApplyConfig restores the saved level after the host links. RAM only.
 #define BOARD_INIT_BRIGHTNESS 200
 
 void app_main(void)

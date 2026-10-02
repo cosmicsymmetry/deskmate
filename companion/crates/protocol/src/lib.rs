@@ -13,7 +13,6 @@ pub use frame::{
     Deframer, Frame, FrameError, MAX_DECODED_FRAME, MAX_PAYLOAD_SIZE, MAX_WIRE_FRAME, crc32c,
     decode_wire_frame, encode_frame,
 };
-pub use message::CAPABILITY_DURABLE_ASSET_ENCODING;
 pub use message::{
     ASSET_DIGEST_LEN, ASSET_ENCODING_RAW, ASSET_ENCODING_RLE565, Ack, ActivateCard, ApplyConfig,
     AssetBegin, AssetChunk, AssetCommit, AssetKind, AssetRelease, AssetStoreStats,
@@ -31,6 +30,9 @@ pub use message::{
     TYPE_TRIGGER_INTERRUPT, TapAction, Tier, TimeSync, TriggerInterrupt,
     VOLATILE_IMAGE_DECODED_LENGTH, VolatileAssetStats, WifiState, decode_message, encode_message,
     expected_response_type, validate_message,
+};
+pub use message::{
+    CAPABILITY_DISPLAY_BRIGHTNESS, CAPABILITY_DURABLE_ASSET_ENCODING, MIN_DISPLAY_BRIGHTNESS,
 };
 pub use rle::{Rle565Error, decode_rle565, encode_rle565};
 pub use scene::{

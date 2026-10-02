@@ -738,6 +738,12 @@ static void dispatch_apply_config(protocol_context_t *context,
                        "display orientation rejected");
         return;
     }
+    if (incoming->has_brightness &&
+        !ui_runtime_set_brightness(incoming->brightness)) {
+        transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
+                       "brightness command rejected");
+        return;
+    }
     if (result == WIDGET_MODEL_CONFIG_REPLAYED) {
         if (!show_current_content(context)) {
             transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,

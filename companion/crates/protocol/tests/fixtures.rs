@@ -156,13 +156,14 @@ fn current_capabilities_advertise_implemented_features() {
             | protocol::CAPABILITY_NETWORKING
             | protocol::CAPABILITY_SCENE_RENDER
             | protocol::CAPABILITY_VOLATILE_ASSETS
-            | protocol::CAPABILITY_DURABLE_ASSET_ENCODING,
+            | protocol::CAPABILITY_DURABLE_ASSET_ENCODING
+            | protocol::CAPABILITY_DISPLAY_BRIGHTNESS,
         "implemented asset transfer, firmware update, networking, scene \
          rendering, volatile-asset, and durable-asset encoding features must be advertised"
     );
     // Protocol v2 re-based the word: bits 0-4 described a device that rendered
     // templates itself and are retired, never re-issued.
-    assert_eq!(protocol::CURRENT_CAPABILITIES, 2016);
+    assert_eq!(protocol::CURRENT_CAPABILITIES, 4064);
 }
 
 fn assert_rot_rect_clip_is_pinned(nodes: &[protocol::SceneNode]) {
@@ -361,4 +362,36 @@ fn push_scene_fixtures_carry_what_they_are_meant_to() {
     assert_label_anchor_default_is_pinned(&push.scene.nodes);
     assert_every_node_kind_is_pinned(&push.scene.nodes);
     assert_minimal_scene_defaults_are_pinned();
+}
+
+#[test]
+fn brightness_fixtures_pin_presence_floor_and_narrowing() {
+    for (name, expected) in [
+        ("apply_config_min.bin", None),
+        ("apply_config_brightness_min.bin", Some(26)),
+        ("apply_config_brightness_default.bin", Some(200)),
+        ("apply_config_brightness_max.bin", Some(255)),
+    ] {
+        let wire = fixture(name);
+        let frame = decode_wire_frame(&wire).unwrap();
+        let message = decode_message(&frame).unwrap();
+        let protocol::Message::ApplyConfig(ref config) = message else {
+            panic!("config");
+        };
+        assert_eq!(config.brightness, expected);
+        assert_eq!(
+            protocol::encode_message(frame.request_id, &message).unwrap(),
+            wire
+        );
+    }
+    for name in [
+        "brightness_zero.bin",
+        "brightness_below_floor.bin",
+        "brightness_overflow.bin",
+        "brightness_negative.bin",
+        "brightness_boolean.bin",
+    ] {
+        let frame = decode_wire_frame(&fixture(name)).unwrap();
+        assert!(decode_message(&frame).is_err(), "{name}");
+    }
 }

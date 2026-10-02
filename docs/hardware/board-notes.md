@@ -6079,3 +6079,43 @@ and unneeded unless the owner reopens them.
 
 Still not observed and still listed above: the rendered (fourth-page) tap, a
 `hackernews`-kind card, a face at 90 degrees, and the framebuffer matrix.
+
+## 2026-10-02 — Track H brightness: off-board build evidence only
+
+Owner-authorized brightness implementation: [design and verification record](../superpowers/specs/2026-10-02-deskmate-brightness-design.md).
+Schema v11 stores 10..100%, default 78%; `ceil(percent * 256 / 100)` capped at 255
+maps default to raw 200. **200 is the existing final boot brightness**:
+`board_display_init()` writes 255, then `main.c`'s `BOARD_INIT_BRIGHTNESS` writes 200.
+The 10% floor maps to raw 26, above black; its desk visibility is not yet observed.
+
+Firmware `v2.3.0-brightness` advertises bit 11; ApplyConfig key 4 carries raw 26..255.
+The server gates initial apply and reconnect replay on advertised support, retaining
+the desired level across upgrade/downgrade cycles. The older decoder accepts and skips
+unknown key 4; the gate is protocol hygiene. Current `v2.2.0-psram` is compatible
+without flashing first. The queued LVGL consumer calls the existing
+QSPI-envelope-correct `board_display_set_brightness()`. RAM only; reboot returns to
+200 and the next config restores the preference. Status key 6 is reused. The
+standalone clock's top-half brightness diagnostic is unchanged.
+
+`idf.py build` and `idf.py size` were run locally, with a clean `origin/main`
+`c20dbbb` baseline and the same configuration/toolchain on each image:
+
+| Region | Baseline | Brightness | Delta bytes |
+| --- | ---: | ---: | ---: |
+| `.bss` | 87,000 | 87,000 | 0 |
+| `.data` | 23,128 | 23,128 | 0 |
+| IRAM | 16,384 | 16,384 | 0 |
+| DIRAM | 203,763 | 203,763 | 0 |
+| Image size reported by size tool | 1,594,079 | 1,594,627 | +548 |
+
+Both new small fields use alignment padding. DIRAM free remains 137,997 bytes;
+IRAM remains 100% used. **Zero statics delta does not establish OTA correctness.**
+Plain and sanitized host checks cover validation, narrowing, replay equality and
+UI queue behavior. Production-window checks used Chrome against a localhost server
+and a simulated WebSocket panel, never the physical panel.
+
+**UNOBSERVED and owed to the owner:** USB flash; OTA download re-verification;
+brightness visibly changing at 10/78/100% in both mountings; reported raw level
+matching after apply; reboot at 200 and relink restoring the saved value; existing
+standalone diagnostic still working. No serial port, flashing, OTA, firmware
+publication, deployment or merge was performed for these observations.

@@ -475,6 +475,7 @@ mod tests {
         }
         fn apply_layout(
             &mut self,
+            _brightness: Option<u8>,
             _rotation: u16,
             _cards: Vec<CardConfig>,
         ) -> Result<(), DeviceError> {

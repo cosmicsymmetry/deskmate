@@ -42,11 +42,11 @@ fn default_fixture_is_the_canonical_default() {
 }
 
 #[test]
-fn v10_omissions_keep_the_frozen_defaults_and_serialize_explicitly() {
+fn v11_omissions_keep_the_frozen_defaults_and_serialize_explicitly() {
     let mut value: serde_json::Value = serde_json::from_str(DEFAULT_JSON).unwrap();
     assert!(
         value.get("image_sources").is_none(),
-        "the canonical v10 fixture must exercise the accepted omission"
+        "the canonical v11 fixture must exercise the accepted omission"
     );
     value["preferences"]
         .as_object_mut()
@@ -235,8 +235,8 @@ fn malformed_and_unknown_json_are_rejected_by_serde() {
     assert!(serde_json::from_str::<AppConfig>(MALFORMED_JSON).is_err());
 
     let with_unknown = DEFAULT_JSON.replace(
-        "\"schema_version\": 10,",
-        "\"schema_version\": 10, \"unexpected\": true,",
+        "\"schema_version\": 11,",
+        "\"schema_version\": 11, \"unexpected\": true,",
     );
     // A schema bump moves this anchor, and a `replace` that matches nothing
     // returns the input unchanged -- which would leave the assertion below
@@ -901,13 +901,13 @@ fn card_data_serializes_as_tagged_values_for_the_preview() {
 // -- Schema v10: the card list is the loop ---------------------------------
 
 #[test]
-fn default_config_is_v10_with_one_card() {
+fn default_config_is_v11_with_one_card() {
     let config = AppConfig::default();
     // A literal, not `CURRENT_SCHEMA_VERSION`: this test exists to catch a bump that
     // forgot to update `AppConfig::default()`, and comparing the constant to itself
     // could never fail that way. The boundary tests in `tests/store.rs` keep the
     // same literal discipline for the same reason.
-    assert_eq!(config.schema_version, 10);
+    assert_eq!(config.schema_version, 11);
     assert_eq!(config.cards.len(), 1);
     assert_eq!(config.advance, CarouselAdvance::Manual);
     assert!(config.validate().is_ok());
@@ -972,4 +972,41 @@ fn a_picture_card_with_a_host_only_tap_action_is_still_refused() {
         .issues;
     assert_eq!(issues.len(), 1);
     assert_eq!(issues[0].code, ValidationCode::RequiresCapability);
+}
+
+#[test]
+fn brightness_defaults_bounds_and_quantization() {
+    let mut config: AppConfig =
+        serde_json::from_str(include_str!("fixtures/default.json")).unwrap();
+    assert_eq!(config.preferences.brightness, 78);
+    assert_eq!(config.preferences.brightness_level(), 200);
+    assert_eq!(
+        serde_json::to_value(&config).unwrap()["preferences"]["brightness"],
+        78
+    );
+    for (percent, level) in [(10, 26), (50, 128), (78, 200), (100, 255)] {
+        config.preferences.brightness = percent;
+        assert_eq!(config.compile(1).unwrap().layout.brightness, Some(level));
+        assert_eq!(config.required_device_capabilities(), 0);
+    }
+    for percent in [0, 9, 101, 255] {
+        config.preferences.brightness = percent;
+        let error = config.validate().unwrap_err();
+        assert!(
+            error
+                .issues
+                .iter()
+                .any(|issue| issue.path == "preferences.brightness")
+        );
+    }
+    for value in [
+        serde_json::json!(-1),
+        serde_json::json!(10.5),
+        serde_json::json!(256),
+        serde_json::Value::Null,
+    ] {
+        let mut document = serde_json::to_value(AppConfig::default()).unwrap();
+        document["preferences"]["brightness"] = value;
+        assert!(serde_json::from_value::<AppConfig>(document).is_err());
+    }
 }

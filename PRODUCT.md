@@ -93,7 +93,7 @@ never clears the panel.
 
 **Surfaces in the current app.** A `TopBar` wordmark and Settings button;
 `SettingsSheet` as the sole disclosure of state, for operator sign-in, device selection
-and ownership, link/WiFi/IP/update state, timezone, and mounting orientation; first-run
+and ownership, link/WiFi/IP/update state, timezone, mounting orientation, and panel brightness; first-run
 and error notices; the loop grid (complication tiles in loop order, reordered in place,
 with the add-card slot and its menu of on-device kinds, Picture, and server-listed
 faces); the per-card editor, which also edits the card's dwell and picture source;
@@ -102,7 +102,7 @@ its head); card-local failures; and save controls in both the work column and se
 sheet.
 
 **Hard constraints that outlive any visual direction.**
-- Config schema is **v10** (`docs/config/v10.md`); wire protocol is **v2**.
+- Config schema is **v11** (`docs/config/v11.md`); wire protocol is **v2**.
   A redesign of this app must not require a schema or wire change.
 - Canvas is a single clean 448×368 landscape. Orientation is `landscape` or
   `landscape-flipped` only — no portrait, and orientation is owned by this settings

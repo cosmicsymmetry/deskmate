@@ -188,7 +188,7 @@ fn draw(command: &FaceCommand, space: &AccountSpace, view: &str) -> CanonicalFra
 
 fn write_config(space: &AccountSpace, source_id: &str) {
     let config = serde_json::json!({
-        "schema_version": 10,
+        "schema_version": 11,
         "preferences": {"timezone":"UTC","autostart":false,"paused":false,"orientation":"landscape"},
         "cards":[{"kind":"picture","id":"bench","title":"Bench","source_id":source_id,
             "tap_action":{"kind":"none"},"refresh":{"kind":"manual"},"alert":{"kind":"none"},"dwell_seconds":null}],

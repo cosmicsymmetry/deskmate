@@ -498,7 +498,16 @@ impl RuntimeDevice for MockDevice {
         })?
     }
 
-    fn apply_layout(&mut self, rotation: u16, _cards: Vec<CardConfig>) -> Result<(), DeviceError> {
+    fn apply_layout(
+        &mut self,
+        brightness: Option<u8>,
+        rotation: u16,
+        _cards: Vec<CardConfig>,
+    ) -> Result<(), DeviceError> {
+        assert!(
+            brightness.is_some(),
+            "runtime must forward configured brightness"
+        );
         // Simulates a real synchronize's cost: an asset reconcile can take
         // far longer than a bare message exchange.
         std::thread::sleep(self.control.state.lock().unwrap().call_delay);

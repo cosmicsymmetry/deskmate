@@ -209,11 +209,46 @@ static void test_running_progress_is_visible_to_ota_policy(void)
     assert(!widget_model_has_running_progress(&model));
 }
 
+static void test_brightness_rejection_and_replay(void)
+{
+    widget_model_t model;
+    widget_model_init(&model);
+    const char *ids[] = {"clock"};
+    protocol_apply_config_t config = config_with(1U, ids, 1U);
+    config.has_brightness = true;
+    config.brightness = 26U;
+    assert(widget_model_apply_config(&model, &config) == WIDGET_MODEL_CONFIG_APPLIED);
+    assert(widget_model_apply_config(&model, &config) == WIDGET_MODEL_CONFIG_REPLAYED);
+    config.brightness = 255U;
+    assert(widget_model_check_config(&model, &config) == WIDGET_MODEL_CONFIG_STALE_REVISION);
+    config.brightness = 26U;
+    config.has_brightness = false;
+    assert(widget_model_check_config(&model, &config) == WIDGET_MODEL_CONFIG_STALE_REVISION);
+    config.has_brightness = true;
+    config.rotation = 270U;
+    assert(widget_model_check_config(&model, &config) == WIDGET_MODEL_CONFIG_STALE_REVISION);
+    config.rotation = 90U;
+    config.cards[0].tap_action = PROTOCOL_TAP_START_PAUSE;
+    assert(widget_model_check_config(&model, &config) == WIDGET_MODEL_CONFIG_STALE_REVISION);
+    config.cards[0].tap_action = PROTOCOL_TAP_NONE;
+    config.card_count = 2U;
+    assert(widget_model_check_config(&model, &config) == WIDGET_MODEL_CONFIG_STALE_REVISION);
+    config.card_count = 1U;
+    strcpy(config.cards[0].card_id, "other");
+    assert(widget_model_check_config(&model, &config) == WIDGET_MODEL_CONFIG_STALE_REVISION);
+    config.revision = 2U;
+    config.brightness = 25U;
+    assert(widget_model_apply_config(&model, &config) == WIDGET_MODEL_CONFIG_INVALID_VALUE);
+    assert(widget_model_config_revision(&model) == 1U);
+    assert(widget_model_config(&model)->brightness == 26U);
+}
+
 int main(void)
 {
     test_config_applies_and_activates();
     test_replace_keeps_the_live_card_when_it_survives();
     test_revision_rules();
+    test_brightness_rejection_and_replay();
     test_preflight_does_not_mutate();
     test_timer_push_rules();
     test_timer_is_dropped_when_its_card_leaves();

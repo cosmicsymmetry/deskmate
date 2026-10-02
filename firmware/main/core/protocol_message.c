@@ -980,6 +980,8 @@ static protocol_message_result_t decode_apply_config(
     protocol_apply_config_t *config)
 {
     config->rotation = 90U;
+    config->has_brightness = false;
+    config->brightness = 0U;
     CborParser parser;
     CborValue contents;
     size_t count = 0U;
@@ -1017,6 +1019,14 @@ static protocol_message_result_t decode_apply_config(
                 result = PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
             }
             config->rotation = (uint16_t)rotation;
+        } else if (key == 4U) {
+            uint64_t brightness = 0U;
+            result = read_unsigned(&contents, &brightness);
+            if (result == PROTOCOL_MESSAGE_OK && brightness > UINT8_MAX) {
+                result = PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+            }
+            config->brightness = (uint8_t)brightness;
+            config->has_brightness = true;
         } else {
             result = skip_value(&contents);
         }
@@ -2056,7 +2066,7 @@ static protocol_message_result_t encode_apply_config_payload(
 {
     CborEncoder map;
     CborEncoder cards;
-    protocol_message_result_t result = begin_map(root, &map, 3U);
+    protocol_message_result_t result = begin_map(root, &map, config->has_brightness ? 4U : 3U);
     if (result == PROTOCOL_MESSAGE_OK) {
         result = encode_pair_uint(&map, 0U, config->revision);
     }
@@ -2079,6 +2089,9 @@ static protocol_message_result_t encode_apply_config_payload(
     if (result == PROTOCOL_MESSAGE_OK) result = end_map(&map, &cards);
     if (result == PROTOCOL_MESSAGE_OK) {
         result = encode_pair_uint(&map, 3U, config->rotation);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && config->has_brightness) {
+        result = encode_pair_uint(&map, 4U, config->brightness);
     }
     if (result == PROTOCOL_MESSAGE_OK) result = end_map(root, &map);
     return result;

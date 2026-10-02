@@ -4,12 +4,13 @@ import type { ApiContractFixtures } from "./types";
 export const apiContractFixtures = {
   "snapshot": {
     "config": {
-      "schema_version": 10,
+      "schema_version": 11,
       "preferences": {
         "timezone": "Asia/Tbilisi",
         "autostart": true,
         "paused": false,
-        "orientation": "landscape-flipped"
+        "orientation": "landscape-flipped",
+        "brightness": 78
       },
       "cards": [
         {
@@ -200,12 +201,13 @@ export const apiContractFixtures = {
   },
   "configs": [
     {
-      "schema_version": 10,
+      "schema_version": 11,
       "preferences": {
         "timezone": "Asia/Tbilisi",
         "autostart": true,
         "paused": false,
-        "orientation": "landscape-flipped"
+        "orientation": "landscape-flipped",
+        "brightness": 78
       },
       "cards": [
         {
@@ -458,7 +460,8 @@ export const apiContractFixtures = {
     "networking",
     "scene-render",
     "volatile-assets",
-    "durable-asset-encoding"
+    "durable-asset-encoding",
+    "display-brightness"
   ],
   "runtime_states": [
     {

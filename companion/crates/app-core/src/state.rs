@@ -196,16 +196,18 @@ pub enum DeviceCapability {
     SceneRender,
     VolatileAssets,
     DurableAssetEncoding,
+    DisplayBrightness,
 }
 
 impl DeviceCapability {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::AssetTransfer,
         Self::FirmwareUpdate,
         Self::Networking,
         Self::SceneRender,
         Self::VolatileAssets,
         Self::DurableAssetEncoding,
+        Self::DisplayBrightness,
     ];
 
     pub const fn bit(self) -> u64 {
@@ -216,6 +218,7 @@ impl DeviceCapability {
             Self::SceneRender => protocol::CAPABILITY_SCENE_RENDER,
             Self::VolatileAssets => protocol::CAPABILITY_VOLATILE_ASSETS,
             Self::DurableAssetEncoding => protocol::CAPABILITY_DURABLE_ASSET_ENCODING,
+            Self::DisplayBrightness => protocol::CAPABILITY_DISPLAY_BRIGHTNESS,
         }
     }
 
@@ -230,6 +233,7 @@ impl DeviceCapability {
             Self::SceneRender => "declarative scene rendering",
             Self::VolatileAssets => "volatile raster assets",
             Self::DurableAssetEncoding => "durable raster asset encoding",
+            Self::DisplayBrightness => "panel brightness",
         }
     }
 

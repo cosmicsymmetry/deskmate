@@ -695,7 +695,7 @@ async fn linked_config_recovery_remains_visible_until_explicit_save() {
     let devices_root = state.account_space(&owner.id).root.join("devices");
     std::fs::create_dir_all(&devices_root).expect("create account devices root");
     let refused_path = devices_root.join(format!("{}.json", refused.device_id));
-    let refused_bytes = br#"{"schema_version":11,"future_body":true}"#;
+    let refused_bytes = br#"{"schema_version":12,"future_body":true}"#;
     std::fs::write(&refused_path, refused_bytes).expect("write unsupported config");
     let healthy_path = devices_root.join(format!("{}.json", healthy.device_id));
     let valid = clock_config();
@@ -810,7 +810,7 @@ fn assert_recoverable_unsupported(snapshot: &serde_json::Value) {
     assert_eq!(snapshot["persistence"]["kind"], "recoverable-error");
     assert_eq!(
         snapshot["persistence"]["message"],
-        "config schema version 11 is unsupported; expected 10"
+        "config schema version 12 is unsupported; expected 11"
     );
 }
 

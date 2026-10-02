@@ -268,15 +268,11 @@ async fn mint_source(
     {
         return Err(ImageRouteError::EntitlementCapacity { maximum });
     }
-    let mint_state = state.clone();
     let mint_space = Arc::clone(&space);
-    let minted = tokio::task::spawn_blocking(move || {
-        let _ = mint_state;
-        mint_space.image_sources.mint(&request.name)
-    })
-    .await
-    .map_err(|_| ImageRouteError::WorkerFailed)?
-    .map_err(|error| map_mint_error(&error))?;
+    let minted = tokio::task::spawn_blocking(move || mint_space.image_sources.mint(&request.name))
+        .await
+        .map_err(|_| ImageRouteError::WorkerFailed)?
+        .map_err(|error| map_mint_error(&error))?;
 
     // A server-drawn face is attached in the same request. If attaching fails the
     // source is revoked rather than left behind: a half-made source shows up in
@@ -291,14 +287,10 @@ async fn mint_source(
         .await
         .map_err(|_| ImageRouteError::WorkerFailed)?;
         if let Err(error) = attached {
-            let revoke_state = state.clone();
             let revoke_space = Arc::clone(&space);
             let orphan = minted.id.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                let _ = revoke_state;
-                revoke_space.image_sources.revoke(&orphan)
-            })
-            .await;
+            let _ = tokio::task::spawn_blocking(move || revoke_space.image_sources.revoke(&orphan))
+                .await;
             return Err(map_face_update_error(&error));
         }
     }

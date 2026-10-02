@@ -796,8 +796,12 @@ async fn sign_in_email_does_not_reveal_accounts_and_respects_closed_signups() {
 #[tokio::test]
 async fn a_link_signs_in_once_and_verifies_the_email() {
     let (state, mailer) = state_with_mailer();
-    owner_account(&state);
-    let server = spawn_http(app(state)).await;
+    let account = state
+        .identity()
+        .create_account("owner@example.com", false, true, Utc::now())
+        .unwrap();
+    assert!(!account.email_verified);
+    let server = spawn_http(app(state.clone())).await;
     post_json(
         &server,
         "/v1/app/auth/email",
@@ -811,6 +815,14 @@ async fn a_link_signs_in_once_and_verifies_the_email() {
     assert_eq!(first.status(), StatusCode::OK);
     let body = json_body(first).await;
     assert_eq!(body["account"]["email_verified"], true);
+    assert!(
+        state
+            .identity()
+            .account(&account.id)
+            .unwrap()
+            .unwrap()
+            .email_verified
+    );
 
     let second = post_json(&server, "/v1/app/auth/link", json!({"token": token})).await;
     assert_eq!(second.status(), StatusCode::BAD_REQUEST);

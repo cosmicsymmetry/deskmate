@@ -65,7 +65,7 @@ pub(crate) async fn list_devices(
                 id,
                 has_saved_config,
                 configured_at,
-                state: state_name(state_value),
+                state: state_value.as_str(),
             },
         )
         .collect();
@@ -274,13 +274,6 @@ pub fn spawn_housekeeping(state: ServerState) -> tokio::task::JoinHandle<()> {
             }
         }
     })
-}
-
-fn state_name(state: DeviceState) -> &'static str {
-    match state {
-        DeviceState::Pending => "pending",
-        DeviceState::Active => "active",
-    }
 }
 
 fn device_link_url(public_url: &url::Url) -> Result<String, ClaimError> {

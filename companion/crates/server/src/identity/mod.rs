@@ -65,7 +65,7 @@ pub enum DeviceState {
 }
 
 impl DeviceState {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
             Self::Active => "active",
@@ -433,14 +433,7 @@ impl IdentityStore {
                 "SELECT device_id, account_id, state, claimed_at \
                  FROM device_owners WHERE device_id = ?1",
                 [device_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?,
-                    ))
-                },
+                device_owner_row,
             )
             .optional()
             .map_err(sqlite_error)?
@@ -457,14 +450,7 @@ impl IdentityStore {
             )
             .map_err(sqlite_error)?;
         let rows = statement
-            .query_map([&account.0], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                ))
-            })
+            .query_map([&account.0], device_owner_row)
             .map_err(sqlite_error)?;
         rows.map(|row| row.map_err(sqlite_error).and_then(device_owner_from_values))
             .collect()
@@ -574,6 +560,10 @@ fn account_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Account> {
         created_at: timestamp(created_at, 3)?,
         is_instance_owner: row.get(4)?,
     })
+}
+
+fn device_owner_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, String, String, i64)> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
 }
 
 fn device_owner_from_values(

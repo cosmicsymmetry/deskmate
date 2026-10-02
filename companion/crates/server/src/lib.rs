@@ -29,14 +29,10 @@ mod credential;
 mod data_cards;
 pub use data_cards::{FaceCommand, set_faces, start_data_cards};
 mod device_link;
-// The SSRF egress guard, and the one HTTP client the provider layer is
-// allowed to use.
+// The SSRF egress guard for OAuth token POSTs.
 mod egress;
 mod entitlements;
 pub use entitlements::{Edition, Entitlements, SelfHosted};
-// The server-authored data-card faces: the SVG authoring (`faces`) and the
-// rasterizer that turns one into the frame a picture producer would have
-// pushed (`face_render`).
 pub mod firmware;
 #[doc(hidden)]
 pub mod identity;
@@ -392,7 +388,7 @@ impl ServerState {
                 (Arc::clone(space), false)
             } else {
                 let space = Arc::new(AccountSpace::open(
-                    &self.inner.config_directory,
+                    self.account_root(account),
                     account.clone(),
                 ));
                 spaces.insert(account.clone(), Arc::clone(&space));
@@ -409,8 +405,6 @@ impl ServerState {
         space
     }
 
-    // Task 7 uses this when account deletion evicts the cached space.
-    #[allow(dead_code)]
     pub(crate) fn drop_account_space(
         &self,
         account: &identity::AccountId,
@@ -473,8 +467,6 @@ impl ServerState {
         self.inner.options.entitlements.as_ref()
     }
 
-    // Task 5 reports the edition from the instance route.
-    #[allow(dead_code)]
     pub(crate) fn edition(&self) -> Edition {
         self.inner.options.edition
     }

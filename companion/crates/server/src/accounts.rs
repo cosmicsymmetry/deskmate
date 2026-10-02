@@ -16,8 +16,7 @@ pub struct AccountSpace {
 }
 
 impl AccountSpace {
-    pub(crate) fn open(config_root: &std::path::Path, account_id: AccountId) -> Self {
-        let root = config_root.join("accounts").join(&account_id.0);
+    pub(crate) fn open(root: PathBuf, account_id: AccountId) -> Self {
         app_core::secure_file::create_directory(&root)
             .expect("failed to create the account data directory");
         let image_sources = ImageSourceStore::new(root.clone())

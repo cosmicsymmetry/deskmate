@@ -140,11 +140,11 @@ async fn setup(
         SetupResult::AlreadyComplete => Err(RouteError::NotFound),
         SetupResult::WrongCode => {
             record_failure(&state, client.0);
-            Err(RouteError::bad_request(WRONG_SETUP_CODE))
+            Err(RouteError::BadRequest(WRONG_SETUP_CODE))
         }
         SetupResult::InvalidEmail => {
             record_failure(&state, client.0);
-            Err(RouteError::bad_request("Enter a valid email address."))
+            Err(RouteError::BadRequest("Enter a valid email address."))
         }
     }
 }
@@ -161,7 +161,7 @@ async fn request_email_link(
     Json(request): Json<EmailRequest>,
 ) -> Result<Response, RouteError> {
     let email = normalize_email(&request.email)
-        .ok_or_else(|| RouteError::bad_request("Enter a valid email address."))?;
+        .ok_or(RouteError::BadRequest("Enter a valid email address."))?;
     check_and_record_email_limits(&state, &email, client.0)?;
 
     let issue = state.clone();
@@ -227,12 +227,10 @@ async fn consume_email_link(
         else {
             return Ok(LinkResult::Invalid);
         };
-        let account = if let Some(account) = consume.identity().account_by_email(&email)? {
+        let account = if let Some(mut account) = consume.identity().account_by_email(&email)? {
             consume.identity().mark_email_verified(&account.id)?;
-            consume
-                .identity()
-                .account(&account.id)?
-                .ok_or(IdentityError::NotFound)?
+            account.email_verified = true;
+            account
         } else {
             let signups_open = consume
                 .identity()
@@ -259,7 +257,7 @@ async fn consume_email_link(
             .into_response()),
         LinkResult::Invalid => {
             record_failure(&state, client.0);
-            Err(RouteError::bad_request(EXPIRED_LINK))
+            Err(RouteError::BadRequest(EXPIRED_LINK))
         }
     }
 }
@@ -358,19 +356,18 @@ fn check_and_record_email_limits(
     ip: std::net::IpAddr,
 ) -> Result<(), RouteError> {
     let now = Instant::now();
-    let address_key = format!("email:{email}");
-    let ip_key = format!("ip-email:{ip}");
+    let ip_key = ip.to_string();
     state
         .inner
         .email_address_limiter
-        .check(&address_key, now)
+        .check(email, now)
         .map_err(RouteError::rate_limited)?;
     state
         .inner
         .email_ip_limiter
         .check(&ip_key, now)
         .map_err(RouteError::rate_limited)?;
-    state.inner.email_address_limiter.record(&address_key, now);
+    state.inner.email_address_limiter.record(email, now);
     state.inner.email_ip_limiter.record(&ip_key, now);
     Ok(())
 }
@@ -382,7 +379,7 @@ pub(super) fn ensure_failure_attempt_allowed(
     state
         .inner
         .failure_limiter
-        .check(&format!("ip-fail:{ip}"), Instant::now())
+        .check(&ip.to_string(), Instant::now())
         .map_err(RouteError::rate_limited)
 }
 
@@ -390,7 +387,7 @@ pub(super) fn record_failure(state: &ServerState, ip: std::net::IpAddr) {
     state
         .inner
         .failure_limiter
-        .record(&format!("ip-fail:{ip}"), Instant::now());
+        .record(&ip.to_string(), Instant::now());
 }
 
 #[derive(Serialize)]
@@ -436,10 +433,6 @@ pub(super) enum RouteError {
 }
 
 impl RouteError {
-    fn bad_request(message: &'static str) -> Self {
-        Self::BadRequest(message)
-    }
-
     pub(super) fn rate_limited(retry_after: std::time::Duration) -> Self {
         let partial_second = u64::from(retry_after.subsec_nanos() != 0);
         Self::RateLimited(retry_after.as_secs().saturating_add(partial_second).max(1))

@@ -9,7 +9,7 @@ A and B are captured in the SAME browser launch, and time is driven, not merely 
 import sys, io, os, json
 from playwright.sync_api import sync_playwright
 from PIL import Image, ImageChops
-SCENARIOS = ["default", "offline", "standalone", "unowned", "invalid", "firstrun", "empty", "carderror", "picture", "signedout"]
+SCENARIOS = ["default", "offline", "standalone", "unowned", "invalid", "firstrun", "empty", "carderror", "picture", "signedout", "setup", "nopanels"]
 VIEWPORTS = {"desktop": (1280, 900), "mobile": (390, 844)}
 A, B, OUT = sys.argv[1], sys.argv[2], sys.argv[3]; os.makedirs(OUT, exist_ok=True)
 def walk(browser, base, vw, scheme, sc):

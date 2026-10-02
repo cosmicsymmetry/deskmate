@@ -17,7 +17,7 @@ honest check is that nothing on screen moved.
 python3 tools/webcheck/pixelab.py http://127.0.0.1:5301 http://127.0.0.1:5302 /tmp/ab
 ```
 
-It walks 10 scenarios x light/dark x desktop/mobile x every UI state (252 states) and
+It walks 12 scenarios x light/dark x desktop/mobile x every UI state (236 states) and
 reports byte-identical / different / text-different. **Run A against A first.** A
 noise floor that is not zero means the instrument is broken, not the build. Two things
 make that floor zero, and both cost an afternoon to find:
@@ -41,9 +41,14 @@ tools/webcheck/smoke.sh <checkout> <label> [port]
 ```
 
 Builds the server and `dist/` from the checkout, starts the binary on localhost with a
-throwaway config dir, mints a device, then in headless Chrome: signs in, opens the add
-menu, adds a pomodoro, saves, reloads, and checks the preview PNG came back through the
-real LVGL path. It then sends SIGTERM **with the page still open** and times the drain.
+throwaway config dir and loopback public URL. Headless Chrome completes first-run setup
+using the code from the server log and checks “Add your panel.” The admin API then mints
+a device for that owner, without USB provisioning. Chrome reloads into the grid, adds a
+pomodoro, checks the save response, decodes the 448×368 preview PNG from the real LVGL
+path, and verifies the saved tile count and session after reload. It then sends SIGTERM
+**with the page and its SSE stream still open** and times the drain. Startup timeouts,
+failed browser assertions and unsuccessful shutdowns return nonzero; `result.json`,
+`server.log` and `smoke.err` remain under `$TMPDIR/deskmate-smoke/<label>/` (or `/tmp`).
 
 Run it against two checkouts to get a before/after. On 2026-09-19 that is what showed,
 against `main`: no `/v1/faces` request and no event stream after signing in, and a server

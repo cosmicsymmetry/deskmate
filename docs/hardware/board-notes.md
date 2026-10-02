@@ -6119,3 +6119,41 @@ brightness visibly changing at 10/78/100% in both mountings; reported raw level
 matching after apply; reboot at 200 and relink restoring the saved value; existing
 standalone diagnostic still working. No serial port, flashing, OTA, firmware
 publication, deployment or merge was performed for these observations.
+
+## 2026-10-02 -- `v2.3.0-brightness` arrives by OTA; the glass is still owed
+
+`dev-0005`, OTA from `v2.2.0-psram` to `v2.3.0-brightness`, built from `main` at `4f13dd3`
+(PR #18 merged and the server deployed at the same revision). Server-side observation only.
+
+- Published `/var/lib/deskmate/firmware/v2.3.0-brightness.bin`, 1,594,736 bytes, sha256
+  `7efc7ce6...b1d9cc07`, byte-identical to the local build and served publicly (200).
+  `DESKMATE_FIRMWARE_VERSION` moved `v2.2.0-psram` -> `v2.3.0-brightness`; env backup
+  `/etc/deskmate/server.env.bak-20261002T115336Z`.
+- The board checks only at boot and daily, so it was reset with esptool's read-only
+  `chip_id --after hard_reset` (no write to flash).
+
+```
+11:54:11  device link refused: owner already live     <- old session not yet reaped after the reset
+11:54:13  device link closed / established
+11:54:16  firmware check dev-0005 current=v2.2.0-psram
+11:54:16  device link closed; an asset chunk failed ... device disconnected   <- download begins
+11:54:19  server restarted by a concurrent session (not part of this procedure)
+11:54:43  device link established
+11:55:08  firmware check dev-0005 current=v2.3.0-brightness
+```
+
+The download completed even though the server restarted 3 s into it. Statics were flat
+across the change (`.bss` 87,000, `.data` 23,128, IRAM 16,384, DIRAM 203,763; image +548
+bytes), so like the 2026-09-28 OTA this proves the download path, not that a statics
+*shift* is safe.
+
+Read back through `GET /v1/devices/dev-0005` immediately afterwards: `firmware_version
+v2.3.0-brightness`, capabilities by name end with `display-brightness` (bit 11),
+`unknown_capability_bits 0x0`, `config.schema_version 11`, `preferences.brightness 78`
+(the migrated default = raw 200, so nothing visible should have changed), `connection
+online`, `runtime running`.
+
+**Observed:** the OTA download and install, the capability read by name, the v11 config
+on the live server. **Still UNOBSERVED:** the level visibly changing on the glass at
+10/78/100% at both mountings, the reported raw level matching after an apply, a reboot
+restoring the saved level, and the standalone diagnostic.

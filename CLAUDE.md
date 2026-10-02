@@ -422,8 +422,11 @@ These are decisions, not defaults. Changing one needs the owner, not a judgement
   and undimmed. ApplyConfig key 4 is gated by bit 11; unsupported firmware never blocks
   saving. Firmware applies from the LVGL UI queue, RAM only, and reboots at raw 200.
   The standalone diagnostic stays. The dead branch's colliding "schema v6" is still
-  not reusable. New firmware's USB flash, OTA download and both-mounting glass checks
-  remain UNOBSERVED; see the Track H entry in board notes.
+  not reusable. Track H recorded successful OTA installation of `v2.3.0-brightness`
+  on `dev-0005` at 2026-10-02 11:55 UTC, capability `display-brightness` by name
+  and live schema v11 at 78%. These are server-side observations; visible level
+  changes at both mountings and the remaining checks are still UNOBSERVED. See
+  the Track H entry in board notes.
 
 ### Hardware verification still owed
 

@@ -1,0 +1,34 @@
+{
+  "api": 1,
+  "id": "ink-landscape",
+  "version": "1.0.0",
+  "label": "Ink Landscape",
+  "description": "An original, changing landscape of mountain ridges and still water. Works offline.",
+  "author": "Deskmate contributors",
+  "hosts": [],
+  "secrets": [],
+  "fields": [
+    {
+      "type": "enum",
+      "key": "palette",
+      "label": "Palette",
+      "default": "paper",
+      "options": [
+        { "value": "paper", "label": "Ink on paper" },
+        { "value": "night", "label": "Moonlit ink" }
+      ]
+    },
+    {
+      "type": "enum",
+      "key": "change",
+      "label": "New landscape",
+      "default": "daily",
+      "options": [
+        { "value": "daily", "label": "Each day" },
+        { "value": "hourly", "label": "Each hour" }
+      ]
+    }
+  ],
+  "refreshSeconds": 900,
+  "tap": "Tap for another landscape. The server draws a new picture."
+}

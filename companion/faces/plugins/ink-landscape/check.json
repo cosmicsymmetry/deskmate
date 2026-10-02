@@ -1,0 +1,9 @@
+{
+  "cases": [
+    { "name": "Ink on paper", "now": "2026-10-02T12:00:00Z", "timezone": "Asia/Tbilisi" },
+    { "name": "Moonlit ink", "now": "2026-10-02T12:00:00Z", "settings": { "palette": "night" } },
+    { "name": "Another landscape", "now": "2026-10-02T12:00:00Z", "event": { "taps": 1, "point": null } },
+    { "name": "Hourly landscape", "now": "2026-10-02T17:00:00Z", "settings": { "change": "hourly" } },
+    { "name": "New year locally", "now": "2026-12-31T16:00:00Z", "timezone": "Asia/Tokyo" }
+  ]
+}

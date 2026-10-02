@@ -83,6 +83,10 @@ function fail(details: ApiError): never {
  */
 let selectedDeviceId: string | null = null;
 
+export function resetAccountState(): void {
+  selectedDeviceId = null;
+}
+
 /** Where an explicit choice is remembered between visits. */
 const DEVICE_KEY = "deskmate.device_id";
 
@@ -143,6 +147,7 @@ export async function request<T>(method: string, path: string, body?: unknown): 
   }
 
   if (response.status === 401) {
+    resetAccountState();
     // The session is the thing that is missing, and saying so is what lets the
     // UI offer the one action that fixes it rather than a generic failure.
     fail({

@@ -1,8 +1,9 @@
-import { request } from "./backend";
+import { request, resetAccountState } from "./backend";
 
 export type Instance = {
   setup_required: boolean;
   google_enabled: boolean;
+  email_delivery: "email" | "server-log";
   signups_open: boolean;
   edition: "self-hosted" | "hosted";
 };
@@ -31,6 +32,7 @@ export function getInstance(): Promise<Instance> {
 
 export async function completeSetup(code: string, email: string): Promise<Account> {
   const response = await request<AccountResponse>("POST", "/v1/app/setup", { code, email });
+  resetAccountState();
   return response.account;
 }
 
@@ -40,6 +42,7 @@ export async function requestSignInLink(email: string): Promise<void> {
 
 export async function consumeSignInLink(token: string): Promise<Account> {
   const response = await request<AccountResponse>("POST", "/v1/app/auth/link", { token });
+  resetAccountState();
   return response.account;
 }
 
@@ -51,16 +54,19 @@ export function getAccount(): Promise<Account> {
   return request<Account>("GET", "/v1/app/account");
 }
 
-export function signOut(): Promise<void> {
-  return request<void>("DELETE", "/v1/app/session");
+export async function signOut(): Promise<void> {
+  await request<void>("DELETE", "/v1/app/session");
+  resetAccountState();
 }
 
-export function signOutEverywhere(): Promise<void> {
-  return request<void>("POST", "/v1/app/sessions/revoke-all");
+export async function signOutEverywhere(): Promise<void> {
+  await request<void>("POST", "/v1/app/sessions/revoke-all");
+  resetAccountState();
 }
 
-export function deleteAccount(): Promise<void> {
-  return request<void>("DELETE", "/v1/app/account");
+export async function deleteAccount(): Promise<void> {
+  await request<void>("DELETE", "/v1/app/account");
+  resetAccountState();
 }
 
 export async function setSignupsOpen(open: boolean): Promise<boolean> {

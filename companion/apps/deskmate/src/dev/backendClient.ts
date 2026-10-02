@@ -135,3 +135,4 @@ export function getAppSnapshot(): Promise<AppSnapshot> {
 // Deliberately absent, matching `src/lib/backendClient.ts`: provisioning,
 // factory reset, the local-ownership switch and autostart. The harness must not
 // expose affordances the shipped web app cannot perform.
+export function resetAccountState(): void {}

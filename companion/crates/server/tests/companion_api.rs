@@ -825,7 +825,12 @@ async fn the_spa_cache_policy_distinguishes_shell_from_fingerprinted_assets() {
     std::fs::write(root.path().join("assets/app-abc123.js"), asset).expect("write asset");
     let app = app_with_web(ServerState::in_memory(), Some(root.path().to_path_buf()));
 
-    for path in ["/", "/index.html", "/settings/cards"] {
+    for path in [
+        "/",
+        "/index.html",
+        "/settings/cards",
+        "/signin?token=secret",
+    ] {
         let response = app
             .clone()
             .oneshot(
@@ -837,6 +842,7 @@ async fn the_spa_cache_policy_distinguishes_shell_from_fingerprinted_assets() {
             .await
             .expect("shell response");
         assert_eq!(response.status(), StatusCode::OK, "{path}");
+        assert_eq!(response.headers()["referrer-policy"], "no-referrer");
         assert_eq!(
             response
                 .headers()

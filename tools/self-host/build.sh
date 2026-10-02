@@ -4,7 +4,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DEST="${1:?usage: build.sh /absolute/new/bundle-directory}"
 [[ "$DEST" = /* && ! -e "$DEST" ]] || { echo 'Destination must be absolute and must not exist.' >&2; exit 1; }
-for tool in python3 curl cargo bun; do command -v "$tool" >/dev/null; done
+for tool in python3 curl cargo bun; do
+    command -v "$tool" >/dev/null || { echo "build.sh needs $tool on PATH" >&2; exit 1; }
+done
 python3 "$ROOT/tools/self-host/fetch-components.py"
 (cd "$ROOT/companion" && cargo build --target-dir "$ROOT/companion/target" --locked --release -p server -p deskmate-cli)
 (cd "$ROOT/companion/apps/deskmate" && bun install --frozen-lockfile && env -u VITE_DESKMATE_MOCK bun run build)

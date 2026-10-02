@@ -106,17 +106,7 @@ fn write_account_layout(
     root
 }
 
-#[allow(clippy::result_large_err)]
-async fn connect_device(
-    server: &support::HttpTestServer,
-    token: &str,
-) -> Result<support::DeviceSocket, tokio_tungstenite::tungstenite::Error> {
-    let host = server
-        .base_url
-        .strip_prefix("http://")
-        .expect("test server uses HTTP");
-    support::connect_device(host, token).await
-}
+use support::connect_server_device as connect_device;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_device_tap_changes_only_its_own_accounts_face_state() {

@@ -307,7 +307,7 @@ async fn revoke_source(
     Path(source_id): Path<String>,
 ) -> Result<StatusCode, ImageRouteError> {
     let space = account_space(&state, &session).await?;
-    revoke_image_source(state, space, source_id)
+    revoke_image_source(space, source_id)
         .await
         .map_err(|error| match error {
             RevokeImageSourceError::WorkerFailed => ImageRouteError::WorkerFailed,
@@ -328,7 +328,6 @@ pub(crate) enum RevokeImageSourceError {
 }
 
 pub(crate) async fn revoke_image_source(
-    state: ServerState,
     space: Arc<AccountSpace>,
     source_id: String,
 ) -> Result<(), RevokeImageSourceError> {
@@ -341,13 +340,10 @@ pub(crate) async fn revoke_image_source(
 
     // Keep face removal in its own awaited phase. If the request is cancelled
     // while source persistence is pending, this write must never begin.
-    tokio::task::spawn_blocking(move || {
-        let _ = state;
-        crate::data_cards::remove_face(&space, &source_id)
-    })
-    .await
-    .map_err(|_| RevokeImageSourceError::WorkerFailed)?
-    .map_err(RevokeImageSourceError::Face)
+    tokio::task::spawn_blocking(move || crate::data_cards::remove_face(&space, &source_id))
+        .await
+        .map_err(|_| RevokeImageSourceError::WorkerFailed)?
+        .map_err(RevokeImageSourceError::Face)
 }
 
 async fn push_image(
@@ -441,8 +437,7 @@ fn map_mint_error(error: &ImageSourceError) -> ImageRouteError {
         | ImageSourceError::UnknownToken
         | ImageSourceError::TooSoon
         | ImageSourceError::InvalidView
-        | ImageSourceError::StagingCapacity
-        | ImageSourceError::TooManyViews => ImageRouteError::Internal,
+        | ImageSourceError::StagingCapacity => ImageRouteError::Internal,
     }
 }
 
@@ -453,8 +448,7 @@ fn map_revoke_error(error: &ImageSourceError) -> ImageRouteError {
         | ImageSourceError::Capacity
         | ImageSourceError::TooSoon
         | ImageSourceError::InvalidView
-        | ImageSourceError::StagingCapacity
-        | ImageSourceError::TooManyViews => ImageRouteError::Internal,
+        | ImageSourceError::StagingCapacity => ImageRouteError::Internal,
     }
 }
 
@@ -464,14 +458,12 @@ fn map_accept_error(error: &ImageSourceError) -> ImageRouteError {
         ImageSourceError::TooSoon => ImageRouteError::RateLimited,
         // The source ceiling is unreachable on an accept: minting already
         // refused the source that would have exceeded it. A producer's POST is
-        // always the resting view, so an invalid view cannot come from one; the
-        // view ceiling is reachable only if a face staged the maximum without a
-        // resting frame, which is our bug and not the producer's.
+        // always the resting view, so neither an invalid view nor the staged
+        // capacity limit can come from one.
         ImageSourceError::Io { .. }
         | ImageSourceError::Capacity
         | ImageSourceError::InvalidView
-        | ImageSourceError::StagingCapacity
-        | ImageSourceError::TooManyViews => ImageRouteError::Internal,
+        | ImageSourceError::StagingCapacity => ImageRouteError::Internal,
     }
 }
 
@@ -682,7 +674,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert_task_for_test(removed.id.clone(), task);
 
-        revoke_image_source(state.clone(), Arc::clone(&space), removed.id.clone())
+        revoke_image_source(Arc::clone(&space), removed.id.clone())
             .await
             .expect("revoke source and face");
 
@@ -717,7 +709,7 @@ mod tests {
                 .join(crate::image_sources::IMAGE_SOURCE_STORE_FILE),
         );
 
-        let error = revoke_image_source(state.clone(), Arc::clone(&space), source.id.clone())
+        let error = revoke_image_source(Arc::clone(&space), source.id.clone())
             .await
             .expect_err("source persistence must fail");
 
@@ -739,7 +731,7 @@ mod tests {
         let backup = replace_file_with_directory(&spec_path);
         let before = std::fs::read(&backup).expect("preserved specs");
 
-        let error = revoke_image_source(state.clone(), Arc::clone(&space), source.id.clone())
+        let error = revoke_image_source(Arc::clone(&space), source.id.clone())
             .await
             .expect_err("face persistence must fail");
 
@@ -770,8 +762,7 @@ mod tests {
             });
             started_rx.await.expect("blocking worker started");
 
-            let operation =
-                revoke_image_source(state.clone(), Arc::clone(&space), source.id.clone());
+            let operation = revoke_image_source(Arc::clone(&space), source.id.clone());
             assert!(
                 operation.now_or_never().is_none(),
                 "source revocation was not pending at its first await"

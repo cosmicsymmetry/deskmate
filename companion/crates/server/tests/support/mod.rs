@@ -24,7 +24,7 @@ pub fn link_request(host: &str, authorization: Option<&str>) -> http::Request<()
     request.body(()).unwrap()
 }
 
-// The error is tungstenite's; keep it intact for callers inspecting refusals.
+// The error belongs to tungstenite; retain it so callers can assert HTTP refusals.
 #[allow(clippy::result_large_err)]
 pub async fn connect_device(
     host: &str,
@@ -34,6 +34,18 @@ pub async fn connect_device(
     tokio_tungstenite::connect_async(request)
         .await
         .map(|(socket, _)| socket)
+}
+
+#[allow(clippy::result_large_err)]
+pub async fn connect_server_device(
+    server: &HttpTestServer,
+    token: &str,
+) -> Result<DeviceSocket, tokio_tungstenite::tungstenite::Error> {
+    let host = server
+        .base_url
+        .strip_prefix("http://")
+        .expect("test server uses HTTP");
+    connect_device(host, token).await
 }
 
 pub const IN_MEMORY_ADMIN_TOKEN: &str = "in-memory-admin-token";
@@ -187,9 +199,12 @@ pub fn replace_file_with_directory(path: &std::path::Path) {
     std::fs::create_dir(path).expect("blocking directory");
 }
 
-pub async fn drive_until_config(socket: &mut DeviceSocket, card_id: &str) -> ApplyConfig {
+async fn drive_until<T>(
+    socket: &mut DeviceSocket,
+    what: &str,
+    mut step: impl FnMut(Message) -> Option<T>,
+) -> T {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        let mut target_config = None;
         loop {
             match socket.next().await {
                 Some(Ok(WsMessage::Binary(bytes))) => {
@@ -197,24 +212,9 @@ pub async fn drive_until_config(socket: &mut DeviceSocket, card_id: &str) -> App
                         .expect("device received a malformed frame");
                     let message = protocol::decode_message(&frame)
                         .expect("device received an undecodable message");
-                    let target = match &message {
-                        Message::ApplyConfig(config) => {
-                            config.cards.iter().any(|card| card.card_id == card_id)
-                        }
-                        _ => false,
-                    };
-                    let completes_target_sync =
-                        target_config.is_some() && matches!(&message, Message::ActivateCard(_));
                     reply(socket, frame.request_id, &message).await;
-                    if target {
-                        let Message::ApplyConfig(config) = message else {
-                            unreachable!("target is true only for ApplyConfig");
-                        };
-                        target_config = Some(config);
-                    } else if completes_target_sync {
-                        return target_config
-                            .take()
-                            .expect("target config was recorded before activation");
+                    if let Some(result) = step(message) {
+                        return result;
                     }
                 }
                 Some(Ok(WsMessage::Ping(payload))) => {
@@ -222,77 +222,45 @@ pub async fn drive_until_config(socket: &mut DeviceSocket, card_id: &str) -> App
                 }
                 Some(Ok(other)) => panic!("unexpected WebSocket message: {other:?}"),
                 Some(Err(error)) => panic!("WebSocket read failed: {error}"),
-                None => panic!("socket closed before the expected config arrived"),
+                None => panic!("socket closed before the expected {what} arrived"),
             }
         }
     })
     .await
-    .expect("timed out waiting for the expected config")
+    .unwrap_or_else(|_| panic!("timed out waiting for the expected {what}"))
+}
+
+pub async fn drive_until_config(socket: &mut DeviceSocket, card_id: &str) -> ApplyConfig {
+    let mut target_config = None;
+    drive_until(socket, "config", |message| {
+        match message {
+            Message::ApplyConfig(config)
+                if config.cards.iter().any(|card| card.card_id == card_id) =>
+            {
+                target_config = Some(config);
+            }
+            Message::ActivateCard(_) => return target_config.take(),
+            _ => {}
+        }
+        None
+    })
+    .await
 }
 
 pub async fn drive_until_push(socket: &mut DeviceSocket, card_id: &str) -> protocol::PushTimer {
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            match socket.next().await {
-                Some(Ok(WsMessage::Binary(bytes))) => {
-                    let frame = protocol::decode_wire_frame(&bytes)
-                        .expect("device received a malformed frame");
-                    let message = protocol::decode_message(&frame)
-                        .expect("device received an undecodable message");
-                    let target = matches!(
-                        &message,
-                        Message::PushTimer(push) if push.card_id == card_id
-                    );
-                    reply(socket, frame.request_id, &message).await;
-                    if target {
-                        let Message::PushTimer(push) = message else {
-                            unreachable!("target is true only for PushTimer");
-                        };
-                        return push;
-                    }
-                }
-                Some(Ok(WsMessage::Ping(payload))) => {
-                    socket.send(WsMessage::Pong(payload)).await.unwrap();
-                }
-                Some(Ok(other)) => panic!("unexpected WebSocket message: {other:?}"),
-                Some(Err(error)) => panic!("WebSocket read failed: {error}"),
-                None => panic!("socket closed before the expected timer push arrived"),
-            }
-        }
+    drive_until(socket, "timer push", |message| match message {
+        Message::PushTimer(push) if push.card_id == card_id => Some(push),
+        _ => None,
     })
     .await
-    .expect("timed out waiting for the expected timer push")
 }
 
 pub async fn drive_until_scene(socket: &mut DeviceSocket) -> protocol::PushScene {
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            match socket.next().await {
-                Some(Ok(WsMessage::Binary(bytes))) => {
-                    let frame = protocol::decode_wire_frame(&bytes)
-                        .expect("device received a malformed frame");
-                    let message = protocol::decode_message(&frame)
-                        .expect("device received an undecodable message");
-                    let target = matches!(&message, Message::PushScene(_));
-                    reply(socket, frame.request_id, &message).await;
-                    if target {
-                        let Message::PushScene(push) = message else {
-                            unreachable!("target is true only for PushScene");
-                        };
-                        return push;
-                    }
-                }
-                Some(Ok(WsMessage::Ping(payload))) => {
-                    socket.send(WsMessage::Pong(payload)).await.unwrap();
-                }
-                Some(Ok(other)) => panic!("unexpected WebSocket message: {other:?}"),
-                Some(Err(error)) => panic!("WebSocket read failed: {error}"),
-                None => panic!("socket closed before the expected scene arrived"),
-            }
-        }
+    drive_until(socket, "scene", |message| match message {
+        Message::PushScene(push) => Some(push),
+        _ => None,
     })
     .await
-    .expect("timed out waiting for the expected scene")
 }
 
 /// Completes runtime synchronization after either an initial connection or a

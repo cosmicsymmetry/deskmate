@@ -154,19 +154,6 @@ async fn hostile_device_frames_are_bounded_and_concatenated_frames_decode() {
     }
 }
 
-/// A producer's push must not wait on device delivery.
-///
-/// The durable outcome of `POST /v1/images/{token}` is "the frame is stored",
-/// and it is stored before the runtime is told anything. Delivery happens over a
-/// link the producer has no relationship with and cannot act on, so awaiting it
-/// made a successful push answer 504 once the reconcile grew `AssetRelease`'s
-/// twenty-second budget -- somebody holding a curl command saw an error for work
-/// that had succeeded, and would reasonably retry it.
-///
-/// This lives here rather than beside the other image-route tests because it
-/// needs a device that is CONNECTED and silent. With no device attached the
-/// notification returns instantly either way, so the same test over there passed
-/// against the awaiting version too, and proved nothing.
 /// A 448x368 all-black PNG: the smallest thing the ingest route accepts.
 fn exact_png() -> Vec<u8> {
     let mut out = Vec::new();
@@ -182,6 +169,19 @@ fn exact_png() -> Vec<u8> {
     out
 }
 
+/// A producer's push must not wait on device delivery.
+///
+/// The durable outcome of `POST /v1/images/{token}` is "the frame is stored",
+/// and it is stored before the runtime is told anything. Delivery happens over a
+/// link the producer has no relationship with and cannot act on, so awaiting it
+/// made a successful push answer 504 once the reconcile grew `AssetRelease`'s
+/// twenty-second budget -- somebody holding a curl command saw an error for work
+/// that had succeeded, and would reasonably retry it.
+///
+/// This lives here rather than beside the other image-route tests because it
+/// needs a device that is CONNECTED and silent. With no device attached the
+/// notification returns instantly either way, so the same test over there passed
+/// against the awaiting version too, and proved nothing.
 #[tokio::test]
 async fn an_image_push_does_not_wait_for_a_silent_device() {
     let (host, identity, _admin_token, owner) = spawn().await;

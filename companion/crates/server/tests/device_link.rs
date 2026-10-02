@@ -5,8 +5,6 @@ use server::{ServerState, app};
 
 mod support;
 
-use support::link_request;
-
 async fn spawn() -> (String, server::registry::DeviceIdentity) {
     let state = ServerState::in_memory();
     let owner = support::owner_account(&state);
@@ -23,7 +21,7 @@ async fn spawn() -> (String, server::registry::DeviceIdentity) {
 async fn device_link_accepts_a_minted_token() {
     let (host, identity) = spawn().await;
     let authorization = format!("Bearer {}", identity.token);
-    let request = link_request(&host, Some(&authorization));
+    let request = support::link_request(&host, Some(&authorization));
     let (_stream, response) = tokio_tungstenite::connect_async(request).await.unwrap();
     assert_eq!(response.status(), 101);
 }
@@ -35,7 +33,7 @@ async fn device_link_refuses_invalid_authorization() {
         ("missing-authorization-header", None),
     ] {
         let (host, _identity) = spawn().await;
-        let request = link_request(&host, authorization);
+        let request = support::link_request(&host, authorization);
         assert!(
             tokio_tungstenite::connect_async(request).await.is_err(),
             "{name}"
@@ -82,8 +80,9 @@ async fn device_link_refuses_a_device_no_account_owns() {
         axum::serve(listener, app(state)).await.unwrap();
     });
     let authorization = format!("Bearer {}", orphan.token);
-    let error = tokio_tungstenite::connect_async(link_request(&host, Some(&authorization)))
-        .await
-        .expect_err("an unowned device must not link");
+    let error =
+        tokio_tungstenite::connect_async(support::link_request(&host, Some(&authorization)))
+            .await
+            .expect_err("an unowned device must not link");
     assert!(error.to_string().contains("401"), "{error}");
 }

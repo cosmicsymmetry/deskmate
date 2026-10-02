@@ -8,15 +8,11 @@ on:
 
 jobs:
   companion:
-    needs: firmware
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: download firmware components
-        uses: actions/download-artifact@v4
-        with:
-          name: firmware-managed-components
-          path: firmware/managed_components
+      - name: fetch pinned preview components
+        run: python3 tools/self-host/fetch-components.py
       # No floating `stable` here: the toolchain comes from
       # companion/rust-toolchain.toml, so this job and a developer machine run
       # the identical compiler and lint set. See that file for why.
@@ -85,16 +81,8 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
-  # The build, and ONLY the build. `companion` and `firmware-host-tests` both need
-  # this job for one thing: firmware/managed_components/ is gitignored and exists
-  # only once the component manager has fetched it, so this job fetches it and
-  # hands the two directories anyone compiles on as an artifact.
-  #
-  # The host tests used to run in this job's one step. When they broke on Linux
-  # (2026-08-23, a glibc feature-test macro -- see host_tests/Makefile) the job
-  # failed before the upload, `companion` was skipped, and NO Rust or frontend gate
-  # ran in CI for four weeks while every local run stayed green. A failing host
-  # test must fail loudly in its own job, not switch the rest of CI off.
+  # Build firmware and verify its lockfile and installed preview inputs. Native
+  # jobs fetch the same pinned bytes independently, so an IDF failure cannot skip them.
   firmware:
     runs-on: ubuntu-latest
     steps:
@@ -108,21 +96,8 @@ jobs:
           command: idf.py build
       - name: verify firmware lockfile unchanged
         run: git diff --exit-code -- firmware/dependencies.lock
-      # lvgl-sim compiles these exact lockfile-resolved sources on macOS. Keep
-      # the transfer narrow: the full LVGL component includes 150+ MB of docs,
-      # demos, and tests that lvgl-sim does not build.
-      - name: upload firmware components
-        uses: actions/upload-artifact@v4
-        with:
-          name: firmware-managed-components
-          path: |
-            firmware/managed_components/lvgl__lvgl/src
-            firmware/managed_components/lvgl__lvgl/lvgl.h
-            firmware/managed_components/lvgl__lvgl/lvgl_private.h
-            firmware/managed_components/lvgl__lvgl/lv_version.h
-            firmware/managed_components/espressif__cbor/tinycbor/src
-          retention-days: 1
-          if-no-files-found: error
+      - name: verify installed preview components against public pins
+        run: python3 tools/self-host/fetch-components.py
 
   # The server-rendered faces. Its own job with NO `needs:`, on purpose: from
   # 2026-08-23 to 2026-09-19 a firmware failure skipped everything that needed its
@@ -224,6 +199,24 @@ jobs:
           REPO_OWNER: ${{ github.repository_owner }}
         run: python3 tools/plugins/check_release_approval.py
 
+  tools:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: install producer test prerequisite
+        run: python3 -m pip install pillow
+      - name: producer diagnostics
+        run: python3 -m unittest discover -s tools/picture-producers -p 'test_*.py'
+      - name: isolated tooling regressions
+        run: |
+          python3 -m unittest discover -s tools/deploy -p 'test_*.py'
+          python3 -m unittest discover -s tools/webcheck -p 'test_*.py'
+          python3 -m unittest discover -s tools/ci -p 'test_*.py'
+          python3 -m unittest discover -s tools/self-host -p 'test_*.py'
+
   plugin-previews:
     needs: plugin-changes
     if: needs.plugin-changes.outputs.changed == 'true'
@@ -274,17 +267,13 @@ jobs:
           if-no-files-found: warn
 
   firmware-host-tests:
-    needs: firmware
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       # The host tests are plain C and need one fetched directory: tinycbor's
-      # sources, which the artifact carries. No IDF container required.
-      - name: download firmware components
-        uses: actions/download-artifact@v4
-        with:
-          name: firmware-managed-components
-          path: firmware/managed_components
+      # sources. Fetch pinned public inputs directly; no IDF container required.
+      - name: fetch pinned preview components
+        run: python3 tools/self-host/fetch-components.py
       - name: host tests
         run: make -C firmware/host_tests clean test
       # The `sanitize` pass is not a nicety. Two of scene_decode.c's bounds --

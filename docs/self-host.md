@@ -79,7 +79,7 @@ DESKMATE_PUBLIC_URL=http://localhost:8443
 DESKMATE_ADMIN_TOKEN=<random-64-hex-characters>
 DESKMATE_CONFIG_DIR=/home/you/deskmate-instance/configs
 DESKMATE_FIRMWARE_DIR=/home/you/deskmate-instance/firmware
-DESKMATE_FIRMWARE_VERSION=v2.1.0-proto2
+DESKMATE_FIRMWARE_VERSION=<the checkout's firmware/version.txt value>
 DESKMATE_WEB_DIR=/home/you/deskmate-release/web
 DESKMATE_FACES_DIR=/home/you/deskmate-release/faces
 DESKMATE_BUN=/home/you/.bun/bin/bun
@@ -382,6 +382,4 @@ corrected bundle build passed, reusing its verified public downloads/build cache
 
 This verifies a clean source checkout on an existing toolchain host, not a freshly
 installed operating system. Debian/systemd/Caddy installation, public HTTPS, actual
-provider delivery, panel provisioning and OTA were not exercised. Repository access was restored later on 2026-09-29: authenticated `git fetch origin`
-and `gh run list` succeeded. Current main is already contained in this branch.
-Branch PR/CI verification and merge are tracked in the packaging work record.
+provider delivery, panel provisioning and OTA were not exercised.

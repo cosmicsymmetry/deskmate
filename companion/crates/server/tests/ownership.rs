@@ -11,8 +11,6 @@ mod registry;
 mod scenes;
 mod support;
 
-use support::connect_device;
-
 /// Boots a server on a loopback port and mints one device identity.
 /// Mirrors `tests/device_link.rs`'s helper; kept separate so the two files
 /// can diverge without one silently changing the other's fixture.
@@ -43,6 +41,8 @@ async fn spawn_state(
         admin_token,
     )
 }
+
+use support::connect_device;
 
 fn clock_config() -> String {
     std::fs::read_to_string(concat!(

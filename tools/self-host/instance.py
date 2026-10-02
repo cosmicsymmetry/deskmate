@@ -57,4 +57,6 @@ else:
         if len(words) != 1:
             sys.exit(f'Quote values containing spaces on server.env line {number}')
         env[key] = words[0]
+    if not (bundle / 'bin/deskmate-server').is_file():
+        sys.exit(f'{bundle}/bin/deskmate-server is missing; rebuild the bundle.')
     os.execve(bundle / 'bin/deskmate-server', ['deskmate-server'], env)

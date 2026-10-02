@@ -13,7 +13,7 @@ installation verification.
 
 ## Submissions and approval
 
-An outside contributor leaves the index unchanged. `plugin:check` prints the exact
+An outside contributor leaves the index and approval machinery unchanged. `plugin:check` prints the exact
 entry an owner could add and includes it in `report.json`. A new version that is
 not yet indexed is information in CI, so a submission can pass before acceptance.
 Different bytes using an already indexed id/version fail CI and deployment.
@@ -32,12 +32,35 @@ checks out or runs PR code, installs PR dependencies, consumes PR artifacts, or
 receives write permissions. It checks the **PR author**, not a rerunning actor or
 Git commit attribution. This follows GitHub's
 [trusted workflow guidance](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target).
-Changing the checker in a submission cannot approve that submission. The ordinary
+The base checker owns the protected-path set; submitted code cannot shrink it.
+An outside-author PR touching a protected path fails with the filenames listed,
+even when the release index itself is unchanged. The protected paths are:
+
+- `companion/faces/**`, except files inside a named `plugins/<id>/` folder. This
+  covers the index, hash/verification module, manifest parser, CLI, imported host
+  modules, alternate-extension import shadows, and package tests/preloads. Host
+  tests execute during deployment and must not rewrite approval files between checks.
+- `tools/plugins/**`, including the trusted checker, its tests and possible Python
+  import shadows; `.github/workflows/**`, `.github/actions/**` and `.github/CODEOWNERS`.
+- `companion/crates/server/deploy/deploy.sh`.
+- At the repository root, `companion/`, and `companion/faces/`: package manifests,
+  dependency locks (`bun.lock`, `bun.lockb`, npm/pnpm/yarn locks), `bunfig.toml`,
+  `.bunfig.toml`, `.npmrc`, `.yarnrc`, `.yarnrc.yml`, `.env*`, `tsconfig*.json`, and
+  anything under `node_modules/`. These can alter module loading, installation or
+  command execution. Every `.gitattributes` and `.gitmodules` file is also protected.
+
+The exact names are in the base checker's `PROTECTED_PATHS`, `PROTECTED_TREES`,
+`RUNTIME_ROOTS` and `RUNTIME_CONFIGS`. New verification dependencies must stay within
+that boundary or extend it in an owner PR. Plugin code, tests and assets belong in
+the hashed plugin folder; ordinary documentation contributions remain open.
+
+Changing the checker or workflow in a submission cannot approve that submission.
+The ordinary
 CI job also exercises the policy and its tests. On this workflow's initial owner
 PR, the ordinary job bootstraps verification; the independent trusted workflow
 starts enforcing future PRs after it exists on `main`.
 
-`CODEOWNERS` documents index ownership. Required code-owner reviews and repository
+`CODEOWNERS` documents index ownership and is itself protected. Required code-owner reviews and repository
 settings are unchanged; the owner can submit and approve their own release PR.
 This gate is a review signal, not a claim that repository administrators cannot
 bypass it. Operators still choose the reviewed revision to deploy.

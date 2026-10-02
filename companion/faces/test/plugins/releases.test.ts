@@ -80,6 +80,21 @@ test("new version is informational in CI and refused for installation until revi
   );
   expect(verifyReleases(root, true)[0]).toContain("not yet in the release index");
   expect(() => verifyReleases(root)).toThrow("sample@2.0.0: missing release index entry");
+  for (const mode of ["check", "verify"]) {
+    const result = Bun.spawnSync([
+      process.execPath,
+      "run",
+      join(import.meta.dir, "../../src/author/releases.ts"),
+      mode,
+      root,
+    ]);
+    expect(result.exitCode).toBe(mode === "check" ? 0 : 1);
+    expect(Buffer.concat([result.stdout, result.stderr]).toString()).toContain(
+      mode === "check"
+        ? "not yet in the release index"
+        : "sample@2.0.0: missing release index entry",
+    );
+  }
   const old = readReleases(root);
   writeFileSync(join(root, "releases.json"), JSON.stringify([...old, hashPlugin(root, "sample")]));
   expect(verifyReleases(root)[0]).toContain("reviewed hash verified");
@@ -135,6 +150,56 @@ test("file names and added files are covered; creation order and chmod are irrel
   expect(() => verifyReleases(root)).toThrow("hash mismatch");
   writeFileSync(join(root, "sample", "extra.js"), "extra executable");
   expect(() => verifyReleases(root)).toThrow("hash mismatch");
+});
+
+test("adding a dotfile changes the reviewed content", () => {
+  const root = fixture();
+  writeFileSync(join(root, "sample/.settings"), "new hidden asset");
+  expect(() => verifyReleases(root)).toThrow("hash mismatch");
+});
+
+test("changing an existing dotfile changes the reviewed content", () => {
+  const root = fixture();
+  writeFileSync(join(root, "sample/.settings"), "reviewed hidden asset");
+  writeFileSync(join(root, "releases.json"), JSON.stringify([hashPlugin(root, "sample")]));
+  writeFileSync(join(root, "sample/.settings"), "changed hidden asset");
+  expect(() => verifyReleases(root)).toThrow("hash mismatch");
+});
+
+for (const operation of ["remove", "rename"]) {
+  test(`a nested asset ${operation} changes the reviewed content`, () => {
+    const root = fixture();
+    const directory = join(root, "sample/assets/nested/deep");
+    mkdirSync(directory, { recursive: true });
+    const asset = join(directory, "shape.svg");
+    writeFileSync(asset, "<svg/>");
+    writeFileSync(join(root, "releases.json"), JSON.stringify([hashPlugin(root, "sample")]));
+    if (operation === "remove") rmSync(asset);
+    else renameSync(asset, join(directory, "different.svg"));
+    expect(() => verifyReleases(root)).toThrow("hash mismatch");
+  });
+}
+
+test("LF and CRLF are different reviewed bytes", () => {
+  const root = fixture();
+  const file = join(root, "sample/index.js");
+  writeFileSync(file, `${readFileSync(file, "utf8")}\n`);
+  writeFileSync(join(root, "releases.json"), JSON.stringify([hashPlugin(root, "sample")]));
+  writeFileSync(file, readFileSync(file, "utf8").replace(/\n/g, "\r\n"));
+  expect(() => verifyReleases(root)).toThrow("hash mismatch");
+});
+
+test("canonical identity uses UTF-8 byte ordering and lengths for non-ASCII paths", () => {
+  const root = fixture();
+  // U+E000 sorts before the emoji in UTF-8, but after it in UTF-16. Creation
+  // order is deliberately different. The fixed digest is a documented-format
+  // vector independently calculated with Python hashlib, not this hasher.
+  writeFileSync(join(root, "sample/😀.txt"), "emoji\n");
+  writeFileSync(join(root, "sample/Ω.txt"), "π\n");
+  writeFileSync(join(root, "sample/\ue000.txt"), "private-use\n");
+  expect(hashPlugin(root, "sample").sha256).toBe(
+    "de3c6cbcc14ffaa9b3315efa841778ed20db62c21c1160bae340302c73a655db",
+  );
 });
 
 test("symlinked assets, folders and index cannot hide unreviewed bytes", () => {

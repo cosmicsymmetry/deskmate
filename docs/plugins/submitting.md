@@ -149,7 +149,10 @@ affected behavior. **Bump the manifest version for every code or permission chan
 Each needs another PR and review. The [release index](releases.md) covers every file
 inside the plugin folder, so documentation, test and asset edits there also need a
 new version. Leave `plugins/releases.json` unchanged in an outside author's PR;
-only the owner can approve its entry. CI refuses reused versions with changed bytes,
+only the owner can approve its entry. The [protected approval paths](releases.md#submissions-and-approval)
+also require an owner-authored PR: keep plugin behavior tests and assets inside
+`plugins/<id>/`, alongside the generated test. Host runtime, package-wide tests,
+verification and deploy changes need a separate owner PR. CI refuses reused versions with changed bytes,
 while a new unindexed version can be green. Deployment refuses unreviewed content.
 
 After adding a plugin or changing its label/version/description, regenerate the

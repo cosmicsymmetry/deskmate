@@ -3,6 +3,9 @@ name: plugin release approval
 # This workflow and its checker execute from main, never from an author's PR.
 # Fetching Git objects for a diff does not check out or execute them. No secrets,
 # dependency install, PR scripts, artifacts or caches enter this job.
+# pull_request_target is deliberate: pull_request would let a PR replace the
+# checker and protected-path set that judge that same PR. Fetch head objects only;
+# keep the checkout and every executed command on the trusted base SHA.
 on:
   pull_request_target:
     branches: [main]
@@ -19,7 +22,7 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: require owner identity for index changes
+      - name: require owner identity for release approval changes
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}

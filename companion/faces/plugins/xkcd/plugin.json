@@ -1,0 +1,30 @@
+{
+  "api": 1,
+  "version": "1.0.0",
+  "author": "Deskmate contributors",
+  "secrets": [],
+  "refreshSeconds": 21600,
+  "id": "xkcd",
+  "label": "xkcd",
+  "description": "Compact xkcd comics or the latest strip, credited to Randall Munroe. Noncommercial content.",
+  "hosts": ["xkcd.com", "imgs.xkcd.com"],
+  "fields": [
+    {
+      "type": "enum",
+      "key": "mode",
+      "label": "Comics",
+      "default": "compact",
+      "options": [
+        {
+          "value": "compact",
+          "label": "Compact selection"
+        },
+        {
+          "value": "latest",
+          "label": "Latest comic"
+        }
+      ]
+    }
+  ],
+  "tap": "Tap for the next compact comic. Latest mode checks for a newer comic."
+}

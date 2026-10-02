@@ -1,0 +1,32 @@
+{
+  "cases": [
+    {
+      "name": "Recorded live source: October 2",
+      "now": "2026-10-02T12:00:00Z",
+      "timezone": "UTC",
+      "responses": [
+        {
+          "url": "https://en.wikipedia.org/api/rest_v1/feed/onthisday/selected/10/02",
+          "status": 200,
+          "body": "{\"selected\": [{\"year\": 2018, \"text\": \"The Washington Post journalist Jamal Khashoggi was assassinated in the Saudi consulate in Istanbul, Turkey.\"}, {\"year\": 2006, \"text\": \"A gunman killed five Amish girls before committing suicide in a one-room schoolhouse in Nickel Mines, Pennsylvania.\"}, {\"year\": 2005, \"text\": \"Typhoon Longwang made landfall in China as the deadliest tropical cyclone in that year to impact the country.\"}, {\"year\": 1990, \"text\": \"A hijacked airliner collided with two other planes while attempting to land at Guangzhou Baiyun International Airport in China, killing 128 and injuring 71.\"}, {\"year\": 1971, \"text\": \"Nguyễn Văn Thiệu was re-elected unopposed as President of South Vietnam.\"}, {\"year\": 1967, \"text\": \"Thurgood Marshall was sworn in as the first African-American justice of the Supreme Court of the United States.\"}, {\"year\": 1942, \"text\": \"Second World War: HMS Curacoa (pictured) was accidentally rammed and sunk by RMS Queen Mary while escorting the liner to provide protection from submarine attacks.\"}, {\"year\": 1913, \"text\": \"The Shubert Theatre (pictured) opened on Broadway with a production of Hamlet.\"}, {\"year\": 1879, \"text\": \"Qing China signed the Treaty of Livadia with the Russian Empire, but the terms were so unfavorable that the Chinese government refused to ratify the treaty.\"}, {\"year\": 1835, \"text\": \"Mexican dragoons dispatched to disarm settlers at Gonzales in Mexican Texas encountered stiff resistance from a Texian militia at the Battle of Gonzales, the first armed engagement of the Texas Revolution.\"}, {\"year\": 1766, \"text\": \"As part of wider food riots, citizens in Nottingham, England, looted large quantities of cheese; one man was killed during attempts to restore order.\"}, {\"year\": 1470, \"text\": \"With King Edward IV of England forced to flee to the Burgundian Netherlands after a rebellion organised by Richard Neville, 16th Earl of Warwick, Henry VI was restored to the throne.\"}]}"
+        }
+      ]
+    },
+    {
+      "name": "Second event on tap",
+      "now": "2026-10-02T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 1,
+        "point": null
+      },
+      "responses": [
+        {
+          "url": "https://en.wikipedia.org/api/rest_v1/feed/onthisday/selected/10/02",
+          "status": 200,
+          "body": "{\"selected\": [{\"year\": 2018, \"text\": \"The Washington Post journalist Jamal Khashoggi was assassinated in the Saudi consulate in Istanbul, Turkey.\"}, {\"year\": 2006, \"text\": \"A gunman killed five Amish girls before committing suicide in a one-room schoolhouse in Nickel Mines, Pennsylvania.\"}, {\"year\": 2005, \"text\": \"Typhoon Longwang made landfall in China as the deadliest tropical cyclone in that year to impact the country.\"}, {\"year\": 1990, \"text\": \"A hijacked airliner collided with two other planes while attempting to land at Guangzhou Baiyun International Airport in China, killing 128 and injuring 71.\"}, {\"year\": 1971, \"text\": \"Nguyễn Văn Thiệu was re-elected unopposed as President of South Vietnam.\"}, {\"year\": 1967, \"text\": \"Thurgood Marshall was sworn in as the first African-American justice of the Supreme Court of the United States.\"}, {\"year\": 1942, \"text\": \"Second World War: HMS Curacoa (pictured) was accidentally rammed and sunk by RMS Queen Mary while escorting the liner to provide protection from submarine attacks.\"}, {\"year\": 1913, \"text\": \"The Shubert Theatre (pictured) opened on Broadway with a production of Hamlet.\"}, {\"year\": 1879, \"text\": \"Qing China signed the Treaty of Livadia with the Russian Empire, but the terms were so unfavorable that the Chinese government refused to ratify the treaty.\"}, {\"year\": 1835, \"text\": \"Mexican dragoons dispatched to disarm settlers at Gonzales in Mexican Texas encountered stiff resistance from a Texian militia at the Battle of Gonzales, the first armed engagement of the Texas Revolution.\"}, {\"year\": 1766, \"text\": \"As part of wider food riots, citizens in Nottingham, England, looted large quantities of cheese; one man was killed during attempts to restore order.\"}, {\"year\": 1470, \"text\": \"With King Edward IV of England forced to flee to the Burgundian Netherlands after a rebellion organised by Richard Neville, 16th Earl of Warwick, Henry VI was restored to the throne.\"}]}"
+        }
+      ]
+    }
+  ]
+}

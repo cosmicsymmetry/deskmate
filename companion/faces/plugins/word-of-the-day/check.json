@@ -1,0 +1,49 @@
+{
+  "cases": [
+    {
+      "name": "Recorded curious: assiduous",
+      "now": "2026-10-02T12:00:00.000Z",
+      "timezone": "UTC",
+      "settings": {
+        "vocabulary": "curious"
+      },
+      "responses": [
+        {
+          "url": "https://en.wiktionary.org/api/rest_v1/page/definition/assiduous",
+          "status": 200,
+          "body": "{\"en\":[{\"partOfSpeech\":\"Adjective\",\"language\":\"English\",\"definitions\":[{\"definition\":\"<a rel=\\\"mw:WikiLink\\\" href=\\\"/wiki/hard-working\\\" title=\\\"hard-working\\\">Hard-working</a>, <a rel=\\\"mw:WikiLink\\\" href=\\\"/wiki/diligent\\\" title=\\\"diligent\\\">diligent</a> or <a rel=\\\"mw:WikiLink\\\" href=\\\"/wiki/regular\\\" title=\\\"regular\\\">regular</a> (in attendance or work); <a rel=\\\"mw:WikiLink\\\" href=\\\"/wiki/industrious\\\" title=\\\"industrious\\\">industrious</a>.\"}]}]}"
+        }
+      ]
+    },
+    {
+      "name": "Recorded curious: verisimilitude",
+      "now": "2026-10-05T12:00:00.000Z",
+      "timezone": "UTC",
+      "settings": {
+        "vocabulary": "curious"
+      },
+      "responses": [
+        {
+          "url": "https://en.wiktionary.org/api/rest_v1/page/definition/verisimilitude",
+          "status": 200,
+          "body": "{\"en\":[{\"partOfSpeech\":\"Noun\",\"language\":\"English\",\"definitions\":[{\"definition\":\"The property of seeming <a rel=\\\"mw:WikiLink\\\" href=\\\"/wiki/true\\\" title=\\\"true\\\">true</a>, of resembling <a rel=\\\"mw:WikiLink\\\" href=\\\"/wiki/reality\\\" title=\\\"reality\\\">reality</a>; resemblance to reality.\"},{\"definition\":\"A <a rel=\\\"mw:WikiLink\\\" href=\\\"/wiki/statement\\\" title=\\\"statement\\\">statement</a> which merely <a rel=\\\"mw:WikiLink\\\" href=\\\"/wiki/appear\\\" title=\\\"appear\\\">appears</a> to be <a rel=\\\"mw:WikiLink\\\" href=\\\"/wiki/true\\\" title=\\\"true\\\">true</a>.\"},{\"definition\":\"<span class=\\\"usage-label-sense\\\" about=\\\"#mwt19\\\" typeof=\\\"mw:Transclusion\\\"></span> Faithfulness to its own rules; internal <a rel=\\\"mw:WikiLink\\\" href=\\\"/wiki/cohesion\\\" title=\\\"cohesion\\\">cohesion</a>.\"}]}],\"fr\":[{\"partOfSpeech\":\"Noun\",\"language\":\"French\",\"definitions\":[{\"definition\":\"<a rel=\\\"mw:WikiLink\\\" href=\\\"/wiki/verisimilitude#English\\\" class=\\\"mw-selflink-fragment\\\">verisimilitude</a>\\n\\n<span class=\\\"mw-empty-elt\\\" about=\\\"#mwt86\\\" typeof=\\\"mw:Transclusion\\\"><link rel=\\\"mw:PageProp/Category\\\" href=\\\"./Category:en:Truth#VERISIMILITUDE\\\"></span>\"}]}]}"
+        }
+      ]
+    },
+    {
+      "name": "Recorded everyday: quietude",
+      "now": "2026-10-02T12:00:00.000Z",
+      "timezone": "UTC",
+      "settings": {
+        "vocabulary": "everyday"
+      },
+      "responses": [
+        {
+          "url": "https://en.wiktionary.org/api/rest_v1/page/definition/quietude",
+          "status": 200,
+          "body": "{\"en\":[{\"partOfSpeech\":\"Noun\",\"language\":\"English\",\"definitions\":[{\"definition\":\"<span class=\\\"form-of-definition use-with-mention\\\" about=\\\"#mwt12\\\" typeof=\\\"mw:Transclusion\\\">Synonym of <span class=\\\"form-of-definition-link\\\"><i class=\\\"Latn mention\\\" lang=\\\"en\\\"><a rel=\\\"mw:WikiLink\\\" href=\\\"/wiki/quietness#English\\\" title=\\\"quietness\\\">quietness</a></i> <span class=\\\"mention-gloss-paren annotation-paren\\\">(</span><span class=\\\"mention-gloss-double-quote\\\">“</span><span class=\\\"mention-gloss\\\">absence of sound</span><span class=\\\"mention-gloss-double-quote\\\">”</span><span class=\\\"mention-gloss-paren annotation-paren\\\">)</span></span></span>\"},{\"definition\":\"<a rel=\\\"mw:WikiLink\\\" href=\\\"/wiki/tranquility\\\" title=\\\"tranquility\\\">tranquility</a>\"}]}],\"gl\":[{\"partOfSpeech\":\"Noun\",\"language\":\"Galician\",\"definitions\":[{\"definition\":\"<span class=\\\"Latn\\\" lang=\\\"en\\\" about=\\\"#mwt47\\\" typeof=\\\"mw:Transclusion\\\"><a rel=\\\"mw:WikiLink\\\" href=\\\"/wiki/quietude#English\\\" class=\\\"mw-selflink-fragment\\\">quietude</a></span>, <a rel=\\\"mw:WikiLink\\\" href=\\\"/wiki/tranquility\\\" title=\\\"tranquility\\\">tranquility</a>\"}]}],\"pt\":[{\"partOfSpeech\":\"Noun\",\"language\":\"Portuguese\",\"definitions\":[{\"definition\":\"<a rel=\\\"mw:WikiLink\\\" href=\\\"/wiki/quiet\\\" title=\\\"quiet\\\">quiet</a> <span class=\\\"mention-gloss-paren\\\" about=\\\"#mwt58\\\" typeof=\\\"mw:Transclusion\\\">(</span><span class=\\\"mention-gloss\\\" about=\\\"#mwt58\\\">absence of movement or sound</span><span class=\\\"mention-gloss-paren\\\" about=\\\"#mwt58\\\">)</span>\"}]}]}"
+        }
+      ]
+    }
+  ]
+}

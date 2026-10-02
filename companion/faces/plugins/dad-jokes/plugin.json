@@ -1,0 +1,13 @@
+{
+  "api": 1,
+  "id": "dad-jokes",
+  "version": "1.0.0",
+  "label": "Dad Jokes",
+  "description": "A fresh dad joke each local day, or whenever you tap.",
+  "author": "Deskmate contributors",
+  "hosts": ["icanhazdadjoke.com"],
+  "secrets": [],
+  "fields": [],
+  "refreshSeconds": 21600,
+  "tap": "Tap to fetch another joke. Repeated quick taps request one new joke."
+}

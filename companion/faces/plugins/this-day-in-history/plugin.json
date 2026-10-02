@@ -1,0 +1,13 @@
+{
+  "api": 1,
+  "id": "this-day-in-history",
+  "version": "1.0.0",
+  "label": "This Day in History",
+  "description": "Selected historical events for today in your timezone, from Wikipedia.",
+  "author": "Deskmate contributors",
+  "hosts": ["en.wikipedia.org"],
+  "secrets": [],
+  "fields": [],
+  "refreshSeconds": 21600,
+  "tap": "Tap to read the next event for today."
+}

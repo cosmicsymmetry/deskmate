@@ -120,6 +120,24 @@ async fn get_with_cookie(server: &HttpTestServer, path: &str, cookie: &str) -> r
         .expect("GET without redirects")
 }
 
+async fn google_sign_in(
+    server: &HttpTestServer,
+    transport: &FakeGoogleTransport,
+    claims: impl FnOnce(&str) -> Value,
+) -> (reqwest::Response, reqwest::Response) {
+    let start = no_redirect_get(server, "/v1/app/auth/google/start").await;
+    let location = start.headers()["location"].to_str().unwrap();
+    let state = query_param(location, "state");
+    transport.answer_id_token(&claims(&query_param(location, "nonce")));
+    let callback = get_with_cookie(
+        server,
+        &format!("/v1/app/auth/google/callback?state={state}&code=c"),
+        &google_cookie(&start),
+    )
+    .await;
+    (start, callback)
+}
+
 fn query_param(url: &str, name: &str) -> String {
     url::Url::parse(url)
         .expect("valid URL")
@@ -187,22 +205,7 @@ async fn connect_device(
         .base_url
         .strip_prefix("http://")
         .expect("test server uses HTTP");
-    let request = http::Request::builder()
-        .uri(format!("ws://{host}/v1/device/link"))
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Host", host)
-        .header("Connection", "Upgrade")
-        .header("Upgrade", "websocket")
-        .header("Sec-WebSocket-Version", "13")
-        .header(
-            "Sec-WebSocket-Key",
-            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
-        )
-        .body(())
-        .unwrap();
-    tokio_tungstenite::connect_async(request)
-        .await
-        .map(|(socket, _)| socket)
+    support::connect_device(host, token).await
 }
 
 async fn expect_socket_closed(socket: &mut support::DeviceSocket) {
@@ -467,29 +470,18 @@ async fn instance_reports_google_only_when_google_sign_in_is_set() {
 async fn google_sign_in_links_to_the_account_with_the_same_verified_email() {
     let (state, transport) = google_world(false);
     let server = spawn_http(app(state.clone())).await;
-    let start = no_redirect_get(&server, "/v1/app/auth/google/start").await;
+    let (start, callback) = google_sign_in(&server, &transport, |nonce| {
+        google_claims("g-1", "owner@example.com", true, nonce)
+    })
+    .await;
     assert_eq!(start.status(), StatusCode::SEE_OTHER);
     let location = start.headers()["location"].to_str().unwrap();
-    let state_param = query_param(location, "state");
     let challenge = query_param(location, "code_challenge");
     assert_eq!(query_param(location, "scope"), "openid email");
     assert_eq!(
         query_param(location, "redirect_uri"),
         "https://deskmate.test/v1/app/auth/google/callback"
     );
-
-    transport.answer_id_token(&google_claims(
-        "g-1",
-        "owner@example.com",
-        true,
-        &query_param(start.headers()["location"].to_str().unwrap(), "nonce"),
-    ));
-    let callback = get_with_cookie(
-        &server,
-        &format!("/v1/app/auth/google/callback?state={state_param}&code=c"),
-        &google_cookie(&start),
-    )
-    .await;
     assert_eq!(callback.status(), StatusCode::SEE_OTHER);
     assert_eq!(callback.headers()["location"], "/");
     assert!(
@@ -527,20 +519,9 @@ async fn google_sign_in_links_to_the_account_with_the_same_verified_email() {
 async fn google_sign_in_does_not_create_accounts_while_signups_are_closed() {
     let (state, transport) = google_world(false);
     let server = spawn_http(app(state.clone())).await;
-    let start = no_redirect_get(&server, "/v1/app/auth/google/start").await;
-    let state_param = query_param(start.headers()["location"].to_str().unwrap(), "state");
-    transport.answer_id_token(&google_claims(
-        "g-stranger",
-        "stranger@example.com",
-        true,
-        &query_param(start.headers()["location"].to_str().unwrap(), "nonce"),
-    ));
-
-    let callback = get_with_cookie(
-        &server,
-        &format!("/v1/app/auth/google/callback?state={state_param}&code=c"),
-        &google_cookie(&start),
-    )
+    let (_, callback) = google_sign_in(&server, &transport, |nonce| {
+        google_claims("g-stranger", "stranger@example.com", true, nonce)
+    })
     .await;
     assert_eq!(callback.status(), StatusCode::SEE_OTHER);
     assert_eq!(
@@ -570,20 +551,9 @@ async fn google_sign_in_does_not_create_accounts_while_signups_are_closed() {
 async fn google_sign_in_refuses_an_unverified_email() {
     let (state, transport) = google_world(true);
     let server = spawn_http(app(state.clone())).await;
-    let start = no_redirect_get(&server, "/v1/app/auth/google/start").await;
-    let state_param = query_param(start.headers()["location"].to_str().unwrap(), "state");
-    transport.answer_id_token(&google_claims(
-        "g-unverified",
-        "person@example.com",
-        false,
-        &query_param(start.headers()["location"].to_str().unwrap(), "nonce"),
-    ));
-
-    let callback = get_with_cookie(
-        &server,
-        &format!("/v1/app/auth/google/callback?state={state_param}&code=c"),
-        &google_cookie(&start),
-    )
+    let (_, callback) = google_sign_in(&server, &transport, |nonce| {
+        google_claims("g-unverified", "person@example.com", false, nonce)
+    })
     .await;
     assert_eq!(callback.status(), StatusCode::SEE_OTHER);
     assert_eq!(
@@ -1327,19 +1297,9 @@ async fn google_callback_is_bound_to_the_starting_browser_and_cannot_be_replayed
 async fn google_callback_rejects_a_nonce_from_another_sign_in() {
     let (state, transport) = google_world(true);
     let server = spawn_http(app(state.clone())).await;
-    let start = no_redirect_get(&server, "/v1/app/auth/google/start").await;
-    let state_param = query_param(start.headers()["location"].to_str().unwrap(), "state");
-    transport.answer_id_token(&google_claims(
-        "g-new",
-        "new@example.com",
-        true,
-        "wrong-nonce",
-    ));
-    let response = get_with_cookie(
-        &server,
-        &format!("/v1/app/auth/google/callback?state={state_param}&code=c"),
-        &google_cookie(&start),
-    )
+    let (_, response) = google_sign_in(&server, &transport, |_| {
+        google_claims("g-new", "new@example.com", true, "wrong-nonce")
+    })
     .await;
     assert_eq!(response.headers()["location"], "/?signin_error=provider");
     assert!(
@@ -1370,24 +1330,11 @@ async fn instance_reports_the_actual_mail_delivery_mode() {
 async fn google_does_not_link_a_third_party_email_without_current_mailbox_proof() {
     let (state, transport) = google_world(false);
     let server = spawn_http(app(state.clone())).await;
-    let start = no_redirect_get(&server, "/v1/app/auth/google/start").await;
-    let location = start.headers()["location"].to_str().unwrap();
-    let mut claims = google_claims(
-        "unlinked",
-        "owner@example.com",
-        true,
-        &query_param(location, "nonce"),
-    );
-    claims.as_object_mut().unwrap().remove("hd");
-    transport.answer_id_token(&claims);
-    let response = get_with_cookie(
-        &server,
-        &format!(
-            "/v1/app/auth/google/callback?state={}&code=c",
-            query_param(location, "state")
-        ),
-        &google_cookie(&start),
-    )
+    let (_, response) = google_sign_in(&server, &transport, |nonce| {
+        let mut claims = google_claims("unlinked", "owner@example.com", true, nonce);
+        claims.as_object_mut().unwrap().remove("hd");
+        claims
+    })
     .await;
     assert_eq!(
         response.headers()["location"],
@@ -1408,24 +1355,11 @@ async fn google_creates_an_account_when_open_and_returns_to_it_after_registratio
     let server = spawn_http(app(state.clone())).await;
     for (email, signups_open) in [("new@gmail.com", true), ("changed@example.org", false)] {
         state.identity().set_signups_open(signups_open).unwrap();
-        let start = no_redirect_get(&server, "/v1/app/auth/google/start").await;
-        let location = start.headers()["location"].to_str().unwrap();
-        let mut claims = google_claims(
-            "stable-google-user",
-            email,
-            true,
-            &query_param(location, "nonce"),
-        );
-        claims.as_object_mut().unwrap().remove("hd");
-        transport.answer_id_token(&claims);
-        let response = get_with_cookie(
-            &server,
-            &format!(
-                "/v1/app/auth/google/callback?state={}&code=c",
-                query_param(location, "state")
-            ),
-            &google_cookie(&start),
-        )
+        let (_, response) = google_sign_in(&server, &transport, |nonce| {
+            let mut claims = google_claims("stable-google-user", email, true, nonce);
+            claims.as_object_mut().unwrap().remove("hd");
+            claims
+        })
         .await;
         assert_eq!(response.headers()["location"], "/");
         assert_eq!(response.headers()["cache-control"], "no-store");
@@ -1493,22 +1427,9 @@ async fn google_registration_cannot_bypass_first_run_owner_setup() {
         .unwrap();
     state.identity().delete_account(&owner.id).unwrap();
     let server = spawn_http(app(state.clone())).await;
-    let start = no_redirect_get(&server, "/v1/app/auth/google/start").await;
-    let location = start.headers()["location"].to_str().unwrap();
-    transport.answer_id_token(&google_claims(
-        "early-google",
-        "early@gmail.com",
-        true,
-        &query_param(location, "nonce"),
-    ));
-    let response = get_with_cookie(
-        &server,
-        &format!(
-            "/v1/app/auth/google/callback?state={}&code=c",
-            query_param(location, "state")
-        ),
-        &google_cookie(&start),
-    )
+    let (_, response) = google_sign_in(&server, &transport, |nonce| {
+        google_claims("early-google", "early@gmail.com", true, nonce)
+    })
     .await;
     assert_eq!(
         response.headers()["location"],

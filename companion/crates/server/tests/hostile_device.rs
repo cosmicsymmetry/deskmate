@@ -56,19 +56,7 @@ async fn spawn() -> (
 async fn connect(host: &str, identity: &server::registry::DeviceIdentity) -> DeviceSocket {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
     loop {
-        let request = http::Request::builder()
-            .uri(format!("ws://{host}/v1/device/link"))
-            .header("Authorization", format!("Bearer {}", identity.token))
-            .header("Host", host)
-            .header("Connection", "Upgrade")
-            .header("Upgrade", "websocket")
-            .header("Sec-WebSocket-Version", "13")
-            .header(
-                "Sec-WebSocket-Key",
-                tokio_tungstenite::tungstenite::handshake::client::generate_key(),
-            )
-            .body(())
-            .unwrap();
+        let request = support::link_request(host, Some(&format!("Bearer {}", identity.token)));
         if let Ok((mut socket, response)) = tokio_tungstenite::connect_async(request).await {
             assert_eq!(response.status(), 101);
             support::bootstrap_runtime(&mut socket).await;

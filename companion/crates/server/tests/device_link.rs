@@ -5,6 +5,8 @@ use server::{ServerState, app};
 
 mod support;
 
+use support::link_request;
+
 async fn spawn() -> (String, server::registry::DeviceIdentity) {
     let state = ServerState::in_memory();
     let owner = support::owner_account(&state);
@@ -15,23 +17,6 @@ async fn spawn() -> (String, server::registry::DeviceIdentity) {
         axum::serve(listener, app(state)).await.unwrap();
     });
     (format!("127.0.0.1:{}", address.port()), identity)
-}
-
-fn link_request(host: &str, authorization: Option<&str>) -> http::Request<()> {
-    let mut request = http::Request::builder()
-        .uri(format!("ws://{host}/v1/device/link"))
-        .header("Host", host)
-        .header("Connection", "Upgrade")
-        .header("Upgrade", "websocket")
-        .header("Sec-WebSocket-Version", "13")
-        .header(
-            "Sec-WebSocket-Key",
-            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
-        );
-    if let Some(authorization) = authorization {
-        request = request.header("Authorization", authorization);
-    }
-    request.body(()).unwrap()
 }
 
 #[tokio::test]

@@ -7,6 +7,35 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 pub type DeviceSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+pub fn link_request(host: &str, authorization: Option<&str>) -> http::Request<()> {
+    let mut request = http::Request::builder()
+        .uri(format!("ws://{host}/v1/device/link"))
+        .header("Host", host)
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header(
+            "Sec-WebSocket-Key",
+            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+        );
+    if let Some(authorization) = authorization {
+        request = request.header("Authorization", authorization);
+    }
+    request.body(()).unwrap()
+}
+
+// The error is tungstenite's; keep it intact for callers inspecting refusals.
+#[allow(clippy::result_large_err)]
+pub async fn connect_device(
+    host: &str,
+    token: &str,
+) -> Result<DeviceSocket, tokio_tungstenite::tungstenite::Error> {
+    let request = link_request(host, Some(&format!("Bearer {token}")));
+    tokio_tungstenite::connect_async(request)
+        .await
+        .map(|(socket, _)| socket)
+}
+
 pub const IN_MEMORY_ADMIN_TOKEN: &str = "in-memory-admin-token";
 
 #[derive(Clone)]

@@ -115,22 +115,7 @@ async fn connect_device(
         .base_url
         .strip_prefix("http://")
         .expect("test server uses HTTP");
-    let request = http::Request::builder()
-        .uri(format!("ws://{host}/v1/device/link"))
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Host", host)
-        .header("Connection", "Upgrade")
-        .header("Upgrade", "websocket")
-        .header("Sec-WebSocket-Version", "13")
-        .header(
-            "Sec-WebSocket-Key",
-            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
-        )
-        .body(())
-        .unwrap();
-    tokio_tungstenite::connect_async(request)
-        .await
-        .map(|(socket, _)| socket)
+    support::connect_device(host, token).await
 }
 
 #[tokio::test(flavor = "multi_thread")]

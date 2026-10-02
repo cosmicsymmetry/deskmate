@@ -1,12 +1,20 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FaceDefinition } from "../../src/face";
 import { discoverPlugins } from "../../src/plugins/discovery";
-import { parseManifest } from "../../src/plugins/manifest";
 import { runPlugin } from "../../src/plugins/run";
 import { warmSandbox } from "../../src/plugins/sandbox";
+import {
+  ONE_BOX_CARD,
+  minimalManifest,
+  shippedPlugin,
+  tempPlugins,
+  writePluginFolder,
+} from "./test_support";
+
+const temporaryRoot = tempPlugins();
 
 beforeAll(async () => {
   await warmSandbox();
@@ -22,30 +30,19 @@ function firstFace(faces: readonly FaceDefinition[]): FaceDefinition {
 }
 
 function fixture(): string {
-  const root = join(tmpdir(), `plugins-${Math.random().toString(36).slice(2)}`);
-  const write = (folder: string, manifest: unknown, source: string) => {
-    mkdirSync(join(root, folder), { recursive: true });
-    writeFileSync(join(root, folder, "plugin.json"), JSON.stringify(manifest));
-    writeFileSync(join(root, folder, "index.js"), source);
-  };
-  const ok = (id: string) => ({
-    api: 1,
-    id,
-    version: "1.0.0",
-    label: id,
-    description: "d",
-    author: "a",
-    hosts: [],
-    secrets: [],
-    fields: [],
-  });
+  const root = temporaryRoot();
   const card = `export function plan(){ return []; }
-    export function render(){ return { layout: { type: "div", style: { display: "flex", width: 448, height: 368, background: "#000" }, children: "ok" } }; }`;
-  write("good", ok("good"), card);
-  write("broken-json", "{not json", card);
-  write("wrong-api", { ...ok("wrong-api"), api: 2 }, card);
-  write("id-mismatch", ok("something-else"), card);
-  write("syntax-error", ok("syntax-error"), "export function plan(){ return [ }");
+    export function render(){ return ${ONE_BOX_CARD}; }`;
+  writePluginFolder(root, "good", minimalManifest("good"), card);
+  writePluginFolder(root, "broken-json", "{not json", card);
+  writePluginFolder(root, "wrong-api", { ...minimalManifest("wrong-api"), api: 2 }, card);
+  writePluginFolder(root, "id-mismatch", minimalManifest("something-else"), card);
+  writePluginFolder(
+    root,
+    "syntax-error",
+    minimalManifest("syntax-error"),
+    "export function plan(){ return [ }",
+  );
   mkdirSync(join(root, "empty-folder"), { recursive: true });
   return root;
 }
@@ -84,28 +81,13 @@ describe("discoverPlugins", () => {
   });
 
   test("a discovered face carries the manifest's tap and refreshSeconds", async () => {
-    const root = join(tmpdir(), `plugins-${Math.random().toString(36).slice(2)}`);
-    mkdirSync(join(root, "clicker"), { recursive: true });
-    writeFileSync(
-      join(root, "clicker", "plugin.json"),
-      JSON.stringify({
-        api: 1,
-        id: "clicker",
-        version: "1.0.0",
-        label: "Clicker",
-        description: "d",
-        author: "a",
-        hosts: [],
-        secrets: [],
-        fields: [],
-        tap: "Tap to advance.",
-        refreshSeconds: 120,
-      }),
-    );
-    writeFileSync(
-      join(root, "clicker", "index.js"),
+    const root = temporaryRoot();
+    writePluginFolder(
+      root,
+      "clicker",
+      minimalManifest("clicker", { label: "Clicker", tap: "Tap to advance.", refreshSeconds: 120 }),
       `export function plan(){ return []; }
-       export function render(){ return { layout: { type: "div", style: { display: "flex", width: 448, height: 368, background: "#000" }, children: "ok" } }; }`,
+       export function render(){ return ${ONE_BOX_CARD}; }`,
     );
     const { faces } = await discoverPlugins(root);
     expect(faces[0]?.tap).toBe("Tap to advance.");
@@ -113,24 +95,11 @@ describe("discoverPlugins", () => {
   });
 
   test("a plugin's own render sees the timezone the render request sent", async () => {
-    const root = join(tmpdir(), `plugins-${Math.random().toString(36).slice(2)}`);
-    mkdirSync(join(root, "clock"), { recursive: true });
-    writeFileSync(
-      join(root, "clock", "plugin.json"),
-      JSON.stringify({
-        api: 1,
-        id: "clock",
-        version: "1.0.0",
-        label: "Clock",
-        description: "d",
-        author: "a",
-        hosts: [],
-        secrets: [],
-        fields: [],
-      }),
-    );
-    writeFileSync(
-      join(root, "clock", "index.js"),
+    const root = temporaryRoot();
+    writePluginFolder(
+      root,
+      "clock",
+      minimalManifest("clock", { label: "Clock" }),
       `export function plan(){ return []; }
        export function render(c){ return { layout: { type: "div", style: { display: "flex", width: 448, height: 368, background: "#000" }, children: "x" }, state: c.now.timezone }; }`,
     );
@@ -152,12 +121,7 @@ describe("discoverPlugins", () => {
     // The real folder, not a throwaway fixture -- `docs/plugins/contract-v1.md`
     // points authors here as the copy-this-pattern example of recording an answer
     // and comparing the rendered card with no network involved.
-    const root = join(import.meta.dir, "..", "..", "plugins", "github-stats");
-    const manifest = parseManifest(
-      JSON.parse(readFileSync(join(root, "plugin.json"), "utf8")),
-      "github-stats",
-    );
-    const source = readFileSync(join(root, "index.js"), "utf8");
+    const { manifest, source } = shippedPlugin("github-stats");
 
     test("fetches exactly once per render, not once per round", async () => {
       const seen: string[] = [];

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { FieldSpec } from "../../src/face";
 import { ManifestError, parseManifest } from "../../src/plugins/manifest";
 
 const valid = {
@@ -138,5 +139,86 @@ describe("parseManifest", () => {
     expect(() => parseManifest({ ...valid, fields: "a-field" }, "github-stats")).toThrow(
       /fields must be an array/,
     );
+  });
+
+  test.each([
+    ["null field", null],
+    ["array field", []],
+    ["unknown type", { type: "number", key: "n", label: "N" }],
+    ["missing key", { type: "text", label: "L", placeholder: "p" }],
+    ["non-string label", { type: "url", key: "k", label: 2, placeholder: "p" }],
+    ["missing text placeholder", { type: "text", key: "k", label: "L" }],
+    ["non-string url placeholder", { type: "url", key: "k", label: "L", placeholder: null }],
+    [
+      "non-string text default",
+      { type: "text", key: "k", label: "L", placeholder: "p", default: 5 },
+    ],
+    [
+      "non-string url default",
+      { type: "url", key: "k", label: "L", placeholder: "p", default: null },
+    ],
+    ["missing enum default", { type: "enum", key: "k", label: "L", options: [] }],
+    ["missing enum options", { type: "enum", key: "k", label: "L", default: "a" }],
+    ["non-array enum options", { type: "enum", key: "k", label: "L", default: "a", options: {} }],
+    ["null option", { type: "enum", key: "k", label: "L", default: "a", options: [null] }],
+    [
+      "non-string option value",
+      { type: "enum", key: "k", label: "L", default: "a", options: [{ value: 1, label: "A" }] },
+    ],
+    [
+      "missing option label",
+      { type: "enum", key: "k", label: "L", default: "a", options: [{ value: "a" }] },
+    ],
+  ])("refuses a malformed catalog field: %s", (_name, field) => {
+    expect(() => parseManifest({ ...valid, fields: [field] }, "github-stats")).toThrow(
+      ManifestError,
+    );
+  });
+
+  test.each([-1, 1e20, 2 ** 64, 0.5, NaN, Infinity])(
+    "refuses refreshSeconds outside u64: %s",
+    (refreshSeconds) => {
+      expect(() => parseManifest({ ...valid, refreshSeconds }, "github-stats")).toThrow(
+        /refreshSeconds/,
+      );
+    },
+  );
+
+  test.each([0, 1e16, 2 ** 64 - 2048])("preserves a valid refreshSeconds: %s", (refreshSeconds) => {
+    expect(parseManifest({ ...valid, refreshSeconds }, "github-stats").refreshSeconds).toBe(
+      refreshSeconds,
+    );
+  });
+
+  test("preserves field strings, duplicate keys, empty options and optional defaults", () => {
+    const fields: FieldSpec[] = [
+      { type: "text", key: " spaced ", label: "", placeholder: "  " },
+      { type: "url", key: " spaced ", label: " ", placeholder: "", default: " url " },
+      { type: "enum", key: "", label: "", default: "", options: [] },
+      {
+        type: "enum",
+        key: "enum",
+        label: " L ",
+        default: " a ",
+        options: [{ value: " a ", label: "" }],
+      },
+    ];
+    expect(parseManifest({ ...valid, fields }, "github-stats").fields).toEqual(fields);
+  });
+
+  test("secret strings keep their trimming, exact errors and validation order", () => {
+    const secret = { ...valid.secrets[0], key: " token ", label: " Token " };
+    expect(parseManifest({ ...valid, secrets: [secret] }, "github-stats").secrets[0]).toMatchObject(
+      { key: "token", label: "Token" },
+    );
+    expect(() =>
+      parseManifest({ ...valid, secrets: [{ ...secret, key: " ", label: " " }] }, "github-stats"),
+    ).toThrow("secret key must be a non-empty string");
+    expect(() =>
+      parseManifest(
+        { ...valid, secrets: [{ ...secret, label: " ", kind: "bad" }] },
+        "github-stats",
+      ),
+    ).toThrow("secret label must be a non-empty string");
   });
 });

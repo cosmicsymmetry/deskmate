@@ -15,8 +15,6 @@ export const GRID = 8;
 export const MARGIN = 3 * GRID;
 /** `DESKMATE_RADIUS_MODULE`. */
 export const RADIUS_MODULE = 3 * GRID;
-/** Small enough to read as a control rather than as a module. */
-export const RADIUS_CHIP = 1.5 * GRID;
 
 export const CANVAS_WIDTH = 448;
 export const CANVAS_HEIGHT = 368;

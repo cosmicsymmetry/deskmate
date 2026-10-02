@@ -1,16 +1,14 @@
-import { afterEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import {
   chmodSync,
   cpSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   hashPlugin,
@@ -19,28 +17,18 @@ import {
   releaseStatus,
   verifyReleases,
 } from "../../src/plugins/releases";
+import { minimalManifest, tempPlugins, writePluginFolder } from "./test_support";
 
-const roots: string[] = [];
-afterEach(() => {
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
-});
-const manifest = {
-  api: 1,
-  id: "sample",
-  version: "1.0.0",
+const temporaryRoot = tempPlugins();
+const manifest = minimalManifest("sample", {
   label: "Sample",
   description: "A card",
   author: "Test",
-  hosts: [],
-  secrets: [],
-  fields: [],
-};
+});
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "plugin-release-"));
-  roots.push(root);
+  const root = temporaryRoot("plugin-release-");
   mkdirSync(join(root, "sample", "assets"), { recursive: true });
-  writeFileSync(join(root, "sample", "plugin.json"), JSON.stringify(manifest));
-  writeFileSync(join(root, "sample", "index.js"), "export function plan(){ return []; }");
+  writePluginFolder(root, "sample", manifest, "export function plan(){ return []; }");
   writeFileSync(join(root, "sample", "assets", "image.svg"), "<svg/>");
   writeFileSync(join(root, "sample", "README.md"), "Read me");
   writeFileSync(join(root, "sample", "index.test.js"), "// Test evidence");
@@ -111,8 +99,7 @@ test("permission changes require a new reviewed version", () => {
 });
 
 test("the author checker prints the shared identity and ignores instance withdrawal policy", () => {
-  const output = mkdtempSync(join(tmpdir(), "release-evidence-"));
-  roots.push(output);
+  const output = temporaryRoot("release-evidence-");
   const policy = join(output, "operator.json");
   writeFileSync(policy, "malformed policy");
   const result = Bun.spawnSync(
@@ -204,8 +191,7 @@ test("canonical identity uses UTF-8 byte ordering and lengths for non-ASCII path
 
 test("symlinked assets, folders and index cannot hide unreviewed bytes", () => {
   const root = fixture();
-  const container = mkdtempSync(join(tmpdir(), "linked-plugins-"));
-  roots.push(container);
+  const container = temporaryRoot("linked-plugins-");
   symlinkSync(root, join(container, "plugins"));
   expect(() => verifyReleases(join(container, "plugins"))).toThrow("real directory");
   symlinkSync("image.svg", join(root, "sample", "assets/link.svg"));

@@ -1,18 +1,13 @@
 import { beforeAll, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pngFromSvg } from "../../src/kit/raster";
 import { discoverPlugins } from "../../src/plugins/discovery";
-import { parseManifest } from "../../src/plugins/manifest";
 import { runPlugin, type RunPluginInput } from "../../src/plugins/run";
 import { runInSandbox, warmSandbox } from "../../src/plugins/sandbox";
+import { shippedPlugin } from "./test_support";
 
 const root = join(import.meta.dir, "../../plugins");
-const source = readFileSync(join(root, "ink-landscape/index.js"), "utf8");
-const manifest = parseManifest(
-  JSON.parse(readFileSync(join(root, "ink-landscape/plugin.json"), "utf8")),
-  "ink-landscape",
-);
+const { source, manifest } = shippedPlugin("ink-landscape");
 beforeAll(warmSandbox);
 
 async function draw(overrides: Partial<RunPluginInput> = {}) {

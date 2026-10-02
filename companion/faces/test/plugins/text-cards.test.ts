@@ -7,21 +7,17 @@ import { textWidth } from "../../src/kit/raster";
 import { renderRequest, tapRequest, viewsRequest } from "../../src/main";
 import { buildNow } from "../../src/plugins/context";
 import { discoverPlugins } from "../../src/plugins/discovery";
-import { parseManifest } from "../../src/plugins/manifest";
+import type { parseManifest } from "../../src/plugins/manifest";
 import { type RunPluginInput, runPlugin } from "../../src/plugins/run";
 import { runInSandbox, warmSandbox } from "../../src/plugins/sandbox";
+import { shippedPlugin } from "./test_support";
 
 const root = join(import.meta.dir, "../../plugins");
 const ids = ["this-day-in-history", "dad-jokes", "word-of-the-day"] as const;
 type Id = (typeof ids)[number];
 const fixtures = Object.fromEntries(
   ids.map((id) => {
-    const folder = join(root, id);
-    const source = readFileSync(join(folder, "index.js"), "utf8");
-    const manifest = parseManifest(
-      JSON.parse(readFileSync(join(folder, "plugin.json"), "utf8")),
-      id,
-    );
+    const { folder, source, manifest } = shippedPlugin(id);
     const checks = JSON.parse(readFileSync(join(folder, "check.json"), "utf8"));
     const body = checks.cases[0].responses[0].body as string;
     return [id, { source, manifest, json: JSON.parse(body) as unknown, body }];

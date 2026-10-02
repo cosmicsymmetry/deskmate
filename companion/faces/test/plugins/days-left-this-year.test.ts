@@ -1,19 +1,13 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { renderRequest } from "../../src/main";
 import { discoverPlugins } from "../../src/plugins/discovery";
-import { parseManifest } from "../../src/plugins/manifest";
 import { runPlugin } from "../../src/plugins/run";
 import { runInSandbox, warmSandbox } from "../../src/plugins/sandbox";
+import { shippedPlugin } from "./test_support";
 
 const plugins = join(import.meta.dir, "../../plugins");
-const folder = join(plugins, "days-left-this-year");
-const source = readFileSync(join(folder, "index.js"), "utf8");
-const manifest = parseManifest(
-  JSON.parse(readFileSync(join(folder, "plugin.json"), "utf8")),
-  "days-left-this-year",
-);
+const { source, manifest } = shippedPlugin("days-left-this-year");
 
 beforeAll(warmSandbox);
 

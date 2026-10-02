@@ -7,6 +7,7 @@ import { newPlugin } from "../../src/author/new";
 import { SANDBOX_LIMITS, warmSandbox } from "../../src/plugins/sandbox";
 import { discoverPlugins } from "../../src/plugins/discovery";
 import { renderRequest } from "../../src/main";
+import { SQUARE_SVG } from "./test_support";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -20,7 +21,7 @@ async function fixture() {
   const options = { pluginsDir, outDir: join(root, "out") };
   return { directory, options, check: () => checkPlugin("sample", options) };
 }
-const card = `{ svg: '<svg xmlns="http://www.w3.org/2000/svg" width="448" height="368"><rect width="448" height="368" fill="black"/></svg>' }`;
+const card = `{ svg: '${SQUARE_SVG}' }`;
 const errors = (report: Awaited<ReturnType<typeof checkPlugin>>) =>
   [...report.errors, ...report.cases.flatMap((example) => example.errors)].join(" ");
 

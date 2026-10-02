@@ -1,37 +1,20 @@
-import { afterEach, beforeAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { beforeAll, expect, test } from "bun:test";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ConfigurationError } from "../../src/face";
 import { discoverPlugins } from "../../src/plugins/discovery";
 import { warmSandbox } from "../../src/plugins/sandbox";
+import { minimalManifest, tempPlugins, writePluginFolder } from "./test_support";
 
 beforeAll(warmSandbox);
-const roots: string[] = [];
-afterEach(() => {
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
-});
+const temporaryRoot = tempPlugins();
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "plugin-denylist-"));
-  roots.push(root);
+  const root = temporaryRoot("plugin-denylist-");
   const plugins = join(root, "plugins");
-  mkdirSync(join(plugins, "sample"), { recursive: true });
-  writeFileSync(
-    join(plugins, "sample/plugin.json"),
-    JSON.stringify({
-      api: 1,
-      id: "sample",
-      version: "1.0.0",
-      label: "Sample",
-      description: "A card",
-      author: "Test",
-      hosts: [],
-      secrets: [],
-      fields: [],
-    }),
-  );
-  writeFileSync(
-    join(plugins, "sample/index.js"),
+  writePluginFolder(
+    plugins,
+    "sample",
+    minimalManifest("sample", { label: "Sample", description: "A card", author: "Test" }),
     'export function plan(){ return []; }\nexport function render(){ return {svg:\'<svg xmlns="http://www.w3.org/2000/svg" width="448" height="368"/>\'}; }',
   );
   const path = join(root, "operator-denylist.json");

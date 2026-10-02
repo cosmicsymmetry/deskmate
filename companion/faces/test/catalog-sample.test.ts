@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { describeCatalog } from "../src/main";
 import type { FaceDefinition } from "../src/face";
+import { SQUARE_SVG } from "./plugins/test_support";
 
 // Pins `describeCatalog`'s exact output across the TypeScript/Rust boundary. The
 // 2026-09-28 review found that `refreshSeconds` (camelCase, this side) was never
@@ -18,8 +19,6 @@ import type { FaceDefinition } from "../src/face";
 // function produces TODAY, so the sample cannot go stale relative to this side. A
 // Rust test deserializes the same file; if either language's shape of this JSON
 // drifts, one of the two tests fails.
-const SQUARE_SVG =
-  '<svg xmlns="http://www.w3.org/2000/svg" width="448" height="368"><rect width="448" height="368" fill="black"/></svg>';
 
 const SAMPLE_FACES: FaceDefinition[] = [
   {

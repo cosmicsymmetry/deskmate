@@ -93,7 +93,7 @@ export async function pinnedAddress(url: URL, resolve: Resolve = systemResolve):
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new ConfigurationError(`${url.protocol} URLs are not fetched; use http or https`);
   }
-  const host = url.hostname.replace(/^\[|\]$/g, "");
+  const host = bareHost(url.hostname);
   let addresses: string[];
   if (isIP(host) !== 0) {
     addresses = [host];
@@ -190,7 +190,7 @@ export function dial(
 ): Promise<Response> {
   const target = new URL(url);
   target.hostname = isIP(address) === 6 ? `[${address}]` : address;
-  const named = isIP(url.hostname.replace(/^\[|\]$/g, "")) === 0;
+  const named = isIP(bareHost(url.hostname)) === 0;
   const { passthrough, overrides } = splitHeaders(init?.headers);
   return fetch(target, {
     method: init?.method,
@@ -225,6 +225,22 @@ export type DialFn = (
   init?: DialInit,
 ) => Promise<Response>;
 
+function transientFor(error: unknown, host: string): never {
+  if (error instanceof ConfigurationError || error instanceof TransientError) {
+    throw error;
+  }
+  if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+    throw new TransientError(`${host} timed out`);
+  }
+  // The message, never the URL: a query string can carry an API key.
+  throw new TransientError(`${host} could not be fetched`);
+}
+
+/** Strips brackets from an IPv6 literal the way `URL.hostname` presents it. */
+export function bareHost(hostname: string): string {
+  return hostname.replace(/^\[|\]$/g, "");
+}
+
 /** For tests: a face takes its fetcher as a parameter, and `fetchText` is the real one. */
 export type FetchText = (url: string) => Promise<string>;
 
@@ -252,17 +268,7 @@ export function createFetchText(resolve: Resolve = systemResolve): FetchText {
       }
       throw new TransientError("the redirect limit was exceeded");
     } catch (error) {
-      if (error instanceof ConfigurationError || error instanceof TransientError) {
-        throw error;
-      }
-      if (
-        error instanceof Error &&
-        (error.name === "TimeoutError" || error.name === "AbortError")
-      ) {
-        throw new TransientError(`${url.host} timed out`);
-      }
-      // The message, never the URL: a query string can carry an API key.
-      throw new TransientError(`${url.host} could not be fetched`);
+      transientFor(error, url.host);
     }
   };
 }
@@ -356,17 +362,7 @@ export function createRequest(resolve: Resolve = systemResolve, dialFn: DialFn =
       });
       return await replyFrom(response, as);
     } catch (error) {
-      if (error instanceof ConfigurationError || error instanceof TransientError) {
-        throw error;
-      }
-      if (
-        error instanceof Error &&
-        (error.name === "TimeoutError" || error.name === "AbortError")
-      ) {
-        throw new TransientError(`${target.host} timed out`);
-      }
-      // The message, never the URL: a query string can carry an API key.
-      throw new TransientError(`${target.host} could not be fetched`);
+      transientFor(error, target.host);
     }
   };
 }

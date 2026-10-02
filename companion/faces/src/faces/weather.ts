@@ -158,10 +158,9 @@ export async function renderWeatherRequest(
   const face = cached ?? (await fetchWeather(settings, get, context.timezone));
   const fetchedAt = cached === undefined ? now.toISOString() : previous.fetchedAt;
   const result = renderWeatherResult(face, now, context);
-  const drawn = typeof result === "string" ? { svg: result } : result;
   return {
-    svg: drawn.svg,
-    state: { ...(drawn.state as WeatherState), forecast: face, fetchedAt },
+    svg: result.svg,
+    state: { ...result.state, forecast: face, fetchedAt },
   };
 }
 
@@ -671,7 +670,7 @@ export function renderWeatherResult(
   face: WeatherFace,
   now: Date,
   context?: RenderContext,
-): RenderResult {
+): { svg: string; state: WeatherState } {
   let state = weatherState(context?.state);
   if (context?.event === undefined && state.view === "days") {
     const tappedAt = state.tappedAt === null ? Number.NaN : Date.parse(state.tappedAt);

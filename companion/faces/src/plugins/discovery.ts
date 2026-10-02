@@ -11,11 +11,15 @@
 
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import type { FaceDefinition, RenderContext as FaceRenderContext, Settings } from "../face";
+import type {
+  FaceDefinition,
+  RenderContext as FaceRenderContext,
+  Settings,
+  TapEvent,
+} from "../face";
 import { type RequestFn, request as httpRequest } from "../kit/http";
 import { FORMAT_SOURCE } from "./context";
 import { type PluginManifest, parseManifest } from "./manifest";
-import type { TapEvent } from "./run";
 import { runPlugin } from "./run";
 import { readPluginSecrets } from "./secrets";
 import { SANDBOX_LIMITS, SandboxError, runInSandbox } from "./sandbox";

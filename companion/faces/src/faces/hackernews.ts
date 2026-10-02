@@ -24,12 +24,12 @@ import {
   type FaceDefinition,
   type RenderContext,
   type Settings,
-  type ViewId,
   text,
   TransientError,
 } from "../face";
 import { relativeAge } from "../kit/age";
 import { type FetchText, fetchText } from "../kit/http";
+import { pageCount, pageViews, pageForView, recentTap } from "../kit/paging";
 import {
   Canvas,
   fit,
@@ -111,7 +111,6 @@ const MAX_STORIES = 4;
 /** A couple of spares, because a ranked id can be dead or deleted. */
 const FETCHED = MAX_STORIES * 5 + 2;
 const STORED_STORIES = MAX_STORIES * 5;
-const TEMPORARY_VIEW_MS = 10 * 60 * 1000;
 
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
 
@@ -695,11 +694,8 @@ function storedState(value: unknown): HackerNewsState | undefined {
   };
 }
 
-const pageCount = (stories: Story[]): number =>
-  Math.max(1, Math.ceil(stories.length / MAX_STORIES));
-
 function normalizedPage(page: number, stories: Story[]): number {
-  return page % pageCount(stories);
+  return page % pageCount(stories.length, MAX_STORIES);
 }
 
 /** Shared by staged selection and the server's render-only tap fallback. */
@@ -711,27 +707,8 @@ function tappedState(previous: HackerNewsState, taps: number, now: Date): Hacker
   };
 }
 
-function pageViews(stories: Story[]): ViewId[] {
-  return Array.from({ length: pageCount(stories) }, (_, page) =>
-    page === 0 ? "" : `page-${page + 1}`,
-  );
-}
-
-function pageForView(view: ViewId | undefined, stories: Story[]): number {
-  const page = pageViews(stories).indexOf(view ?? "");
-  return page === -1 ? 0 : page;
-}
-
-function recentTap(tappedAt: string | null, now: Date): boolean {
-  if (tappedAt === null) {
-    return false;
-  }
-  const instant = Date.parse(tappedAt);
-  return Number.isFinite(instant) && now.getTime() - instant <= TEMPORARY_VIEW_MS;
-}
-
 function drawState(state: HackerNewsState): string {
-  const count = pageCount(state.stories);
+  const count = pageCount(state.stories.length, MAX_STORIES);
   const page = normalizedPage(state.page, state.stories);
   return renderHackerNews({
     stories: state.stories.slice(page * MAX_STORIES, (page + 1) * MAX_STORIES),
@@ -754,7 +731,10 @@ export async function renderHackerNewsRequest(
   }
   if (context.view !== undefined && previous !== undefined) {
     return {
-      svg: drawState({ ...previous, page: pageForView(context.view, previous.stories) }),
+      svg: drawState({
+        ...previous,
+        page: pageForView(context.view, pageCount(previous.stories.length, MAX_STORIES)),
+      }),
       state: previous,
     };
   }
@@ -769,7 +749,10 @@ export async function renderHackerNewsRequest(
   // A scheduled refresh names no view, and must draw the page the state above
   // just decided -- that is where "a tap holds its page for ten minutes" lives.
   // Reading an absent view as page zero threw that decision away.
-  const page = context.view === undefined ? state.page : pageForView(context.view, fresh.stories);
+  const page =
+    context.view === undefined
+      ? state.page
+      : pageForView(context.view, pageCount(fresh.stories.length, MAX_STORIES));
   return { svg: drawState({ ...state, page }), state };
 }
 
@@ -794,7 +777,7 @@ export const hackernews: FaceDefinition = {
   ],
   views(_settings, value) {
     const state = storedState(value);
-    return state === undefined ? [""] : pageViews(state.stories);
+    return state === undefined ? [""] : pageViews(pageCount(state.stories.length, MAX_STORIES));
   },
   onTap(_settings, value, event, now) {
     const previous = storedState(value);
@@ -802,7 +785,10 @@ export const hackernews: FaceDefinition = {
       return { view: "" };
     }
     const state = tappedState(previous, event.taps, now);
-    return { view: pageViews(state.stories)[state.page] ?? "", state };
+    return {
+      view: pageViews(pageCount(state.stories.length, MAX_STORIES))[state.page] ?? "",
+      state,
+    };
   },
   render(settings, now, context) {
     return renderHackerNewsRequest(settings, now, context);

@@ -32,10 +32,10 @@ export interface PluginManifest {
   tap?: string;
 }
 
-function text(source: Record<string, unknown>, key: string): string {
+function text(source: Record<string, unknown>, key: string, prefix = ""): string {
   const value = source[key];
   if (typeof value !== "string" || value.trim() === "") {
-    throw new ManifestError(`${key} must be a non-empty string`);
+    throw new ManifestError(`${prefix}${key} must be a non-empty string`);
   }
   return value.trim();
 }
@@ -45,14 +45,8 @@ function validateSecret(secret: unknown): SecretSpec {
     throw new ManifestError("each secret must be an object");
   }
   const s = secret as Record<string, unknown>;
-  const key = s.key;
-  if (typeof key !== "string" || key.trim() === "") {
-    throw new ManifestError("secret key must be a non-empty string");
-  }
-  const label = s.label;
-  if (typeof label !== "string" || label.trim() === "") {
-    throw new ManifestError("secret label must be a non-empty string");
-  }
+  const key = text(s, "key", "secret ");
+  const label = text(s, "label", "secret ");
   const kind = s.kind;
   if (kind !== "api_key") {
     throw new ManifestError(`secret kind must be "api_key", not ${JSON.stringify(kind)}`);
@@ -86,14 +80,54 @@ function validateSecret(secret: unknown): SecretSpec {
     throw new ManifestError(`a secret sent as "${send_as}" names a header, not a param`);
   }
   return {
-    key: key.trim(),
-    label: label.trim(),
+    key,
+    label,
     kind,
     host,
     send_as,
     ...(header !== undefined ? { header } : {}),
     ...(param !== undefined ? { param } : {}),
   };
+}
+
+// Match the catalog's Rust field types without tightening its accepted string values.
+function fieldString(source: Record<string, unknown>, key: string): string {
+  const value = source[key];
+  if (typeof value !== "string") throw new ManifestError(`field ${key} must be a string`);
+  return value;
+}
+
+function validateField(field: unknown): FieldSpec {
+  if (typeof field !== "object" || field === null || Array.isArray(field)) {
+    throw new ManifestError("each field must be an object");
+  }
+  const source = field as Record<string, unknown>;
+  const key = fieldString(source, "key");
+  const label = fieldString(source, "label");
+  const type = source.type;
+  if (type === "text" || type === "url") {
+    return {
+      ...source,
+      type,
+      key,
+      label,
+      placeholder: fieldString(source, "placeholder"),
+      ...(source.default === undefined ? {} : { default: fieldString(source, "default") }),
+    };
+  }
+  if (type === "enum") {
+    const value = fieldString(source, "default");
+    if (!Array.isArray(source.options)) throw new ManifestError("field options must be an array");
+    const options = source.options.map((option: unknown) => {
+      if (typeof option !== "object" || option === null || Array.isArray(option)) {
+        throw new ManifestError("each field option must be an object");
+      }
+      const entry = option as Record<string, unknown>;
+      return { ...entry, value: fieldString(entry, "value"), label: fieldString(entry, "label") };
+    });
+    return { ...source, type, key, label, default: value, options };
+  }
+  throw new ManifestError('field type must be "text", "url", or "enum"');
 }
 
 export function parseManifest(raw: unknown, folder: string): PluginManifest {
@@ -151,12 +185,16 @@ export function parseManifest(raw: unknown, folder: string): PluginManifest {
     }
   }
   if (!Array.isArray(source.fields)) throw new ManifestError("fields must be an array");
+  const fields = source.fields.map(validateField);
   const refreshSeconds = source.refreshSeconds;
   if (
     refreshSeconds !== undefined &&
-    (typeof refreshSeconds !== "number" || !Number.isInteger(refreshSeconds))
+    (typeof refreshSeconds !== "number" ||
+      !Number.isInteger(refreshSeconds) ||
+      refreshSeconds < 0 ||
+      refreshSeconds >= 2 ** 64)
   ) {
-    throw new ManifestError("refreshSeconds must be a whole number of seconds");
+    throw new ManifestError("refreshSeconds must be a whole number of seconds in the u64 range");
   }
   return {
     api: 1,
@@ -167,7 +205,7 @@ export function parseManifest(raw: unknown, folder: string): PluginManifest {
     author: text(source, "author"),
     hosts: hosts as string[],
     secrets,
-    fields: source.fields as unknown[] as FieldSpec[],
+    fields,
     ...(refreshSeconds === undefined ? {} : { refreshSeconds }),
     ...(typeof source.tap === "string" ? { tap: source.tap } : {}),
   };

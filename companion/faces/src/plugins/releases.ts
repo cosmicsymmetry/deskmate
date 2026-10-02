@@ -1,3 +1,4 @@
+import { PLUGIN_ID } from "./id";
 // One content identity for author evidence, CI and installation. See
 // docs/plugins/releases.md for the byte format and approval boundary.
 import { createHash } from "node:crypto";
@@ -12,7 +13,6 @@ export interface Release {
 }
 
 export const RELEASE_INDEX = "releases.json";
-const ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export function pluginFolders(root: string): string[] {
   if (!lstatSync(root).isDirectory()) throw new Error("Plugins directory must be a real directory");
@@ -21,14 +21,14 @@ export function pluginFolders(root: string): string[] {
       const stat = lstatSync(join(root, name));
       if (stat.isSymbolicLink()) throw new Error(`Plugin path ${name} is a symlink`);
       if (!stat.isDirectory()) return false;
-      if (!ID.test(name)) throw new Error(`Invalid plugin folder ${JSON.stringify(name)}`);
+      if (!PLUGIN_ID.test(name)) throw new Error(`Invalid plugin folder ${JSON.stringify(name)}`);
       return true;
     })
     .sort();
 }
 
 export function hashPlugin(root: string, id: string): Release {
-  if (!ID.test(id)) throw new Error("Invalid plugin id");
+  if (!PLUGIN_ID.test(id)) throw new Error("Invalid plugin id");
   const directory = join(root, id);
   const files: string[] = [];
   const walk = (relative: string) => {
@@ -69,7 +69,7 @@ export function parseReleases(raw: unknown): Release[] {
     const r = entry as Record<string, unknown>;
     if (
       typeof r.id !== "string" ||
-      !ID.test(r.id) ||
+      !PLUGIN_ID.test(r.id) ||
       typeof r.version !== "string" ||
       !r.version.trim() ||
       r.version !== r.version.trim() ||

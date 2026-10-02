@@ -11,6 +11,7 @@ import {
   type SetupDeps,
   type SetupStep,
 } from "../lib/serial/setup";
+import { PRODUCT_NAME } from "../lib/product";
 
 export interface SetupController {
   connect(): Promise<void>;
@@ -94,7 +95,7 @@ function WifiForm({
           onChange={(event) => onPasswordChange(event.currentTarget.value)}
         />
         <small>
-          Your Wi-Fi password goes to the panel over the cable. It is never sent to Deskmate's
+          Your Wi-Fi password goes to the panel over the cable. It is never sent to {PRODUCT_NAME}'s
           server.
         </small>
       </label>

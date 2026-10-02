@@ -120,6 +120,24 @@ async fn get_with_cookie(server: &HttpTestServer, path: &str, cookie: &str) -> r
         .expect("GET without redirects")
 }
 
+async fn google_sign_in(
+    server: &HttpTestServer,
+    transport: &FakeGoogleTransport,
+    claims: impl FnOnce(&str) -> Value,
+) -> (reqwest::Response, reqwest::Response) {
+    let start = no_redirect_get(server, "/v1/app/auth/google/start").await;
+    let location = start.headers()["location"].to_str().unwrap();
+    let state = query_param(location, "state");
+    transport.answer_id_token(&claims(&query_param(location, "nonce")));
+    let callback = get_with_cookie(
+        server,
+        &format!("/v1/app/auth/google/callback?state={state}&code=c"),
+        &google_cookie(&start),
+    )
+    .await;
+    (start, callback)
+}
+
 fn query_param(url: &str, name: &str) -> String {
     url::Url::parse(url)
         .expect("valid URL")
@@ -442,29 +460,18 @@ async fn instance_reports_google_only_when_google_sign_in_is_set() {
 async fn google_sign_in_links_to_the_account_with_the_same_verified_email() {
     let (state, transport) = google_world(false);
     let server = spawn_http(app(state.clone())).await;
-    let start = no_redirect_get(&server, "/v1/app/auth/google/start").await;
+    let (start, callback) = google_sign_in(&server, &transport, |nonce| {
+        google_claims("g-1", "owner@example.com", true, nonce)
+    })
+    .await;
     assert_eq!(start.status(), StatusCode::SEE_OTHER);
     let location = start.headers()["location"].to_str().unwrap();
-    let state_param = query_param(location, "state");
     let challenge = query_param(location, "code_challenge");
     assert_eq!(query_param(location, "scope"), "openid email");
     assert_eq!(
         query_param(location, "redirect_uri"),
         "https://deskmate.test/v1/app/auth/google/callback"
     );
-
-    transport.answer_id_token(&google_claims(
-        "g-1",
-        "owner@example.com",
-        true,
-        &query_param(start.headers()["location"].to_str().unwrap(), "nonce"),
-    ));
-    let callback = get_with_cookie(
-        &server,
-        &format!("/v1/app/auth/google/callback?state={state_param}&code=c"),
-        &google_cookie(&start),
-    )
-    .await;
     assert_eq!(callback.status(), StatusCode::SEE_OTHER);
     assert_eq!(callback.headers()["location"], "/");
     assert!(
@@ -502,20 +509,9 @@ async fn google_sign_in_links_to_the_account_with_the_same_verified_email() {
 async fn google_sign_in_does_not_create_accounts_while_signups_are_closed() {
     let (state, transport) = google_world(false);
     let server = spawn_http(app(state.clone())).await;
-    let start = no_redirect_get(&server, "/v1/app/auth/google/start").await;
-    let state_param = query_param(start.headers()["location"].to_str().unwrap(), "state");
-    transport.answer_id_token(&google_claims(
-        "g-stranger",
-        "stranger@example.com",
-        true,
-        &query_param(start.headers()["location"].to_str().unwrap(), "nonce"),
-    ));
-
-    let callback = get_with_cookie(
-        &server,
-        &format!("/v1/app/auth/google/callback?state={state_param}&code=c"),
-        &google_cookie(&start),
-    )
+    let (_, callback) = google_sign_in(&server, &transport, |nonce| {
+        google_claims("g-stranger", "stranger@example.com", true, nonce)
+    })
     .await;
     assert_eq!(callback.status(), StatusCode::SEE_OTHER);
     assert_eq!(
@@ -545,20 +541,9 @@ async fn google_sign_in_does_not_create_accounts_while_signups_are_closed() {
 async fn google_sign_in_refuses_an_unverified_email() {
     let (state, transport) = google_world(true);
     let server = spawn_http(app(state.clone())).await;
-    let start = no_redirect_get(&server, "/v1/app/auth/google/start").await;
-    let state_param = query_param(start.headers()["location"].to_str().unwrap(), "state");
-    transport.answer_id_token(&google_claims(
-        "g-unverified",
-        "person@example.com",
-        false,
-        &query_param(start.headers()["location"].to_str().unwrap(), "nonce"),
-    ));
-
-    let callback = get_with_cookie(
-        &server,
-        &format!("/v1/app/auth/google/callback?state={state_param}&code=c"),
-        &google_cookie(&start),
-    )
+    let (_, callback) = google_sign_in(&server, &transport, |nonce| {
+        google_claims("g-unverified", "person@example.com", false, nonce)
+    })
     .await;
     assert_eq!(callback.status(), StatusCode::SEE_OTHER);
     assert_eq!(
@@ -662,6 +647,54 @@ async fn first_run_setup_creates_the_owner_once() {
 }
 
 #[tokio::test]
+async fn deleting_the_last_account_restores_first_run_setup() {
+    let state = ServerState::in_memory();
+    let code = state.setup_code_for_tests().unwrap();
+    let server = spawn_http(app(state.clone())).await;
+    let setup = post_json(
+        &server,
+        "/v1/app/setup",
+        json!({"code": code, "email": "first@example.com"}),
+    )
+    .await;
+    assert_eq!(setup.status(), StatusCode::OK);
+    let cookie = google_cookie(&setup);
+    assert!(state.setup_code_for_tests().is_none());
+    assert_eq!(
+        get_json(&server, "/v1/app/instance").await["setup_required"],
+        false
+    );
+
+    let deleted = reqwest::Client::new()
+        .delete(format!("{}/v1/app/account", server.base_url))
+        .header("origin", "https://deskmate.test")
+        .header("cookie", cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    assert_eq!(state.identity().account_count().unwrap(), 0);
+    assert_eq!(
+        get_json(&server, "/v1/app/instance").await["setup_required"],
+        true
+    );
+    let replacement = state
+        .setup_code_for_tests()
+        .expect("regenerated setup code");
+    let setup_again = post_json(
+        &server,
+        "/v1/app/setup",
+        json!({"code": replacement, "email": "next@example.com"}),
+    )
+    .await;
+    assert_eq!(setup_again.status(), StatusCode::OK);
+    let body = json_body(setup_again).await;
+    assert_eq!(body["account"]["email"], "next@example.com");
+    assert_eq!(body["account"]["is_instance_owner"], true);
+    assert!(state.setup_code_for_tests().is_none());
+}
+
+#[tokio::test]
 async fn setup_code_guesses_are_rate_limited() {
     let (state, _mail) = state_with_mailer();
     let server = spawn_http(app(state)).await;
@@ -723,8 +756,12 @@ async fn sign_in_email_does_not_reveal_accounts_and_respects_closed_signups() {
 #[tokio::test]
 async fn a_link_signs_in_once_and_verifies_the_email() {
     let (state, mailer) = state_with_mailer();
-    owner_account(&state);
-    let server = spawn_http(app(state)).await;
+    let account = state
+        .identity()
+        .create_account("owner@example.com", false, true, Utc::now())
+        .unwrap();
+    assert!(!account.email_verified);
+    let server = spawn_http(app(state.clone())).await;
     post_json(
         &server,
         "/v1/app/auth/email",
@@ -738,6 +775,14 @@ async fn a_link_signs_in_once_and_verifies_the_email() {
     assert_eq!(first.status(), StatusCode::OK);
     let body = json_body(first).await;
     assert_eq!(body["account"]["email_verified"], true);
+    assert!(
+        state
+            .identity()
+            .account(&account.id)
+            .unwrap()
+            .unwrap()
+            .email_verified
+    );
 
     let second = post_json(&server, "/v1/app/auth/link", json!({"token": token})).await;
     assert_eq!(second.status(), StatusCode::BAD_REQUEST);
@@ -1078,6 +1123,152 @@ async fn a_second_sign_in_does_not_invalidate_the_first_session() {
     );
 }
 
+async fn google_start_from(
+    client: &reqwest::Client,
+    server: &HttpTestServer,
+    ip: &str,
+) -> reqwest::Response {
+    client
+        .get(format!("{}/v1/app/auth/google/start", server.base_url))
+        .header("x-forwarded-for", ip)
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn google_starts_are_limited_per_client_without_spending_the_callback_budget() {
+    let (state, transport) = google_world(false);
+    let server = spawn_http(app(state)).await;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let first = google_start_from(&client, &server, "198.51.100.7").await;
+    assert_eq!(first.status(), StatusCode::SEE_OTHER);
+    for _ in 1..32 {
+        assert_eq!(
+            google_start_from(&client, &server, "198.51.100.7")
+                .await
+                .status(),
+            StatusCode::SEE_OTHER
+        );
+    }
+    for _ in 0..30 {
+        let refused = google_start_from(&client, &server, "198.51.100.7").await;
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry = json_body(refused).await["retry_after_seconds"]
+            .as_u64()
+            .unwrap();
+        assert!((1..=600).contains(&retry));
+    }
+    let location = first.headers()["location"].to_str().unwrap();
+    let flow = query_param(location, "state");
+    let nonce = query_param(location, "nonce");
+    transport.answer_id_token(&google_claims("owner", "owner@example.com", true, &nonce));
+    let callback = client
+        .get(format!(
+            "{}/v1/app/auth/google/callback?state={flow}&code=c",
+            server.base_url
+        ))
+        .header("x-forwarded-for", "198.51.100.7")
+        .header("cookie", google_cookie(&first))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(callback.status(), StatusCode::SEE_OTHER);
+    assert_eq!(callback.headers()["location"], "/");
+    assert!(
+        callback
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .any(|cookie| cookie
+                .to_str()
+                .unwrap()
+                .starts_with("__Host-deskmate_session="))
+    );
+    // The successful callback frees a global pending slot, but not this client's budget.
+    assert_eq!(
+        google_start_from(&client, &server, "198.51.100.7")
+            .await
+            .status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        google_start_from(&client, &server, "203.0.113.9")
+            .await
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_google_starts_admit_only_the_client_limit() {
+    let (state, transport) = google_world(false);
+    let server = spawn_http(app(state)).await;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let barrier = Arc::new(tokio::sync::Barrier::new(40));
+    let mut starts = tokio::task::JoinSet::new();
+    for _ in 0..40 {
+        let barrier = barrier.clone();
+        let client = client.clone();
+        let server = HttpTestServer::at(server.base_url.clone());
+        starts.spawn(async move {
+            barrier.wait().await;
+            google_start_from(&client, &server, "198.51.100.7").await
+        });
+    }
+    let mut admitted = Vec::new();
+    while let Some(response) = starts.join_next().await {
+        let response = response.unwrap();
+        match response.status() {
+            StatusCode::SEE_OTHER => admitted.push(response),
+            StatusCode::TOO_MANY_REQUESTS => {
+                // A bare 429 from the global pending cap would hide a missing client limiter.
+                let retry = json_body(response).await["retry_after_seconds"]
+                    .as_u64()
+                    .unwrap();
+                assert!((1..=600).contains(&retry));
+            }
+            status => panic!("unexpected start status: {status}"),
+        }
+    }
+    assert_eq!(admitted.len(), 32);
+    let first = &admitted[0];
+    let location = first.headers()["location"].to_str().unwrap();
+    let flow = query_param(location, "state");
+    let nonce = query_param(location, "nonce");
+    transport.answer_id_token(&google_claims("owner", "owner@example.com", true, &nonce));
+    let callback = client
+        .get(format!(
+            "{}/v1/app/auth/google/callback?state={flow}&code=c",
+            server.base_url
+        ))
+        .header("x-forwarded-for", "198.51.100.7")
+        .header("cookie", google_cookie(first))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(callback.status(), StatusCode::SEE_OTHER);
+    assert_eq!(callback.headers()["location"], "/");
+    assert_eq!(
+        google_start_from(&client, &server, "198.51.100.7")
+            .await
+            .status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        google_start_from(&client, &server, "203.0.113.9")
+            .await
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+}
+
 #[tokio::test]
 async fn google_callback_is_bound_to_the_starting_browser_and_cannot_be_replayed() {
     let (state, transport) = google_world(false);
@@ -1131,19 +1322,9 @@ async fn google_callback_is_bound_to_the_starting_browser_and_cannot_be_replayed
 async fn google_callback_rejects_a_nonce_from_another_sign_in() {
     let (state, transport) = google_world(true);
     let server = spawn_http(app(state.clone())).await;
-    let start = no_redirect_get(&server, "/v1/app/auth/google/start").await;
-    let state_param = query_param(start.headers()["location"].to_str().unwrap(), "state");
-    transport.answer_id_token(&google_claims(
-        "g-new",
-        "new@example.com",
-        true,
-        "wrong-nonce",
-    ));
-    let response = get_with_cookie(
-        &server,
-        &format!("/v1/app/auth/google/callback?state={state_param}&code=c"),
-        &google_cookie(&start),
-    )
+    let (_, response) = google_sign_in(&server, &transport, |_| {
+        google_claims("g-new", "new@example.com", true, "wrong-nonce")
+    })
     .await;
     assert_eq!(response.headers()["location"], "/?signin_error=provider");
     assert!(
@@ -1174,24 +1355,11 @@ async fn instance_reports_the_actual_mail_delivery_mode() {
 async fn google_does_not_link_a_third_party_email_without_current_mailbox_proof() {
     let (state, transport) = google_world(false);
     let server = spawn_http(app(state.clone())).await;
-    let start = no_redirect_get(&server, "/v1/app/auth/google/start").await;
-    let location = start.headers()["location"].to_str().unwrap();
-    let mut claims = google_claims(
-        "unlinked",
-        "owner@example.com",
-        true,
-        &query_param(location, "nonce"),
-    );
-    claims.as_object_mut().unwrap().remove("hd");
-    transport.answer_id_token(&claims);
-    let response = get_with_cookie(
-        &server,
-        &format!(
-            "/v1/app/auth/google/callback?state={}&code=c",
-            query_param(location, "state")
-        ),
-        &google_cookie(&start),
-    )
+    let (_, response) = google_sign_in(&server, &transport, |nonce| {
+        let mut claims = google_claims("unlinked", "owner@example.com", true, nonce);
+        claims.as_object_mut().unwrap().remove("hd");
+        claims
+    })
     .await;
     assert_eq!(
         response.headers()["location"],
@@ -1212,24 +1380,11 @@ async fn google_creates_an_account_when_open_and_returns_to_it_after_registratio
     let server = spawn_http(app(state.clone())).await;
     for (email, signups_open) in [("new@gmail.com", true), ("changed@example.org", false)] {
         state.identity().set_signups_open(signups_open).unwrap();
-        let start = no_redirect_get(&server, "/v1/app/auth/google/start").await;
-        let location = start.headers()["location"].to_str().unwrap();
-        let mut claims = google_claims(
-            "stable-google-user",
-            email,
-            true,
-            &query_param(location, "nonce"),
-        );
-        claims.as_object_mut().unwrap().remove("hd");
-        transport.answer_id_token(&claims);
-        let response = get_with_cookie(
-            &server,
-            &format!(
-                "/v1/app/auth/google/callback?state={}&code=c",
-                query_param(location, "state")
-            ),
-            &google_cookie(&start),
-        )
+        let (_, response) = google_sign_in(&server, &transport, |nonce| {
+            let mut claims = google_claims("stable-google-user", email, true, nonce);
+            claims.as_object_mut().unwrap().remove("hd");
+            claims
+        })
         .await;
         assert_eq!(response.headers()["location"], "/");
         assert_eq!(response.headers()["cache-control"], "no-store");
@@ -1297,22 +1452,9 @@ async fn google_registration_cannot_bypass_first_run_owner_setup() {
         .unwrap();
     state.identity().delete_account(&owner.id).unwrap();
     let server = spawn_http(app(state.clone())).await;
-    let start = no_redirect_get(&server, "/v1/app/auth/google/start").await;
-    let location = start.headers()["location"].to_str().unwrap();
-    transport.answer_id_token(&google_claims(
-        "early-google",
-        "early@gmail.com",
-        true,
-        &query_param(location, "nonce"),
-    ));
-    let response = get_with_cookie(
-        &server,
-        &format!(
-            "/v1/app/auth/google/callback?state={}&code=c",
-            query_param(location, "state")
-        ),
-        &google_cookie(&start),
-    )
+    let (_, response) = google_sign_in(&server, &transport, |nonce| {
+        google_claims("early-google", "early@gmail.com", true, nonce)
+    })
     .await;
     assert_eq!(
         response.headers()["location"],

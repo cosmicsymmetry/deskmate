@@ -65,7 +65,7 @@ pub(crate) async fn list_devices(
                 id,
                 has_saved_config,
                 configured_at,
-                state: state_name(state_value),
+                state: state_value.as_str(),
             },
         )
         .collect();
@@ -209,6 +209,17 @@ fn delete_account_data(
         crate::data_cards::stop_account_refreshers(&space);
     }
     state.identity().delete_account(account_id)?;
+    {
+        let _guard = state
+            .inner
+            .setup_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.identity().account_count()? == 0 {
+            let code = state.inner.setup_code.regenerate();
+            crate::web_auth::setup_code::announce_setup_code(state.public_url(), &code);
+        }
+    }
     remove_directory_if_present(&root)?;
     Ok(())
 }
@@ -263,13 +274,6 @@ pub fn spawn_housekeeping(state: ServerState) -> tokio::task::JoinHandle<()> {
             }
         }
     })
-}
-
-fn state_name(state: DeviceState) -> &'static str {
-    match state {
-        DeviceState::Pending => "pending",
-        DeviceState::Active => "active",
-    }
 }
 
 fn device_link_url(public_url: &url::Url) -> Result<String, ClaimError> {

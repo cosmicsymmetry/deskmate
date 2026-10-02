@@ -16,8 +16,8 @@ use crate::identity::{IdentityError, normalize_email};
 use crate::oauth::GoogleOAuthConfig;
 use crate::oauth::transport::OAuthTransport;
 use crate::registry::constant_time_eq;
-use crate::web_auth::routes::{ensure_failure_attempt_allowed, record_failure};
-use crate::web_auth::{ClientIp, set_session_cookie};
+use crate::web_auth::routes::{RouteError, ensure_failure_attempt_allowed, record_failure};
+use crate::web_auth::{ClientIp, RateLimiter, set_session_cookie};
 
 const PENDING_TTL: Duration = Duration::seconds(600);
 const MAX_PENDING_AUTHS: usize = 32;
@@ -33,6 +33,7 @@ pub(crate) struct GoogleSignIn {
     config: GoogleOAuthConfig,
     transport: Arc<dyn OAuthTransport>,
     pending: Mutex<HashMap<String, PendingSignIn>>,
+    start_limiter: RateLimiter,
 }
 
 impl GoogleSignIn {
@@ -41,6 +42,9 @@ impl GoogleSignIn {
             config,
             transport,
             pending: Mutex::new(HashMap::new()),
+            // The hosted proxy still makes this an instance-wide bucket. Lower it to 10
+            // in the same change that makes the proxy forward the real client IP.
+            start_limiter: RateLimiter::new(MAX_PENDING_AUTHS, std::time::Duration::from_secs(600)),
         }
     }
 
@@ -262,10 +266,16 @@ pub(super) fn routes() -> Router<ServerState> {
         .route("/v1/app/auth/google/callback", get(google_callback))
 }
 
-async fn start_google(State(state): State<ServerState>) -> Response {
+async fn start_google(State(state): State<ServerState>, client: ClientIp) -> Response {
     let Some(google) = state.google_sign_in() else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    if let Err(retry) = google
+        .start_limiter
+        .check_and_record(&client.0.to_string(), std::time::Instant::now())
+    {
+        return RouteError::rate_limited(retry).into_response();
+    }
     match google.start(Utc::now()) {
         Ok((url, state_value)) => (
             [(
@@ -548,6 +558,36 @@ mod tests {
                 "{field}"
             );
         }
+    }
+
+    #[test]
+    fn start_budget_expires_without_extending_the_window_on_rejection() {
+        let runtime = runtime();
+        let now = std::time::Instant::now();
+        for _ in 0..MAX_PENDING_AUTHS {
+            runtime
+                .start_limiter
+                .check_and_record("client", now)
+                .unwrap();
+        }
+        assert_eq!(
+            runtime
+                .start_limiter
+                .check_and_record("client", now + std::time::Duration::from_secs(599)),
+            Err(std::time::Duration::from_secs(1))
+        );
+        for _ in 0..MAX_PENDING_AUTHS {
+            runtime
+                .start_limiter
+                .check_and_record("client", now + std::time::Duration::from_secs(600))
+                .unwrap();
+        }
+        assert_eq!(
+            runtime
+                .start_limiter
+                .check_and_record("client", now + std::time::Duration::from_secs(600)),
+            Err(std::time::Duration::from_secs(600))
+        );
     }
 
     #[test]

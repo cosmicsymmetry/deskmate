@@ -112,6 +112,59 @@ Keep the backend on loopback. Do not add a host-wide Basic-auth gate: panel and 
 producer bearer tokens must reach Deskmate unchanged. Do not expose the plaintext
 backend port. Sign-in origin checks require the browser URL to match `PUBLIC_URL`.
 
+### Optional Cloudflare Tunnel
+
+The direct-Caddy example above needs no tunnel settings. For Cloudflare → cloudflared
+→ Caddy → Deskmate, use a separate loopback listener for cloudflared and keep
+`DESKMATE_SERVER_BIND=127.0.0.1:8443`. Run Caddy in the host network namespace so its
+backend connection really comes from loopback; a Docker bridge/LAN connection does
+not qualify. Deskmate trusts the final `X-Forwarded-For` address only from loopback.
+
+With cloudflared on the same host, point its ingress service at
+`http://127.0.0.1:8080` and preserve the public `Host` name. This Caddyfile normalizes
+the validated client address into exactly one upstream address:
+
+<!-- tunnel-caddyfile -->
+```caddyfile
+{
+    servers {
+        trusted_proxies static 127.0.0.1/32 ::1/128
+        trusted_proxies_strict
+        client_ip_headers CF-Connecting-IP
+    }
+}
+
+http://desk.example.org:8080 {
+    bind 127.0.0.1
+    reverse_proxy 127.0.0.1:8443 {
+        header_up X-Forwarded-For {client_ip}
+        header_up X-Forwarded-Proto https
+    }
+}
+```
+
+Only cloudflared and trusted local processes may reach that listener. If cloudflared
+runs elsewhere, restrict ingress to that specific peer and replace the trusted
+addresses with its exact address; do not trust all private networks. Cloudflare must
+set `CF-Connecting-IP` (do not remove visitor-IP headers or replace IPv6 with Pseudo
+IPv4). Caddy parses it only for trusted peers; an untrusted peer's forwarding headers
+cannot select a rate-limit bucket. Do not copy raw `CF-Connecting-IP` into Deskmate or
+make the server trust it merely because the last hop is loopback.
+
+Setting `trusted_proxies` alone is insufficient: the default proxy chain still ends
+with cloudflared's address. The explicit `header_up` replaces that chain with
+`{client_ip}`. See Caddy's [client-IP options](https://caddyserver.com/docs/caddyfile/options#client-ip-headers),
+[proxy header behavior](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#headers),
+and Cloudflare's [visitor-IP header contract](https://developers.cloudflare.com/fundamentals/reference/http-headers/#cf-connecting-ip).
+
+Verify this recipe locally with `python3 tools/self-host/test_tunnel_proxy.py /path/to/caddy`.
+The fixture runs the documented proxy against a loopback echo server: two visitor
+addresses remain distinct, forged XFF is replaced, and untrusted or malformed
+visitor-IP headers cannot supply an address. It does not contact Cloudflare.
+
+The Deskmate listener behind the tunnel must be on loopback; a bridge or LAN peer
+is not trusted.
+
 Use **Add a panel** in Chrome/Edge on a computer connected to the panel by USB. The
 claimed link URL will be `wss://desk.example.org/v1/device/link`. The panel's Wi-Fi
 network must reach that hostname and trust its TLS certificate; browser trust in a

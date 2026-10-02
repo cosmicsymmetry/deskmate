@@ -1296,7 +1296,7 @@ mod tests {
                 state.account_space(&account.id)
             } else {
                 Arc::new(AccountSpace::open(
-                    &state.inner.config_directory,
+                    state.account_root(&account.id),
                     account.id.clone(),
                 ))
             };
@@ -1352,7 +1352,7 @@ mod tests {
                 state.account_space(&account.id)
             } else {
                 Arc::new(AccountSpace::open(
-                    &state.inner.config_directory,
+                    state.account_root(&account.id),
                     account.id.clone(),
                 ))
             };

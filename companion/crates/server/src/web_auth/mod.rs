@@ -1,5 +1,4 @@
 pub(crate) mod google;
-#[allow(dead_code)] // Consumed by Task 5's sign-in abuse limits.
 mod rate_limit;
 pub(crate) mod routes;
 pub(crate) mod setup_code;
@@ -16,14 +15,12 @@ use chrono::Utc;
 use crate::ServerState;
 use crate::identity::Account;
 
-#[allow(unused_imports)]
 pub(crate) use rate_limit::RateLimiter;
 
 pub(crate) const SESSION_COOKIE: &str = "__Host-deskmate_session";
 const SESSION_MAX_AGE_SECONDS: i64 = crate::identity::SESSION_TTL_DAYS * 24 * 60 * 60;
 
 #[must_use]
-#[allow(dead_code)] // Consumed by Task 5's sign-in routes.
 pub(crate) fn set_session_cookie(plaintext_sid: &str) -> HeaderValue {
     HeaderValue::from_str(&format!(
         "{SESSION_COOKIE}={plaintext_sid}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age={SESSION_MAX_AGE_SECONDS}"
@@ -139,7 +136,6 @@ impl FromRequestParts<ServerState> for SameOrigin {
     }
 }
 
-#[allow(dead_code)] // Consumed by Task 5's sign-in and setup rate limits.
 pub(crate) struct ClientIp(pub(crate) IpAddr);
 
 impl FromRequestParts<ServerState> for ClientIp {
@@ -162,7 +158,6 @@ impl FromRequestParts<ServerState> for ClientIp {
     }
 }
 
-#[allow(dead_code)] // Consumed by ClientIp, which Task 5 wires into routes.
 fn client_ip(peer: Option<SocketAddr>, forwarded: Option<&str>) -> IpAddr {
     match peer {
         Some(peer) if peer.ip().is_loopback() => forwarded

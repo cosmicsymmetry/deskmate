@@ -45,9 +45,18 @@ test("describe prints the catalog the server builds the add menu from", async ()
     "hackernews",
     "rss",
     "token",
+    "anime-images",
+    "art-of-the-day",
+    "calvin-and-hobbes",
+    "dad-jokes",
     "days-left-this-year",
+    "ghibli-scenes",
     "github-stats",
+    "ink-landscape",
     "moon-phase",
+    "this-day-in-history",
+    "word-of-the-day",
+    "xkcd",
   ]);
   for (const face of catalog) {
     for (const field of face.fields) {

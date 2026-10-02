@@ -13,7 +13,7 @@ marketplace-service proposal.
 | This Day in History | A readable historical event for the owner's calendar date |
 | Dad Jokes | A short joke with another available on tap |
 | Art of the Day | Curated public-domain art, including Japanese prints and landscapes |
-| Calvin and Hobbes | A publicly available strip, preserving the source's access controls |
+| Calvin and Hobbes | Cycle up to eight supplied official strip image URLs |
 | Ink Landscape | A changing original, procedural landscape |
 | xkcd | Compact curated strips, with a latest option and source credit |
 | Word of the Day | A word and definition that change with the owner's date |
@@ -58,12 +58,12 @@ specific limitation and use a supported source/configuration instead of a fake f
 
 ## Delivery and verification
 
-- [ ] Implement all nine plugins with appropriate settings and attribution.
-- [ ] Exercise real sandbox paths: discovery, successful render, malformed/missing
+- [x] Implement all nine plugins with appropriate settings and attribution.
+- [x] Exercise real sandbox paths: discovery, successful render, malformed/missing
   data, fetch failures, selection state, settings, timezone boundaries and taps.
-- [ ] Supply offline `check.json` fixtures and accessible full/desk previews.
-- [ ] Verify live provider requests through the real guarded runtime.
-- [ ] Run full applicable faces checks and changed-plugin preview checks.
+- [x] Supply offline `check.json` fixtures and accessible full/desk previews.
+- [x] Verify live provider requests through the real guarded runtime.
+- [x] Run full applicable faces checks and changed-plugin preview checks.
 - [ ] Complete independent visual/code review and documentation handoff.
 - [ ] Open the submission PR and confirm CI passes on the reviewed head.
 - [ ] Integrate current main and check ancestry against every live component.
@@ -79,5 +79,30 @@ cards respectively. Track B's primary branch owns integration, review records, P
 merge and deployment. Other open tracks' changes are preserved and are not deployed
 from an unmerged branch as a side effect.
 
-Status: implementation in progress. Live baseline observed before work: faces
+Status: all nine plugins implemented and integrated; independent review in progress.
+Combined faces suite: **727 tests, 4029 assertions, zero failures**. Typecheck, lint
+and format pass. The nine offline author checks pass **27 cases / 54 PNGs**, with
+no runtime-limit notices. Live guarded renders and tap changes pass for the eight
+automatic cards; the supplied-URL Calvin path also renders an official GIF.
+Live baseline observed before work: faces
 `122faf7`, web/binary `424c8a7`.
+
+### Source findings
+
+Calvin and Hobbes cannot currently discover random strips automatically: GoComics
+pages refused automated access, and the independent Comics RSS feed now carries
+a notice that its GoComics feed has halted. The card therefore accepts up to eight
+official image URLs and cycles those. A public GIF from the publisher's current
+`featureassets.gocomics.com` host was reachable from both local and deployment
+hosts; this is distinct from permission to republish an archive. No access-control
+workaround or unauthorized mirror is used.
+
+The anime provider serves images that can exceed the runtime's 1 MB response cap,
+and sometimes JPEG bytes beneath a `.png` URL. The default collection therefore
+uses individually verified small images; fresh selection has a bounded fallback.
+No sandbox limits are loosened.
+
+Provider preflight from the deployment host returned HTTP 200 for all eight remote
+services/asset hosts tested (Wikipedia, icanhazdadjoke, Wiktionary, Met, Ghibli, xkcd,
+Nekos.best and GoComics' image server). Full installed-runtime checks remain a
+separate deployment gate.

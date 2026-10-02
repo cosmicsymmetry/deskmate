@@ -229,3 +229,14 @@ index. The two alternate 1.0.1 draft hashes from `81a1f58` were never installed;
 no deployed history is overwritten. Runtime, server, UI, firmware and approval
 machinery remain byte-identical to the previously green revision. The complete
 faces tree now matches the already deployed reconciliation.
+
+CI on `74d4797` exposed a different existing fixture timeout: the warm-selector
+seam test waited for the retained child to exit and hit its ten-second subprocess
+deadline. RSS and Hacker News passed in that run (1.642 and 1.784 seconds). The
+fixture now sends a framed request with stdin open, reads the real reply, and
+terminates/reaps the child explicitly. It keeps the ten-second reply deadline and
+all timezone/resource assertions; production code is byte-identical. Twenty
+repeats under four local CPU-load workers passed (whole-test median 0.589 s, max
+0.666 s); twenty isolated repeats against the installed Linux runtime passed
+(median 0.392 s, max 0.409 s). Mutating timezone forwarding and suppressing the
+worker reply each failed the revised test, bringing the caught-probe total to 55.

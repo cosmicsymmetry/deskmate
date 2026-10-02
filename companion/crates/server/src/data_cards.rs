@@ -1428,6 +1428,19 @@ mod tests {
         format!("'{}'", value.display().to_string().replace('\'', "'\\''"))
     }
 
+    async fn poll_until<T>(
+        mut probe: impl FnMut() -> Option<T>,
+        failure: impl FnOnce() -> String,
+    ) -> T {
+        for _ in 0..200 {
+            if let Some(value) = probe() {
+                return value;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("{}", failure());
+    }
+
     /// One real refresher speaking to the fake package through its subprocess
     /// boundary. The wrapper supplies a private request-log directory after
     /// `FaceCommand` clears the server process's environment.
@@ -1557,107 +1570,99 @@ mod tests {
         }
 
         async fn wait_for_plans(&self, count: usize) -> Vec<serde_json::Value> {
-            for _ in 0..200 {
-                let plans = self.plans();
-                if plans.len() >= count {
-                    return plans;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            panic!(
-                "only {} plan requests arrived; wanted {count}",
-                self.plans().len()
-            );
+            poll_until(
+                || {
+                    let plans = self.plans();
+                    (plans.len() >= count).then_some(plans)
+                },
+                || {
+                    format!(
+                        "only {} plan requests arrived; wanted {count}",
+                        self.plans().len()
+                    )
+                },
+            )
+            .await
         }
 
-        /// Waits until the named view has actually been drawn and stored, so a
-        /// test can measure what a tap costs without racing the staging pass
-        /// that the previous refresh kicked off.
+        /// Waits for a staged render request, then preserves the commit grace period.
         async fn wait_for_staged_view(&self, view: &str) {
-            for _ in 0..200 {
-                if self
-                    .requests()
-                    .iter()
-                    .any(|request| request.get("view") == Some(&serde_json::json!(view)))
-                {
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            panic!("the view {view:?} was never staged: {:?}", self.requests());
+            poll_until(
+                || {
+                    self.requests()
+                        .iter()
+                        .any(|request| request.get("view") == Some(&serde_json::json!(view)))
+                        .then_some(())
+                },
+                || format!("the view {view:?} was never staged: {:?}", self.requests()),
+            )
+            .await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
-        /// The tap counts of the renders that answered a tap, once at least
-        /// `count` of them have happened.
+        /// The tap counts of renders that answered a tap, after at least `count`.
         async fn wait_for_tap_renders(&self, count: usize) -> Vec<u64> {
-            for _ in 0..200 {
-                let counts: Vec<u64> = self
-                    .requests()
-                    .iter()
-                    .filter_map(|request| request["event"]["taps"].as_u64())
-                    .collect();
-                if counts.len() >= count {
-                    return counts;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            panic!(
-                "fewer than {count} renders answered a tap: {:?}",
-                self.requests()
-            );
+            poll_until(
+                || {
+                    let counts: Vec<u64> = self
+                        .requests()
+                        .iter()
+                        .filter_map(|request| request["event"]["taps"].as_u64())
+                        .collect();
+                    (counts.len() >= count).then_some(counts)
+                },
+                || {
+                    format!(
+                        "fewer than {count} renders answered a tap: {:?}",
+                        self.requests()
+                    )
+                },
+            )
+            .await
         }
 
         async fn wait_for_requests(&self, count: usize) -> Vec<serde_json::Value> {
-            for _ in 0..200 {
-                let requests = self.requests();
-                if requests.len() >= count {
-                    return requests;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            panic!(
-                "only {} render requests arrived; wanted {count}",
-                self.requests().len()
-            );
+            poll_until(
+                || {
+                    let requests = self.requests();
+                    (requests.len() >= count).then_some(requests)
+                },
+                || {
+                    format!(
+                        "only {} render requests arrived; wanted {count}",
+                        self.requests().len()
+                    )
+                },
+            )
+            .await
         }
 
         async fn wait_for_file(&self, name: &str) {
-            for _ in 0..200 {
-                if self.directory.path().join(name).exists() {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            panic!("the fake package never created {name}");
+            poll_until(
+                || self.directory.path().join(name).exists().then_some(()),
+                || format!("the fake package never created {name}"),
+            )
+            .await;
         }
 
         async fn wait_for_face_state(&self, expected: serde_json::Value) {
-            for _ in 0..200 {
-                let actual = self
-                    .space
+            let actual = || {
+                self.space
                     .data_cards
                     .lock()
                     .expect("data cards")
                     .face_state
-                    .get(&self.source_id);
-                if actual.as_ref() == Some(&expected) {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            let actual = self
-                .space
-                .data_cards
-                .lock()
-                .expect("data cards")
-                .face_state
-                .get(&self.source_id);
-            panic!(
-                "the face state never became {expected}; actual={actual:?}, status={:?}, requests={:?}",
-                status_for_source(&self.state, &self.space, &self.source_id),
-                self.requests()
-            );
+                    .get(&self.source_id)
+            };
+            poll_until(
+                || (actual().as_ref() == Some(&expected)).then_some(()),
+                || format!(
+                    "the face state never became {expected}; actual={:?}, status={:?}, requests={:?}",
+                    actual(),
+                    status_for_source(&self.state, &self.space, &self.source_id),
+                    self.requests()
+                ),
+            ).await;
         }
 
         async fn restart_with_refresh(&self, refresh: Duration) -> usize {

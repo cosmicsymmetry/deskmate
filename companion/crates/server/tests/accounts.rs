@@ -178,32 +178,7 @@ async fn wait_for_mail(mailer: &RecordingMailer, count: usize) {
     .expect("mailer did not record the message");
 }
 
-#[allow(clippy::result_large_err)]
-async fn connect_device(
-    server: &HttpTestServer,
-    token: &str,
-) -> Result<support::DeviceSocket, tokio_tungstenite::tungstenite::Error> {
-    let host = server
-        .base_url
-        .strip_prefix("http://")
-        .expect("test server uses HTTP");
-    let request = http::Request::builder()
-        .uri(format!("ws://{host}/v1/device/link"))
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Host", host)
-        .header("Connection", "Upgrade")
-        .header("Upgrade", "websocket")
-        .header("Sec-WebSocket-Version", "13")
-        .header(
-            "Sec-WebSocket-Key",
-            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
-        )
-        .body(())
-        .unwrap();
-    tokio_tungstenite::connect_async(request)
-        .await
-        .map(|(socket, _)| socket)
-}
+use support::connect_server_device as connect_device;
 
 async fn expect_socket_closed(socket: &mut support::DeviceSocket) {
     use futures_util::StreamExt as _;

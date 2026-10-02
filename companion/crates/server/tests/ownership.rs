@@ -42,33 +42,7 @@ async fn spawn_state(
     )
 }
 
-// The Err type is tungstenite's, so its size is not ours to reduce, and boxing
-// it in a test helper would add indirection at every call site for nothing.
-#[allow(clippy::result_large_err)]
-async fn connect_device(
-    host: &str,
-    token: &str,
-) -> Result<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-    tokio_tungstenite::tungstenite::Error,
-> {
-    let request = http::Request::builder()
-        .uri(format!("ws://{host}/v1/device/link"))
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Host", host)
-        .header("Connection", "Upgrade")
-        .header("Upgrade", "websocket")
-        .header("Sec-WebSocket-Version", "13")
-        .header(
-            "Sec-WebSocket-Key",
-            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
-        )
-        .body(())
-        .unwrap();
-    tokio_tungstenite::connect_async(request)
-        .await
-        .map(|(s, _)| s)
-}
+use support::connect_device;
 
 fn clock_config() -> String {
     std::fs::read_to_string(concat!(

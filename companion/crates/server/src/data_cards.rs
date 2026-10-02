@@ -1693,7 +1693,7 @@ mod tests {
             };
             let baseline = self.requests().len();
             let taps = Arc::new(TapSignal::default());
-            let task = worker::spawn_refresher_for_test(
+            let task = worker::spawn_refresher_with_refresh(
                 &tokio::runtime::Handle::current(),
                 worker::RefresherJob::new(
                     self.state.clone(),

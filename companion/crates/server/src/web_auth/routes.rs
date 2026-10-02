@@ -32,12 +32,26 @@ pub(crate) fn routes() -> Router<ServerState> {
         .route("/v1/app/instance/signups", put(set_signups))
         .route("/v1/admin/signin-link", post(admin_signin_link))
         .merge(super::google::routes())
+        .layer(axum::middleware::map_response(private_auth_response))
+}
+
+async fn private_auth_response(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        header::HeaderValue::from_static("no-referrer"),
+    );
+    response
 }
 
 #[derive(Serialize)]
 struct InstanceResponse {
     setup_required: bool,
     google_enabled: bool,
+    email_delivery: crate::mailer::MailDelivery,
     signups_open: bool,
     edition: crate::Edition,
 }
@@ -57,6 +71,7 @@ async fn instance(State(state): State<ServerState>) -> Result<Json<InstanceRespo
     Ok(Json(InstanceResponse {
         setup_required: account_count == 0 && state.inner.setup_code.is_active(),
         google_enabled: state.google_sign_in().is_some(),
+        email_delivery: state.mailer().delivery(),
         signups_open,
         edition: state.edition(),
     }))
@@ -152,6 +167,11 @@ async fn request_email_link(
     let issue = state.clone();
     let email_for_store = email.clone();
     let token = tokio::task::spawn_blocking(move || {
+        // The first account must prove access to the setup code. An open
+        // registration default must not strand an instance without an owner.
+        if issue.identity().account_count()? == 0 {
+            return Ok(None);
+        }
         let known = issue
             .identity()
             .account_by_email(&email_for_store)?
@@ -198,6 +218,9 @@ async fn consume_email_link(
     ensure_failure_attempt_allowed(&state, client.0)?;
     let consume = state.clone();
     let result = tokio::task::spawn_blocking(move || {
+        if consume.identity().account_count()? == 0 {
+            return Ok(LinkResult::Invalid);
+        }
         let Some(email) = consume
             .identity()
             .consume_login_token(&request.token, Utc::now())?

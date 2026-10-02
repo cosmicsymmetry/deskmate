@@ -153,7 +153,12 @@ fn google_oauth_config_from_values(
     let mut config = server::oauth::GoogleOAuthConfig {
         client_id: required_google_value(values.client_id, ENV_GOOGLE_CLIENT_ID)?,
         client_secret: resolve_client_secret(values.client_secret, values.client_secret_file)?,
-        redirect_uri: required_google_value(values.redirect_uri, ENV_GOOGLE_REDIRECT_URI)?,
+        // Sign-in derives its callback from PUBLIC_URL. This redirect enables
+        // the separate, optional OAuth integration that stores refresh tokens.
+        redirect_uri: match values.redirect_uri {
+            Some(value) => required_google_value(Some(value), ENV_GOOGLE_REDIRECT_URI)?,
+            None => String::new(),
+        },
         ..server::oauth::GoogleOAuthConfig::default()
     };
     set_optional_google_url(&mut config.auth_uri, values.auth_uri, ENV_GOOGLE_AUTH_URI)?;
@@ -167,7 +172,9 @@ fn google_oauth_config_from_values(
         values.revoke_uri,
         ENV_GOOGLE_REVOKE_URI,
     )?;
-    validate_google_url(&config.redirect_uri, ENV_GOOGLE_REDIRECT_URI)?;
+    if !config.redirect_uri.is_empty() {
+        validate_google_url(&config.redirect_uri, ENV_GOOGLE_REDIRECT_URI)?;
+    }
     Ok(Some(config))
 }
 
@@ -273,6 +280,10 @@ fn configure_google(
     let transport: Arc<dyn server::oauth::transport::OAuthTransport> =
         Arc::new(server::oauth::transport::EgressTransport);
     state.set_google_sign_in(oauth.clone(), Arc::clone(&transport));
+    if oauth.redirect_uri.is_empty() {
+        tracing::info!("Google sign-in enabled");
+        return;
+    }
     let store = server::secrets::open_integration_store(config_dir).unwrap_or_else(|error| {
         panic!(
             "Google OAuth is configured but the integration secrets store could not open \
@@ -818,7 +829,7 @@ mod tests {
     }
 
     #[test]
-    fn google_config_requires_all_three_credentials_once_enabled() {
+    fn google_config_requires_a_client_secret_once_enabled() {
         let mut env = complete_google_env();
         env.client_secret = None;
 
@@ -828,6 +839,23 @@ mod tests {
                 variable: super::ENV_GOOGLE_CLIENT_SECRET
             })
         ));
+    }
+
+    #[test]
+    fn google_sign_in_does_not_need_an_integration_redirect_or_secrets_store() {
+        let mut env = complete_google_env();
+        env.redirect_uri = None;
+        let config = super::google_oauth_config_from_values(env)
+            .unwrap()
+            .unwrap();
+        assert!(config.redirect_uri.is_empty());
+        let directory = tempfile::tempdir().unwrap();
+        super::configure_google(
+            &server::ServerState::in_memory(),
+            directory.path(),
+            Some(config),
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 
     #[test]

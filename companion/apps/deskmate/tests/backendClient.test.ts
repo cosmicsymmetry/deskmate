@@ -70,6 +70,7 @@ test("account calls use the committed routes and unwrap their response envelopes
     jsonResponse({
       setup_required: false,
       google_enabled: true,
+      email_delivery: "email",
       signups_open: true,
       edition: "hosted",
     }),
@@ -270,4 +271,22 @@ test("real event streams preserve credentials, parsing and stale-source cleanup"
     if (remembered === null) window.localStorage.removeItem("deskmate.device_id");
     else window.localStorage.setItem("deskmate.device_id", remembered);
   }
+});
+
+test("session loss forgets the previous account's selected panel", async () => {
+  const client = await import("../src/lib/backendClient.ts?production-client");
+  client.resetAccountState();
+  httpHandlers.set("GET /v1/app/devices", () =>
+    jsonResponse([{ id: "first-panel", connected: true }]),
+  );
+  expect(await client.getNetworkSettings()).toMatchObject({ device_id: "first-panel" });
+  httpHandlers.set("GET /v1/app/account", () => new Response(null, { status: 401 }));
+  await expect(client.request("GET", "/v1/app/account")).rejects.toThrow(
+    client.SESSION_REQUIRED_MESSAGE,
+  );
+  httpHandlers.set("GET /v1/app/devices", () =>
+    jsonResponse([{ id: "second-panel", connected: true }]),
+  );
+  expect(await client.getNetworkSettings()).toMatchObject({ device_id: "second-panel" });
+  client.resetAccountState();
 });

@@ -1767,6 +1767,11 @@ fieldset legend {
   color: var(--ink-3);
   font-size: 0.8rem;
   max-width: 34ch;
+  overflow-wrap: anywhere;
+}
+
+.startup .save-error {
+  color: var(--bad);
 }
 
 .startup__ring {

@@ -217,6 +217,10 @@ source-specific bearer and POST PNGs; follow [the picture producer guide](images
 Keep withdrawal policy outside `<bundle>/faces/`, where a faces deployment cannot
 overwrite it. By default the file is `<instance>/configs/plugin-denylist.json`.
 An optional `DESKMATE_PLUGIN_DENYLIST` absolute path overrides that location. The
+path must not contain `..`; its nearest existing ancestor is resolved before
+checking it is outside faces, even when intermediate directories do not exist yet.
+Dangling or unreadable ancestors are refused.
+The
 server passes only this path through the cleared faces environment; account-scoped
 `DESKMATE_CONFIG_DIR` remains reserved for that account's credentials.
 

@@ -150,3 +150,27 @@ temporary empty policy removed on exit. The live service's path and policy guard
 are unchanged. All 631 faces tests pass under an inherited malformed policy; three
 repository integration checks pass, and deleting either isolation guard fails its
 regression check (34 caught mutations total).
+
+## PR #19 review fixes (2026-10-02)
+
+- Owner-only approval now covers the [protected machinery](../../plugins/releases.md#submissions-and-approval),
+  not only the index: the base checker defines the path set and names changed files
+  in outside-author refusals. Host tests and loader configuration are included because
+  deployment executes them. Plugin-folder contributions and documentation remain open;
+  the catalog test discovers new plugin folders without requiring a host-test edit.
+- Denylist containment resolves the nearest existing ancestor before appending missing
+  path components. Missing intermediate directories under a symlink into faces are
+  rejected, as are `..` and dangling/unreadable ancestors. Validation creates no directories.
+- `pull_request_target` is retained deliberately. A test pins the read-only base
+  checkout and the two allowed commands, preventing accidental PR-head execution.
+- Tests now drive the real CLI with an unindexed release, and cover hidden-file
+  additions/changes, nested removal/rename, exact CRLF bytes and non-ASCII UTF-8 ordering.
+  The ordering case uses a fixed digest independently calculated from the documented format.
+
+Full local gates pass: Rust 868 tests (two existing ignored), web 216, faces 637,
+three repository integration checks and 14 approval-policy tests, plus formatting,
+linting, typechecks, builds, doctests, actionlint, shell syntax and all three release
+hashes. All 19 review-specific mutations were caught (53 probes across the initial,
+deployment-isolation and review checks). A fresh scaffolded outside submission in
+an isolated copy passed 638 tests and pending-release CI verification without changing
+the index or any host test. Built-in goldens remain byte-identical.

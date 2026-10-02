@@ -162,6 +162,7 @@ Paths below should be absolute. Optional variables should be omitted, not set em
 | `DESKMATE_WEB_DIR` | Built SPA directory containing `index.html`. Read per request. Unset is API-only, without a browser UI. |
 | `DESKMATE_FACES_DIR` | Separate faces directory containing `src/main.ts` and installed dependencies. Unset disables server-rendered faces, not external PNG producers. |
 | `DESKMATE_BUN` | Absolute Bun executable; default `/usr/local/bin/bun`. Helper resolves installed Bun. |
+| `DESKMATE_PLUGIN_DENYLIST` | Operator withdrawal file, default `<DESKMATE_CONFIG_DIR>/plugin-denylist.json` at the instance root. Absolute path outside the deployed faces directory. Contents are read per discovery and per refresh; editing it needs no restart. |
 | `DESKMATE_SIGNUPS` | `closed` (default) or `open`; seeds the stored setting. Owner changes it in account settings after setup. |
 | `DESKMATE_OWNER_EMAIL` | Only for migration from legacy flat config; not required for a fresh instance. |
 | `DESKMATE_SMTP_URL`, `DESKMATE_MAIL_FROM` | Both or neither. Without them, sign-in links are logged. Example: `smtps://user:password@smtp.example.org:465` and quoted `Deskmate <mail@example.org>`. URL-encode credential special characters. |
@@ -211,7 +212,9 @@ or paid tier is bundled or guaranteed.
 
 Install local plugins under `<bundle>/faces/plugins/<id>/` with `plugin.json` and
 `index.js`; see [the plugin contract and worked example](plugins/contract-v1.md).
-The bundled `github-stats` is a local example, not a managed directory listing.
+The [plugin directory](plugins/index.md) links the bundled examples and their guides.
+The hosted deploy requires the owner's [reviewed release index](plugins/releases.md);
+self-host operators choose their own trusted source and reviewed release entries.
 The catalog is re-read periodically (allow a minute). Per-account plugin credentials
 belong in `<instance>/configs/accounts/<account-id>/plugin-secrets.json`, mode 0600:
 
@@ -223,6 +226,49 @@ Use the exact keys declared by that plugin. These are plaintext operator-owned s
 the host substitutes them into permitted requests, not into sandbox code. Public
 network/SSRF/sandbox guards remain in force. External producers instead obtain a
 source-specific bearer and POST PNGs; follow [the picture producer guide](images/producer-guide.md).
+
+## Operator plugin withdrawal
+
+Keep withdrawal policy outside `<bundle>/faces/`, where a faces deployment cannot
+overwrite it. By default the file is `<instance>/configs/plugin-denylist.json`.
+An optional `DESKMATE_PLUGIN_DENYLIST` absolute path overrides that location. The
+path must not contain `..`; its nearest existing ancestor is resolved before
+checking it is outside faces, even when intermediate directories do not exist yet.
+Dangling or unreadable ancestors are refused.
+The
+server passes only this path through the cleared faces environment; account-scoped
+`DESKMATE_CONFIG_DIR` remains reserved for that account's credentials.
+
+For example, write the following JSON array to an operator-owned file, mode 0600
+and readable by the server's service user:
+
+```json
+[
+  {"id": "github-stats", "version": "1.0.0", "reason": "Reviewing a reported problem"},
+  {"id": "days-left-this-year", "reason": "Temporarily withdrawn"}
+]
+```
+
+An absent `version` matches every version of the id; otherwise the version matches
+exactly. Each entry needs a nonempty plain-words reason. Unknown fields, invalid
+entries, malformed JSON, files over 256 KiB, or other read failures withdraw all
+third-party plugins and log an error. Their `face_status` reports
+`withdrawn by the operator: denylist is unreadable`. A missing file or `[]` denies
+nothing. Built-in weather, Hacker News, RSS and token faces are never affected,
+even if their names appear in the list.
+
+Write a replacement file alongside it and rename it atomically to avoid exposing a
+partially written policy. Removing an entry restores eligibility without restarting.
+The catalog reloads about once a minute: withdrawn plugins leave the add menu and
+existing cards show the reason. Every render checks again before reading credentials
+or executing plugin code; retained face objects recheck too. A render already in
+progress may finish. Existing workers retain their normal refresh cadence, including
+when policy is lifted; changing this file does not wake a six-hour face immediately.
+
+**The last stored frame remains visible and becomes stale.** Withdrawal does not
+delete cards, clear frames, revoke credentials, or remove files. Offline author
+previews intentionally ignore instance withdrawal policy and stored secrets. Review
+the content and permission fix before lifting a denial or accepting a new release.
 
 ## Persistence, updates and recovery
 

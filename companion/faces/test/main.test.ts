@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { storyFromItem } from "../src/faces/hackernews";
 import { describeCatalog, renderRequest, tapRequest } from "../src/main";
+import { pluginFolders } from "../src/plugins/releases";
 
 const MAIN = `${import.meta.dir}/../src/main.ts`;
 const SQUARE_SVG =
@@ -35,6 +36,7 @@ test("describe prints the catalog the server builds the add menu from", async ()
   expect(code).toBe(0);
   const catalog = JSON.parse(new TextDecoder().decode(out)) as {
     kind: string;
+    withdrawn?: string;
     fields: { type: string; key: string }[];
   }[];
   // Built-ins first, then the shipped plugins sorted by folder name
@@ -45,19 +47,11 @@ test("describe prints the catalog the server builds the add menu from", async ()
     "hackernews",
     "rss",
     "token",
-    "anime-images",
-    "art-of-the-day",
-    "dad-jokes",
-    "days-left-this-year",
-    "ghibli-scenes",
-    "github-stats",
-    "ink-landscape",
-    "moon-phase",
-    "this-day-in-history",
-    "word-of-the-day",
-    "xkcd",
+    ...pluginFolders(join(import.meta.dir, "../plugins")),
   ]);
+  expect(catalog.map((face) => face.kind)).not.toContain("calvin-and-hobbes");
   for (const face of catalog) {
+    expect(face.withdrawn).toBeUndefined();
     for (const field of face.fields) {
       expect(["text", "url", "enum"]).toContain(field.type);
     }

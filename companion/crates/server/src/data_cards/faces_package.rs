@@ -20,7 +20,7 @@
 //!
 //! The environment is cleared. The server's own environment carries
 //! `DESKMATE_ADMIN_TOKEN`, and a process whose job is to fetch arbitrary feed
-//! URLs has no business holding it. The one addition is `DESKMATE_CONFIG_DIR`,
+//! URLs has no business holding it. `DESKMATE_CONFIG_DIR` is added explicitly,
 //! set on `render` only, to the *rendering account's own directory*
 //! (`AccountSpace::root`) -- never the top-level config root, and never sent on
 //! `describe`. That is how a plugin reads its stored credential without the
@@ -28,6 +28,9 @@
 //! `$DESKMATE_CONFIG_DIR/plugin-secrets.json`
 //! (`companion/faces/src/plugins/secrets.ts`) for itself, scoped to whichever
 //! account's card is being drawn.
+//! `DESKMATE_PLUGIN_DENYLIST` is a separate operator-chosen path at the instance
+//! root, passed on every verb so discovery, warm selection and rendering share
+//! withdrawal policy without inheriting the server environment.
 //!
 //! # Nothing here waits unboundedly
 //!
@@ -79,6 +82,7 @@ pub struct FaceCommand {
     program: PathBuf,
     arguments: Vec<OsString>,
     selector: Option<Arc<selector::Selector>>,
+    denylist: Option<PathBuf>,
 }
 
 impl FaceCommand {
@@ -89,6 +93,7 @@ impl FaceCommand {
             program: bun,
             arguments: vec!["run".into(), faces_dir.join("src/main.ts").into()],
             selector: Some(Arc::new(selector::Selector::default())),
+            denylist: None,
         }
     }
 
@@ -99,13 +104,25 @@ impl FaceCommand {
             program,
             arguments: Vec::new(),
             selector: None,
+            denylist: None,
         }
+    }
+
+    /// Operator policy is shared across accounts and lives outside the faces package.
+    /// Pass only its path through the cleared child environment, including discovery
+    /// and the retained selector; its contents are read afresh by the package.
+    #[must_use]
+    pub fn with_denylist(mut self, path: PathBuf) -> Self {
+        self.denylist = Some(path);
+        self
     }
 }
 
 impl PartialEq for FaceCommand {
     fn eq(&self, other: &Self) -> bool {
-        self.program == other.program && self.arguments == other.arguments
+        self.program == other.program
+            && self.arguments == other.arguments
+            && self.denylist == other.denylist
     }
 }
 
@@ -116,6 +133,9 @@ impl Eq for FaceCommand {}
 pub(crate) struct CatalogFace {
     pub(crate) kind: String,
     pub(crate) label: String,
+    /// Private catalog tombstone: keeps the withdrawal reason for existing cards.
+    #[serde(default)]
+    pub(crate) withdrawn: Option<String>,
     /// What the window tells the owner a tap does. Absent means taps are ignored.
     #[serde(default)]
     pub(crate) tap: Option<String>,
@@ -290,6 +310,9 @@ fn builder(command: &FaceCommand, verb: &str, account_dir: Option<&Path>) -> Com
         .env("PATH", "/usr/local/bin:/usr/bin:/bin")
         .env("BUN_RUNTIME_TRANSPILER_CACHE_PATH", "0")
         .env("NO_COLOR", "1");
+    if let Some(path) = &command.denylist {
+        builder.env("DESKMATE_PLUGIN_DENYLIST", path);
+    }
     if let Some(account_dir) = account_dir {
         // Safe to add back where the admin token is deliberately withheld: this is
         // a directory the caller (the render's own account scope) already chose for
@@ -395,6 +418,16 @@ pub(crate) fn describe(command: &FaceCommand) -> Result<Vec<CatalogFace>, String
     )?;
     if finished.code != Some(0) {
         return Err(format!("describe failed: {}", message_of(&finished)));
+    }
+    // Discovery can retain built-ins while rejecting third-party plugins. Do not
+    // discard its diagnostics just because the catalog itself is valid JSON.
+    for line in finished
+        .stderr
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+    {
+        tracing::error!(target: "server::data_cards", diagnostic = %line,
+            "faces catalog reported a problem");
     }
     let mut catalog: Vec<CatalogFace> = serde_json::from_slice(&finished.stdout)
         .map_err(|error| format!("the face catalog is not the expected JSON: {error}"))?;
@@ -909,6 +942,74 @@ mod tests {
         // "<unset>") and if a different value than the one passed in reaches the
         // child.
         assert_eq!(message, "DESKMATE_CONFIG_DIR=/accounts/acc-123");
+    }
+
+    #[test]
+    fn operator_policy_path_reaches_every_child_without_inheriting_server_environment() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let script = root.path().join("print-env");
+        std::fs::write(&script, "#!/bin/sh\nprintf '%s|%s|%s' \"${DESKMATE_PLUGIN_DENYLIST-unset}\" \"${DESKMATE_CONFIG_DIR-unset}\" \"${HOME-unset}\"\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.path().join("operator-policy.json");
+        let command = FaceCommand::program(script).with_denylist(path.clone());
+        for verb in ["describe", "render", "views", "tap", "tap-worker"] {
+            let account = (verb == "render").then_some(Path::new("/accounts/one"));
+            let output = run(&command, verb, &[], 4096, Duration::from_secs(5), account).unwrap();
+            assert_eq!(output.code, Some(0));
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                format!(
+                    "{}|{}|unset",
+                    path.display(),
+                    if account.is_some() {
+                        "/accounts/one"
+                    } else {
+                        "unset"
+                    }
+                ),
+                "{verb}"
+            );
+        }
+    }
+
+    #[test]
+    fn discovery_diagnostics_reach_the_server_log_even_with_a_successful_catalog() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt as _;
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let script = root.path().join("diagnostic-faces");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\necho 'Plugin denylist is unreadable: invalid JSON' >&2\nprintf '[]'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let writer = Capture(Arc::clone(&captured));
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_env_filter("server::data_cards=error")
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(describe(&FaceCommand::program(script)).unwrap().is_empty());
+        });
+        let log = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+        assert!(log.contains("ERROR"));
+        assert!(log.contains("Plugin denylist is unreadable"));
     }
 
     #[test]

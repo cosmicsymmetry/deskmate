@@ -153,6 +153,11 @@ jobs:
       - name: faces tests
         working-directory: companion/faces
         run: bun test
+      - name: plugin directory and isolated deploy preflight
+        run: bun test ./tools/plugins/releases.test.ts
+      - name: reviewed release content and pending submissions
+        working-directory: companion/faces
+        run: bun run src/author/releases.ts check
       # What the server actually runs: the package must describe itself from a cold
       # start, as the subprocess does, not only under the test runner.
       - name: faces describe
@@ -195,6 +200,29 @@ jobs:
               output.write("changed=" + str(bool(changed)).lower() + "\n")
               output.write("ids=" + json.dumps(ids, ensure_ascii=True) + "\n")
           PYTHON
+
+  plugin-release-policy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: release approval policy tests
+        run: python3 -m unittest discover -s tools/plugins -p 'test_*.py'
+      # Also exercise the policy in its initial owner PR. After merge, the
+      # independent pull_request_target workflow enforces trusted base code even
+      # when an outside author edits or removes this ordinary PR workflow.
+      - name: check index approval
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: python3 tools/plugins/check_release_approval.py
 
   plugin-previews:
     needs: plugin-changes

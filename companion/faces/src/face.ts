@@ -58,6 +58,8 @@ export interface RenderContext {
 export type RenderResult = string | { svg: string; state?: unknown };
 
 export interface FaceDefinition {
+  /** Internal catalog tombstone: hidden from creation, retained for existing-card errors. */
+  withdrawn?: string;
   /** The stable identifier stored in `data-cards.json`. */
   kind: string;
   /** What the add menu calls it. */

@@ -1,0 +1,72 @@
+[
+  {
+    "id": "days-left-this-year",
+    "version": "1.1.0",
+    "sha256": "93ac865ceeaf224ae172e07d8995db778cc4891f908580fe7e20b514c75f4727"
+  },
+  {
+    "id": "github-stats",
+    "version": "1.0.0",
+    "sha256": "b573ae0a714ffb51855c00ff9a8a17a44027125361d197af588789228139f633"
+  },
+  {
+    "id": "moon-phase",
+    "version": "1.0.0",
+    "sha256": "cb94239cb46e51f09abaf2bcd1a8378fa8407f65b1d94efa19971f88bfdbd339"
+  },
+  {
+    "id": "anime-images",
+    "version": "1.0.0",
+    "sha256": "9ca5d4550ec6f6939b15cc5bfa210acc102178f9411396cb51287feae8b6cc18"
+  },
+  {
+    "id": "art-of-the-day",
+    "version": "1.0.0",
+    "sha256": "f6d2b37707ca4337808b24b45a10054ed27159caa3c7773a2421a89a0f9ab818"
+  },
+  {
+    "id": "calvin-and-hobbes",
+    "version": "1.0.0",
+    "sha256": "58b3119b3e901db054eaf300337c697f12de6871545a2d8eb21ea3618e2850ef"
+  },
+  {
+    "id": "dad-jokes",
+    "version": "1.0.0",
+    "sha256": "1622ddda2fdcb87a612fb664d6a4e77eb53c90bedc265f9e1fdb6758345a1e6a"
+  },
+  {
+    "id": "ghibli-scenes",
+    "version": "1.0.0",
+    "sha256": "3e19abef90d7403fd7504b78189e7058f0c2738e4f8e2fe6175a345172ca2efa"
+  },
+  {
+    "id": "ink-landscape",
+    "version": "1.0.0",
+    "sha256": "5e0226374f7bdc769c17a16f628353cbf39c6ebdb313f1ba9d17c1045ad2bd39"
+  },
+  {
+    "id": "this-day-in-history",
+    "version": "1.0.0",
+    "sha256": "b81bfa6dc0759503facdfb5d080fc3263354d151b0d1bd9421ea45eb7261cf0c"
+  },
+  {
+    "id": "word-of-the-day",
+    "version": "1.0.0",
+    "sha256": "696d0d356a8a373e44c3b499919390978911d4c58acfaf0ae7d78afa7b1737d4"
+  },
+  {
+    "id": "xkcd",
+    "version": "1.0.0",
+    "sha256": "9c14449b394a6fa2b66f86e977d98a673c2d80a5e57261891c0aa96698a013d0"
+  },
+  {
+    "id": "anime-images",
+    "version": "1.0.1",
+    "sha256": "2f2e094fefaaba6fba88435c4577b89a35eb2faa6c52a4d9b56d56178fa5fbd9"
+  },
+  {
+    "id": "xkcd",
+    "version": "1.0.1",
+    "sha256": "572982b363a8a487ac9da58bd0323ba2f9e1dfee3ab587da7cc1d80065e6142c"
+  }
+]

@@ -449,8 +449,7 @@ fn map_mint_error(error: &ImageSourceError) -> ImageRouteError {
         | ImageSourceError::UnknownToken
         | ImageSourceError::TooSoon
         | ImageSourceError::InvalidView
-        | ImageSourceError::StagingCapacity
-        | ImageSourceError::TooManyViews => ImageRouteError::Internal,
+        | ImageSourceError::StagingCapacity => ImageRouteError::Internal,
     }
 }
 
@@ -461,8 +460,7 @@ fn map_revoke_error(error: &ImageSourceError) -> ImageRouteError {
         | ImageSourceError::Capacity
         | ImageSourceError::TooSoon
         | ImageSourceError::InvalidView
-        | ImageSourceError::StagingCapacity
-        | ImageSourceError::TooManyViews => ImageRouteError::Internal,
+        | ImageSourceError::StagingCapacity => ImageRouteError::Internal,
     }
 }
 
@@ -472,14 +470,12 @@ fn map_accept_error(error: &ImageSourceError) -> ImageRouteError {
         ImageSourceError::TooSoon => ImageRouteError::RateLimited,
         // The source ceiling is unreachable on an accept: minting already
         // refused the source that would have exceeded it. A producer's POST is
-        // always the resting view, so an invalid view cannot come from one; the
-        // view ceiling is reachable only if a face staged the maximum without a
-        // resting frame, which is our bug and not the producer's.
+        // always the resting view, so neither an invalid view nor the staged
+        // capacity limit can come from one.
         ImageSourceError::Io { .. }
         | ImageSourceError::Capacity
         | ImageSourceError::InvalidView
-        | ImageSourceError::StagingCapacity
-        | ImageSourceError::TooManyViews => ImageRouteError::Internal,
+        | ImageSourceError::StagingCapacity => ImageRouteError::Internal,
     }
 }
 

@@ -10,6 +10,8 @@ use protocol::{SCENE_CANVAS_HEIGHT, SCENE_CANVAS_WIDTH};
 use sha2::{Digest, Sha256};
 
 const LVGL_IMAGE_HEADER_BYTES: usize = 12;
+pub(crate) const CANONICAL_FRAME_BYTES: usize =
+    LVGL_IMAGE_HEADER_BYTES + SCENE_CANVAS_WIDTH as usize * SCENE_CANVAS_HEIGHT as usize * 2;
 const LVGL_IMAGE_MAGIC: u32 = 0x19;
 const LVGL_COLOR_FORMAT_RGB565: u32 = 0x12;
 

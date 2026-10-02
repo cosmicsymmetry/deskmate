@@ -47,7 +47,6 @@ test("describe prints the catalog the server builds the add menu from", async ()
     "token",
     "anime-images",
     "art-of-the-day",
-    "calvin-and-hobbes",
     "dad-jokes",
     "days-left-this-year",
     "ghibli-scenes",

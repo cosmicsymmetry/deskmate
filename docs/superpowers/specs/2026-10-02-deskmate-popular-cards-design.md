@@ -6,7 +6,15 @@ parallel agents, pull requests, merge and deployment without another approval st
 This extends the existing plugin submission flow; it does not approve the separate
 marketplace-service proposal.
 
-## Scope
+## Current scope amendment
+
+After the initial deployment, the owner said **“skip calvin then”** (2026-10-02).
+Calvin and Hobbes is removed from the shipped plugin directory and catalog, together
+with its fixtures/previews and plugin-specific tests. The eight automatic cards
+remain. The catalog therefore contains 15 total faces after this follow-up deploy.
+The nine-card scope and validation counts below record the original release.
+
+## Original scope
 
 | Plugin | Intended result |
 | --- | --- |
@@ -173,3 +181,14 @@ The service was active/running; public `/` returned HTTP 200 and unauthenticated
 `/v1/app/devices` returned the expected 401. Concurrent service restarts were observed
 outside this faces-only script, so process identity is not claimed unchanged.
 Physical panel appearance remains unobserved.
+
+
+### Calvin removal follow-up
+
+Owner authorization covers removing Calvin, merging and redeploying without another
+approval. The existing exact catalog test now expects the remaining 15 faces; xkcd
+and Anime retain their media validation coverage without depending on deleted Calvin
+fixtures. Their READMEs no longer describe Calvin-only GIF checks. No saved account
+configuration is rewritten. Local validation passes: **737 faces tests / 4046
+assertions**, typecheck, lint, formatting, cold discovery (15 faces, no Calvin), and
+xkcd/Anime author checks (8 cases / 16 PNGs). CI, merge and deployment are pending.

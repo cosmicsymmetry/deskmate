@@ -231,6 +231,7 @@ function PictureFaceSettings({
     }, FACE_STATUS_POLL_MS);
     return () => {
       requestGeneration.current += 1;
+      onTapSentence(null);
       window.clearInterval(poll);
     };
   }, [sourceId, onTapSentence]);

@@ -523,3 +523,32 @@ test("a tappable face tells the owner what a tap does, and others say nothing", 
     await quiet.cleanup();
   }
 });
+
+test("switching from a tappable picture to a clock clears the gesture sentence", async () => {
+  const editor = await mountFaceSettings(
+    { ...opaqueFace, tap: "Tap the panel for the next stories." },
+    null,
+  );
+  await waitFor(() =>
+    expect(editor.container.textContent).toContain("Tap the panel for the next stories."),
+  );
+  const clock = clockCard("clock");
+  await act(async () =>
+    editor.root.render(
+      <CardEditor
+        card={clock}
+        config={cardListConfig([clock])}
+        issues={[]}
+        cardError={null}
+        pomodoro={null}
+        timerBusy={false}
+        onChange={() => {}}
+        onConfigChange={() => {}}
+        onRemove={() => {}}
+        onTimerAction={() => {}}
+      />,
+    ),
+  );
+  expect(editor.container.textContent).toContain("Tapping this card does nothing.");
+  expect(editor.container.textContent).not.toContain("Tap the panel for the next stories.");
+});

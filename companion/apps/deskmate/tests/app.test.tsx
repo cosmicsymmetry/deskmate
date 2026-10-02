@@ -1040,7 +1040,8 @@ for (const supported of [false, true]) {
       return { save: { generation: 1, warning: null } };
     };
     const { container } = await mount(<App />);
-    await act(async () => container.querySelector<HTMLButtonElement>(".settings-trigger")?.click());
+    await act(async () => container.querySelector<HTMLButtonElement>(".topbar__settings")?.click());
+    expect(container.querySelector("dialog")?.open).toBe(true);
     const slider = container.querySelector<HTMLInputElement>("#display-brightness");
     expect(slider).not.toBeNull();
     expect(

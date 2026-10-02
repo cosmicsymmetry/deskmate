@@ -11,3 +11,4 @@ See [submitting a plugin](submitting.md) and [reviewed releases](releases.md).
 | --- | --- | --- |
 | [Days Left This Year](../../companion/faces/plugins/days-left-this-year/README.md) | 1.1.0 | Calendar days remaining, including today, and year progress. Uses the owner's timezone. |
 | [GitHub stats](../../companion/faces/plugins/github-stats/README.md) | 1.0.0 | Public repos, followers and following for a GitHub username. |
+| [Moon Phase](../../companion/faces/plugins/moon-phase/README.md) | 1.0.0 | The current moon, illumination and next full moon date \(UTC\). No account needed. |

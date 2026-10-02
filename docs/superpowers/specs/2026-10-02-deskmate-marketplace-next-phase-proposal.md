@@ -89,6 +89,9 @@ stalls. PNG evidence supplements review; it never proves physical-panel delivery
   Symlinks and special files are refused. No extension-based exclusions; consequently
   any file change inside a reviewed folder requires a new version and review.
   The two reviewed shipped plugins seed the index; GitHub stats gains a setup README.
+  Main's subsequent Moon Phase submission (PR #16) is integrated into the directory
+  but left pending, without inferring release approval from a source merge. The
+  install gate refuses it until an owner-approved entry records its exact bytes.
 - Owner-authored index PRs are the approval source. Previous entries are immutable
   rollback history. A trusted-base `pull_request_target` workflow checks PR identity
   without executing submitted code; CODEOWNERS is documentation, with no repository
@@ -108,3 +111,31 @@ stalls. PNG evidence supplements review; it never proves physical-panel delivery
 - Author previews stay offline and independent of instance secrets/withdrawal policy.
   The next outside author is invited to use the existing guide unaided and report
   where they get stuck. No preview UI, install API or account/publisher service is added.
+
+## Local verification (2026-10-02)
+
+- Rust: fmt, clippy with warnings denied, workspace all-targets (867 passed,
+  two existing ignored) and separate doctests pass. Web: 216 tests, typecheck,
+  lint, formatting and build pass. Faces after integrating main's Moon Phase:
+  631 tests, typecheck, lint, formatting, dump, cold describe and all three offline
+  author checks pass. Two repository integration tests and seven approval-policy
+  tests pass; actionlint and shell syntax validation pass.
+- All 32 deliberate guard mutations were caught, covering hash/content/version
+  identity, approval and rollback history, deployment refusal, discovery, refresh,
+  malformed policy, status/menu/API behavior, logging and cleared-environment paths.
+  CLI/deploy mutations were repeated after moving their repository-only tests out
+  of the separately shipped faces bundle.
+- The faces bundle was copied to an isolated temporary directory without repository
+  docs or deploy scripts. Its complete suite and cold describe pass. Reviewed fixture
+  bytes pass the real verification CLI; changed bytes stop the extracted deploy
+  preflight before gates or VM-command stubs. Actual Moon Phase bytes produce the
+  expected pending-CI/install-refusal result. Neither deploy nor its dry-run was run;
+  no VM contact or hardware verification was performed.
+- Built-in SVG goldens are unchanged. All 18 Days Left checker PNGs match the prior
+  accepted output byte-for-byte; its three desk-scale layouts were inspected again.
+
+An initial run with Rust, web and faces gates concurrent failed three unchanged C1
+selector subprocess tests (idle reaping, inherited-pipe timing and a worker refusal).
+Ten consecutive focused selector runs then passed, followed by the complete Rust
+workspace run. Selector lifecycle code and its deadlines are unchanged by this work;
+the initial failures are disclosed rather than hidden by a timeout change.

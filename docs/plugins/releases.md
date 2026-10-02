@@ -7,6 +7,11 @@ for rollback history. The initial entries cover the reviewed `days-left-this-yea
 and `github-stats` plugins. A hash identifies content; **an owner commit to this
 index is the approval**.
 
+Moon Phase arrived through PR #16 while this index was being implemented. Its
+source and directory listing are included, but the initial approval seeds remain
+the two shipped plugins above. CI reports Moon Phase as pending; deployment of
+this revision is intentionally refused until the owner approves its exact entry.
+
 ## Submissions and approval
 
 An outside contributor leaves the index unchanged. `plugin:check` prints the exact

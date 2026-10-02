@@ -77,10 +77,7 @@ can write a plugin and either self-host it or submit it to run on ours.
 
 ## Board
 
-**Schema/wire lock:** **free.** C1 released it by merging PR #7 on 2026-10-01
-(`63633d2`), as the lock line said it would (ROD-3). No track holds the schema or the
-wire; config stays v10 and the integration added no wire keys or firmware changes. The
-next track to need either takes the lock here first, with the owner's authorization.
+**Schema/wire lock:** **held by Track H (brightness)**, on the owner's authorization (2026-10-02: "spin up another agent that will work on brightness setting"). H bumps the config to v11 (`preferences.brightness`), adds an `ApplyConfig` key under protocol v2 gated by capability bit 11, and changes firmware; it releases the lock when its PR merges. C1 released the previous hold by merging PR #7 on 2026-10-01 (`63633d2`).
 
 | Track | Status | Branch | Waiting on |
 |---|---|---|---|
@@ -92,3 +89,4 @@ next track to need either takes the lock here first, with the owner's authorizat
 | E | **Publishing.** Plans drafted and five pieces written (issue ROD-5); the dev log shipped via ROD-10 and **Deskmate's first public writing is live** at `deskmate-site.pages.dev/log/thirteen-seconds`, with an RSS feed and a footer link. Launch shape is **B** (owner): every one-shot channel -- Show HN, Hackaday, the subreddits -- is held until Track F has a store, so **F sets the launch date, not E**. The repo going public on 2026-10-01 was deliberately quiet and spent no one-shot. Social accounts are approved but **held** by the owner, who will name the handle; there is no mailer and no domain, so `/log`'s feed plus "watch the repo" are the only ways to follow the project. The repo is **not yet set up as a channel** -- no description, topics, homepage link or social preview, and 0 releases against 5 tags, so "Releases only" watchers currently receive nothing (`github-repo-pack` on ROD-5 specifies the fix; a tag needs owner authorization) | -- | Owner: approve the repo About-box and README copy; approve pieces 03/05 as text; a handle; whether to cut a release. Launch waits on **F** |
 | F | Not started | -- | A |
 | G | Not started | -- | C1 phase 2, A |
+| H | **Started 2026-10-02 (owner).** Panel brightness: schema v11 `preferences.brightness`, additive `ApplyConfig` key gated by capability bit 11 (sent only to firmware that advertises it, so no flash-first order), RAM-only apply on the device, one control in the SettingsSheet. Revives the feature the 2026-09-22 rule retired; the dead `feat/display-brightness` branch is a sketch only | `track-h/brightness` | Its PR; then the owner's USB flash and on-board OTA re-verification |

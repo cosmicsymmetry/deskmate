@@ -23,7 +23,8 @@ marketplace-service proposal.
 All are ordinary sandboxed picture producers under `companion/faces/plugins/`.
 The implementation stays inside the existing plugin, settings and picture-frame
 contracts. No config, wire, firmware or browser-component changes are planned.
-Track H retains its schema/wire lock. Dilbert is explicitly excluded.
+Track H owned the independent brightness/schema work, which merged before this batch.
+Dilbert is explicitly excluded.
 
 ## Visual and interaction direction
 
@@ -65,9 +66,9 @@ specific limitation and use a supported source/configuration instead of a fake f
 - [x] Verify live provider requests through the real guarded runtime.
 - [x] Run full applicable faces checks and changed-plugin preview checks.
 - [x] Complete independent visual/code review and documentation handoff.
-- [ ] Open the submission PR and confirm CI passes on the reviewed head.
-- [ ] Integrate current main and check ancestry against every live component.
-- [ ] Merge and deploy the reviewed merged revision, then verify the installed
+- [x] Open the submission PR and confirm CI passes on the reviewed head.
+- [x] Integrate current main and check ancestry against every live component.
+- [x] Merge and deploy the reviewed merged revision, then verify the installed
   catalog, live rendering and service health.
 
 Physical panel appearance is unobserved unless the owner supplies that evidence.
@@ -79,8 +80,8 @@ cards respectively. Track B's primary branch owns integration, review records, P
 merge and deployment. Other open tracks' changes are preserved and are not deployed
 from an unmerged branch as a side effect.
 
-Status: all nine plugins implemented, integrated and independently reviewed; PR #21
-awaits final CI, merge and deployment.
+Status: all nine plugins implemented, reviewed, **merged in PR #21 as `8b733db`**
+and deployed faces-only at **2026-10-02 11:53:04 UTC**.
 Combined faces suite: **754 tests, 4077 assertions, zero failures**. Typecheck, lint
 and format pass. The nine offline author checks pass **28 cases / 56 PNGs**, with
 no runtime-limit notices. Live guarded renders and tap changes pass for the eight
@@ -105,8 +106,8 @@ No sandbox limits are loosened.
 
 Provider preflight from the deployment host returned HTTP 200 for all eight remote
 services/asset hosts tested (Wikipedia, icanhazdadjoke, Wiktionary, Met, Ghibli, xkcd,
-Nekos.best and GoComics' image server). Full installed-runtime checks remain a
-separate deployment gate.
+Nekos.best and GoComics' image server). Installed-runtime checks subsequently
+passed as recorded below.
 
 ### Review outcome
 
@@ -140,8 +141,35 @@ the gate before observing its result, and uses the surrounding fixture's one-sec
 budget for cross-thread panic reporting. The actual closed-gate timeout remains
 20 ms, and the existing open/join cleanup and closed-gate assertion remain intact.
 This changes only a test; no runtime behavior is changed. Independent code review
-accepted the correction. The final submission reruns the repository gates; no
-skipped or failing gate is accepted as a release pass.
+accepted the correction. Final submission `42ca1e6` passed all six jobs in
+[CI run 37002508098](https://github.com/cosmicsymmetry/deskmate/actions/runs/37002508098);
+no skipped or failing gate was accepted as a release pass. All 56 PNGs in that
+submission’s CI artifact were byte-identical to the reviewed local checker outputs.
 
-Integration also includes main `149d07f`, the sign-in release that reached production
-while this batch was under review. That merge changes no faces-package files.
+### Release record
+
+The merge preserves sign-in (`149d07f`), brightness (`4f13dd3`) and Deskboy naming
+(`0e132ae`), which reached main while this batch was under review. Each upstream PR
+passed its applicable CI; none changed the faces package. The combined tree was
+checked locally with Rust fmt/clippy, **878 passing Rust tests** (two existing
+ignored tests), and doctests. GitHub's actual merge `8b733db` was tree-identical to
+that locally checked integration before deployment.
+
+Immediately before deployment, all live component revisions were verified as
+ancestors of `8b733db`: faces/binary `4f13dd3`, web `0e132ae`. The clean merged
+checkout shipped through `deploy.sh --faces-only`; the deploy script passed its
+local and Linux faces suites and cold catalog before installation. It recorded
+faces `8b733db397cb11592ac73fbff7d26e8ef3516e0c` at 11:53:04 UTC. Web and binary
+revision records were unchanged by this deployment.
+
+The installed CLI was then invoked with a cleared subprocess environment, matching
+the server's entry point. Its catalog contained all **16** expected built-in/plugin
+faces. All **18** checks passed: default and changed-tap output for eight automatic
+cards, actionable Calvin setup refusal, and a supplied official Calvin GIF. All
+successful frames measured 448×368; the largest PNG was 295,449 bytes. These checks
+read public sources without changing any account's saved card loop.
+
+The service was active/running; public `/` returned HTTP 200 and unauthenticated
+`/v1/app/devices` returned the expected 401. Concurrent service restarts were observed
+outside this faces-only script, so process identity is not claimed unchanged.
+Physical panel appearance remains unobserved.

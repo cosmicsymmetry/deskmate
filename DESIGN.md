@@ -3,255 +3,139 @@
 <!-- impeccable:design-world modular-face -->
 
 **Applies to:** `companion/apps/deskmate/src/**`, principally `src/styles.css`.
-**Status:** built and in the tree. Supersedes `docs/design/companion-visual-language.md`
-("the lit panel"), which described a proposal that was never approved and is now
-recorded there as superseded.
-**Direction seed:** ef112502. The world was pinned by the owner, not dealt by the roll.
+**Mode:** Operate. Compose the cards on a physical desk display, preview the result,
+and explicitly save changes.
+**Direction seed:** ef112502, originally pinned by the owner.
+**Refinement, 2026-10-02:** the owner identified too many boxes, rounded tiles, and
+purely decorative UI. Keep the display-and-loop model, but express it through open
+layout, readable controls, and restrained selection. This document supersedes
+`docs/design/companion-visual-language.md`.
 
-## Thesis
+## Principles
 
-Deskmate's hardware is a small emissive rounded panel that shows one glanceable thing
-at a time. That is, structurally, a watch face clipped to a monitor. So the app that
-composes it is built from the parts a watch face is built from: **complications** on a
-grid, each owning exactly one fact; **rings** wherever something has a real proportion;
-**huge rounded numerals**.
+- The physical display is the focal point. Its preview stays black in both themes.
+- Card order is one sequence, edited in one place. The card chooser is an open strip
+  that wraps, with numbered positions and a blue underline on the selected card.
+- Inputs and buttons have surfaces; helper text, card identities, and settings facts
+  do not need enclosing boxes. Separate groups with space or a fine rule.
+- Color communicates action or state. There are no decorative gradients or glows.
+- Keep all existing draft, validation, ownership, keyboard, and explicit-save behavior.
 
-It refuses the arrangement this category always ships — a left source list, a stack of
-soft grey cards, one blue primary button — because a face has no navigation. Everything
-is already on it.
+## Color
 
-The feeling the owner asked for, being organised and visibly productive, has a
-mechanism rather than a mood: watchOS earned "closing your rings" by making completion
-**visible, proportional and physical**. The rotation gets the same treatment. The loop
-is a ring, each card's dwell is an arc of it, and it closes.
-
-## Colour
-
-Two grounds, five roles. Both schemes are first-class; the light one is designed, not
-inverted.
-
-| Token | Light | Dark | Role |
+| Token | Light | Dark | Purpose |
 |---|---|---|---|
-| `--ground` | `#ECECF0` | `#000000` | The page. Cool grey, deliberately not cream. |
-| `--tile` | `#FFFFFF` | `#131316` | Anything you can touch: tiles, inputs, controls. |
-| `--tile-2` / `--tile-3` | `#F4F4F7` / `#E6E6EB` | `#1D1D21` / `#2A2A2F` | Nested control surfaces and hover. |
-| `--ink` / `--ink-2` / `--ink-3` | `#1D1D1F` / `#62626B` / `#6A6A72` | `#F5F5F7` / `#A0A0A8` / `#84848D` | Primary, secondary, label. |
-| `--stage` | `#000000` | `#000000` | **Black in both schemes.** |
+| `--ground` | `#F5F5F7` | `#000000` | Workspace |
+| `--tile` | `#FFFFFF` | `#131316` | Inputs, controls, header, footer |
+| `--tile-2` | `#F4F4F7` | `#1D1D21` | Hover and secondary controls |
+| `--tile-3` | `#E6E6EB` | `#2A2A2F` | Disabled controls, scrollbars |
+| `--ink` | `#1D1D1F` | `#F5F5F7` | Primary text |
+| `--ink-2` | `#62626B` | `#A0A0A8` | Secondary text |
+| `--ink-3` | `#6A6A72` | `#84848D` | Hints, labels, placeholders |
+| `--hairline` | black at 9% | white at 10% | Dividers |
+| `--stage` | `#000000` | `#000000` | Physical display |
+| `--act` | `#0062E0` | `#0A84FF` | Selection, focus, primary action |
+| `--live` | `#E5004C` | `#FA114F` | Running preview/timer feedback |
+| `--good` | `#157B42` | `#30D158` | Healthy and saved states |
+| `--warn` | `#975D00` | `#FF9F0A` | Pending or degraded states |
+| `--bad` | `#D70015` | `#FF453A` | Errors and destructive actions |
+| `--arc-a` / `--arc-b` | `#62626B` / `#B3B3BB` | `#A0A0A8` / `#53535C` | Neutral rotation ramp |
 
-The five chromatic roles, each with **exactly one meaning** and no decorative use:
+The selected arc and its legend swatch use `--act`, alongside stroke weight, position,
+and the legend's stronger text. This is the card selected in the editor, not a claim
+about which card is currently on the hardware. Other arcs use the neutral ramp.
+Status words accompany semantic colors. The preview badge sits on a permanently black
+screen, so it uses `#FFBC57` on `#251B0B` in both themes for readable warning text.
 
-| Token | Light | Dark | Means |
-|---|---|---|---|
-| `--live` | `#E5004C` | `#FA114F` | On the panel right now; a running timer. |
-| `--good` | `#157B42` | `#30D158` | Reachable, owned, fresh, healthy. |
-| `--act` | `#0062E0` | `#0A84FF` | Interactive only: focus, selection, the primary action. |
-| `--warn` | `#975D00` | `#FF9F0A` | Stale, pending, paused, needs a look. |
-| `--bad` | `#D70015` | `#FF453A` | Fault, refused, destructive. |
+## Type and controls
 
-**Every one of these was measured, not eyeballed.** `--ink-3` is the label role at
-0.625rem uppercase, which is small text and therefore owes 4.5:1 — it is checked against
-both `--ground` and `--tile` in each scheme, and `--good` and `--warn` are checked the
-same way because they colour a state word at 0.9rem. The worst small-text pair
-in the built system is 4.52:1. The light values are darker than common system green
-and orange because those do not clear 4.5:1 on white at this size.
+System fonts only; no font or icon library requests.
 
-**Colour is never the sole carrier of a state.** Every state prints a word that says the
-same thing its colour does ("Connected", "stale", "Ownership unavailable"), so the page
-survives a greyscale screenshot and a colour-blind reader alike.
-
-`--arc-a` / `--arc-b` are a **ramp, not states**. Only the loop ring uses them, and only
-to keep neighbouring arcs tellable apart. Which arc is live is said by luminance and
-stroke weight, never by hue.
-
-### Three rules that outrank convenience
-
-1. **`--stage` is black in both schemes.** The preview shows an AMOLED panel whose unlit
-   pixels emit nothing. Drawing it on a light ground in light mode would be a picture of
-   a different device.
-2. **The stage renders at an integer scale, always.** `.stage__frame` reserves the box and
-   `.stage__screen` is exactly 448×368; below 540px it takes `transform: scale(0.5)`, a
-   whole fraction, so `image-rendering: pixelated` never resamples unevenly. The preview
-   is exact-pixel by contract; a `max-width` that rendered a 448px source at 452px would
-   make that promise false.
-3. **The bloom under the stage is scheme-aware.** On black it is the panel's own light
-   falling on the desk (`--stage-bloom`, tinted with `--live`). On a light ground that
-   same glow reads as a lavender haze, so light mode gets a neutral, tighter shadow. It
-   is the only shadow in the design; nothing else is elevated by shadow.
-
-## Type
-
-Scale: `h1` 1.5rem, `h2` 1.15rem, body 0.78–0.8rem, `.tile-label` 0.625rem. The two rail
-heroes — the ring total and a card tile's live value — carry 1.75rem, because the thesis
-promises huge numerals and a design whose ceiling is 23px has not delivered them.
-
-No web fonts, and this is a deliberate choice rather than a constraint absorbed.
-System stacks give the companion its pinned face with zero font requests.
-
-| Role | Stack | Use |
-|---|---|---|
-| UI | `ui-sans-serif, -apple-system, system-ui, …` | All prose and controls. |
-| **Numerals** | `--round`: `ui-rounded, "SF Pro Rounded", …` with `tabular-nums` | **Every time, duration, count and index.** |
-| Label | UI stack, `0.625rem`, `700`, `0.085em`, uppercase, `--ink-3` | `.tile-label`. |
-
-Where available, `ui-rounded` resolves to the platform's rounded system face; on macOS
-that is **SF Pro Rounded**. The server sets no CSP, so the page could serve a bundled
-`woff2`, but the system face is the pinned world's own face and adds no fetch. There is
-also no separate display face here: this is a numeral role, not headline lettering.
-Numerals are tabular because this product is about time: digits that jitter as they tick
-make a worse instrument than digits that hold their columns.
-
-**`.tile-label` names a reading, never a heading.** A label stacked above an `h2` is
-banned — the heading carries its own weight. The label survives only where it is the
-only text naming a value ("LINK", "ADD A CARD", "WORKDAY").
+- UI: `ui-sans-serif, -apple-system, system-ui, "Segoe UI", roboto, sans-serif`.
+- Times, durations, counts, and positions: `ui-rounded, "SF Pro Rounded", …`, with
+  tabular numerals. Card names use the UI face, not the numeric role.
+- Main loop heading: 1.5rem / 600. Editor headings: 1.15rem / 640.
+- Card names: 1rem / 600. Countdown: 1.375rem / 550. Rotation total: 1.5rem / 550.
+- Field labels, checkbox labels, and input values: 1rem. Labels use primary ink
+  and medium weight. Necessary guidance, validation, and source status: 0.875rem
+  with 1.5 line height. Secondary color belongs to supporting copy, not field labels.
+- `--r-control: 7px`; `--r-tile: 14px` for notices and the settings dialog.
+  The card strip has square, open edges and no filled selection box.
+- Inputs are at least 40px high, primary buttons 38px, pacing controls 30px,
+  rotation selections 36px, and add-menu choices 44px.
+- The outline display mark and its local SVG favicon replace the glowing gradient mark.
 
 ## Composition
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ ● Deskmate                                     ⚙ Settings   │  chrome
-├──────────────────────────┬──────────────────────────────────┤
-│ ┌──────────────────────┐ │  The loop      drag · ⌥ ← →  3/8 │
-│ │                      │ │  ┌────────┐┌────────┐┌────────┐  │
-│ │        17:24         │ │  │ Clock  ││Weather ││  3:00  │  │  live tiles,
-│ │   Wednesday 19 Aug   │ │  │        ││        ││ Focus  │  │  in loop order
-│ │                      │ │  └────────┘└────────┘└────────┘  │
-│ └──────────────────────┘ │  ┌ + Add a card ┐                 │  the slot
-│  THE LOOP [Timed]Manual  │  ─────────────────────────────   │
-│           50 s   ▷ Play  │  Clock                 Remove    │
-│         ╭─────╮          │                                  │
-│        │ 2:30 │          │  Show seconds  [ ]               │
-│         ╰─────╯          │  Stays on the panel for [     ]  │
-│  ● Clock           50s   │                                  │
-│  ● Weather         50s   │                                  │
-├──────────────────────────┴──────────────────────────────────┤
-│ Everything is up to date                    [Save to server] │  save bar
-└─────────────────────────────────────────────────────────────┘
-```
+The desktop workspace is bounded to 1216px, including 24px side gutters. The left
+column reserves 464px for the 448px display and a scrollbar; a 40px gap separates
+that column from the editor, keeping 56px between the display and work region. The header and save footer align to the same content edges and are
+72px high before content-driven expansion.
 
-- **The rail is the face.** What the panel shows, what the loop looks like, whether the
-  data behind it is fresh. It stays put while the work column scrolls, because every
-  edit in that column is aimed at it.
-- **The work column is one surface.** Sections are bare regions separated by space and a
-  hairline. **There is no panel-card layer** — a card inside a card is always wrong, and
-  only the interactive atoms (tiles, inputs, controls) are elevated off the ground.
-- **The panel identifies itself.** No label above it, no resolution beside it, no caption
-  under it. It is the one object on the page that looks exactly like the thing it
-  represents, so anything printed around it described what you could already see.
-- **Ownership and device state are behind the one door.** Operator sign-in, device
-  selection, and troubleshooting are not things you look at while arranging cards. They
-  live in a modal `<dialog>` reached from the chrome, with the device's link, Wi-Fi,
-  address and update state beside them. When one of those turns bad the button carries a
-  dot and the work column carries the sentence explaining it — so the sheet is a place
-  to *go*, never a place where news can hide.
-- **The grid is the loop.** (2026-09-06, on owner direction.) There is no card library
-  and no playlist anywhere on the page: the complication tiles in the work column *are*
-  the loop, in loop order, and they are where the order changes — drag a tile, use the
-  earlier / later buttons that appear on hover, or ⌥ ← → on a focused tile. Adding a card
-  is one dashed slot at the end of the grid; the new card joins the loop at once — one
-  `addCard` path, one capacity guard, one gesture. A tile
-  owns one fact, so dwell is never printed on it: the ring draws the proportion and the
-  card's editor edits it ("Stays on the panel for"). Schema v10's ordered `cards[]` is
-  the loop, so every card is represented exactly once and there is no second list to
-  reconcile.
-- **Exactly one disclosure for state, and one menu.** No tabs, no accordions, no drawer
-  for anything you touch more than twice. Everything the design is about — cards, the
-  loop, the panel — is on one surface, focused by luminance. This is what keeps the
-  redesign from being slower than what it replaced. The add-card slot's menu
-  (2026-09-06) is the one menu: it holds available built-in kinds, Picture, and
-  server-listed faces, never state, so nothing can hide in it.
-- **One card, one name — and the name says what the card is.** A card is identified by
-  `cardIdentity()` on every visible surface: "Clock" for a clock, the source name for a
-  picture, and the timer label for a Pomodoro. A template label is not printed above it;
-  the card already shows what kind of thing it is. Accessible move and remove names keep
-  the template because that off-screen context helps a listener act safely.
-- **A status bar is not information.** Four permanent complications reading Connected /
-  Server / -54 dBm / Live answered questions asked twice in a device's life and charged
-  every other session for it. State that is nominal 99% of the time is noise; state worth
-  a sentence gets one, in the column you are already reading.
+The rail and work column scroll independently. At heights of 800px or less, desktop
+vertical spacing compresses so the display, rotation, and legend fit at 1060×740.
+Below 1041px, the columns become one scrollable flow. The rail is at most 448px;
+the work region is at most 640px. At 540px and below, the card strip has two columns,
+and at 430px the footer stacks its message above its action.
 
-Breakpoints: two columns above 940px; below it the regions flow at natural height and
-`.face` scrolls. At 430px the card grid drops to two columns and hover-revealed controls
-become permanently visible.
+The display is exactly 448×368 at full size. At widths of 540px and below it renders
+at 224×184, a 2:1 downscale with smooth image sampling so thin firmware strokes remain
+legible. Never stretch it to an arbitrary width. A neutral soft shadow belongs only
+to the display: `0 12px 28px -16px`, black at 28% in light mode and 60% in dark mode.
 
-## Signature: the loop ring
+## Card editing
 
-`src/components/LoopRing.tsx`. A 124px ring paired side by side with its legend, one arc
-per card in the loop, sweep proportional to that card's resolved dwell, the
-on-panel entry at full luminance with a marker riding its start, and the loop total in
-the centre at 1.75rem.
+The strip is the schema-v10 ordered `cards[]` loop. Drag, earlier/later buttons, and
+Alt+arrow keys all change that same order. Position numbers communicate sequence and
+are hidden from assistive technology to keep card names concise. Move/remove controls
+appear on hover or focus, and remain visible at narrow widths or on touch devices.
 
-The centre prints a compact `1:50`, not `formatDuration`'s "1 min 50 s": the prose form
-is right in a sentence and wrong inside a ring, where it wraps at hero size. The full
-phrasing still reaches assistive technology through the ring's `aria-label`.
+A card has one identity: Clock, its picture source, or its editable timer label.
+A running timer additionally shows its countdown. Accessible move/remove names retain
+kind context. Dwell is edited below and visualized in the rotation; do not repeat it
+on every card. The final open slot adds a card through the existing menu.
 
-It replaces the previous filmstrip and keeps the same truth — a card's share of the loop,
-which no other control shows — in the form the rest of this world is built from. All the
-arithmetic comes from the pure helpers in `src/lib/configDraft.ts` (`loopSegments`,
-`loopSeconds`, `loopAdvance`, `loopDeadline`), so the ring and any other consumer of loop
-length cannot drift apart.
+The editor uses unboxed checkbox rows and grouped settings separated by space or a
+rule. Labels should explain controls without a second sentence repeating them.
+Gesture guidance, alert-timing explanation, and picture-source identifiers live in
+plain native disclosures. Missing sources and source validation automatically open
+their disclosure; one-time credentials and actionable errors remain visible. A timed
+alert hold keeps its tap-to-dismiss caveat beside the control. The selected card's
+title and Remove action lead the editor.
 
-Four decisions worth keeping:
+## Rotation
 
-- **A manual loop gets equal arcs.** With no dwell there is no proportion to encode, and
-  a ring implying one would be inventing it.
-- **The ring displays; the legend beside it selects.** Reordering lives on the grid in
-  the work column, so one order has exactly one place to change it. Dragging arcs around
-  a circle has no keyboard equivalent worth shipping.
-- **Arc colour spreads across the ramp**, `index / (count - 1)`, never `index % 4`. A
-  loop holds up to eight cards, and two arcs sharing a colour would break the only
-  mapping there is from an arc back to its name.
-- **The whole ring, its legend and its transport fit above the save bar at 1060×740**,
-  the reference wide viewport. The transport lives in the loop's head row for exactly
-  this reason, and so does the pacing control (Timed / Manual and the default dwell).
-  Anything added here has to pay for itself out of that budget.
+A 104px ring and its legend show proportional dwell, with the compact total in the
+center. Thin arcs have no glow. The heading is **Rotation**, distinguishing pacing
+from the **The loop** card chooser. Timed/manual pacing and the preview transport
+remain beside that heading, wrapping on narrow screens.
 
-## Icons
+The calculations still come from `loopSegments`, `loopSeconds`, `loopAdvance`, and
+`loopDeadline`. Manual rotation uses equal arcs and no implied duration. Playback
+advances the editor preview, and reduced motion disables automatic playback with a
+visible explanation. Reordering remains in the card strip.
 
-`src/components/Icon.tsx`. One 16px grid, one 1.75 stroke, round caps and joins, drawn.
-Six inline SVG marks keep the set consistent with zero library or asset fetches. They
-also avoid borrowing `×`, `↑`, `✓`, `⠿` as icons, which hands their weight and alignment
-to whatever font resolves.
+## State and accessibility
 
-## Motion
+Settings is the single native modal for account, panels, display preferences, and
+connection troubleshooting. The dialog owns focus and Escape; its save bar makes
+saving reachable while the page behind it is inert. Device facts use plain rows.
+Consequential failures remain visible in the workspace as well as Settings.
 
-Two curves, both without overshoot: `--ease: cubic-bezier(0.32,0.72,0,1)` and
-`--spring: cubic-bezier(0.16,1,0.3,1)`. Things settle; they do not bounce. An overshoot
-on a press or a ring reads as tacky rather than physical.
+Save remains explicit and is blocked by validation, ownership, and in-flight work.
+Disabled primary actions use a neutral fill. The adjacent message explains the state;
+there is no decorative hatch. Validation stays attached to the field or card that owns
+it, with an unclaimed-issue fallback.
 
-`prefers-reduced-motion: reduce` collapses every duration to 0.001ms and stops the loop
-ring's automatic playback outright, with the reason stated in the UI rather than the
-control silently doing nothing.
+Keyboard focus is a 2px `--act` outline with a 2px offset. Selection and carets use
+`--act`; thin scrollbars use `--tile-3`. Short transitions communicate interaction.
+`prefers-reduced-motion: reduce` collapses transition/animation durations and disables
+loop playback. Both themes remain supported, including explicit dev-harness overrides.
 
-## Browser surfaces
+## Verification harness
 
-The parts nobody draws still carry the design: `::selection` is tinted from `--act`,
-`caret-color` is `--act`, scrollbars are thin and coloured from `--tile-3`, focus rings
-are a 2px `--act` outline with a 2px offset and are never removed.
-
-## States
-
-Every one of these has a designed treatment, and each is reachable in the dev harness
-(`VITE_DESKMATE_MOCK=1 bun run dev`, then `?scenario=…`): `default`, `offline`,
-`standalone`, `unowned`, `invalid`, `firstrun`, `empty`, `carderror`, and
-`picture` (a server-rendered PNG card and its source editor).
+Run `VITE_DESKMATE_MOCK=1 bun run dev` from `companion/apps/deskmate`.
+The harness supplies sample data without contacting hardware. Scenarios include
+`default`, `offline`, `standalone`, `unowned`, `invalid`, `firstrun`, `empty`,
+`carderror`, `picture`, `signedout`, `setup`, and `nopanels`; use `?scenario=…`.
 Add `&theme=dark` or `&theme=light` to pin the scheme.
-
-A **barred primary action** is drawn as barred — a diagonal hatch on `Save` says a
-condition is holding it — rather than merely faded. Quiet buttons keep plain reduced
-opacity, because four hatched controls at once is noise instead of a signal.
-
-## What this design will not do
-
-- Reintroduce a kicker or eyebrow above a heading.
-- Put a card inside a card.
-- Use `--live`, `--good`, `--act`, `--warn` or `--bad` decoratively, or let any of them
-  carry a state that no word also carries.
-- Give the ring a proportion that is not real.
-- Hide a state behind a tab, accordion or drawer. The settings sheet is the one modal in
-  the product and it holds a *task*, not news: anything the sheet knows that is going
-  wrong is also said in the open, on the button and in the work column.
-- Print a fact the user cannot act on, or that the thing beside it already shows.
-- Add a visible template label to a card. Its identity is Clock, its picture source, or
-  its timer label.
-- Add a permanent status band. State earns its place by being abnormal.
-- Add a shadow anywhere except under the stage.

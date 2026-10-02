@@ -50,42 +50,48 @@ function HoldSelector({
   issues: ValidationIssue[];
 }) {
   return (
-    <label className="field">
-      <span>Hold as outstanding</span>
-      <select
-        value={hold.kind}
-        onChange={(event) =>
-          onChange(
-            event.currentTarget.value === "until-dismissed"
-              ? { kind: "until-dismissed" }
-              : { kind: "seconds", value: hold.kind === "seconds" ? hold.value : 30 },
-          )
-        }
-      >
-        <option value="until-dismissed">Until you tap it</option>
-        <option value="seconds">For a limited time</option>
-      </select>
-      {hold.kind === "seconds" && (
-        <input
-          type="number"
-          className="numeral"
-          min={5}
-          max={600}
-          step={1}
-          aria-label="Hold duration in seconds"
-          value={hold.value}
+    <>
+      <label className="field">
+        <span>Hold as outstanding</span>
+        <select
+          value={hold.kind}
           onChange={(event) =>
-            onChange({ kind: "seconds", value: numberValue(event.currentTarget.value) })
+            onChange(
+              event.currentTarget.value === "until-dismissed"
+                ? { kind: "until-dismissed" }
+                : { kind: "seconds", value: hold.kind === "seconds" ? hold.value : 30 },
+            )
           }
-          aria-invalid={issues.length > 0}
-        />
-      )}
-      <small>
-        The alert stays on screen until you tap it, regardless of this setting — it only bounds how
-        long Deskmate treats the alert as outstanding, freeing it for the next one.
-      </small>
-      <FieldIssues issues={issues} />
-    </label>
+        >
+          <option value="until-dismissed">Until you tap it</option>
+          <option value="seconds">For a limited time</option>
+        </select>
+        {hold.kind === "seconds" && (
+          <input
+            type="number"
+            className="numeral"
+            min={5}
+            max={600}
+            step={1}
+            aria-label="Hold duration in seconds"
+            value={hold.value}
+            onChange={(event) =>
+              onChange({ kind: "seconds", value: numberValue(event.currentTarget.value) })
+            }
+            aria-invalid={issues.length > 0}
+          />
+        )}
+        {hold.kind === "seconds" && <small>The alert stays on screen until you tap it.</small>}
+        <FieldIssues issues={issues} />
+      </label>
+      <details className="editor-help">
+        <summary>How alert timing works</summary>
+        <p>
+          This setting controls when Deskmate can accept another alert. It does not clear the
+          display; tap the display to dismiss the current alert.
+        </p>
+      </details>
+    </>
   );
 }
 
@@ -446,7 +452,6 @@ export function CardEditor({
             />
             <span>
               <strong>Show seconds</strong>
-              <small>Add seconds beside the large time.</small>
             </span>
           </label>
         )}
@@ -529,15 +534,25 @@ export function CardEditor({
           <>
             {/* Stated, not selected. Re-pointing a card would change its identity,
                 so the source is chosen once when the card is added. */}
-            <div className="field">
-              <span>Picture source</span>
-              <strong>
-                {config.image_sources.find((source) => source.id === card.source_id)?.name ??
-                  `${card.source_id} · Missing source`}
-              </strong>
-              <small>{card.source_id}</small>
-              <FieldIssues issues={fieldIssues("source_id")} />
-            </div>
+            <details
+              className="editor-help"
+              open={
+                !config.image_sources.some((source) => source.id === card.source_id) ||
+                fieldIssues("source_id").length > 0
+                  ? true
+                  : undefined
+              }
+            >
+              <summary>Picture source</summary>
+              <div className="field">
+                <strong>
+                  {config.image_sources.find((source) => source.id === card.source_id)?.name ??
+                    `${card.source_id} · Missing source`}
+                </strong>
+                <span className="source-identifier">{card.source_id}</span>
+                <FieldIssues issues={fieldIssues("source_id")} />
+              </div>
+            </details>
 
             {/* `pictureAccess &&` first, deliberately. Optional chaining alone
                 compared `undefined === undefined` whenever there was no access
@@ -591,10 +606,6 @@ export function CardEditor({
               />
               <span>
                 <strong>Take over the screen when the timer ends</strong>
-                <small>
-                  Shows full-screen until you tap it. The hold setting below controls how long
-                  Deskmate treats it as outstanding, not how long it's shown.
-                </small>
               </span>
             </label>
             {card.alert.kind === "on-timer-finish" && (
@@ -643,13 +654,11 @@ export function CardEditor({
           </label>
         )}
 
-        <div className="gesture-note">
+        <details className="editor-help editor-help--gestures">
+          <summary>Display gestures</summary>
           <p>{tapActionDescription(card, faceTap)}</p>
-          <p>
-            Swiping the screen moves through the loop. While an alert is on screen, a tap dismisses
-            it instead of performing the card's usual tap action.
-          </p>
-        </div>
+          <p>Swipe to change cards. While an alert is on screen, a tap dismisses it instead.</p>
+        </details>
       </div>
     </section>
   );

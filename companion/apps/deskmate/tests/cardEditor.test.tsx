@@ -99,7 +99,7 @@ test("cardIdentity names every visible surface without a template label", () => 
   // One name, the same on all three surfaces. "Desk" is a frozen creation
   // default rather than an editable identity, so it is not displayed.
   expect(library).not.toContain('class="tile-label">Digital clock<');
-  expect(library).toContain('<strong class="card-tile__value numeral">Clock</strong>');
+  expect(library).toContain('<strong class="card-tile__value">Clock</strong>');
   expect(library).not.toContain('class="card-tile__name">Desk<');
   expect(loop).toContain('class="loop__entry-name">Clock<');
   expect(editor).toContain('id="editor-heading">Clock<');
@@ -116,6 +116,7 @@ test("a picture card states its source instead of offering a menu of them", () =
   expect(html).toContain("Picture source");
   expect(html).toContain("Claude limits");
   expect(html).toContain("limits-source");
+  expect(html).toContain('<details class="editor-help"><summary>Picture source</summary>');
   expect(html).not.toContain("<select");
 });
 
@@ -138,6 +139,7 @@ test("a picture card whose source no longer exists says so rather than silently 
   );
 
   expect(html).toContain("deleted-source · Missing source");
+  expect(html).toContain('<details class="editor-help" open="">');
 });
 
 test("a picture editor shows source access once, immediately after minting", () => {
@@ -389,14 +391,17 @@ test("pomodoro cards offer their timer-finish alert controls", () => {
   expect(renderCardEditor(pomodoro)).toContain("Take over the screen when the timer ends");
 });
 
-test("states the card's tap gesture and the shared alert-dismiss behaviour", () => {
+test("keeps gesture guidance available in a closed help disclosure", () => {
   const clock = cards.find((card) => card.kind === "clock");
   if (!clock) {
     throw new Error("contract fixture is missing its clock widget");
   }
   const html = renderCardEditor(clock);
+  expect(html).toContain(
+    '<details class="editor-help editor-help--gestures"><summary>Display gestures</summary>',
+  );
   expect(html).toContain("Tapping this card does nothing.");
-  expect(html).toContain("Swiping the screen moves through the loop.");
+  expect(html).toContain("Swipe to change cards.");
   expect(html).toContain("a tap dismisses it");
 });
 

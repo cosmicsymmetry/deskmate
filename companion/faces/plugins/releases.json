@@ -62,11 +62,11 @@
   {
     "id": "anime-images",
     "version": "1.0.1",
-    "sha256": "fd4406ebc047e6c8f1f96cb92c63b04cdd1deed295d743a143425e0bc805ca96"
+    "sha256": "2f2e094fefaaba6fba88435c4577b89a35eb2faa6c52a4d9b56d56178fa5fbd9"
   },
   {
     "id": "xkcd",
     "version": "1.0.1",
-    "sha256": "456adc7408c18f513fd3c95c94fb299c8bd41443e12fbe5334215f49cb16c800"
+    "sha256": "572982b363a8a487ac9da58bd0323ba2f9e1dfee3ab587da7cc1d80065e6142c"
   }
 ]

@@ -91,3 +91,6 @@ responsible for decoding. No claim is made that every possible malformed image i
 detected before rasterization. The tests pin common truncations (first 33 bytes,
 first 100 bytes, and missing final chunks/terminators), PNG CRC damage, valid
 synthetic PNG/JPEG rendering and Anime's truncation fallback.
+
+Version 1.0.1 updates only this validation documentation after Calvin was removed.
+Rendering code, permissions and settings are unchanged.

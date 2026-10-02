@@ -218,3 +218,14 @@ checks pass. Typecheck, lint, formatting and dump pass. Server, web, firmware,
 approval checker and workflow bytes are unchanged from the seven-green-job head;
 the 884 Rust, 225 web and 14 policy test results remain applicable. Final CI runs
 the complete job set again.
+
+All seven jobs passed at `81a1f58` (run 37006364170), with the Hacker News case
+in 3.540 seconds. The live-revision guard then found the other track's reviewed
+reconciliation `c8fe780` (PR #27) already deployed. It independently preserves
+this policy and Calvin's removal; its only faces differences were explicit
+1.0.1 README notes, the associated hashes, and a Calvin-absence assertion.
+This branch merges that deployed history and keeps its exact fourteen-entry
+index. The two alternate 1.0.1 draft hashes from `81a1f58` were never installed;
+no deployed history is overwritten. Runtime, server, UI, firmware and approval
+machinery remain byte-identical to the previously green revision. The complete
+faces tree now matches the already deployed reconciliation.

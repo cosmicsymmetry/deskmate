@@ -16,9 +16,12 @@ Their exact merged folder bytes are also seeded; previous entries are unchanged.
 The owner then removed Calvin and Hobbes in merged PR #24 (`9e2bb7e`), so it is
 absent from the current directory; its historical approval stays for rollback.
 That PR also corrected the xkcd/Anime READMEs. Because documentation contributes
-to the hash, those exact merged corrections ship at 1.0.1 with new entries rather
+to the hash, those corrections and their release notes ship at 1.0.1 with new entries rather
 than overwriting the 1.0.0 history. All eleven installed plugins pass strict
 verification; fourteen entries retain the current releases and rollback history.
+The 1.0.1 entries match the independently reviewed, deployed reconciliation
+`c8fe780` (PR #27). Uninstalled draft hashes from the parallel reconciliation
+were replaced with these deployed bytes; no deployed release history was changed.
 
 ## Submissions and approval
 

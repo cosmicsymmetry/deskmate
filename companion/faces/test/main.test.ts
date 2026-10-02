@@ -49,6 +49,7 @@ test("describe prints the catalog the server builds the add menu from", async ()
     "token",
     ...pluginFolders(join(import.meta.dir, "../plugins")),
   ]);
+  expect(catalog.map((face) => face.kind)).not.toContain("calvin-and-hobbes");
   for (const face of catalog) {
     expect(face.withdrawn).toBeUndefined();
     for (const field of face.fields) {

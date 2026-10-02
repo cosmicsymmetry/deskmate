@@ -15,12 +15,12 @@ import {
   type FaceDefinition,
   type RenderContext,
   type Settings,
-  type ViewId,
   text,
   TransientError,
 } from "../face";
 import { relativeAge } from "../kit/age";
 import { type FetchText, fetchText } from "../kit/http";
+import { pageCount, pageViews, pageForView, recentTap } from "../kit/paging";
 import { Canvas, fit, fitTracked, normalizeWhitespace, textWidth, wrap } from "../kit/svg";
 import {
   baselineFromCapTop,
@@ -324,9 +324,6 @@ export interface RssState {
   tappedAt: string | null;
 }
 
-/** A page returns to the top after this long untouched, so the card rests on its lead story. */
-const TEMPORARY_PAGE_MS = 10 * 60 * 1_000;
-
 function storedState(value: unknown): RssState | undefined {
   if (typeof value !== "object" || value === null) {
     return undefined;
@@ -344,13 +341,9 @@ function storedState(value: unknown): RssState | undefined {
   };
 }
 
-function pageCount(entries: FeedEntry[]): number {
-  return Math.max(1, Math.ceil(entries.length / MAX_ITEMS));
-}
-
 /** Wraps, so the last page taps back to the first rather than stopping dead. */
 function normalizedPage(page: number, entries: FeedEntry[]): number {
-  const pages = pageCount(entries);
+  const pages = pageCount(entries.length, MAX_ITEMS);
   return ((page % pages) + pages) % pages;
 }
 
@@ -361,25 +354,6 @@ function tappedState(previous: RssState, taps: number, now: Date): RssState {
     page: normalizedPage(previous.page + taps, previous.entries),
     tappedAt: now.toISOString(),
   };
-}
-
-function pageViews(entries: FeedEntry[]): ViewId[] {
-  return Array.from({ length: pageCount(entries) }, (_, page) =>
-    page === 0 ? "" : `page-${page + 1}`,
-  );
-}
-
-function pageForView(view: ViewId | undefined, entries: FeedEntry[]): number {
-  const page = pageViews(entries).indexOf(view ?? "");
-  return page === -1 ? 0 : page;
-}
-
-function recentTap(tappedAt: string | null, now: Date): boolean {
-  if (tappedAt === null) {
-    return false;
-  }
-  const at = Date.parse(tappedAt);
-  return Number.isFinite(at) && now.getTime() - at <= TEMPORARY_PAGE_MS;
 }
 
 function faceForPage(state: RssState): RssFace {
@@ -411,7 +385,10 @@ export async function renderRssRequest(
   if (context.view !== undefined && previous !== undefined) {
     return {
       svg: renderRss(
-        faceForPage({ ...previous, page: pageForView(context.view, previous.entries) }),
+        faceForPage({
+          ...previous,
+          page: pageForView(context.view, pageCount(previous.entries.length, MAX_ITEMS)),
+        }),
       ),
       state: previous,
     };
@@ -431,7 +408,10 @@ export async function renderRssRequest(
         ...state,
         // As in hackernews: an absent view is a scheduled refresh, which draws
         // the page the state decided rather than resetting to the first one.
-        page: context.view === undefined ? state.page : pageForView(context.view, fresh.entries),
+        page:
+          context.view === undefined
+            ? state.page
+            : pageForView(context.view, pageCount(fresh.entries.length, MAX_ITEMS)),
       }),
     ),
     state,
@@ -448,7 +428,7 @@ export const rss: FaceDefinition = {
   ],
   views(_settings, value) {
     const state = storedState(value);
-    return state === undefined ? [""] : pageViews(state.entries);
+    return state === undefined ? [""] : pageViews(pageCount(state.entries.length, MAX_ITEMS));
   },
   onTap(_settings, value, event, now) {
     const previous = storedState(value);
@@ -456,7 +436,7 @@ export const rss: FaceDefinition = {
       return { view: "" };
     }
     const state = tappedState(previous, event.taps, now);
-    return { view: pageViews(state.entries)[state.page] ?? "", state };
+    return { view: pageViews(pageCount(state.entries.length, MAX_ITEMS))[state.page] ?? "", state };
   },
   async render(settings, now, context) {
     return renderRssRequest(settings, now, context);

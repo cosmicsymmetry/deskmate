@@ -35,6 +35,7 @@ import {
   truncateUtf8,
 } from "../face";
 import { type FetchText, fetchText } from "../kit/http";
+import { recentTap } from "../kit/paging";
 import { Canvas, fitTracked, fixed, normalizeWhitespace, textInk, textWidth } from "../kit/svg";
 import {
   BAD,
@@ -285,8 +286,7 @@ export async function fetchToken(settings: Settings, get: FetchText): Promise<To
 
   // The chart is a decoration on a true price: a refused second request leaves a face
   // with a price and an empty chart, never a stale price.
-  const chosen = text(settings, "chart");
-  face.chart = chosen === "candles" || chosen === "none" ? chosen : "line";
+  face.chart = configuredChart(settings);
   if (face.chart === "none" || face.coinId === "") {
     return face;
   }
@@ -813,9 +813,6 @@ export interface TokenState {
   tappedAt: string | null;
 }
 
-/** The chart returns to the card's own setting after this long untouched. */
-const TEMPORARY_CHART_MS = 10 * 60 * 1_000;
-
 /**
  * The styles a tap moves between.
  *
@@ -874,14 +871,6 @@ function nextChart(current: ChartStyle, taps: number): ChartStyle {
   const from = index === -1 ? 0 : index;
   const next = (from + taps) % TAPPABLE_CHARTS.length;
   return TAPPABLE_CHARTS[(next + TAPPABLE_CHARTS.length) % TAPPABLE_CHARTS.length] as ChartStyle;
-}
-
-function recentTap(tappedAt: string | null, now: Date): boolean {
-  if (tappedAt === null) {
-    return false;
-  }
-  const at = Date.parse(tappedAt);
-  return Number.isFinite(at) && now.getTime() - at <= TEMPORARY_CHART_MS;
 }
 
 export async function renderTokenRequest(

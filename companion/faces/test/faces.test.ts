@@ -1027,6 +1027,41 @@ describe("hacker news", () => {
 });
 
 describe("the views seam", () => {
+  test("empty stored feeds still offer the resting page", () => {
+    expect(rss.views?.({}, { feedTitle: "", entries: [], page: 0, tappedAt: null })).toEqual([""]);
+    expect(hackernews.views?.({}, { stories: [], page: 0, tappedAt: null })).toEqual([""]);
+  });
+
+  test("unknown page views draw the resting page from stored feeds", async () => {
+    const stories = CAPTURED_HACKER_NEWS.map((item, i) => storyFromItem(item, i + 1, NOW));
+    const hnState = { stories, page: 1, tappedAt: NOW.toISOString() };
+    const rssState = {
+      feedTitle: "HN",
+      entries: CAPTURED_HACKER_NEWS.map((item) => ({ title: item.title, age: "" })),
+      page: 1,
+      tappedAt: NOW.toISOString(),
+    };
+    const noFetch: FetchText = async () => {
+      throw new Error("stored views must not fetch");
+    };
+    const hnRest = await renderHackerNewsRequest({}, NOW, { state: hnState, view: "" }, noFetch);
+    const hnUnknown = await renderHackerNewsRequest(
+      {},
+      NOW,
+      { state: hnState, view: "unknown" },
+      noFetch,
+    );
+    expect(hnUnknown).toEqual(hnRest);
+    const rssRest = await renderRssRequest({}, NOW, { state: rssState, view: "" }, noFetch);
+    const rssUnknown = await renderRssRequest(
+      {},
+      NOW,
+      { state: rssState, view: "unknown" },
+      noFetch,
+    );
+    expect(rssUnknown).toEqual(rssRest);
+  });
+
   // The saving a tap makes is that NOTHING fetches and NOTHING rasterises on the
   // tap path: the server asks which view, then pushes a scene naming a frame the
   // device already holds. A face that fetched inside views() or onTap() would put

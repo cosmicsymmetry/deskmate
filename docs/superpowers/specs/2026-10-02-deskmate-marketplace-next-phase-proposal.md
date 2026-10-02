@@ -186,3 +186,10 @@ lists all twelve. The catalog conflict keeps folder discovery so the next outsid
 author still need not edit protected host tests. This acceptance is based on the
 owner-authored PR's recorded review and owner merge, not an automatic approval of
 unmerged submissions.
+
+The integrated batch passes the full gates again: 884 Rust tests (two existing
+ignored), 225 web tests, 779 faces tests, three repository checks and 14 policy
+tests. All twelve offline author checks and strict release verification pass;
+formatting, lint, typechecks, builds, doctests, directory generation and cold
+discovery pass. Built-in golden bytes and the already deployed web/firmware code
+remain identical to main.

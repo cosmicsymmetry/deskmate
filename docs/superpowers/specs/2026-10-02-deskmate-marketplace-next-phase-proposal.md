@@ -193,3 +193,10 @@ tests. All twelve offline author checks and strict release verification pass;
 formatting, lint, typechecks, builds, doctests, directory generation and cold
 discovery pass. Built-in golden bytes and the already deployed web/firmware code
 remain identical to main.
+
+All seven CI jobs passed at `4381e81` (run 37003915944); the Hacker News unstaged
+tap case passed in 3.166 seconds. The pre-deploy ancestry check then stopped before
+installation because the live UI had advanced to merged PR #22 (`0c7ecbb`). That
+merge preserves the deployed UI exactly and changes no faces, server, firmware,
+approval tooling or workflow bytes. The web gates pass again (225 tests); final
+CI and deployment evidence follow in PR #19.

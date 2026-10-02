@@ -66,6 +66,29 @@ function linkLabel(snapshot: AppSnapshot): string {
 
 const validDraft: DraftValidation = { valid: true, issues: [] };
 
+function Waking() {
+  return (
+    <main className="startup" aria-busy="true">
+      <span className="startup__ring" aria-hidden="true" />
+      <h1>Waking the display…</h1>
+      <p>The server keeps the display updated whether or not this page is open.</p>
+    </main>
+  );
+}
+
+function StartupError({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <main className="startup startup--error">
+      <span className="startup__ring startup__ring--error" aria-hidden="true" />
+      <h1>Settings could not be loaded</h1>
+      <p role="alert">{message}</p>
+      <button className="button button--primary" type="button" onClick={onRetry}>
+        Try again
+      </button>
+    </main>
+  );
+}
+
 export function App() {
   const [instance, setInstance] = useState<Instance | null>(null);
   const [instanceError, setInstanceError] = useState<ApiError | null>(null);
@@ -93,27 +116,13 @@ export function App() {
   if (!instance) {
     if (instanceError) {
       return (
-        <main className="startup startup--error">
-          <span className="startup__ring startup__ring--error" aria-hidden="true" />
-          <h1>Settings could not be loaded</h1>
-          <p role="alert">{instanceError.message}</p>
-          <button
-            className="button button--primary"
-            type="button"
-            onClick={() => setInstanceGeneration((current) => current + 1)}
-          >
-            Try again
-          </button>
-        </main>
+        <StartupError
+          message={instanceError.message}
+          onRetry={() => setInstanceGeneration((current) => current + 1)}
+        />
       );
     }
-    return (
-      <main className="startup" aria-busy="true">
-        <span className="startup__ring" aria-hidden="true" />
-        <h1>Waking the display…</h1>
-        <p>The server keeps the display updated whether or not this page is open.</p>
-      </main>
-    );
+    return <Waking />;
   }
 
   if (instance.setup_required) {
@@ -270,13 +279,7 @@ function DeviceApp({
   }
 
   if (loading && !snapshot) {
-    return (
-      <main className="startup" aria-busy="true">
-        <span className="startup__ring" aria-hidden="true" />
-        <h1>Waking the display…</h1>
-        <p>The server keeps the display updated whether or not this page is open.</p>
-      </main>
-    );
+    return <Waking />;
   }
 
   if (!snapshot || !draft) {
@@ -311,14 +314,10 @@ function DeviceApp({
       );
     }
     return (
-      <main className="startup startup--error">
-        <span className="startup__ring startup__ring--error" aria-hidden="true" />
-        <h1>Settings could not be loaded</h1>
-        <p role="alert">{stateError?.message ?? "The server is unavailable."}</p>
-        <button className="button button--primary" type="button" onClick={() => void refresh()}>
-          Try again
-        </button>
-      </main>
+      <StartupError
+        message={stateError?.message ?? "The server is unavailable."}
+        onRetry={() => void refresh()}
+      />
     );
   }
 

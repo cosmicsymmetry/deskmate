@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { renderCardPreview } from "../lib/backend";
 import { cardIdentity } from "../lib/configDraft";
-import type { CardSettings, DisplayOrientation, ImageSource } from "../lib/types";
+import type { CardKind, CardSettings, DisplayOrientation, ImageSource } from "../lib/types";
 
 interface DevicePreviewProps {
   cards: CardSettings[];
@@ -13,7 +13,7 @@ interface DevicePreviewProps {
 }
 
 /** Re-render cadence per card kind, in milliseconds. */
-const REFRESH_MS: Record<string, number> = {
+const REFRESH_MS: Record<CardKind, number> = {
   // Live templates re-render at 1 Hz so the clock ticks (spec §2.5).
   clock: 1_000,
   pomodoro: 1_000,
@@ -73,11 +73,10 @@ export function DevicePreview({
       }
     };
     void tick();
-    const cadence = REFRESH_MS[widget.kind];
-    const interval = cadence === undefined ? undefined : window.setInterval(tick, cadence);
+    const interval = window.setInterval(tick, REFRESH_MS[widget.kind]);
     return () => {
       cancelled = true;
-      if (interval) window.clearInterval(interval);
+      window.clearInterval(interval);
     };
   }, [widget?.id, widget?.kind, orientation, dataGeneration]);
 

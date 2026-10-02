@@ -143,6 +143,33 @@ with its own bearer and one live socket per device.
 4. The token is single use. Consuming it marks the email verified, creates the account
    if it is new, and creates a session.
 
+**2026-10-02 completion:** instance discovery also returns `email_delivery` (`email`
+or `server-log`), so the confirmation screen describes the configured destination
+without promising delivery or revealing whether an account exists. The screen supports
+another request, address correction and visible rate-limit errors. Missing/expired links
+have a route back to sign-in. Authentication responses use `Cache-Control: no-store`;
+the SPA and authentication responses use `Referrer-Policy: no-referrer` to keep link
+credentials out of subsequent request referrers. Session loss clears the loaded account
+state and closes its stream; sign-out remains available before a panel is claimed.
+Email and Google registration wait until the first owner completes setup, even when
+sign-ups default to open. Regression tests reproduced and now prevent registration
+from creating an ownerless instance before the setup code is used.
+
+Verification on 2026-10-02: 870 Rust tests passed (2 intentionally ignored), doctests,
+fmt and Clippy passed; 222 web tests, types, lint, format and production build passed;
+556 faces tests, types, lint and format passed. The real Rust server and built SPA in
+Chrome completed setup, sign-out, SMTP delivery to a local sink, explicit email-link
+confirmation, authenticated account access, reload/server-restart persistence, and rejection of link
+reuse after sign-out. Desktop/mobile captures had no horizontal overflow or browser
+JavaScript errors. Google HTTP tests cover browser binding, nonce, PKCE, replay,
+verified/authoritative email matching, new and returning accounts, closed registration
+and failure throttling; startup with client ID/secret alone was also exercised. Chrome
+also completed a Google round trip through a local provider simulator on a different
+site, with PKCE and nonce validation, new-account creation and sign-out. Google provider
+responses were simulated: live consent, production credentials and external inbox
+deliverability were not exercised. A read-only production instance check still reported
+Google disabled. These changes have not been deployed.
+
 ### Google
 
 - `GET /v1/app/auth/google/start` and `/callback`, reusing the existing PKCE and state
@@ -156,6 +183,13 @@ with its own bearer and one live socket per device.
 - Lookup order: `google_sub`, then a verified-email match (so an email-link account
   can later use Google and land in the same account), then create -- only if sign-ups
   are open.
+- **2026-10-02 sign-in hardening:** each attempt is bound to a ten-minute HttpOnly,
+  Secure, SameSite=Lax `__Host-deskmate_google` cookie, validated before consuming
+  state. PKCE, nonce, audience and authorized-party checks bind the token exchange.
+  Automatic email matching additionally requires a Google-managed mailbox (Gmail or
+  Workspace); other existing addresses use an email link to prove current ownership.
+  Google sign-in only needs client ID/secret: the integration redirect and encrypted
+  refresh-token store are optional and independent.
 - The button appears only when `DESKMATE_GOOGLE_CLIENT_ID` is set.
 
 ### Sessions

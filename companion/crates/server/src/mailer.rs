@@ -7,11 +7,22 @@ use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use thiserror::Error;
 
 pub trait Mailer: Send + Sync + 'static {
+    fn delivery(&self) -> MailDelivery {
+        MailDelivery::Email
+    }
+
     fn send_sign_in_link(
         &self,
         to: &str,
         link: &str,
     ) -> Pin<Box<dyn Future<Output = Result<(), MailError>> + Send + '_>>;
+}
+
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MailDelivery {
+    Email,
+    ServerLog,
 }
 
 #[derive(Debug, Error)]
@@ -32,6 +43,10 @@ impl MailError {
 pub struct LogMailer;
 
 impl Mailer for LogMailer {
+    fn delivery(&self) -> MailDelivery {
+        MailDelivery::ServerLog
+    }
+
     fn send_sign_in_link(
         &self,
         to: &str,

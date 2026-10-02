@@ -565,6 +565,7 @@ export async function mockAccountRequest(
       return delay({
         setup_required: setupRequired,
         google_enabled: true,
+        email_delivery: "email",
         signups_open: signupsOpen,
         edition: "self-hosted" as const,
       });

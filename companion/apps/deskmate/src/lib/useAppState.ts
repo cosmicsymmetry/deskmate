@@ -5,6 +5,7 @@ import {
   getAppSnapshot,
   getNetworkSettings,
   listenToAppState,
+  isSessionMissing,
   saveConfig as saveConfigRequest,
   toApiError,
 } from "./backend";
@@ -119,17 +120,29 @@ export function useAppState(): AppStateValue {
   });
   const lastCardDataRef = useRef<string | null>(null);
   const networkSettingsRef = useRef(networkSettings);
+  const sessionLost = useRef(false);
+  const signedOut = error !== null && isSessionMissing(error);
 
   const acceptNetworkSettings = useCallback((next: NetworkSettings) => {
+    if (sessionLost.current) return;
     networkSettingsRef.current = next;
     setNetworkSettings(next);
   }, []);
   const acceptError = useCallback((next: ApiError) => {
+    if (sessionLost.current) return;
+    if (isSessionMissing(next)) {
+      sessionLost.current = true;
+      setSnapshot(null);
+      const empty = { server_url: "", device_id: "", tier: null };
+      networkSettingsRef.current = empty;
+      setNetworkSettings(empty);
+    }
     setLoading(false);
     setError(next);
   }, []);
 
   const acceptSnapshot = useCallback((next: AppSnapshot) => {
+    if (sessionLost.current) return;
     setSnapshot(next);
     setLoading(false);
     setError(null);
@@ -162,18 +175,17 @@ export function useAppState(): AppStateValue {
     return saveConfigRequest(config);
   }, []);
 
-  useEffect(
-    () =>
-      startAppStateSubscription({
-        fetchSnapshot: getAppSnapshot,
-        listen: listenToAppState,
-        onSnapshot: acceptSnapshot,
-        onError: acceptError,
-        focusTarget: window,
-        visibilityTarget: document,
-      }),
-    [acceptError, acceptSnapshot],
-  );
+  useEffect(() => {
+    if (signedOut) return;
+    return startAppStateSubscription({
+      fetchSnapshot: getAppSnapshot,
+      listen: listenToAppState,
+      onSnapshot: acceptSnapshot,
+      onError: acceptError,
+      focusTarget: window,
+      visibilityTarget: document,
+    });
+  }, [acceptError, acceptSnapshot, signedOut]);
 
   useEffect(() => {
     let active = true;

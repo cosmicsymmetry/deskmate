@@ -19,6 +19,7 @@ const { mount } = installDomLifecycle();
 const instance: Instance = {
   setup_required: false,
   google_enabled: true,
+  email_delivery: "email",
   signups_open: true,
   edition: "self-hosted",
 };

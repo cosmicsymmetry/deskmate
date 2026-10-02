@@ -95,6 +95,14 @@ fn serve_file(path: &Path, is_shell: bool) -> Response {
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+    if is_shell {
+        // /signin carries a one-time credential. Do not forward it in Referer
+        // when loading assets or following links, including same-origin URLs.
+        response.headers_mut().insert(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        );
+    }
     response
 }
 

@@ -61,13 +61,15 @@ fn id_token(claims: &Value) -> String {
     )
 }
 
-fn google_claims(sub: &str, email: &str, verified: bool) -> Value {
+fn google_claims(sub: &str, email: &str, verified: bool, nonce: &str) -> Value {
     json!({
         "iss": "https://accounts.google.com",
         "aud": "test-google-client",
         "sub": sub,
         "email": email,
         "email_verified": verified,
+        "nonce": nonce,
+        "hd": "example.com",
         "exp": Utc::now().timestamp() + 60,
     })
 }
@@ -93,11 +95,26 @@ fn google_world(signups_open: bool) -> (ServerState, Arc<FakeGoogleTransport>) {
 }
 
 async fn no_redirect_get(server: &HttpTestServer, path: &str) -> reqwest::Response {
+    get_with_cookie(server, path, "").await
+}
+
+fn google_cookie(start: &reqwest::Response) -> String {
+    start.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
+async fn get_with_cookie(server: &HttpTestServer, path: &str, cookie: &str) -> reqwest::Response {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap()
         .get(format!("{}{path}", server.base_url))
+        .header("cookie", cookie)
         .send()
         .await
         .expect("GET without redirects")
@@ -461,10 +478,16 @@ async fn google_sign_in_links_to_the_account_with_the_same_verified_email() {
         "https://deskmate.test/v1/app/auth/google/callback"
     );
 
-    transport.answer_id_token(&google_claims("g-1", "owner@example.com", true));
-    let callback = no_redirect_get(
+    transport.answer_id_token(&google_claims(
+        "g-1",
+        "owner@example.com",
+        true,
+        &query_param(start.headers()["location"].to_str().unwrap(), "nonce"),
+    ));
+    let callback = get_with_cookie(
         &server,
         &format!("/v1/app/auth/google/callback?state={state_param}&code=c"),
+        &google_cookie(&start),
     )
     .await;
     assert_eq!(callback.status(), StatusCode::SEE_OTHER);
@@ -506,11 +529,17 @@ async fn google_sign_in_does_not_create_accounts_while_signups_are_closed() {
     let server = spawn_http(app(state.clone())).await;
     let start = no_redirect_get(&server, "/v1/app/auth/google/start").await;
     let state_param = query_param(start.headers()["location"].to_str().unwrap(), "state");
-    transport.answer_id_token(&google_claims("g-stranger", "stranger@example.com", true));
+    transport.answer_id_token(&google_claims(
+        "g-stranger",
+        "stranger@example.com",
+        true,
+        &query_param(start.headers()["location"].to_str().unwrap(), "nonce"),
+    ));
 
-    let callback = no_redirect_get(
+    let callback = get_with_cookie(
         &server,
         &format!("/v1/app/auth/google/callback?state={state_param}&code=c"),
+        &google_cookie(&start),
     )
     .await;
     assert_eq!(callback.status(), StatusCode::SEE_OTHER);
@@ -518,7 +547,16 @@ async fn google_sign_in_does_not_create_accounts_while_signups_are_closed() {
         callback.headers()["location"],
         "/?signin_error=signups-closed"
     );
-    assert!(callback.headers().get("set-cookie").is_none());
+    assert!(
+        callback
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .all(|cookie| !cookie
+                .to_str()
+                .unwrap()
+                .starts_with("__Host-deskmate_session="))
+    );
     assert!(
         state
             .identity()
@@ -534,11 +572,17 @@ async fn google_sign_in_refuses_an_unverified_email() {
     let server = spawn_http(app(state.clone())).await;
     let start = no_redirect_get(&server, "/v1/app/auth/google/start").await;
     let state_param = query_param(start.headers()["location"].to_str().unwrap(), "state");
-    transport.answer_id_token(&google_claims("g-unverified", "person@example.com", false));
+    transport.answer_id_token(&google_claims(
+        "g-unverified",
+        "person@example.com",
+        false,
+        &query_param(start.headers()["location"].to_str().unwrap(), "nonce"),
+    ));
 
-    let callback = no_redirect_get(
+    let callback = get_with_cookie(
         &server,
         &format!("/v1/app/auth/google/callback?state={state_param}&code=c"),
+        &google_cookie(&start),
     )
     .await;
     assert_eq!(callback.status(), StatusCode::SEE_OTHER);
@@ -590,6 +634,7 @@ async fn first_run_setup_creates_the_owner_once() {
         json!({
             "setup_required": true,
             "google_enabled": false,
+            "email_delivery": "email",
             "signups_open": false,
             "edition": "self-hosted",
         })
@@ -1055,5 +1100,252 @@ async fn a_second_sign_in_does_not_invalidate_the_first_session() {
             .await
             .status(),
         StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn google_callback_is_bound_to_the_starting_browser_and_cannot_be_replayed() {
+    let (state, transport) = google_world(false);
+    let server = spawn_http(app(state)).await;
+    let start = no_redirect_get(&server, "/v1/app/auth/google/start").await;
+    let location = start.headers()["location"].to_str().unwrap();
+    let state_param = query_param(location, "state");
+    let path = format!("/v1/app/auth/google/callback?state={state_param}&code=c");
+    let cookie = google_cookie(&start);
+    let set_cookie = start.headers()["set-cookie"].to_str().unwrap();
+    for attribute in [
+        "HttpOnly",
+        "Secure",
+        "SameSite=Lax",
+        "Path=/",
+        "Max-Age=600",
+    ] {
+        assert!(set_cookie.contains(attribute));
+    }
+    transport.answer_id_token(&google_claims(
+        "g-1",
+        "owner@example.com",
+        true,
+        &query_param(location, "nonce"),
+    ));
+    for other_cookie in ["", "__Host-deskmate_google=other-browser"] {
+        let response = get_with_cookie(&server, &path, other_cookie).await;
+        assert_eq!(response.headers()["location"], "/?signin_error=expired");
+        assert!(response.headers().get("set-cookie").is_none());
+        assert!(transport.calls.lock().unwrap().is_empty());
+    }
+    // A mismatched browser must not burn the real browser's pending state.
+    let response = get_with_cookie(&server, &path, &cookie).await;
+    assert_eq!(response.headers()["location"], "/");
+    assert!(
+        response
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .any(|value| {
+                let value = value.to_str().unwrap();
+                value.starts_with("__Host-deskmate_google=;") && value.contains("Max-Age=0")
+            })
+    );
+    let replay = get_with_cookie(&server, &path, &cookie).await;
+    assert_eq!(replay.headers()["location"], "/?signin_error=expired");
+    assert_eq!(transport.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn google_callback_rejects_a_nonce_from_another_sign_in() {
+    let (state, transport) = google_world(true);
+    let server = spawn_http(app(state.clone())).await;
+    let start = no_redirect_get(&server, "/v1/app/auth/google/start").await;
+    let state_param = query_param(start.headers()["location"].to_str().unwrap(), "state");
+    transport.answer_id_token(&google_claims(
+        "g-new",
+        "new@example.com",
+        true,
+        "wrong-nonce",
+    ));
+    let response = get_with_cookie(
+        &server,
+        &format!("/v1/app/auth/google/callback?state={state_param}&code=c"),
+        &google_cookie(&start),
+    )
+    .await;
+    assert_eq!(response.headers()["location"], "/?signin_error=provider");
+    assert!(
+        state
+            .identity()
+            .account_for_google("g-new")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn instance_reports_the_actual_mail_delivery_mode() {
+    let server = spawn_http(app(ServerState::in_memory())).await;
+    assert_eq!(
+        get_json(&server, "/v1/app/instance").await["email_delivery"],
+        "server-log"
+    );
+    let (state, _) = state_with_mailer();
+    let server = spawn_http(app(state)).await;
+    assert_eq!(
+        get_json(&server, "/v1/app/instance").await["email_delivery"],
+        "email"
+    );
+}
+
+#[tokio::test]
+async fn google_does_not_link_a_third_party_email_without_current_mailbox_proof() {
+    let (state, transport) = google_world(false);
+    let server = spawn_http(app(state.clone())).await;
+    let start = no_redirect_get(&server, "/v1/app/auth/google/start").await;
+    let location = start.headers()["location"].to_str().unwrap();
+    let mut claims = google_claims(
+        "unlinked",
+        "owner@example.com",
+        true,
+        &query_param(location, "nonce"),
+    );
+    claims.as_object_mut().unwrap().remove("hd");
+    transport.answer_id_token(&claims);
+    let response = get_with_cookie(
+        &server,
+        &format!(
+            "/v1/app/auth/google/callback?state={}&code=c",
+            query_param(location, "state")
+        ),
+        &google_cookie(&start),
+    )
+    .await;
+    assert_eq!(
+        response.headers()["location"],
+        "/?signin_error=email-link-required"
+    );
+    assert!(
+        state
+            .identity()
+            .account_for_google("unlinked")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn google_creates_an_account_when_open_and_returns_to_it_after_registration_closes() {
+    let (state, transport) = google_world(true);
+    let server = spawn_http(app(state.clone())).await;
+    for (email, signups_open) in [("new@gmail.com", true), ("changed@example.org", false)] {
+        state.identity().set_signups_open(signups_open).unwrap();
+        let start = no_redirect_get(&server, "/v1/app/auth/google/start").await;
+        let location = start.headers()["location"].to_str().unwrap();
+        let mut claims = google_claims(
+            "stable-google-user",
+            email,
+            true,
+            &query_param(location, "nonce"),
+        );
+        claims.as_object_mut().unwrap().remove("hd");
+        transport.answer_id_token(&claims);
+        let response = get_with_cookie(
+            &server,
+            &format!(
+                "/v1/app/auth/google/callback?state={}&code=c",
+                query_param(location, "state")
+            ),
+            &google_cookie(&start),
+        )
+        .await;
+        assert_eq!(response.headers()["location"], "/");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+        assert_eq!(
+            state
+                .identity()
+                .account_for_google("stable-google-user")
+                .unwrap()
+                .unwrap()
+                .email,
+            "new@gmail.com"
+        );
+    }
+    assert_eq!(state.identity().account_count().unwrap(), 2);
+}
+
+#[tokio::test]
+async fn email_registration_cannot_bypass_first_run_owner_setup() {
+    let mailer = Arc::new(RecordingMailer::default());
+    let state = ServerState::in_memory_with_options(ServerOptions {
+        signups_default: true,
+        mailer: mailer.clone(),
+        ..ServerOptions::default()
+    });
+    let code = state.setup_code_for_tests().unwrap();
+    let server = spawn_http(app(state.clone())).await;
+    let response = post_json(
+        &server,
+        "/v1/app/auth/email",
+        json!({"email": "early@example.com"}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    tokio::task::yield_now().await;
+    assert!(
+        mailer.sent.lock().unwrap().is_empty(),
+        "registration must wait for the setup code owner"
+    );
+    // Also reject a previously issued or administrator-created token until setup completes.
+    let token = state
+        .identity()
+        .create_login_token("early@example.com", Utc::now())
+        .unwrap();
+    let response = post_json(&server, "/v1/app/auth/link", json!({"token": token})).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(state.identity().account_count().unwrap(), 0);
+    let setup = post_json(
+        &server,
+        "/v1/app/setup",
+        json!({"code": code, "email": "owner@example.com"}),
+    )
+    .await;
+    assert_eq!(setup.status(), StatusCode::OK);
+    assert_eq!(json_body(setup).await["account"]["is_instance_owner"], true);
+}
+
+#[tokio::test]
+async fn google_registration_cannot_bypass_first_run_owner_setup() {
+    let (state, transport) = google_world(true);
+    let owner = state
+        .identity()
+        .account_by_email("owner@example.com")
+        .unwrap()
+        .unwrap();
+    state.identity().delete_account(&owner.id).unwrap();
+    let server = spawn_http(app(state.clone())).await;
+    let start = no_redirect_get(&server, "/v1/app/auth/google/start").await;
+    let location = start.headers()["location"].to_str().unwrap();
+    transport.answer_id_token(&google_claims(
+        "early-google",
+        "early@gmail.com",
+        true,
+        &query_param(location, "nonce"),
+    ));
+    let response = get_with_cookie(
+        &server,
+        &format!(
+            "/v1/app/auth/google/callback?state={}&code=c",
+            query_param(location, "state")
+        ),
+        &google_cookie(&start),
+    )
+    .await;
+    assert_eq!(
+        response.headers()["location"],
+        "/?signin_error=setup-required"
+    );
+    assert_eq!(state.identity().account_count().unwrap(), 0);
+    assert_eq!(
+        get_json(&server, "/v1/app/instance").await["setup_required"],
+        true
     );
 }

@@ -72,6 +72,7 @@ export function installHttpLifecycle(cleanup: () => Promise<void>) {
       jsonResponse({
         setup_required: false,
         google_enabled: false,
+        email_delivery: "email",
         signups_open: true,
         edition: "self-hosted",
       }),

@@ -1216,6 +1216,19 @@ fieldset legend {
   gap: 22px;
 }
 
+.panel > .form-grid {
+  max-width: 40rem;
+}
+
+/* Short values should not stretch across the card editor's full measure. */
+.panel > .form-grid .field input[type="number"] {
+  max-width: 15rem;
+}
+
+.panel > .form-grid .field select {
+  max-width: 20rem;
+}
+
 .source-settings {
   display: flex;
   flex-direction: column;
@@ -1473,6 +1486,19 @@ fieldset legend {
   font-size: 0.9375rem;
   font-weight: 600;
   text-transform: capitalize;
+}
+
+.timer-state--running {
+  /* Pure --live falls below 4.5:1 for this small text on the light ground. */
+  color: color-mix(in srgb, var(--live) 96%, var(--ink));
+}
+
+.timer-state--paused {
+  color: var(--warn);
+}
+
+.panel-status--online {
+  color: var(--good);
 }
 
 .timer-controls > span small {

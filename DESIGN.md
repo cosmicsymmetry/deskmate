@@ -44,8 +44,11 @@ layout, readable controls, and restrained selection. This document supersedes
 The selected arc and its legend swatch use `--act`, alongside stroke weight, position,
 and the legend's stronger text. This is the card selected in the editor, not a claim
 about which card is currently on the hardware. Other arcs use the neutral ramp.
-Status words accompany semantic colors. The preview badge sits on a permanently black
-screen, so it uses `#FFBC57` on `#251B0B` in both themes for readable warning text.
+Status words accompany semantic colors: an online panel uses `--good`, and the
+Pomodoro state word uses `--live` (mixed with 4% `--ink` for text contrast) while
+running and `--warn` while paused. The words carry the state; color only repeats it.
+The preview badge sits on a permanently black screen, so it uses `#FFBC57` on
+`#251B0B` in both themes for readable warning text.
 
 ## Type and controls
 
@@ -96,7 +99,8 @@ kind context. Dwell is edited below and visualized in the rotation; do not repea
 on every card. The final open slot adds a card through the existing menu.
 
 The editor uses unboxed checkbox rows and grouped settings separated by space or a
-rule. Labels should explain controls without a second sentence repeating them.
+rule. Its fields hold a 40rem measure, with number inputs capped at 15rem and selects
+at 20rem. Labels should explain controls without a second sentence repeating them.
 Gesture guidance, alert-timing explanation, and picture-source identifiers live in
 plain native disclosures. Missing sources and source validation automatically open
 their disclosure; one-time credentials and actionable errors remain visible. A timed

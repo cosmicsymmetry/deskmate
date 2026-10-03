@@ -492,7 +492,10 @@ export function CardEditor({
             <fieldset className="timer-controls">
               <legend className="sr-only">Pomodoro controls</legend>
               <span>
-                <strong>{pomodoro?.state ?? "idle"}</strong>
+                {/* The word carries the state; the colour only repeats it. */}
+                <strong className={`timer-state timer-state--${pomodoro?.state ?? "idle"}`}>
+                  {pomodoro?.state ?? "idle"}
+                </strong>
                 <small className={pomodoro ? "numeral" : undefined}>
                   {pomodoro
                     ? `${Math.ceil(pomodoro.remaining_seconds / 60)} min remaining`

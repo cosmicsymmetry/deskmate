@@ -6157,3 +6157,11 @@ online`, `runtime running`.
 on the live server. **Still UNOBSERVED:** the level visibly changing on the glass at
 10/78/100% at both mountings, the reported raw level matching after an apply, a reboot
 restoring the saved level, and the standalone diagnostic.
+
+## 2026-10-03 -- the owner reports the brightness slider works on the glass
+
+`dev-0005` on `v2.3.0-brightness`, live server `f1724de`. **The owner's report, verbatim in
+substance: "the brightness slider works."** Taken as the on-glass observation of a level change
+applied through the window's Settings slider (save -> `ApplyConfig` key 4 -> panel). Not separately
+recorded: which levels were tried, the mounting, the reported raw level after apply, a reboot
+restoring the saved level, and the standalone diagnostic -- none of those is claimed here.

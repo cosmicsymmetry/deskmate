@@ -58,19 +58,53 @@ panel; PNG decode plus persistence ~.0025 CPU-s per write; a paced refusal still
 | Fact | Value |
 |---|---|
 | Host | 12 logical CPUs, 11,958 MiB RAM, 8,307 MiB available, load 0.08 |
-| Service since 09:53 UTC (8 h) | `CPUUsageNSec` 235.9 s = **.008 CPU average**; `MemoryPeak` 581,857,280 B = **555 MiB** (the service cgroup, children included) |
-| Live server-rendered sources | **two**: `days-left-this-year` and `ink-landscape`, both 900 s plugins; no taps in the window |
+| Service run 09:53:31-17:57:27 UTC (8 h 04 min) | systemd's own stop line: **3 min 58.6 s CPU = .0082 CPU average**, **554.9 MiB memory peak** (the service cgroup, children included) |
+| Live server-rendered sources | **eight**, all plugins: `days-left-this-year` and `ink-landscape` at 900 s; `anime-images`, `art-of-the-day`, `dad-jokes`, `ghibli-scenes`, `this-day-in-history`, `xkcd` at 21,600 s |
 | `Delegate` on the unit | `no` (systemd default; the unit file has no `Delegate=` key) |
 
-Two things follow. The 555 MiB peak is above revision 5's 512 MiB "server/store"
-partition with only two sources running, so that split was already wrong. And with two
-sources at 900 s, the once-a-minute `describe` is the dominant steady cost: 480
-describes at ~.2 s is ~96 of the 236 CPU-s.
+The service was restarted at 17:57:27 UTC by something outside this session; the
+deployed revision did not change (`deploy.sh --status` still `5c44245` at 09:53). That
+restart ended the 8 h window and started M4's.
 
-**Not measured, and owed (section 9):** every verb against the fifteen-face catalog;
-the retained worker's idle RSS and exchange time; a plugin tap through the retained
-worker; `describe` at fifteen faces; any built-in other than weather; the Hacker News
-and RSS staged renders.
+Two things follow. The 555 MiB peak is above revision 5's 512 MiB "server/store"
+partition with one account's eight sources, so that split was already wrong. And at
+these cadences the once-a-minute `describe` is the dominant steady cost: ~484
+describes at the measured .25 s is ~121 of the 239 CPU-s.
+
+**Measured on the live VM for this revision, 2026-10-04 ~18:05 UTC** (section 9 has
+the method; harness and raw output are committed beside this spec under
+`assets/2026-10-04-limits-measurement/`). Faces tree identical to live `5c44245`,
+**fifteen-face catalog** (four built-ins, eleven plugins), offline fixtures including
+the captured Hacker News front page, n=3 per row, transient unit as `nobody`, 0.5 CPU:
+
+| Child | CPU-s | Peak RSS | Wall s | Planning CPU-s |
+|---|---:|---:|---:|---:|
+| `describe`, fifteen faces | .24-.26 | 85-88 MiB | .49-.50 | **.30** |
+| Weather render / views | .13-.14 / .11-.12 | 71-74 / 65-68 MiB | .29 / .21-.29 | .15 / .15 |
+| Hacker News render (resting) | .20-.21 | 72-74 MiB | .40-.46 | .25 |
+| Hacker News views (answers five pages) | .12 | 66-69 MiB | .20-.28 | .15 |
+| Hacker News staged render, pages 2/3/4 | .22-.24 / .25 / .19-.22 | 70-74 MiB | .39-.56 | .25 each |
+| `github-stats` render / views | .36-.39 / .24-.25 | 96-99 / 79-85 MiB | .71-.79 / .50-.58 | .40 / .30 |
+| `ink-landscape` render / views | .50-.53 / .24-.25 | 98-107 / 85-86 MiB | 1.01-1.08 / .50-.58 | **.55** / .30 |
+| `ink-landscape` one-shot tap (exits 1 by design) | .24-.27 | 80-86 MiB | .49-.58 | .30 |
+
+Against Vault's five-face figures, every plugin-kind child is about **.08 CPU-s
+dearer**, which is ten more folders of discovery at roughly .008 s each. Built-in
+children did not move: they skip discovery (`requestedFace` returns a built-in before
+`warmSandbox`).
+
+**The retained selector worker**, one process, same unit:
+
+| Phase | Result |
+|---|---|
+| Start-up plus first exchange | .30 s wall, .13 CPU-s, 73 MiB RSS |
+| Ten Hacker News taps (built-in, `onTap`) | median **0.1 ms**, max 0.2 ms, ~.001 CPU-s each |
+| Ten `ink-landscape` taps (plugin, fails by design) | median **91 ms**, max **191 ms**, .038 CPU-s each; RSS 73 to 88 MiB |
+| Five Hacker News taps afterwards | median 0.1 ms; RSS stays at 88 MiB |
+
+**Still not measured:** RSS and token at any setting; any staged render whose network
+fetch is real; describe or a plugin child with a populated denylist (the run used an
+empty one, the same file shape the server passes); the tunnel; anything multi-account.
 
 ## 3. The cost model, against `main` today
 
@@ -89,11 +123,12 @@ finer is attributable.
 3. One further `render` child per staged view, up to **three** (`MAX_STAGED_FRAMES_PER_SOURCE`
    4 including rest). Weather declares one extra view; Hacker News and RSS declare pages.
 
-| Refresh of | Children | Model CPU-s |
-|---|---|---:|
-| A plugin | render + views | **.65** |
-| Weather | render + views + 1 staged render | **.55** |
-| A paging built-in (Hacker News, RSS, token) | render + views + 3 staged renders | **.95** |
+| Refresh of | Children | Measured CPU-s | Planning CPU-s |
+|---|---|---:|---:|
+| A plugin | render + views | .60-.64 (`github-stats`), .74-.78 (`ink-landscape`) | **.85** |
+| Weather | render + views + 1 staged render | ~.40 | **.45** |
+| Hacker News (five pages; staging takes three) | render + views + 3 staged renders | .98-1.04 | **1.05** |
+| RSS, token | same shape as Hacker News | not measured | 1.05, by analogy |
 
 Two facts about staging that the limits must respect, both from reading the code:
 
@@ -117,21 +152,22 @@ transition lock, then asks the selector.
 | Tap on | Path | Cost |
 |---|---|---|
 | A face that declares no tap (three plugins, external producers) | dropped at `tapped` | nothing but the log line |
-| A built-in, view already staged | retained-worker exchange, then one `PushScene` | **no child**; ~0.3 ms selector locally, ~5 ms end to end on the loopback bench |
-| A built-in, view not staged | exchange, miss, then the refresher's render fallback | one plugin-style refresh (.55-.95), coalesced at 32 taps per source |
-| A plugin that declares a tap (eight of eleven) | exchange **that fails by design**, then render fallback | render + views = **.65**, plus the exchange |
+| A built-in, view already staged | retained-worker exchange, then one `PushScene` | **no child**; 0.1 ms exchange on the VM, ~5 ms end to end on the loopback bench |
+| A built-in, view not staged | exchange, miss, then the refresher's render fallback | one render plus views, .30-.40, coalesced at 32 taps per source |
+| A plugin that declares a tap (eight of eleven) | exchange **that fails by design**, then render fallback | .04 exchange + .85 render and views = **.90** |
 
 The last row is the hazard that replaces revision 5's lane problem. For a plugin kind
 the retained worker's `select` is `main.ts tap`, which calls `requestedFace`, which runs
 `warmSandbox()` and `allFaces()`, which **re-discovers every plugin folder on every
 call** (`registry.ts`: "re-runs discovery on every call"), and then throws "this face
 handles taps through render" because plugins have no `onTap`. That discovery happens
-while `Selector::tap` holds the **process-wide selector mutex**, so one hosted account's
-plugin tap stalls every other account's staged built-in taps for as long as eleven
-folders take to probe. The cost is unmeasured (section 9, M2). The fix is cheap and
-Rust-free: `describe` says whether a kind has a selector (R1 below), and the server
-skips the exchange when it does not. Until it is measured, treat a plugin tap as "a
-refresh plus an unknown stall of the shared selector".
+while `Selector::tap` holds the **process-wide selector mutex**. Measured: **median
+91 ms, worst 191 ms** per plugin tap at eleven folders, and the worker's RSS grows about
+1.4 MiB per such exchange (it retires at 128 MiB, so roughly every 38 plugin taps).
+A staged built-in tap that arrives during one waits that long, which is a third to
+three quarters of C1's 250 ms target spent behind someone else's card. It grows with
+the catalog. The fix is cheap and Rust-light: `describe` says whether a kind has a
+selector (R1 below), and the server skips the exchange when it does not.
 
 ### Frames
 
@@ -152,11 +188,20 @@ the first attempt after a restart is immediate.
 ### What the live numbers imply
 
 At declared cadences the per-account CPU bucket proposed below is a **backstop, not a
-governor**: a 900 s plugin costs 96 x .65 = 62.4 CPU-s a day, 7% of the free hourly
-rate times 24. The bucket exists for three things that cadence cannot bound: a plugin
-at the 60 s floor (.65 x 1,440 = 936 CPU-s a day, just over the free rate), a tap storm
-on a plugin that declares a tap, and hostile or merely expensive raster work (the 5.4 s
-SVG, 96 x 5.75 = 552 CPU-s a day at 900 s, which the free rate still covers).
+governor**: a 900 s plugin costs 96 x .85 = 81.6 CPU-s a day, 9% of the free rate's
+864 a day. The bucket exists for three things that cadence cannot bound: a plugin at
+the 60 s floor (.85 x 1,440 = 1,224 CPU-s a day, 1.4x the free rate), a tap storm on a
+plugin that declares a tap, and hostile or merely expensive raster work (the 5.4 s
+SVG, 96 x 5.8 = 557 CPU-s a day at 900 s, which the free rate still covers).
+
+**The paid frame does not fit the measured cost without R1.** Eight plugins at 60 s
+cost 8 x 1,440 x .85 = 9,792 CPU-s a day against paid's 8,640, so they cannot all hold
+the floor; the ledger would stretch them to about 68 s and leave nothing for taps.
+With R1 (section 8: no views child for a kind that declares no views, which is every
+plugin) a plugin refresh is one render, .40-.55, and eight at 60 s cost at most
+6,336 a day, leaving a tap every ~34 s account-wide. **R1 is therefore a prerequisite
+for offering the paid frame as written**, not an optimisation. The alternative is a
+different paid number, which is the owner's call.
 
 ## 4. Numeric limits
 
@@ -194,8 +239,8 @@ refuse new resources only.
 ## 5. The CPU ledger and tap semantics
 
 **Expected-cost reservation with debt**, integer microseconds, one ledger per hosted
-account, persisted beside `data-cards.json`. Reserve .40 s before a plugin render and
-.25 s before a plugin views child; a child starts only if the balance covers the
+account, persisted beside `data-cards.json`. Reserve .55 s before a plugin render and
+.30 s before a plugin views child (the measured planning values, section 2); a child starts only if the balance covers the
 reservation. On exit, settle against actual CPU (the whole child, discovery included)
 and let the balance go negative. A negative balance blocks new starts until the rate
 refills it. A child that dies without a usage report, or is killed by the supervisor,
@@ -208,11 +253,12 @@ they are bounded by the global pool only.
 
 Envelopes, so the implementation has something to test against: in any hour an
 account can settle at most rate x 3,600 + 10 (stored) + 11 (one boundary-crossing
-kill) = **57 CPU-s free, 381 CPU-s paid**. Taps: a plugin tap costs .65 modelled, so a
-free account that does nothing else sustains one tap per **65 s** and bursts 15 from a
-full store; paid, one per 6.5 s. With one 900 s plugin refreshing, free sustains one
-tap per ~70 s; with eight 900 s plugins, paid sustains one per ~6.9 s. These are
-consumption averages, not latencies.
+kill) = **57 CPU-s free, 381 CPU-s paid**. Taps: a plugin tap costs .90 measured, so a
+free account that does nothing else sustains one tap per **90 s** and bursts 11 from a
+full store; paid, one per 9 s. With one 900 s plugin refreshing, free sustains one tap
+per ~99 s; with eight 900 s plugins, paid sustains one per ~9.7 s. After R1 a plugin
+tap is one render, .55, and those become 55 s / 5.5 s idle. These are consumption
+averages, not latencies.
 
 **Budget stops are typed, not transient.** A supervisor kill (`SIGXCPU`, or `SIGKILL`
 with `cpu.stat` at the limit, or `memory.events` `oom_kill` incremented) becomes
@@ -221,9 +267,10 @@ it waits the **full cadence** and never enters the 60 s retry doubling. `face_st
 says "This face exceeded its processing allowance and was stopped." The last-good frame
 stays. The same applies to built-ins, which have no ledger but can still be killed.
 
-**Staged taps stay out of the ledger** because they cost no child. The one bound they
-need is the fix in section 3: skip the exchange for a kind without a selector, so a
-plugin tap cannot occupy the shared worker.
+**Staged taps stay out of the ledger** because they cost no child (.001 CPU-s per
+exchange, measured). The one bound they need is the fix in section 3: skip the
+exchange for a kind without a selector, so a plugin tap cannot hold the shared worker
+for its measured 91-191 ms.
 
 ## 6. Operator safety settings, separate from entitlements
 
@@ -261,8 +308,10 @@ The 10 CPU-s guard is **deliberately stricter than the sum of today's legal guar
 (up to 8 s of sandbox wall time plus native raster plus discovery). A plugin that is
 legal today can be stopped by it; it then shows as a budget stop, not a crash.
 
-The `MemoryMax` figure is informed by the observed 555 MiB peak with two sources and one
-panel, not derived from it; it must be re-read after the pilot. Revision 5's 1 GiB
+The `MemoryMax` figure is informed by the observed 555 MiB peak with one account's
+eight plugin sources, not derived from it. Measured children sit at 65-107 MiB and the
+retained selector at 73-88 MiB, so the 256/128 MiB child limits leave room for legal
+work seen so far; it must be re-read after the pilot. Revision 5's 1 GiB
 split (512 server + 256 + 128 + 128) is withdrawn.
 
 ## 7. The pilot, re-derived
@@ -271,16 +320,19 @@ Five free accounts and one paid: **8 panels, 28 sources, 13 plugins, 64 cards**,
 remaining 15 slots built-ins or external producers. An operator admission ceiling, not a
 service level.
 
-| Load | CPU, at declared cadences | CPU, everything at the 60 s floor |
+| Load | CPU, at 900 s | CPU, everything at the 60 s floor |
 |---|---:|---:|
-| 13 plugins (900 s, .65) | .0094 | .141 |
-| 15 paging built-ins (900 s, .95) | .0158 | .238 |
-| `describe` once a minute (.25, five-face figure) | .0042 | .0042 |
-| **Automatic total** | **.029** | **.383** |
-| Stress: 13 plugins at the 5.75 s render | .083 | 1.25 (ledger-throttled to .15 aggregate) |
+| 13 plugins (.85) | .0123 | .184, ledger-capped at .15 (5 x .01 + .10) |
+| 15 paging built-ins (1.05) | .0175 | .263 |
+| `describe` once a minute (.30, fifteen faces) | .0050 | .0050 |
+| **Automatic total** | **.035** | **.418** |
+| Stress: 13 plugins at the 5.8 s render | .084 | ledger-capped at .15 |
 
-At declared cadences the pilot is about 3% of one CPU, consistent with the live .008 at
-two sources. The .5 CPU pool is sized for the floor case and for taps. Memory: 28
+At 900 s the pilot is about 3.5% of one CPU, consistent with the live .0082 for one
+account's eight plugins, six of them at 21,600 s. The floor case fits the .5 pool with
+.08 to spare for taps and the selector, and only because the ledger caps plugins;
+fifteen paging built-ins at the floor are the largest unbudgeted load, which is why
+the global pool and fair scheduling matter more than any account cap. The .5 CPU pool is sized for the floor case and for taps. Memory: 28
 sources' frames at the 15-per-account ceiling are 6 x 4,946,100 = 29.7 MB; the 8
 panels about 32 MiB active; the children as in section 2. External `POST` at 1 per 5 s
 on all 28 slots would write 159.5 GB a day of frame bytes, which no one has promised
@@ -337,12 +389,13 @@ types in an incompatible way (`CatalogFace` has no `deny_unknown_fields`):
 
 - **R1 -- capability flags in `describe`**: `origin: "builtin" | "plugin"`, `views:
   bool`, `selector: bool`. The server skips the views child when `views` is false
-  (every plugin today: refresh drops from .65 to .40) and skips the selector exchange
+  (every plugin today: refresh drops from .85 to one render, .40-.55) and skips the selector exchange
   when `selector` is false (every plugin today: the shared worker is never held for a
   plugin tap). Missing flags from an older package mean "true", preserving dispatch.
 - **R2 -- dispatch one folder**: the server passes the resolved plugin folder from its
   own catalog; a render, views or tap child verifies and loads that folder only.
-  Removes the eleven-folder discovery from every job child; `describe` alone keeps it.
+  Removes the eleven-folder discovery from every job child, about .08 CPU-s each as
+  measured; `describe` alone keeps it.
   The folder must come from the server's catalog, never from a request, and be checked
   for containment in the plugin root.
 - **Describe cadence**: the once-a-minute catalog re-read is the largest live cost today.
@@ -350,23 +403,39 @@ types in an incompatible way (`CatalogFace` has no `deny_unknown_fields`):
   operator setting; it changes how fast a `--faces-only` deploy is noticed and nothing
   else. Owner's call on the interval; the default stays at a minute until then.
 
-## 9. The one VM re-measurement this revision owes
+## 9. The VM re-measurement, run 2026-10-04
 
-One session, read-only toward production, in a transient unit as `nobody` with the
-same isolation Vault used, against the **installed** `/var/lib/deskmate/faces` (fifteen
-faces), offline fixtures, n=3 unless stated:
+M1-M3 ran on the live VM at about 18:05 UTC; their results are in section 2. M4 is a
+24 h window and is still open. Method, which mirrors Vault's 2026-10-01 bundle:
+`git archive HEAD companion/faces` (identical to the live `5c44245` faces tree, archive
+sha256 `643ee7e6...47eb8e`) extracted to a temporary directory; the installed
+`node_modules` copied from `/var/lib/private/deskmate/faces`; only the two HTTP adapter
+exports in `kit/http.ts` replaced with offline fixtures, the Hacker News one serving
+`test/hn-front-page.captured.json`; the real `main.ts` driven in fresh processes and as
+one `tap-worker`, under `systemd-run` as `nobody` with `PrivateNetwork`,
+`ProtectSystem=strict`, `ProtectHome`, `NoNewPrivileges`, `CPUQuota=50%`,
+`MemoryMax=768M`. Children received a readable empty denylist through
+`DESKMATE_PLUGIN_DENYLIST`, as the server passes its own: the first attempt used the
+live path, which `nobody` cannot read, and an unreadable denylist correctly withdraws
+every plugin. Temporary files and the unit were removed; production was not touched.
+Harness: `assets/2026-10-04-limits-measurement/measure6.py`; raw JSON lines beside it.
 
-- **M1 -- per-verb children at fifteen faces.** `render`, `views` for weather and for
-  `github-stats`; `describe`. The difference from the five-face numbers in section 2 is
-  the per-folder discovery cost, which sizes R2.
-- **M2 -- the retained worker.** Start-up CPU and RSS; idle RSS after ten exchanges;
-  exchange wall time for a Hacker News tap with state (n=10) and for a `github-stats`
-  tap (n=10, the discovery-under-mutex case). This number decides whether R1 is a
-  prerequisite for the pilot or merely desirable.
-- **M3 -- a paging built-in refresh end to end.** Hacker News: render, views, and the
-  three staged renders, to replace the .95 extrapolation with a figure.
-- **M4 -- 24 h of `systemctl show`** for `MemoryPeak` and `CPUUsageNSec` on the live
-  service, to replace this revision's 8 h sample.
+What each item covered:
+
+- **M1 -- per-verb children at fifteen faces.** Done: `describe`, weather render and
+  views, `github-stats` render and views, `ink-landscape` render, views and one-shot tap.
+  Plugin children rose about .08 CPU-s against the five-face catalog; that is what R2
+  saves at eleven folders, and it grows with every plugin added.
+- **M2 -- the retained worker.** Done: start-up, ten built-in taps, ten plugin taps,
+  five built-in taps after. The plugin taps held the worker 91 ms median and 191 ms
+  worst, which makes R1 a prerequisite for a second hosted account, not merely
+  desirable.
+- **M3 -- a paging built-in refresh end to end.** Done for Hacker News: render, views
+  and the three staged pages, .98-1.04 CPU-s against the .95 extrapolation.
+- **M4 -- 24 h of the service's own accounting.** Open. The window started at the
+  17:57:27 UTC restart; read it on or after 2026-10-05 17:57 UTC with
+  `systemctl show deskmate-server -p MemoryPeak -p CPUUsageNSec -p ActiveEnterTimestamp`,
+  and only if `ActiveEnterTimestamp` has not moved.
 
 Not in this session: OS kill behaviour, overshoot, cgroup delegation, OOM. Those are
 implementation gates (M2/M3 in revision 5's sense) and run when the supervision code
@@ -425,5 +494,7 @@ Source read at `70a0639`: `entitlements.rs`, `claim.rs`, `images.rs`, `image_sou
 `faces_package/selector.rs`, `device_link.rs`, `admin.rs`, `app_api/mod.rs`, the deploy
 unit, `faces/src/main.ts`, `registry.ts`, `tap-worker.ts`, `plugins/discovery.ts`,
 `plugins/run.ts`, and every `plugin.json`. Live VM inventory and the service journal read
-over `ssh` without sudo; `deploy.sh --status`. Arithmetic recomputed from the inputs
-stated. No code changed, nothing deployed, no measurement rerun, no board touched.
+over `ssh`; `deploy.sh --status`. M1-M3 measured on the VM as section 9 describes, in
+a transient unit, with production untouched; the 17:57 UTC service restart was not
+caused by this session. Arithmetic recomputed from the measured inputs. No application
+code changed, nothing deployed.

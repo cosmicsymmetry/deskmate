@@ -17,6 +17,7 @@ See [submitting a plugin](submitting.md) and [reviewed releases](releases.md).
 | [GitHub stats](../../companion/faces/plugins/github-stats/README.md) | 1.0.1 | Public repos, followers and following for a GitHub username. |
 | [Ink Landscape](../../companion/faces/plugins/ink-landscape/README.md) | 1.0.0 | An original, changing landscape of mountain ridges and still water. Works offline. |
 | [Moon Phase](../../companion/faces/plugins/moon-phase/README.md) | 1.0.0 | The current moon, illumination and next full moon date \(UTC\). No account needed. |
+| [Terminal Command](../../companion/faces/plugins/terminal-command/README.md) | 1.0.0 | A useful Linux or macOS command each day. Tap for another; works offline. |
 | [This Day in History](../../companion/faces/plugins/this-day-in-history/README.md) | 1.0.0 | Selected historical events for today in your timezone, from Wikipedia. |
 | [Word of the Day](../../companion/faces/plugins/word-of-the-day/README.md) | 1.0.0 | A daily English word with a live Wiktionary definition. Tap to explore another. |
 | [xkcd](../../companion/faces/plugins/xkcd/README.md) | 1.0.1 | Compact xkcd comics or the latest strip, credited to Randall Munroe. Noncommercial content. |

@@ -1,0 +1,25 @@
+{
+  "api": 1,
+  "id": "terminal-command",
+  "version": "1.0.0",
+  "label": "Terminal Command",
+  "description": "A useful Linux or macOS command each day. Tap for another; works offline.",
+  "author": "Deskboy contributors",
+  "hosts": [],
+  "secrets": [],
+  "fields": [
+    {
+      "type": "enum",
+      "key": "platform",
+      "label": "Commands for",
+      "default": "both",
+      "options": [
+        { "value": "both", "label": "Both Linux and macOS" },
+        { "value": "linux", "label": "Linux" },
+        { "value": "macos", "label": "macOS" }
+      ]
+    }
+  ],
+  "refreshSeconds": 21600,
+  "tap": "Tap for the next command. Quick taps advance by their count; a new local day resets the selection."
+}

@@ -1,0 +1,296 @@
+{
+  "cases": [
+    {
+      "name": "du -sh .",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC"
+    },
+    {
+      "name": "tail -n 20 file.txt",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 1,
+        "point": null
+      }
+    },
+    {
+      "name": "find . -type f -name '*.log'",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 2,
+        "point": null
+      }
+    },
+    {
+      "name": "sw_vers",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 3,
+        "point": null
+      }
+    },
+    {
+      "name": "pmset -g batt",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 4,
+        "point": null
+      }
+    },
+    {
+      "name": "tar -tf archive.tar",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 5,
+        "point": null
+      }
+    },
+    {
+      "name": "head -n 20 file.txt",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 6,
+        "point": null
+      }
+    },
+    {
+      "name": "file file.txt",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 7,
+        "point": null
+      }
+    },
+    {
+      "name": "date -d tomorrow '+%F'",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 8,
+        "point": null
+      }
+    },
+    {
+      "name": "date '+%Y-%m-%d'",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 9,
+        "point": null
+      }
+    },
+    {
+      "name": "tail -f app.log",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 10,
+        "point": null
+      }
+    },
+    {
+      "name": "sed -n '1,20p' file.txt",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 11,
+        "point": null
+      }
+    },
+    {
+      "name": "printenv PATH",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 12,
+        "point": null
+      }
+    },
+    {
+      "name": "date -v+1d '+%F'",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 13,
+        "point": null
+      }
+    },
+    {
+      "name": "sort -u file.txt",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 14,
+        "point": null
+      }
+    },
+    {
+      "name": "command -v git",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 15,
+        "point": null
+      }
+    },
+    {
+      "name": "pwd",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 16,
+        "point": null
+      }
+    },
+    {
+      "name": "grep -n 'TODO' file.txt",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 17,
+        "point": null
+      }
+    },
+    {
+      "name": "id",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 18,
+        "point": null
+      }
+    },
+    {
+      "name": "wc -l file.txt",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 19,
+        "point": null
+      }
+    },
+    {
+      "name": "uname -srm",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 20,
+        "point": null
+      }
+    },
+    {
+      "name": "man ls",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 21,
+        "point": null
+      }
+    },
+    {
+      "name": "less file.txt",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 22,
+        "point": null
+      }
+    },
+    {
+      "name": "diff -u old.txt new.txt",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 23,
+        "point": null
+      }
+    },
+    {
+      "name": "free -h",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 24,
+        "point": null
+      }
+    },
+    {
+      "name": "ls -lah",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 25,
+        "point": null
+      }
+    },
+    {
+      "name": "df -h .",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 26,
+        "point": null
+      }
+    },
+    {
+      "name": "lsblk -f",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 27,
+        "point": null
+      }
+    },
+    {
+      "name": "uptime",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 28,
+        "point": null
+      }
+    },
+    {
+      "name": "ps -ef",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "event": {
+        "taps": 29,
+        "point": null
+      }
+    },
+    {
+      "name": "linux selection",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "settings": {
+        "platform": "linux"
+      }
+    },
+    {
+      "name": "macos selection",
+      "now": "2026-10-04T12:00:00Z",
+      "timezone": "UTC",
+      "settings": {
+        "platform": "macos"
+      }
+    },
+    {
+      "name": "Tokyo New Year",
+      "now": "2027-12-31T15:00:00Z",
+      "timezone": "Asia/Tokyo"
+    },
+    {
+      "name": "Leap day",
+      "now": "2028-02-29T12:00:00Z",
+      "timezone": "UTC"
+    }
+  ]
+}

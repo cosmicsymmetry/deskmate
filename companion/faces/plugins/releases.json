@@ -73,5 +73,10 @@
     "id": "github-stats",
     "version": "1.0.1",
     "sha256": "939e9a7b7e2a26263413f408f0c2f091bc4fcbe6a64a7349b032d0c62eea276f"
+  },
+  {
+    "id": "terminal-command",
+    "version": "1.0.0",
+    "sha256": "ab2966046c0b2d2fe35869d9110f9524df9ce6a290ff769521fe4cfb01e613f5"
   }
 ]

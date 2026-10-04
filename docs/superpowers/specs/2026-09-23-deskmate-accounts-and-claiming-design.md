@@ -168,7 +168,21 @@ also completed a Google round trip through a local provider simulator on a diffe
 site, with PKCE and nonce validation, new-account creation and sign-out. Google provider
 responses were simulated: live consent, production credentials and external inbox
 deliverability were not exercised. A read-only production instance check still reported
-Google disabled. These changes have not been deployed.
+Google disabled. These local checks preceded deployment.
+
+Deployment on 2026-10-02: PR #20 merged as `149d07f` after all applicable CI jobs
+passed (the companion job needed one rerun for an existing runtime fixture timing
+failure). The full release, including the already-live Moon Phase faces update,
+shipped to `deskmate.rodi.one` at 11:30 UTC. The service is active and its installed
+binary matches the release build. Production Chrome checks passed: an existing
+session survived the restart, a fresh log-delivered link signed in, sign-out revoked
+the session, and reuse of a consumed link was rejected. Protected endpoints return
+401 without a session; auth responses carry `no-store` and `no-referrer`; the page
+and built assets load with no browser JavaScript errors. Production has no SMTP or
+Google credentials configured, so email links use the server log and Google remains
+disabled. External email delivery and live Google consent remain unverified. Google sign-in
+was switched on later the same day from Track D, with its consent screen in testing
+(see the roadmap's D row); SMTP is still unset.
 
 ### Google
 

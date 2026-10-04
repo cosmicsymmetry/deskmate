@@ -33,6 +33,7 @@ mod device_link;
 mod egress;
 mod entitlements;
 pub use entitlements::{Edition, Entitlements, SelfHosted};
+pub use web_auth::TrustedProxies;
 pub mod firmware;
 #[doc(hidden)]
 pub mod identity;
@@ -152,6 +153,9 @@ struct StateInner {
     /// configured. Separate from the instance-owner integration runtime: the
     /// two flows have different redirects, scopes and pending state.
     google_sign_in: OnceLock<web_auth::google::GoogleSignIn>,
+    /// Proxies whose `X-Forwarded-For` is believed besides loopback, set at startup
+    /// from `DESKMATE_TRUSTED_PROXIES`; unset means loopback only.
+    trusted_proxies: OnceLock<web_auth::TrustedProxies>,
     /// The OAuth integration runtime, attached at startup by `set_integrations`
     /// when integrations are configured. `OnceLock` so existing constructors are
     /// untouched and a deployment without integrations simply never sets it.
@@ -302,6 +306,7 @@ impl ServerState {
                 email_ip_limiter: web_auth::RateLimiter::new(20, Duration::from_hours(1)),
                 failure_limiter: web_auth::RateLimiter::new(5, Duration::from_mins(15)),
                 google_sign_in: OnceLock::new(),
+                trusted_proxies: OnceLock::new(),
                 integrations: OnceLock::new(),
                 _config_temp_dir: config_temp_dir,
                 shutdown: tokio::sync::watch::channel(false).0,
@@ -559,6 +564,16 @@ impl ServerState {
 
     pub(crate) fn google_sign_in(&self) -> Option<&web_auth::google::GoogleSignIn> {
         self.inner.google_sign_in.get()
+    }
+
+    /// Trusts `X-Forwarded-For` from these proxies as well as loopback. Startup only.
+    pub fn set_trusted_proxies(&self, proxies: TrustedProxies) {
+        let _ = self.inner.trusted_proxies.set(proxies);
+    }
+
+    pub(crate) fn trusted_proxies(&self) -> &TrustedProxies {
+        static LOOPBACK_ONLY: TrustedProxies = TrustedProxies::NONE;
+        self.inner.trusted_proxies.get().unwrap_or(&LOOPBACK_ONLY)
     }
 
     /// Snapshot live handles without holding the server's link-map lock while a

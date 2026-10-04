@@ -21,6 +21,9 @@ use crate::web_auth::{ClientIp, RateLimiter, set_session_cookie};
 
 const PENDING_TTL: Duration = Duration::seconds(600);
 const MAX_PENDING_AUTHS: usize = 32;
+/// Google sign-in starts one client may make per ten minutes. Per client only because
+/// `ClientIp` is the visitor's address; see `TrustedProxies`.
+const STARTS_PER_CLIENT: usize = 10;
 const STATE_COOKIE: &str = "__Host-deskmate_google";
 
 struct PendingSignIn {
@@ -42,9 +45,7 @@ impl GoogleSignIn {
             config,
             transport,
             pending: Mutex::new(HashMap::new()),
-            // The hosted proxy still makes this an instance-wide bucket. Lower it to 10
-            // in the same change that makes the proxy forward the real client IP.
-            start_limiter: RateLimiter::new(MAX_PENDING_AUTHS, std::time::Duration::from_secs(600)),
+            start_limiter: RateLimiter::new(STARTS_PER_CLIENT, std::time::Duration::from_secs(600)),
         }
     }
 
@@ -564,7 +565,7 @@ mod tests {
     fn start_budget_expires_without_extending_the_window_on_rejection() {
         let runtime = runtime();
         let now = std::time::Instant::now();
-        for _ in 0..MAX_PENDING_AUTHS {
+        for _ in 0..STARTS_PER_CLIENT {
             runtime
                 .start_limiter
                 .check_and_record("client", now)
@@ -576,7 +577,7 @@ mod tests {
                 .check_and_record("client", now + std::time::Duration::from_secs(599)),
             Err(std::time::Duration::from_secs(1))
         );
-        for _ in 0..MAX_PENDING_AUTHS {
+        for _ in 0..STARTS_PER_CLIENT {
             runtime
                 .start_limiter
                 .check_and_record("client", now + std::time::Duration::from_secs(600))

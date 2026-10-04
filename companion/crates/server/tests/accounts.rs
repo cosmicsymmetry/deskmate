@@ -1146,7 +1146,7 @@ async fn google_starts_are_limited_per_client_without_spending_the_callback_budg
         .unwrap();
     let first = google_start_from(&client, &server, "198.51.100.7").await;
     assert_eq!(first.status(), StatusCode::SEE_OTHER);
-    for _ in 1..32 {
+    for _ in 1..10 {
         assert_eq!(
             google_start_from(&client, &server, "198.51.100.7")
                 .await
@@ -1237,7 +1237,7 @@ async fn concurrent_google_starts_admit_only_the_client_limit() {
             status => panic!("unexpected start status: {status}"),
         }
     }
-    assert_eq!(admitted.len(), 32);
+    assert_eq!(admitted.len(), 10);
     let first = &admitted[0];
     let location = first.headers()["location"].to_str().unwrap();
     let flow = query_param(location, "state");

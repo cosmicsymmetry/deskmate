@@ -144,7 +144,7 @@ impl FromRequestParts<ServerState> for ClientIp {
     #[allow(clippy::unused_async_trait_impl)]
     async fn from_request_parts(
         parts: &mut Parts,
-        _state: &ServerState,
+        state: &ServerState,
     ) -> Result<Self, Self::Rejection> {
         let peer = parts
             .extensions
@@ -154,13 +154,80 @@ impl FromRequestParts<ServerState> for ClientIp {
             .headers
             .get("x-forwarded-for")
             .and_then(|value| value.to_str().ok());
-        Ok(Self(client_ip(peer, forwarded)))
+        Ok(Self(client_ip(peer, forwarded, state.trusted_proxies())))
     }
 }
 
-fn client_ip(peer: Option<SocketAddr>, forwarded: Option<&str>) -> IpAddr {
+/// The peers whose `X-Forwarded-For` names the client: loopback always, plus the
+/// networks in `DESKMATE_TRUSTED_PROXIES`. Every per-IP auth limit keys on the
+/// address this yields, so a proxy that is not trusted here turns them all into
+/// one instance-wide bucket -- and trusting a peer that does not overwrite the
+/// header lets a visitor choose their own bucket. Name only the proxy itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrustedProxies(Vec<(IpAddr, u8)>);
+
+impl TrustedProxies {
+    pub const NONE: Self = Self(Vec::new());
+
+    /// Comma-separated addresses or CIDR networks, e.g. `172.26.0.0/16`.
+    /// A zero-length prefix is refused: it would trust every peer.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        value
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                let (address, prefix) = match entry.split_once('/') {
+                    Some((address, prefix)) => (address, Some(prefix)),
+                    None => (entry, None),
+                };
+                let address: IpAddr = address
+                    .parse()
+                    .map_err(|_| format!("{entry:?} is not an IP address or CIDR network"))?;
+                let width = if address.is_ipv4() { 32 } else { 128 };
+                let prefix = match prefix {
+                    None => width,
+                    Some(prefix) => prefix
+                        .parse::<u8>()
+                        .ok()
+                        .filter(|prefix| (1..=width).contains(prefix))
+                        .ok_or_else(|| {
+                            format!("{entry:?} needs a prefix length between 1 and {width}")
+                        })?,
+                };
+                Ok((address, prefix))
+            })
+            .collect::<Result<_, _>>()
+            .map(Self)
+    }
+
+    fn trusts(&self, peer: IpAddr) -> bool {
+        let peer = peer.to_canonical();
+        peer.is_loopback()
+            || self
+                .0
+                .iter()
+                .any(|&(network, prefix)| match (peer, network) {
+                    (IpAddr::V4(peer), IpAddr::V4(network)) => {
+                        let mask = u32::MAX << (32 - u32::from(prefix));
+                        u32::from(peer) & mask == u32::from(network) & mask
+                    }
+                    (IpAddr::V6(peer), IpAddr::V6(network)) => {
+                        let mask = u128::MAX << (128 - u32::from(prefix));
+                        u128::from(peer) & mask == u128::from(network) & mask
+                    }
+                    _ => false,
+                })
+    }
+}
+
+fn client_ip(
+    peer: Option<SocketAddr>,
+    forwarded: Option<&str>,
+    trusted: &TrustedProxies,
+) -> IpAddr {
     match peer {
-        Some(peer) if peer.ip().is_loopback() => forwarded
+        Some(peer) if trusted.trusts(peer.ip()) => forwarded
             .and_then(|value| value.rsplit(',').next())
             .and_then(|value| value.trim().parse().ok())
             .unwrap_or_else(|| peer.ip()),
@@ -207,15 +274,95 @@ mod tests {
 
     #[test]
     fn forwarded_for_is_trusted_only_from_loopback() {
+        let none = &TrustedProxies::NONE;
         let from_proxy = client_ip(
             Some("127.0.0.1:5000".parse().unwrap()),
             Some("198.51.100.7, 203.0.113.9"),
+            none,
         );
         assert_eq!(from_proxy, "203.0.113.9".parse::<IpAddr>().unwrap());
 
-        let direct = client_ip(Some("192.0.2.1:5000".parse().unwrap()), Some("203.0.113.9"));
+        let direct = client_ip(
+            Some("192.0.2.1:5000".parse().unwrap()),
+            Some("203.0.113.9"),
+            none,
+        );
         assert_eq!(direct, "192.0.2.1".parse::<IpAddr>().unwrap());
-        assert_eq!(client_ip(None, None), IpAddr::from([0, 0, 0, 0]));
+        assert_eq!(client_ip(None, None, none), IpAddr::from([0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn forwarded_for_is_trusted_from_a_configured_proxy_network_only() {
+        // The hosted shape: Caddy in a Docker bridge reaching a LAN-bound listener.
+        let trusted = TrustedProxies::parse("172.26.0.0/16, 2001:db8::1").unwrap();
+        let ip = |text: &str| text.parse::<IpAddr>().unwrap();
+
+        let via_caddy = client_ip(
+            Some("172.26.0.2:41000".parse().unwrap()),
+            Some("203.0.113.9"),
+            &trusted,
+        );
+        assert_eq!(via_caddy, ip("203.0.113.9"));
+        let mapped = client_ip(
+            Some("[::ffff:172.26.0.2]:41000".parse().unwrap()),
+            Some("203.0.113.9"),
+            &trusted,
+        );
+        assert_eq!(
+            mapped,
+            ip("203.0.113.9"),
+            "an IPv4-mapped peer is the same peer"
+        );
+        let v6 = client_ip(
+            Some("[2001:db8::1]:41000".parse().unwrap()),
+            Some("203.0.113.9"),
+            &trusted,
+        );
+        assert_eq!(v6, ip("203.0.113.9"));
+
+        // A LAN host outside the network cannot choose its bucket.
+        let lan = client_ip(
+            Some("192.168.8.30:41000".parse().unwrap()),
+            Some("203.0.113.9"),
+            &trusted,
+        );
+        assert_eq!(lan, ip("192.168.8.30"));
+        let neighbour = client_ip(
+            Some("172.27.0.2:41000".parse().unwrap()),
+            Some("203.0.113.9"),
+            &trusted,
+        );
+        assert_eq!(neighbour, ip("172.27.0.2"));
+        // A trusted proxy that sent nothing usable is itself the bucket.
+        let garbage = client_ip(
+            Some("172.26.0.2:41000".parse().unwrap()),
+            Some("not-an-ip"),
+            &trusted,
+        );
+        assert_eq!(garbage, ip("172.26.0.2"));
+    }
+
+    #[test]
+    fn trusted_proxies_parse_addresses_and_networks_and_refuse_nonsense() {
+        assert_eq!(TrustedProxies::parse("").unwrap(), TrustedProxies::NONE);
+        assert_eq!(TrustedProxies::parse(" , ").unwrap(), TrustedProxies::NONE);
+        assert_eq!(
+            TrustedProxies::parse("10.0.0.1, ::1/128").unwrap(),
+            TrustedProxies(vec![
+                ("10.0.0.1".parse().unwrap(), 32),
+                ("::1".parse().unwrap(), 128)
+            ])
+        );
+        for bad in [
+            "0.0.0.0/0",
+            "::/0",
+            "10.0.0.0/33",
+            "10.0.0.0/x",
+            "caddy",
+            "10.0.0/8",
+        ] {
+            assert!(TrustedProxies::parse(bad).is_err(), "{bad} must be refused");
+        }
     }
 
     #[test]

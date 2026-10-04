@@ -388,6 +388,7 @@ async fn main() {
     );
 
     configure_google(&state, &config_dir, google_oauth);
+    configure_trusted_proxies(&state);
 
     // Server-rendered data cards, if this deployment has any. The specs are
     // read before the listener binds so a malformed file fails the start
@@ -544,6 +545,17 @@ fn faces_command(config_dir: &std::path::Path) -> Option<server::FaceCommand> {
         std::env::var_os("DESKMATE_PLUGIN_DENYLIST"),
     );
     Some(server::FaceCommand::bun(bun, &faces_dir).with_denylist(denylist))
+}
+
+/// `DESKMATE_TRUSTED_PROXIES`: the reverse proxy's address or network, when it does
+/// not reach this listener over loopback (e.g. Caddy in a Docker bridge). A bad
+/// value fails the start rather than silently trusting nothing.
+fn configure_trusted_proxies(state: &ServerState) {
+    if let Ok(proxies) = std::env::var("DESKMATE_TRUSTED_PROXIES") {
+        let proxies = server::TrustedProxies::parse(&proxies)
+            .unwrap_or_else(|error| panic!("DESKMATE_TRUSTED_PROXIES is invalid: {error}"));
+        state.set_trusted_proxies(proxies);
+    }
 }
 
 fn plugin_denylist_path(

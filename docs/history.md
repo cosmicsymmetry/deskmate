@@ -1624,8 +1624,8 @@ every per-IP auth budget is instance-wide. It drops to 10 in the same change tha
 proxy forward the real client IP (the `docs/self-host.md` recipe; tracked on Track A's board row).
 
 **Follow-ups left open:**
-- The hosted proxy does not forward the client IP (above). Until it does, five failed
-  link/setup/callback attempts from anyone lock those paths for everyone for 15 minutes.
+- ~~The hosted proxy does not forward the client IP.~~ Fixed 2026-10-04 by PR #34 plus the
+  hosted Caddy change (see Track A's board row).
 - Flaky tests seen on `main` CI, each passing on rerun of the same commit:
   `data_cards::tests::a_tap_reschedules_the_interval_rather_than_adding_a_refresh` (wall-clock
   500 ms interval with 300/250 ms sleeps), `accounts::removing_a_panel_revokes_it_and_drops_its_live_link`

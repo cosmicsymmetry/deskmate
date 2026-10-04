@@ -2,6 +2,14 @@
 
 2026-10-01. Track B.
 
+**Status, reconciled 2026-10-04:** the trial is delivered (PRs #12 and #13).
+The owner subsequently approved all four recommendations in the
+[next-phase decision record](2026-10-02-deskmate-marketplace-next-phase-proposal.md),
+implemented by PRs #14, #19 and #27. The approval, checksum and remaining-decision
+statements below describe the original trial; they are not today's backlog.
+The [author contract](../../plugins/contract-v1.md),
+[release policy](../../plugins/releases.md) and roadmap are current.
+
 ## Status and owner decisions
 
 The owner chose **Days Left This Year** as our own first plugin submission, and

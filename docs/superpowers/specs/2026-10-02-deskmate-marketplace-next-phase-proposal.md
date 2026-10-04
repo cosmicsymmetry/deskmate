@@ -5,6 +5,32 @@
 The owner approved all four recommendations as written: “do as recommended”.
 The original alternatives and recommendations below remain as decision history.
 
+## Current scope, reconciled 2026-10-04
+
+The approved follow-up is delivered through PRs #14, #19 and #27: author commands
+and CI previews, GitHub submission identity, a generated documentation directory,
+reviewed release hashes and operator withdrawal. Eleven plugins remain after
+Calvin's removal. The trial's old "not approved" language and the hosted plan's
+unticked boxes describe their original execution, not additional implementation
+owed now.
+
+Hosted allowances still wait on Track A's ROD-4 revision 4 and enforcement work.
+The original contract's remote adapter, standalone self-host runner and shared-render
+cache remain unbuilt and outside the delivered hosted-runtime plan; external PNG
+push already works through the producer contract. Further product scope, including
+a public gallery beyond the documentation directory, requires the owner's go-ahead
+under the current Track B handoff. The existing recommendation to learn from the
+next outside author's unaided submission remains open; an agent's local rehearsal
+cannot establish that author experience.
+
+The unblocked maintenance pass reconciles the author documentation with the running
+code and verifies the existing author path. It also reproduced a concrete defect:
+GitHub stats 1.0.0 prefixes a bearer placeholder that the host already prefixes,
+producing `Bearer Bearer <token>`. The owner approved the narrow 1.0.1 fix on
+2026-10-04, including its regression and new release-index entry. Permissions,
+settings, layout and cadence are unchanged; prior reviewed hashes remain intact.
+Local verification is recorded below; the PR records CI and merge evidence.
+
 The [submission trial](2026-10-01-deskmate-plugin-marketplace-design.md) produced
 Days Left This Year through PR #12, then the owner-approved three-face update in
 PR #13. The existing manifest, sandbox, add menu and automatic settings save were
@@ -248,3 +274,43 @@ checker. Current main (`0e16762`) is merged, retaining Track D's new board facts
 and Track H's released lock. The remaining PR difference is the fixture and
 documentation; the owner-merged release/runtime controls and deployed hashes
 are preserved unchanged.
+
+
+## Author handoff and GitHub stats 1.0.1 verification (2026-10-04)
+
+- The new plugin-local regression failed against 1.0.0 with
+  `Bearer Bearer synthetic-fixture-token` and passes with the one-prefix header.
+  It runs the shipped source through QuickJS and `runPlugin` with an offline
+  response, checks the public-user URL and exactly one request, and uses no real
+  credential. All fourteen previous release entries are unchanged; the new
+  1.0.1 hash is `939e9a7b7e2a26263413f408f0c2f091bc4fcbe6a64a7349b032d0c62eea276f`.
+- Rust formatting, clippy with warnings denied, all-target tests (898 passed,
+  two existing ignored) and separate doctests pass. Web tests (227), typecheck,
+  lint, formatting and build pass. Faces tests (808), typecheck, lint, formatting,
+  strict release verification, directory check and built-in dump pass. Three
+  repository release checks, fourteen approval-policy tests and all five tooling
+  suites pass. Firmware host tests, ASan/UBSan and the ESP-IDF build pass; no
+  firmware source changed and no image was flashed or published.
+- All eleven installed-source plugin checks pass offline. GitHub stats success and
+  failure-fallback PNGs are byte-identical to 1.0.0 for identical supplied replies;
+  full-size and desk-scale output was inspected. This establishes unchanged drawing,
+  not GitHub's response to a real credential.
+- An isolated source export with these changes, a fresh frozen dependency install
+  and a disposable `author-rehearsal` scaffold passes `plugin:new`, `plugin:check`,
+  the generated regression, all 809 faces tests, typecheck, lint, formatting,
+  pending-release CI verification, directory regeneration and repository checks.
+  The disposable plugin is not committed or approved for release. This is an agent
+  rehearsal, not an outside author's unaided submission.
+- Contract corrections were checked against the current host and sandbox: discovery
+  probes `plan({})`; render-time planning starts with `answers: []`; HTTP status is
+  separate from `ok`; response-byte exhaustion skips later network requests; JSON
+  conversion and formatting have the documented actual behavior; configuration
+  errors retry at the ordinary cadence, while layout-engine exceptions reach the
+  retrying status. Deploy-time checksum approval and runtime withdrawal are distinct.
+  The author guide now keeps outside-submission tests within the plugin folder,
+  which is permitted by the existing approval policy.
+- Read-only `deploy.sh --status` reported all three live parts at `5c44245`.
+  `git merge-base --is-ancestor 5c44245 HEAD` passed. No deployment, real-credential
+  API request, browser flow or physical-panel observation was performed for this
+  verification. A faces-only release must repeat the live-revision check immediately
+  before installation and remains a separate operator action.

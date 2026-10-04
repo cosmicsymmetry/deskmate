@@ -17,11 +17,18 @@ The owner then removed Calvin and Hobbes in merged PR #24 (`9e2bb7e`), so it is
 absent from the current directory; its historical approval stays for rollback.
 That PR also corrected the xkcd/Anime READMEs. Because documentation contributes
 to the hash, those corrections and their release notes ship at 1.0.1 with new entries rather
-than overwriting the 1.0.0 history. All eleven installed plugins pass strict
-verification; fourteen entries retain the current releases and rollback history.
+than overwriting the 1.0.0 history. At that reconciliation, all eleven installed
+plugins passed strict verification; fourteen entries retained the current releases
+and rollback history.
 The 1.0.1 entries match the independently reviewed, deployed reconciliation
 `c8fe780` (PR #27). Uninstalled draft hashes from the parallel reconciliation
 were replaced with these deployed bytes; no deployed release history was changed.
+
+GitHub stats 1.0.1 fixes the duplicated bearer prefix sent when a token is
+configured. The owner approved this fix on 2026-10-04 after an offline reproduction
+with a synthetic token. Its entry includes the regression test and README update;
+the 1.0.0 hash remains unchanged. The index now holds fifteen entries for eleven
+plugins and their rollback history. Approval and merge still do not establish deployment.
 
 ## Submissions and approval
 

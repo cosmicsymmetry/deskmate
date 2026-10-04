@@ -1,7 +1,7 @@
 # GitHub stats
 
 Shows a GitHub user's public repository, follower and following counts on one
-448×368 picture card. This is the bundled plugin-contract example, version 1.0.0.
+448×368 picture card. This is the bundled plugin-contract example, version 1.0.1.
 The manifest author, Deskmate, is attribution text rather than a verified identity.
 
 ## Setup and permissions
@@ -27,5 +27,13 @@ The offline checker reports the expected request-failure fallback and writes its
 full-size and desk-scale PNGs under `out/plugins/github-stats/`. The discovery tests
 also exercise recorded success and credential isolation. These are sandbox and PNG
 checks, not physical-panel verification.
+
+## Release 1.0.1
+
+Fixes the duplicated `Bearer` prefix when an operator configures `github_token`.
+The plugin now supplies only the secret placeholder; the host adds the prefix.
+The regression test runs the shipped source through the sandbox and asserts the
+outgoing header using a synthetic token and an offline response. Layout, requested
+permissions, settings and refresh cadence are unchanged.
 
 The source follows the repository licence and contains no third-party image assets.

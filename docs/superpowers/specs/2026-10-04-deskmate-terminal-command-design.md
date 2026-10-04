@@ -78,5 +78,9 @@ release entries remain unchanged. The PR is the visual-acceptance handoff.
 Committed samples live in `companion/faces/plugins/terminal-command/previews/`;
 all 34 reproducible pairs and five full-size contact sheets live in
 `companion/faces/out/plugins/terminal-command/`. The README gives reproduction steps.
-No physical-panel observation is claimed. No merge or deploy is authorized by this
-request: the owner accepts the plugin visually first.
+No physical-panel observation is claimed. After reviewing the submission, the owner
+accepted it and explicitly authorized deployment on 2026-10-04: “Yeah, deploy.”
+This supersedes the original hold on merging and deploying. Merge
+[PR #37](https://github.com/cosmicsymmetry/deskmate/pull/37) after its checks pass,
+then ship only the faces package; the PR records the deployed revision and live
+verification results. The Track B roadmap row remains owned by its separate session.

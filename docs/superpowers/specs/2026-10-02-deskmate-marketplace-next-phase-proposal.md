@@ -314,3 +314,33 @@ are preserved unchanged.
   API request, browser flow or physical-panel observation was performed for this
   verification. A faces-only release must repeat the live-revision check immediately
   before installation and remains a separate operator action.
+
+
+## GitHub stats 1.0.1 deployment (2026-10-04)
+
+The owner explicitly authorized deployment after PR #36 merged as `3e89172`.
+All eight PR CI jobs and the separate trusted approval check passed; the main
+push CI also passed ([run 37223226323](https://github.com/cosmicsymmetry/deskmate/actions/runs/37223226323)).
+Immediately before shipping, `deploy.sh --status` reported faces, web and binary
+at `5c44245`; ancestry checks for every reported revision passed against `3e89172`.
+This contains the other merged tracks, including C1, brightness/schema v11, the
+Track A proxy fix, Deskboy branding and the D/E board updates.
+
+`deploy.sh --faces-only` passed local approval/typecheck/tests and the VM's suite,
+cold discovery and staged hash verification, then installed faces at
+**2026-10-04 18:58:26 UTC**, recorded as `3e89172`. Web and binary remain at
+`5c44245`. The faces difference from the prior live revision is limited to the
+GitHub stats folder and its appended release entry.
+
+Post-install checks ran against `/var/lib/private/deskmate/faces`, not just staging:
+all eleven current release hashes verified, GitHub stats reports 1.0.1, and its
+synthetic-token regression passes under the installed Bun 1.4.2. Cold discovery
+with the instance's configured policy paths returns the exact expected fifteen
+entries (four built-ins, eleven plugins, no Calvin). The service remains active
+with PID 2956693 and start time 17:57:27 UTC, unchanged across deployment, and
+`https://app.deskboy.sh/` returned HTTP 200.
+
+No real GitHub credential or external API request was used for the plugin check,
+and neither the browser workflow nor the physical panel was observed. The
+installed-code checks establish that the reviewed fix is present and handles the
+synthetic credential correctly; they do not establish a live account's frame.

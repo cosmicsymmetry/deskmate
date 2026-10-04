@@ -1,7 +1,7 @@
 {
   "api": 1,
   "id": "github-stats",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "label": "GitHub stats",
   "description": "Public repos, followers and following for a GitHub username.",
   "author": "Deskmate",

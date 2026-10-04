@@ -1,5 +1,13 @@
 # Plugin contract v1 — hosted runtime implementation plan
 
+> **STATUS, reconciled 2026-10-04:** hosted runtime delivered in PR #8;
+> author tooling and release/withdrawal controls followed in PRs #14, #19 and #27.
+> The unticked implementation steps below are the historical execution plan, not
+> outstanding work. Physical-panel checks are not established by those merges; see
+> `docs/hardware/board-notes.md` for observed evidence. Remote plugins, the standalone
+> runner and render sharing remain outside this plan. Current scope is recorded in
+> `docs/roadmap.md` and the approved 2026-10-02 next-phase decision record.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A folder under `companion/faces/plugins/<id>/` holding a manifest and a

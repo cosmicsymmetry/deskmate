@@ -88,14 +88,7 @@ impl Mailer for SmtpMailer {
         Box::pin(async move {
             let recipient = recipient
                 .map_err(|error| MailError::new(format!("invalid mail recipient: {error}")))?;
-            let message = Message::builder()
-                .from(self.from.clone())
-                .to(recipient)
-                .subject("Sign in to Deskmate")
-                .body(format!(
-                    "Use this link to sign in to Deskmate:\n\n{link}\n\nThis link expires in 15 minutes."
-                ))
-                .map_err(|error| MailError::new(format!("build sign-in email: {error}")))?;
+            let message = sign_in_message(self.from.clone(), recipient, &link)?;
             self.transport
                 .send(message)
                 .await
@@ -103,6 +96,19 @@ impl Mailer for SmtpMailer {
             Ok(())
         })
     }
+}
+
+/// The sign-in email a person receives. It carries the public name, Deskboy;
+/// "Deskmate" is the codename and stays out of anything a visitor reads.
+fn sign_in_message(from: Mailbox, to: Mailbox, link: &str) -> Result<Message, MailError> {
+    Message::builder()
+        .from(from)
+        .to(to)
+        .subject("Sign in to Deskboy")
+        .body(format!(
+            "Use this link to sign in to Deskboy:\n\n{link}\n\nThis link expires in 15 minutes."
+        ))
+        .map_err(|error| MailError::new(format!("build sign-in email: {error}")))
 }
 
 /// A deterministic mail sink for consumers exercising the HTTP API.
@@ -135,5 +141,21 @@ mod tests {
         assert!(SmtpMailer::from_url("not-an-smtp-url", "mail@example.com").is_err());
         assert!(SmtpMailer::from_url("smtps://smtp.example.com", "not-an-email").is_err());
         assert!(SmtpMailer::from_url("smtps://smtp.example.com", "mail@example.com").is_ok());
+    }
+
+    #[test]
+    fn the_sign_in_email_uses_the_public_name() {
+        let from: Mailbox = "Deskboy <hello@example.com>".parse().unwrap();
+        let to: Mailbox = "person@example.com".parse().unwrap();
+        let link = "https://desk.example.org/v1/app/auth/link#token";
+        let message = sign_in_message(from, to, link).unwrap();
+        let text = String::from_utf8(message.formatted()).unwrap();
+        assert!(text.contains("Subject: Sign in to Deskboy\r\n"), "{text}");
+        assert!(
+            text.contains("Use this link to sign in to Deskboy:"),
+            "{text}"
+        );
+        assert!(text.contains(link), "{text}");
+        assert!(!text.contains("Deskmate"), "{text}");
     }
 }

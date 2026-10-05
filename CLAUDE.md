@@ -126,7 +126,7 @@ default. This section states only what is true now.
   was, and it kept three dead templates alive to have something to compare against.
 - **THE COMPANION IS A WEB APP, and there is no desktop app.** Every surface for a
   networked device is served by the server it configures, at
-  `https://deskmate.rodi.one/`. The browser API is `crates/server/src/app_api/`, gated by
+  `https://app.deskboy.sh/` (moved from `deskmate.rodi.one` on 2026-10-04). The browser API is `crates/server/src/app_api/`, gated by
   account sessions created through an email link, Google sign-in or the first-run setup
   code; the admin token is for CLI operations and account recovery only. Nothing in the
   tree is scaffolding for a desktop app: if one is wanted it is written from scratch, and it
@@ -149,8 +149,10 @@ default. This section states only what is true now.
     a built `dist/`, read per request, so a UI change is `bun run build` plus an rsync
     with no Rust build and no restart. That is the whole point; do not "simplify" it into
     the binary.
-- **Live deployment**: `deskmate.rodi.one` on the owner's homelab (docker-vm, reachable
-  over Tailscale), behind Cloudflare -> cloudflared -> Caddy, systemd unit in
+- **Live deployment**: `app.deskboy.sh` for browsers (`DESKMATE_PUBLIC_URL`) and
+  `deskmate.rodi.one` for `/v1/*` and `/feeds/*` (the panel's link, image push, OTA;
+  every other path there 308s to `app.deskboy.sh`), on the owner's homelab (docker-vm,
+  reachable over Tailscale), behind Cloudflare -> cloudflared -> Caddy, systemd unit in
   `companion/crates/server/deploy/`. Built for linux/x86_64 in a throwaway
   `rust:1.98-bookworm` container over an rsync'd `git archive HEAD` export -- never the
   working tree. **The export is `companion/` AND `firmware/` now**, because the server

@@ -14,9 +14,10 @@ See [submitting a plugin](submitting.md) and [reviewed releases](releases.md).
 | [Dad Jokes](../../companion/faces/plugins/dad-jokes/README.md) | 1.0.0 | A fresh dad joke each local day, or whenever you tap. |
 | [Days Left This Year](../../companion/faces/plugins/days-left-this-year/README.md) | 1.1.0 | Calendar days remaining, including today, and year progress. Uses the owner's timezone. |
 | [Ghibli Scenes](../../companion/faces/plugins/ghibli-scenes/README.md) | 1.0.0 | Official Studio Ghibli gallery stills from six films. Copyright remains with the credited owners; studio usage terms apply. |
-| [GitHub stats](../../companion/faces/plugins/github-stats/README.md) | 1.0.0 | Public repos, followers and following for a GitHub username. |
+| [GitHub stats](../../companion/faces/plugins/github-stats/README.md) | 1.0.1 | Public repos, followers and following for a GitHub username. |
 | [Ink Landscape](../../companion/faces/plugins/ink-landscape/README.md) | 1.0.0 | An original, changing landscape of mountain ridges and still water. Works offline. |
 | [Moon Phase](../../companion/faces/plugins/moon-phase/README.md) | 1.0.0 | The current moon, illumination and next full moon date \(UTC\). No account needed. |
+| [Terminal Command](../../companion/faces/plugins/terminal-command/README.md) | 1.0.0 | A useful Linux or macOS command each day. Tap for another; works offline. |
 | [This Day in History](../../companion/faces/plugins/this-day-in-history/README.md) | 1.0.0 | Selected historical events for today in your timezone, from Wikipedia. |
 | [Word of the Day](../../companion/faces/plugins/word-of-the-day/README.md) | 1.0.0 | A daily English word with a live Wiktionary definition. Tap to explore another. |
 | [xkcd](../../companion/faces/plugins/xkcd/README.md) | 1.0.1 | Compact xkcd comics or the latest strip, credited to Randall Munroe. Noncommercial content. |

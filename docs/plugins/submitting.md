@@ -2,11 +2,11 @@
 
 Submit a hosted plugin as a pull request to
 [cosmicsymmetry/deskmate](https://github.com/cosmicsymmetry/deskmate), targeting `main`.
-The first submission trial uses this manual process. Review and merge do not deploy
+Submissions use this manual process. Review and merge do not deploy
 your plugin; hosted release is a separate operator action.
 
 Your publishing identity is your GitHub account and the PR record. Manifest `author`
-text is unverified attribution; no panel or hosted Deskmate account is needed to contribute.
+text is unverified attribution; no panel or hosted Deskboy account is needed to contribute.
 Browse the [plugin directory](index.md) for the existing plugins and their READMEs.
 
 ## Prepare the plugin
@@ -32,8 +32,9 @@ The executable `index.js` runs in QuickJS: no imports, direct networking, filesy
 environment or `Intl`. Only `plan` declares requests. Tests and preview fixtures run
 on the author side and must contain public, synthetic or sanitized data only.
 Add meaningful sandbox tests for date boundaries, missing data, API failures,
-credential absence and taps, as applicable. Tests may live beside the plugin or in
-`test/plugins/`; the generated test demonstrates the real runtime.
+credential absence and taps, as applicable. Keep submission tests inside
+`plugins/<id>/`; package-wide `test/plugins/` files are protected approval machinery
+and require an owner-authored PR. The generated test demonstrates the real runtime.
 
 ## Verify and show the result
 
@@ -126,7 +127,7 @@ validation results and known limitations. Keep tokens, personal emails, private
 addresses and account data out of commits, examples, screenshots and PR text.
 
 GitHub identifies the contributor; the manifest's `author` is attribution text, not
-a verified Deskmate publishing identity. A plugin submitted here is distributed with
+a verified Deskboy publishing identity. A plugin submitted here is distributed with
 the repository, so it is GPL-3.0 unless its folder carries its own `LICENSE` file; a
 plugin is not a derivative work of the host
 ([contract v1](contract-v1.md#licence)), so any licence you put there is your choice.

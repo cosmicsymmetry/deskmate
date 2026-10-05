@@ -126,8 +126,11 @@ validation results and known limitations. Keep tokens, personal emails, private
 addresses and account data out of commits, examples, screenshots and PR text.
 
 GitHub identifies the contributor; the manifest's `author` is attribution text, not
-a verified Deskmate publishing identity. Follow the repository licence and identify
-any third-party code or assets and their licences.
+a verified Deskmate publishing identity. A plugin submitted here is distributed with
+the repository, so it is GPL-3.0 unless its folder carries its own `LICENSE` file; a
+plugin is not a derivative work of the host
+([contract v1](contract-v1.md#licence)), so any licence you put there is your choice.
+Identify any third-party code or assets and their licences.
 
 ## Review and updates
 

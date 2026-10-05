@@ -59,6 +59,16 @@ including one you built yourself to hold PNG bytes -- serializes to an object of
 numeric string keys, not to anything the host recognizes as an image. Wherever this
 document says "bytes", it means a base64 string.
 
+### Licence
+
+**The project's position is that GPL-3.0 does not reach a plugin.** A plugin links
+against nothing of ours: it imports nothing, the sandbox hands it no API to call, and
+everything it exchanges with the host is JSON data. The host interprets it; it is not a
+derivative work of the host. A plugin you write is yours to license as you choose, and
+running one on your own server or ours places no licence obligation on it. A plugin
+*submitted to this repository* is distributed inside it, so see
+[Submitting a plugin](submitting.md#open-the-pull-request) for which licence it carries.
+
 ## The worked example: `github-stats`
 
 `companion/faces/plugins/github-stats/` is real plugin code, not a fixture -- it ships

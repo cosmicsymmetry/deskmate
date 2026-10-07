@@ -160,6 +160,8 @@ pub(crate) enum AcceptOutcome {
 pub(crate) enum ImageSourceError {
     #[error("unknown or revoked image source")]
     UnknownToken,
+    #[error("this account can have at most {maximum} picture sources")]
+    PolicyCapacity { maximum: usize },
     #[error("the image-source capacity has been reached")]
     Capacity,
     #[error("image-source storage failed: {message}")]
@@ -199,10 +201,30 @@ impl ImageSourceStore {
 
     /// Mints a source id and a random 32-byte bearer token. The token's digest
     /// is committed before the one plaintext copy is returned.
+    /// The store's own ceiling and nothing lower; production goes through
+    /// [`ImageSourceStore::mint_within`] with the account's policy.
+    #[cfg(test)]
     pub(crate) fn mint(&self, name: &str) -> Result<MintedSource, ImageSourceError> {
+        self.mint_within(name, MAX_IMAGE_SOURCES)
+    }
+
+    /// Mints under `limit`, checked while holding the store's mutex so two
+    /// callers racing for the last slot cannot both pass. A limit below the
+    /// store's ceiling is the account's policy and refuses as such; at the
+    /// ceiling the store answers with its own, unchanged refusal.
+    pub(crate) fn mint_within(
+        &self,
+        name: &str,
+        limit: usize,
+    ) -> Result<MintedSource, ImageSourceError> {
         let mut state = self.lock();
-        if state.sources.len() >= MAX_IMAGE_SOURCES {
-            return Err(ImageSourceError::Capacity);
+        let limit = limit.min(MAX_IMAGE_SOURCES);
+        if state.sources.len() >= limit {
+            return Err(if limit < MAX_IMAGE_SOURCES {
+                ImageSourceError::PolicyCapacity { maximum: limit }
+            } else {
+                ImageSourceError::Capacity
+            });
         }
 
         let id = loop {
@@ -450,6 +472,16 @@ impl ImageSourceStore {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Whether `view` is stored for `id`, without selecting it.
+    #[cfg(test)]
+    pub(crate) fn has_view_for_test(&self, id: &str, view: &str) -> bool {
+        self.lock()
+            .sources
+            .iter()
+            .find(|source| source.id == id)
+            .is_some_and(|source| source.frames.contains_key(view))
     }
 
     #[cfg(test)]
@@ -1061,6 +1093,77 @@ mod tests {
             store.mint("One too many"),
             Err(ImageSourceError::Capacity)
         ));
+    }
+
+    #[test]
+    fn a_lower_limit_is_its_own_refusal_and_the_ceiling_keeps_its_old_one() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("store");
+        for index in 0..4 {
+            store
+                .mint_within(&format!("Source {index}"), 4)
+                .expect("within four");
+        }
+        assert!(matches!(
+            store.mint_within("Fifth", 4),
+            Err(ImageSourceError::PolicyCapacity { maximum: 4 })
+        ));
+        for index in 4..MAX_IMAGE_SOURCES {
+            store
+                .mint(&format!("Source {index}"))
+                .expect("within the ceiling");
+        }
+        assert!(matches!(
+            store.mint("Ninth"),
+            Err(ImageSourceError::Capacity)
+        ));
+    }
+
+    #[test]
+    fn a_cap_below_the_existing_count_refuses_and_keeps_every_source() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("store");
+        for index in 0..6 {
+            store.mint(&format!("Source {index}")).expect("mint");
+        }
+        assert!(matches!(
+            store.mint_within("After downgrade", 4),
+            Err(ImageSourceError::PolicyCapacity { maximum: 4 })
+        ));
+        assert_eq!(store.summaries(Utc::now()).len(), 6);
+    }
+
+    #[test]
+    fn the_last_slot_goes_to_exactly_one_of_two_concurrent_mints() {
+        for limit in [4, MAX_IMAGE_SOURCES] {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let store = std::sync::Arc::new(
+                ImageSourceStore::new(temp.path().to_path_buf()).expect("store"),
+            );
+            for index in 0..limit - 1 {
+                store
+                    .mint_within(&format!("Source {index}"), limit)
+                    .expect("mint");
+            }
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let racers: Vec<_> = (0..2)
+                .map(|racer| {
+                    let store = std::sync::Arc::clone(&store);
+                    let barrier = std::sync::Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        store.mint_within(&format!("Racer {racer}"), limit).is_ok()
+                    })
+                })
+                .collect();
+            let wins = racers
+                .into_iter()
+                .map(|racer| racer.join().expect("racer"))
+                .filter(|won| *won)
+                .count();
+            assert_eq!(wins, 1, "limit {limit}");
+            assert_eq!(store.summaries(Utc::now()).len(), limit);
+        }
     }
 
     #[test]

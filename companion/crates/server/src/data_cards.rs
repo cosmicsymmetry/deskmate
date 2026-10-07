@@ -821,6 +821,20 @@ pub(crate) fn face_takes_taps(state: &ServerState, space: &AccountSpace, source_
     descriptor_for_source(state, space, source_id).is_some_and(|face| face.tap.is_some())
 }
 
+/// What the catalog says `kind` can use: `(views, selector)`. `None` when the
+/// catalog does not know the kind, and the caller keeps today's behaviour.
+pub(crate) fn face_capabilities(state: &ServerState, kind: &str) -> Option<(bool, bool)> {
+    state
+        .inner
+        .face_catalog
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .catalog()
+        .iter()
+        .find(|face| face.kind == kind)
+        .map(|face| (face.declares_views(), face.declares_selector()))
+}
+
 fn count_dropped_tap(space: &AccountSpace, source_id: &str, reason: &'static str) {
     let mut data_cards = space
         .data_cards
@@ -896,6 +910,13 @@ fn select_staged_view(state: &ServerState, space: &AccountSpace, source_id: &str
     let Some((spec, face_state)) = found else {
         return false;
     };
+    // A face with no selector cannot answer from a staged view; asking would
+    // hold the shared selector worker while the package re-discovers every
+    // plugin folder (91 ms median, 191 ms worst on the VM, 2026-10-04) only to
+    // refuse. Go straight to the render fallback.
+    if face_capabilities(state, &spec.face.kind).is_some_and(|(_, selector)| !selector) {
+        return false;
+    }
     let faces = {
         state
             .inner
@@ -3427,5 +3448,146 @@ esac
             )
         );
         state.shutdown();
+    }
+
+    /// A faces package that logs each verb it is asked for, with one plugin
+    /// that declares neither views nor a selector and one built-in that
+    /// declares both. `FaceCommand` clears the environment, so the log and the
+    /// frame are baked into the script as absolute paths.
+    struct CapabilityServer {
+        state: ServerState,
+        space: Arc<AccountSpace>,
+        source_id: String,
+        directory: tempfile::TempDir,
+    }
+
+    impl CapabilityServer {
+        fn new(kind: &str) -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let directory = tempfile::tempdir().expect("verb log directory");
+            let log = directory.path().join("verbs.log");
+            let png = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake-face.png");
+            let script = directory.path().join("faces");
+            std::fs::write(
+                &script,
+                format!(
+                    r#"#!/bin/sh
+printf '%s\n' "$1" >> {log}
+case "$1" in
+describe) cat <<'JSON'
+[{{"kind":"plain-plugin","label":"Plain","fields":[],"tap":"Tap for another.","origin":"plugin","views":false,"selector":false}},
+ {{"kind":"headlines","label":"Headlines","fields":[],"tap":"Tap for more.","origin":"builtin","views":true,"selector":true}}]
+JSON
+;;
+render) cat >/dev/null; cat {png} ;;
+views) cat >/dev/null; printf '{{"views":["","page-1"]}}' ;;
+tap) cat >/dev/null; printf '{{"view":"page-1"}}' ;;
+esac
+"#,
+                    log = shell_word(&log),
+                    png = shell_word(&png),
+                ),
+            )
+            .expect("write the verb-logging package");
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
+                .expect("make it executable");
+
+            let state = ServerState::in_memory();
+            set_faces(&state, FaceCommand::program(script));
+            let space = test_space(&state);
+            let source = space.image_sources.mint(kind).expect("mint source");
+            create_face(&state, &space, &source.id, kind).expect("create face");
+            Self {
+                state,
+                space,
+                source_id: source.id,
+                directory,
+            }
+        }
+
+        /// Every verb except the catalog reads, which the server repeats on
+        /// its own schedule and which this test is not about.
+        fn verbs(&self) -> Vec<String> {
+            std::fs::read_to_string(self.directory.path().join("verbs.log"))
+                .unwrap_or_default()
+                .lines()
+                .filter(|verb| *verb != "describe")
+                .map(str::to_owned)
+                .collect()
+        }
+
+        async fn wait_for_verbs(&self, count: usize) -> Vec<String> {
+            poll_until(
+                || Some(self.verbs()).filter(|verbs| verbs.len() >= count),
+                || format!("fewer than {count} verbs: {:?}", self.verbs()),
+            )
+            .await
+        }
+
+        async fn tap(&self) {
+            let state = self.state.clone();
+            let space = Arc::clone(&self.space);
+            let source_id = self.source_id.clone();
+            tokio::task::spawn_blocking(move || tapped(&state, &space, &source_id))
+                .await
+                .expect("the tap task did not panic");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_plugin_without_views_starts_no_views_child() {
+        let server = CapabilityServer::new("plain-plugin");
+        server.wait_for_verbs(1).await;
+        // Give a views child the time it would take to be asked for.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(server.verbs(), ["render"]);
+        server.state.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_plugin_tap_skips_the_selector_and_falls_back_to_render() {
+        let server = CapabilityServer::new("plain-plugin");
+        server.wait_for_verbs(1).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        server.tap().await;
+        let verbs = server.wait_for_verbs(2).await;
+        assert_eq!(
+            verbs,
+            ["render", "render"],
+            "a tap renders without asking a selector"
+        );
+        server.state.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_builtin_still_stages_and_selects() {
+        let server = CapabilityServer::new("headlines");
+        server.wait_for_verbs(3).await;
+        // The third verb is logged when the staging render STARTS; tap only once
+        // its frame is stored, or a loaded host turns a staged hit into a render.
+        poll_until(
+            || {
+                server
+                    .space
+                    .image_sources
+                    .has_view_for_test(&server.source_id, "page-1")
+                    .then_some(())
+            },
+            || format!("page-1 was never staged: {:?}", server.verbs()),
+        )
+        .await;
+        assert_eq!(server.verbs(), ["render", "views", "render"]);
+        server.tap().await;
+        let verbs = server.wait_for_verbs(4).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(verbs[3], "tap");
+        assert_eq!(
+            server.verbs().len(),
+            4,
+            "a staged hit renders nothing: {:?}",
+            server.verbs()
+        );
+        server.state.shutdown();
     }
 }

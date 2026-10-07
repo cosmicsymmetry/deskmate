@@ -343,6 +343,22 @@ async fn stage_other_views(
     face_state: Arc<FaceStateStore>,
     spec: &DataCardSpec,
 ) {
+    // A face that declares no views has nothing to stage, and asking costs a
+    // whole child (with plugin discovery). An older catalog says nothing, and
+    // then the child runs exactly as before.
+    // The lookup may re-read the catalog, which starts a child, so it runs off
+    // the executor like every other faces call here.
+    let catalog_state = state.clone();
+    let kind = spec.face.kind.clone();
+    let capabilities = tokio::task::spawn_blocking(move || {
+        crate::data_cards::face_capabilities(&catalog_state, &kind)
+    })
+    .await
+    .ok()
+    .flatten();
+    if capabilities.is_some_and(|(views, _)| !views) {
+        return;
+    }
     let source_id = spec.source_id.clone();
     let stored = face_state.get(&source_id);
     let views_faces = faces.clone();

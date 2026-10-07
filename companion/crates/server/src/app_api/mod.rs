@@ -559,15 +559,15 @@ async fn save_config(
     let config = parse_draft(&payload)?;
     let maximum = state
         .entitlements()
-        .max_cards(&space.account_id)
-        .min(app_core::MAX_CONFIG_CARDS);
+        .policy(&space.account_id)
+        .effective_cards();
     if config.cards.len() > maximum {
         return Err(AppApiError::Validation {
             message: "the configuration is not valid".into(),
             issues: vec![ValidationIssue {
                 path: "cards".into(),
                 code: app_core::ValidationCode::TooMany,
-                message: format!("This account can have at most {maximum} cards."),
+                message: format!("This panel can have at most {maximum} cards."),
             }],
         });
     }

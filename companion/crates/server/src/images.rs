@@ -257,22 +257,20 @@ async fn mint_source(
     })?;
     let face_kind = request.face_kind.clone();
     let space = account_space(&state, &session).await?;
-    let maximum = state
+    // The account's limit is checked inside the store's lock, so two creates
+    // racing for the last slot cannot both pass. At the store's own ceiling the
+    // store answers with its existing refusal, so self-hosting keeps its contract.
+    let limit = state
         .entitlements()
-        .max_image_sources(&space.account_id)
-        .min(app_core::config::MAX_IMAGE_SOURCES);
-    // Only a plan stricter than the store speaks for itself; at the store's own
-    // ceiling the store answers, so self-hosting keeps its existing contract.
-    if maximum < app_core::config::MAX_IMAGE_SOURCES
-        && space.image_sources.summaries(chrono::Utc::now()).len() >= maximum
-    {
-        return Err(ImageRouteError::EntitlementCapacity { maximum });
-    }
+        .policy(&space.account_id)
+        .effective_image_sources();
     let mint_space = Arc::clone(&space);
-    let minted = tokio::task::spawn_blocking(move || mint_space.image_sources.mint(&request.name))
-        .await
-        .map_err(|_| ImageRouteError::WorkerFailed)?
-        .map_err(|error| map_mint_error(&error))?;
+    let minted = tokio::task::spawn_blocking(move || {
+        mint_space.image_sources.mint_within(&request.name, limit)
+    })
+    .await
+    .map_err(|_| ImageRouteError::WorkerFailed)?
+    .map_err(|error| map_mint_error(&error))?;
 
     // A server-drawn face is attached in the same request. If attaching fails the
     // source is revoked rather than left behind: a half-made source shows up in
@@ -431,6 +429,9 @@ fn map_ingest_error(error: ImageIngestError) -> ImageRouteError {
 fn map_mint_error(error: &ImageSourceError) -> ImageRouteError {
     match error {
         ImageSourceError::Capacity => ImageRouteError::Capacity,
+        ImageSourceError::PolicyCapacity { maximum } => {
+            ImageRouteError::EntitlementCapacity { maximum: *maximum }
+        }
         // None of these can reach a mint; they are folded in so the match
         // stays exhaustive without a wildcard that would hide a new variant.
         ImageSourceError::Io { .. }
@@ -446,6 +447,7 @@ fn map_revoke_error(error: &ImageSourceError) -> ImageRouteError {
         ImageSourceError::UnknownToken => ImageRouteError::NotFound,
         ImageSourceError::Io { .. }
         | ImageSourceError::Capacity
+        | ImageSourceError::PolicyCapacity { .. }
         | ImageSourceError::TooSoon
         | ImageSourceError::InvalidView
         | ImageSourceError::StagingCapacity => ImageRouteError::Internal,
@@ -462,6 +464,7 @@ fn map_accept_error(error: &ImageSourceError) -> ImageRouteError {
         // capacity limit can come from one.
         ImageSourceError::Io { .. }
         | ImageSourceError::Capacity
+        | ImageSourceError::PolicyCapacity { .. }
         | ImageSourceError::InvalidView
         | ImageSourceError::StagingCapacity => ImageRouteError::Internal,
     }

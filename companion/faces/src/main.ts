@@ -35,22 +35,31 @@ const EXIT_TRANSIENT = 1;
 
 export function describeCatalog(faces: readonly FaceDefinition[] = FACES): string {
   return JSON.stringify(
-    faces.map(({ kind, label, fields, tap, refreshSeconds, withdrawn }) => ({
-      kind,
-      label,
-      fields,
-      ...(withdrawn === undefined ? {} : { withdrawn }),
-      ...(tap === undefined ? {} : { tap }),
-      // snake_case on the wire, deliberately: this JSON is read by
-      // `crates/server/src/data_cards/faces_package.rs`'s `CatalogFace`, which has no
-      // `#[serde(rename)]` and no `deny_unknown_fields` -- a camelCase key here is
-      // silently ignored, not refused, and the field quietly deserializes to `None`.
-      // `kind`/`label`/`fields`/`tap` are single words so this was invisible until a
-      // compound-word field arrived. `FaceDefinition.refreshSeconds` and the
-      // manifest's own `refreshSeconds` (author-facing) are unaffected -- only this
-      // wire-facing key changes shape.
-      ...(refreshSeconds === undefined ? {} : { refresh_seconds: refreshSeconds }),
-    })),
+    faces.map((face) => {
+      const { kind, label, fields, tap, refreshSeconds, withdrawn } = face;
+      return {
+        kind,
+        label,
+        fields,
+        ...(withdrawn === undefined ? {} : { withdrawn }),
+        ...(tap === undefined ? {} : { tap }),
+        // snake_case on the wire, deliberately: this JSON is read by
+        // `crates/server/src/data_cards/faces_package.rs`'s `CatalogFace`, which has no
+        // `#[serde(rename)]` and no `deny_unknown_fields` -- a camelCase key here is
+        // silently ignored, not refused, and the field quietly deserializes to `None`.
+        // `kind`/`label`/`fields`/`tap` are single words so this was invisible until a
+        // compound-word field arrived. `FaceDefinition.refreshSeconds` and the
+        // manifest's own `refreshSeconds` (author-facing) are unaffected -- only this
+        // wire-facing key changes shape.
+        ...(refreshSeconds === undefined ? {} : { refresh_seconds: refreshSeconds }),
+        // What the server may skip. A built-in is recognised by identity, not by
+        // kind, so a plugin folder named like a built-in cannot claim to be one.
+        // A withdrawn tombstone can do nothing, so it declares nothing.
+        origin: faceOfKind(kind) === face ? "builtin" : "plugin",
+        views: withdrawn === undefined && face.views !== undefined,
+        selector: withdrawn === undefined && face.onTap !== undefined,
+      };
+    }),
     null,
     2,
   );

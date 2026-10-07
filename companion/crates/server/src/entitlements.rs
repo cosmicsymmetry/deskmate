@@ -11,30 +11,81 @@ pub enum Edition {
     Hosted,
 }
 
+/// What one account may hold, as one immutable snapshot. Read it at the
+/// moment of admission; never cache it across a lock release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccountPolicy {
+    /// `None` means the edition sets no panel limit.
+    pub max_panels: Option<usize>,
+    /// Per PANEL, not per account: each panel's config holds its own cards.
+    pub max_cards: usize,
+    pub max_image_sources: usize,
+}
+
+impl AccountPolicy {
+    /// The public build's policy: no commercial cap below the structure.
+    pub const SELF_HOSTED: Self = Self {
+        max_panels: None,
+        max_cards: MAX_CONFIG_CARDS,
+        max_image_sources: MAX_IMAGE_SOURCES,
+    };
+
+    #[must_use]
+    pub fn effective_cards(&self) -> usize {
+        self.max_cards.min(MAX_CONFIG_CARDS)
+    }
+
+    #[must_use]
+    pub fn effective_image_sources(&self) -> usize {
+        self.max_image_sources.min(MAX_IMAGE_SOURCES)
+    }
+}
+
 pub trait Entitlements: Send + Sync + 'static {
-    fn max_cards(&self, account: &AccountId) -> usize;
-    fn max_image_sources(&self, account: &AccountId) -> usize;
-    fn max_panels(&self, account: &AccountId) -> Option<usize>;
-    fn feature_enabled(&self, account: &AccountId, feature: &str) -> bool;
+    fn policy(&self, account: &AccountId) -> AccountPolicy;
 }
 
 #[derive(Debug, Default)]
 pub struct SelfHosted;
 
 impl Entitlements for SelfHosted {
-    fn max_cards(&self, _account: &AccountId) -> usize {
-        MAX_CONFIG_CARDS
+    fn policy(&self, _account: &AccountId) -> AccountPolicy {
+        AccountPolicy::SELF_HOSTED
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn self_hosted_is_exactly_the_structural_ceiling() {
+        let account = AccountId("acct-self-host-test".to_owned());
+        assert_eq!(
+            SelfHosted.policy(&account),
+            AccountPolicy {
+                max_panels: None,
+                max_cards: MAX_CONFIG_CARDS,
+                max_image_sources: MAX_IMAGE_SOURCES,
+            }
+        );
     }
 
-    fn max_image_sources(&self, _account: &AccountId) -> usize {
-        MAX_IMAGE_SOURCES
-    }
-
-    fn max_panels(&self, _account: &AccountId) -> Option<usize> {
-        None
-    }
-
-    fn feature_enabled(&self, _account: &AccountId, _feature: &str) -> bool {
-        true
+    #[test]
+    fn a_policy_above_the_structure_is_clamped_to_it() {
+        let generous = AccountPolicy {
+            max_panels: Some(100),
+            max_cards: 99,
+            max_image_sources: 99,
+        };
+        assert_eq!(generous.effective_cards(), MAX_CONFIG_CARDS);
+        assert_eq!(generous.effective_image_sources(), MAX_IMAGE_SOURCES);
+        let strict = AccountPolicy {
+            max_cards: 2,
+            max_image_sources: 4,
+            ..generous
+        };
+        assert_eq!(strict.effective_cards(), 2);
+        assert_eq!(strict.effective_image_sources(), 4);
     }
 }

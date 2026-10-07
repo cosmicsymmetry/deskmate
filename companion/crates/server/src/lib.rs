@@ -32,7 +32,7 @@ mod device_link;
 // The SSRF egress guard for OAuth token POSTs.
 mod egress;
 mod entitlements;
-pub use entitlements::{Edition, Entitlements, SelfHosted};
+pub use entitlements::{AccountPolicy, Edition, Entitlements, SelfHosted};
 pub use web_auth::TrustedProxies;
 pub mod firmware;
 #[doc(hidden)]

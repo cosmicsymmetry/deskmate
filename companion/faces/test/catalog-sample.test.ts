@@ -27,6 +27,8 @@ const SAMPLE_FACES: FaceDefinition[] = [
     fields: [{ type: "text", key: "user", label: "Username", placeholder: "octocat" }],
     tap: "Tap for detail.",
     refreshSeconds: 300,
+    views: () => ["", "detail"],
+    onTap: () => ({ view: "detail" }),
     render: async () => SQUARE_SVG,
   },
   {
@@ -55,4 +57,35 @@ test("no declared cadence is an absent key, never an explicit null", () => {
   const b = catalog[1] as Record<string, unknown>;
   expect("refresh_seconds" in b).toBe(false);
   expect(JSON.stringify(b)).not.toContain("refresh_seconds");
+});
+
+test("describe states origin, views and selector for every face", () => {
+  const [a, b] = JSON.parse(describeCatalog(SAMPLE_FACES));
+  expect([a.origin, a.views, a.selector]).toEqual(["plugin", true, true]);
+  expect([b.origin, b.views, b.selector]).toEqual(["plugin", false, false]);
+  const builtins = JSON.parse(describeCatalog()) as {
+    origin: string;
+    views: boolean;
+    selector: boolean;
+  }[];
+  expect(builtins.map((face) => [face.origin, face.views, face.selector])).toEqual(
+    builtins.map(() => ["builtin", true, true]),
+  );
+});
+
+test("a withdrawn tombstone declares no views and no selector", () => {
+  const [tomb] = JSON.parse(
+    describeCatalog([
+      {
+        kind: "gone",
+        label: "gone",
+        fields: [],
+        withdrawn: "withdrawn by the operator",
+        views: () => [""],
+        onTap: () => ({ view: "" }),
+        render: async () => SQUARE_SVG,
+      },
+    ]),
+  );
+  expect([tomb.origin, tomb.views, tomb.selector]).toEqual(["plugin", false, false]);
 });

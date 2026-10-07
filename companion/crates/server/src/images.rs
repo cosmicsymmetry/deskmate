@@ -259,8 +259,8 @@ async fn mint_source(
     let space = account_space(&state, &session).await?;
     let maximum = state
         .entitlements()
-        .max_image_sources(&space.account_id)
-        .min(app_core::config::MAX_IMAGE_SOURCES);
+        .policy(&space.account_id)
+        .effective_image_sources();
     // Only a plan stricter than the store speaks for itself; at the store's own
     // ceiling the store answers, so self-hosting keeps its existing contract.
     if maximum < app_core::config::MAX_IMAGE_SOURCES

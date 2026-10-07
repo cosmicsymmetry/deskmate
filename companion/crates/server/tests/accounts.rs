@@ -219,20 +219,11 @@ async fn expect_socket_closed(socket: &mut support::DeviceSocket) {
 struct OnePanel;
 
 impl Entitlements for OnePanel {
-    fn max_cards(&self, _account: &server::identity::AccountId) -> usize {
-        app_core::MAX_CONFIG_CARDS
-    }
-
-    fn max_image_sources(&self, _account: &server::identity::AccountId) -> usize {
-        app_core::config::MAX_IMAGE_SOURCES
-    }
-
-    fn max_panels(&self, _account: &server::identity::AccountId) -> Option<usize> {
-        Some(1)
-    }
-
-    fn feature_enabled(&self, _account: &server::identity::AccountId, _feature: &str) -> bool {
-        true
+    fn policy(&self, _account: &server::identity::AccountId) -> server::AccountPolicy {
+        server::AccountPolicy {
+            max_panels: Some(1),
+            ..server::AccountPolicy::SELF_HOSTED
+        }
     }
 }
 

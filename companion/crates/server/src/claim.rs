@@ -91,7 +91,8 @@ async fn claim_device(
             let owned = claim_state.identity().devices_for(&account_id)?;
             if claim_state
                 .entitlements()
-                .max_panels(&account_id)
+                .policy(&account_id)
+                .max_panels
                 .is_some_and(|limit| owned.len() >= limit)
             {
                 return Err(ClaimError::Conflict(

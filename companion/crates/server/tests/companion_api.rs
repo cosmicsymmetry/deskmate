@@ -1438,3 +1438,43 @@ async fn a_picture_cards_preview_is_the_frame_its_source_last_drew() {
     );
     assert!(frame["state"].is_null());
 }
+
+#[derive(Debug)]
+struct OneCard;
+
+impl server::Entitlements for OneCard {
+    fn policy(&self, _account: &server::identity::AccountId) -> server::AccountPolicy {
+        server::AccountPolicy {
+            max_cards: 1,
+            ..server::AccountPolicy::SELF_HOSTED
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_panel_over_its_card_limit_is_refused_per_panel() {
+    let state = ServerState::in_memory_with_options(server::ServerOptions {
+        entitlements: std::sync::Arc::new(OneCard),
+        ..server::ServerOptions::default()
+    });
+    support::owner_account(&state);
+    let server = spawn_with(state, None).await;
+    let client = Client::new();
+    let device = mint_device(&client, &server).await;
+
+    let mut config = snapshot(&client, &server, &device.device_id).await["config"].clone();
+    let cards = config["cards"].as_array_mut().expect("cards");
+    cards.truncate(1);
+    let mut second = cards[0].clone();
+    second["id"] = serde_json::json!("second-card");
+    cards.push(second);
+
+    let response = save_config(&client, &server, &device.device_id, &config).await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = json_body(response).await;
+    assert_eq!(body["issues"][0]["path"], "cards", "{body}");
+    assert_eq!(
+        body["issues"][0]["message"],
+        "This panel can have at most 1 cards."
+    );
+}

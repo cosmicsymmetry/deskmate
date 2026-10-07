@@ -201,6 +201,9 @@ impl ImageSourceStore {
 
     /// Mints a source id and a random 32-byte bearer token. The token's digest
     /// is committed before the one plaintext copy is returned.
+    /// The store's own ceiling and nothing lower; production goes through
+    /// [`ImageSourceStore::mint_within`] with the account's policy.
+    #[cfg(test)]
     pub(crate) fn mint(&self, name: &str) -> Result<MintedSource, ImageSourceError> {
         self.mint_within(name, MAX_IMAGE_SOURCES)
     }

@@ -137,6 +137,46 @@ pub(crate) struct CatalogFace {
     /// has never heard of still parses.
     #[serde(default)]
     pub(crate) refresh_seconds: Option<u64>,
+    /// Built into the package or a plugin folder. Absent from an older package,
+    /// and an unknown value reads as absent rather than dropping the catalog.
+    #[serde(default, deserialize_with = "lenient_origin")]
+    pub(crate) origin: Option<FaceOrigin>,
+    /// Whether the face offers views worth staging. Read through
+    /// [`CatalogFace::declares_views`]; absent means "true".
+    #[serde(default)]
+    pub(crate) views: Option<bool>,
+    /// Whether the face answers a tap without rendering. Read through
+    /// [`CatalogFace::declares_selector`]; absent means "true".
+    #[serde(default)]
+    pub(crate) selector: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum FaceOrigin {
+    Builtin,
+    Plugin,
+}
+
+fn lenient_origin<'de, D>(deserializer: D) -> Result<Option<FaceOrigin>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
+}
+
+impl CatalogFace {
+    /// Absent means "true": an older package that predates the key keeps
+    /// today's dispatch, which always started a views child.
+    pub(crate) fn declares_views(&self) -> bool {
+        self.views.unwrap_or(true)
+    }
+
+    /// Absent means "true", for the same reason, for the selector exchange.
+    pub(crate) fn declares_selector(&self) -> bool {
+        self.selector.unwrap_or(true)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -672,6 +712,27 @@ mod tests {
     }
 
     #[test]
+    fn an_older_catalog_without_capability_keys_keeps_every_child() {
+        let faces: Vec<CatalogFace> =
+            serde_json::from_str(r#"[{"kind":"weather","label":"Weather","fields":[]}]"#)
+                .expect("an older catalog still parses");
+        assert!(faces[0].declares_views());
+        assert!(faces[0].declares_selector());
+        assert_eq!(faces[0].origin, None);
+    }
+
+    #[test]
+    fn an_unknown_origin_does_not_drop_the_catalog() {
+        let faces: Vec<CatalogFace> = serde_json::from_str(
+            r#"[{"kind":"x","label":"X","fields":[],"origin":"partner","views":false,"selector":false}]"#,
+        )
+        .expect("a future origin value still parses");
+        assert_eq!(faces[0].origin, None);
+        assert!(!faces[0].declares_views());
+        assert!(!faces[0].declares_selector());
+    }
+
+    #[test]
     fn the_catalog_sample_committed_by_the_faces_package_still_deserializes() {
         // companion/faces/test/catalog-sample.json is real describeCatalog() output,
         // and companion/faces/test/catalog-sample.test.ts pins it against the
@@ -704,10 +765,13 @@ mod tests {
             .expect("sample-a is in the committed sample");
         assert_eq!(sample_a.refresh_seconds, Some(300));
         assert!(sample_a.tap.is_some(), "sample-a declares a tap");
+        assert_eq!(sample_a.origin, Some(FaceOrigin::Plugin));
+        assert!(sample_a.declares_views() && sample_a.declares_selector());
         let sample_b = faces
             .iter()
             .find(|face| face.kind == "sample-b")
             .expect("sample-b is in the committed sample");
+        assert!(!sample_b.declares_views() && !sample_b.declares_selector());
         assert_eq!(sample_b.refresh_seconds, None);
     }
 

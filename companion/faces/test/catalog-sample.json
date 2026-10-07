@@ -11,11 +11,17 @@
       }
     ],
     "tap": "Tap for detail.",
-    "refresh_seconds": 300
+    "refresh_seconds": 300,
+    "origin": "plugin",
+    "views": true,
+    "selector": true
   },
   {
     "kind": "sample-b",
     "label": "Sample B",
-    "fields": []
+    "fields": [],
+    "origin": "plugin",
+    "views": false,
+    "selector": false
   }
 ]

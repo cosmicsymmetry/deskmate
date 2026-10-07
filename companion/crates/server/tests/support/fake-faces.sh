@@ -19,7 +19,7 @@ describe)
   {"kind": "token", "label": "Token price", "fields": [
     {"type": "text", "key": "coin_id", "label": "Coin ID", "placeholder": "solana"},
     {"type": "text", "key": "currency", "label": "Currency", "placeholder": "usd", "default": "usd"}]},
-  {"kind": "headlines", "label": "Headlines", "tap": "Tap the panel for the next stories.", "fields": [
+  {"kind": "headlines", "label": "Headlines", "tap": "Tap the panel for the next stories.", "origin": "builtin", "views": true, "selector": true, "fields": [
     {"type": "enum", "key": "list", "label": "Stories", "default": "top", "options": [
       {"value": "top", "label": "Front page"}, {"value": "new", "label": "Newest"}]}]}
 ]

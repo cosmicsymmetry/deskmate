@@ -49,15 +49,26 @@ one or the other:
   how many requests it actually made. The `github-stats` example below is tested
   exactly that way in `companion/faces/test/plugins/discovery.test.ts`.
 
-Everything that crosses the boundary between your code and the host -- `plan`'s
-return value, `render`'s return value, a thrown error -- is serialized with
-`JSON.stringify` and read back with `JSON.parse`
-(`companion/faces/src/plugins/sandbox.ts:120-197`). Nothing that cannot survive that
-round trip reaches the host: a function, a `Symbol` or a `BigInt` anywhere in your
-return value is refused by name as a configuration error, and a `Uint8Array` --
-including one you built yourself to hold PNG bytes -- serializes to an object of
-numeric string keys, not to anything the host recognizes as an image. Wherever this
-document says "bytes", it means a base64 string.
+Return values cross the boundary as JSON: the host captures `JSON.stringify` before
+your code runs, serializes the result once inside the sandbox, and reads it with
+`JSON.parse` (`companion/faces/src/plugins/sandbox.ts`). A top-level function,
+`Symbol` or `BigInt` is refused by name as a configuration error. Nested values follow
+JSON's rules: function and symbol properties disappear from objects and become
+`null` in arrays; nested `BigInt` and circular references throw during serialization.
+Return plain JSON data rather than relying on those conversions. A `Uint8Array`
+serializes to numeric string keys, not an image; wherever this document says
+"bytes", it means a base64 string. Thrown errors use a separate normalization path
+that preserves their message and `configuration` flag.
+
+### Licence
+
+**The project's position is that GPL-3.0 does not reach a plugin.** A plugin links
+against nothing of ours: it imports nothing, the sandbox hands it no API to call, and
+everything it exchanges with the host is JSON data. The host interprets it; it is not a
+derivative work of the host. A plugin you write is yours to license as you choose, and
+running one on your own server or ours places no licence obligation on it. A plugin
+*submitted to this repository* is distributed inside it, so see
+[Submitting a plugin](submitting.md#open-the-pull-request) for which licence it carries.
 
 ## The worked example: `github-stats`
 
@@ -73,7 +84,7 @@ the credential was not configured.
 {
   "api": 1,
   "id": "github-stats",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "label": "GitHub stats",
   "description": "Public repos, followers and following for a GitHub username.",
   "author": "Deskmate",
@@ -122,7 +133,7 @@ export function plan(context) {
       as: "json",
       headers: {
         Accept: "application/vnd.github+json",
-        Authorization: "Bearer {{secret:github_token}}",
+        Authorization: "{{secret:github_token}}",
       },
     },
   ];
@@ -185,15 +196,16 @@ Two things worth noticing that are not obvious from the shape alone:
 
 - `plan` and `render` are called defensively (`(context && context.settings) || {}`)
   because discovery calls `plan` once against an **empty** context (`{}`) just to
-  confirm the file parses and exports both functions
+  confirm the file parses and `plan` can run
   (`companion/faces/src/plugins/discovery.ts:61-67`). A plugin that assumes
   `context.settings` always exists throws at discovery and is skipped from the
-  catalog, not merely at render time.
+  catalog, not merely at render time. A missing `render` is refused when rendering;
+  `plugin:check` exercises both discovery and rendering.
 - The `Authorization` header is written even when no `github_token` secret is
   configured. An unconfigured secret leaves `{{secret:github_token}}` as literal text
-  in the header, which GitHub answers as an ordinary request (public data,
-  rate-limited, no error) -- `render`'s `--` fallback is what makes that harmless
-  rather than a crash. A plugin cannot ask "is my secret configured?" from inside
+  in the header. This is not a credential-free request and does not promise access
+  to public data. The example renders `--` when the reply lacks the expected numeric
+  fields. A plugin cannot ask "is my secret configured?" from inside
   `plan` or `render`; design for the answer being absent.
 
 ## The manifest, field by field
@@ -229,9 +241,13 @@ reads without opening `index.js`. Parsed and validated in
 | `label` | What the settings window shows the owner. |
 | `kind` | Must be `"api_key"` -- the only kind this contract defines. |
 | `host` | Must be one of the manifest's own `hosts`. A secret naming a host the manifest did not declare is refused at load. |
-| `send_as` | `"bearer"` (an `Authorization: Bearer <value>` header), `"header"` (paired with `header`, an arbitrary header name), or `"query"` (paired with `param`, a query-parameter name). |
-| `header` | Only legal with `send_as: "header"`. Naming it with `send_as: "query"` is refused. |
-| `param` | Only legal with `send_as: "query"`. Naming it with any other `send_as` is refused. |
+| `send_as` | `"bearer"` substitutes `Bearer <value>` for a placeholder in a header; `"header"` substitutes the raw value in a header; `"query"` substitutes the raw value in a query parameter. The plugin supplies the header/parameter itself. |
+| `header` | Optional name restriction for `send_as: "header"` or `"bearer"`, compared case-insensitively. Omitted permits substitution in any supplied header. Naming it with `send_as: "query"` is refused. |
+| `param` | Optional, case-sensitive name restriction for `send_as: "query"`. Omitted permits substitution in any supplied query parameter. Naming it with any other `send_as` is refused. |
+
+For `send_as: "bearer"`, write `Authorization: "{{secret:github_token}}"`, without
+your own `Bearer` prefix. GitHub stats 1.0.1 corrects the duplicated prefix that
+1.0.0 sent with a stored token.
 
 **A plugin that declares a secret may declare only the hosts that secret's own
 manifest entries belong to.** If any secret is present, every host in `hosts` must be
@@ -243,7 +259,7 @@ credential from the manifest alone: if `github-stats` could also declare
 `evil.example` as a host, a reviewer would have to read `index.js` to know whether the
 GitHub token ever leaves `api.github.com`.
 
-A plugin with no `secrets` entry has no such restriction and may declare any number of
+A plugin with `secrets: []` has no such restriction and may declare any number of
 hosts.
 
 ## What `plan` may return
@@ -302,15 +318,20 @@ GitHub calls per render instead of one, with nothing failing to reveal it.
 The request count (8), byte budget (4 MB) and measurement count (64) are **spent
 across all three rounds, not reset per round** -- a plugin that uses 5 requests on
 round one has 3 left for round two and round three combined
-(`companion/faces/src/plugins/run.ts:79-90, 187-231`). Requesting more than what
-remains of the budget on any round is a configuration error naming the limit, not a
-silent truncation.
+(`companion/faces/src/plugins/run.ts`). Declaring more requests or measurements than
+remain is a configuration error. Once the response-byte budget is spent, later
+network requests are skipped with `{ ok: false, error }` and a host notice;
+measurements still run. A body already being read may cross the remaining budget,
+and a transport failure mid-body cannot report its consumed bytes. The independent
+eight-request and per-response caps still apply.
 
-A network failure -- a timeout, a non-2xx status, a name that does not resolve --
-never fails the whole render; it becomes `{ ok: false, status?, error }` in that
-request's own answer, and `render` decides what that means for the card. Only a
-violation of the contract itself (an undeclared host, a malformed request shape, the
-budget exceeded) fails the render outright, because those cannot come good on a retry.
+A transport failure -- a timeout, a name that does not resolve, a refused address --
+becomes `{ ok: false, error }` for that request; `render` decides what it means for
+the card. **`ok` does not mean HTTP success.** Any completed response, including
+301, 404, 429 and 500, normally arrives as `{ ok: true, status, json?, text?, base64? }`.
+Check `status` as well as the payload; the host does not turn HTTP errors into failed
+answers. Credential-echo refusals can return `ok: false` with a status. Contract
+violations such as an undeclared host or malformed request fail the whole render.
 
 ## What `render` is handed, and what it returns
 
@@ -319,15 +340,15 @@ interface RenderContext {
   settings: Settings;      // what the owner typed into the fields you declared
   answers: Answer[];       // every answer from every round, in declaration order
   now: NowContext;         // see below
-  format: Format;          // an injected global, not an import -- see below
   state?: unknown;         // what this plugin returned as `state` last time
   event?: { taps: number; point: { x: number; y: number } | null };
 }
 ```
 
-`plan` receives the same shape minus `answers` (it has not run any requests yet on its
-first call), so `plan` can decide what to fetch from `state` and `event` alone -- a
-paging plugin answering a tap can fetch nothing at all.
+`plan` receives the same shape, with `answers: []` on its first render-time call
+and accumulated answers on later calls. Discovery's separate probe supplies `{}`.
+`format` is an injected binding, not a context property. A paging plugin can decide
+what to fetch from `state` and `event` alone and fetch nothing on a tap.
 
 ### `now`
 
@@ -352,7 +373,7 @@ the sandbox, with real `Intl` (`companion/faces/src/plugins/context.ts:16-66`), 
 handed in as plain data.
 
 The server forwards the owner's configured timezone on every render, including
-staged views and renders answering taps. Config v10 stores `preferences.timezone`
+staged views and renders answering taps. Config v11 stores `preferences.timezone`
 per device, but a source is one shared image per account: the first active device
 with a saved picture card using that source wins, ordered by device id. Before a
 source has a consuming card, the first active saved device config supplies the zone;
@@ -368,16 +389,16 @@ is promised. The ordinary 60-second to six-hour cadence bounds are unchanged.
 
 ### `format`
 
-An ordinary global, injected as source text ahead of your plugin's own code on every
-sandbox call (`FORMAT_SOURCE`, `companion/faces/src/plugins/context.ts:68-114`) --
-not something you import, and not available inside a string your plugin builds and
-`eval`s (there is no `eval` either).
+A script-level binding, injected as source text ahead of your plugin's own code on
+every sandbox call (`FORMAT_SOURCE`, `companion/faces/src/plugins/context.ts`) --
+not something you import or read from `context`. QuickJS's `eval` exists, but runs
+inside the same sandbox and grants no host imports, filesystem or networking.
 
 | Function | Behaviour |
 |---|---|
 | `format.number(value, decimals?)` | Thousands-grouped. `decimals` fixes the fractional digits; omitted, rounds to a whole number. `format.number(1234567)` -> `"1,234,567"`. |
-| `format.compact(value)` | `"1.2K"`, `"3.4M"`, `"5.6B"`, rounding to a whole number above 100 of a unit. Falls back to the next smaller unit if the compacted value would itself round to 1000+ of the larger one. |
-| `format.date(local, pattern)` | Token substitution against `now.local` (or any object with the same shape): `MMM` (short month name), `yyyy`, `HH`, `mm`, `dd` (zero-padded day), `d` (unpadded day). Each token is replaced **once**, via plain string `.replace`, not a global regex -- a pattern that repeats a token (`"dd/dd"`) only substitutes the first occurrence. There is no numeric-month token; use `local.month` directly if you need one. |
+| `format.compact(value)` | `"1.2K"`, `"3.4M"`, `"5.6B"`, rounding to a whole number at an absolute value of 100 or more of a unit. Promotes to the next larger available unit when rounding reaches 1000: `999999` becomes `"1M"`, not `"1000K"`. |
+| `format.date(local, pattern)` | Token substitution against `now.local` (or any object with the same shape), in order: `MMM` (short month name), `yyyy`, `HH`, `mm`, `dd` (zero-padded day), `d` (unpadded day). Each replacement affects only the first match; repeated tokens are unsupported and can be partially replaced (`"dd/dd"` on day 1 becomes `"01/1d"`). There is no numeric-month token; use `local.month` directly if you need one. |
 | `format.since(nowIso, thenIso)` | `"just now"` / `"12m ago"` / `"3h ago"` / `"2d ago"`, from two ISO instants. |
 
 ### `state` and `event`
@@ -464,7 +485,7 @@ Every failure a plugin can produce collapses to exactly one of two kinds
 
 | Kind | Meaning | Owner sees |
 |---|---|---|
-| **Configuration** | Deterministic: the same refusal happens again next minute. The owner must change something before a retry can help. | An alert in the settings window, under the face's fields (`face_status` on `GET /v1/images`), naming what to fix. Not retried early -- nothing changes until the owner edits a setting. |
+| **Configuration** | Deterministic: the owner or plugin author must change something before a retry can help. | An alert in the settings window, under the face's fields (`face_status` on `GET /v1/images`), naming what to fix. Retried at the ordinary refresh interval, without the early transient retry; a settings edit restarts the refresher. |
 | **Transient** | The world did not cooperate this time -- a timeout, a 5xx, a rate limit, an ordinary `throw new Error(...)`. Worth retrying. | A status line, not an alarm (*"Couldn't refresh: ... The display keeps the last frame and this retries on its own."*), per `docs/images/server-rendered-cards.md`'s "What the owner is told". Retried after a minute, doubling up to the refresh interval. |
 
 Either kind keeps the stored frame and stops it from being marked freshly refreshed.
@@ -488,12 +509,12 @@ deterministic without running your code again: an undeclared host, a plan that i
 an array, a request over budget, a card over a shape cap, a plugin missing `plan` or
 `render` entirely, or a source over the byte cap.
 
-One gap the design record names explicitly and this contract does not close: the host
-cannot tell "the layout engine choked on the CSS you handed it" apart from an internal
-bug in the layout engine itself, so a genuinely broken card layout is retried forever,
-silently, rather than surfaced to the owner as something you can fix. If your card
-never renders and nothing appears in the settings window, check your `style` values by
-hand -- this is the failure mode with no message.
+The host cannot distinguish a layout-engine exception caused by the plugin's CSS
+from an internal engine bug, so it classifies that exception as transient. The
+message reaches the window through the same retrying status as other transient
+failures, while the stored frame remains unchanged. Repeated failures do not
+automatically escalate to a separate "broken plugin" state. Inspect the checker
+report and the plugin's styles when the same exception persists.
 
 ## Behaviours that will surprise you
 
@@ -621,8 +642,10 @@ carries your plugin folder exactly as it carries a built-in face's own source fi
 no Rust build, no restart, and the catalog is re-read every 60 s, so the plugin
 appears in the add menu on its own once the deploy finishes. Submit new plugins and
 updates through the [PR submission and review process](submitting.md) before that
-operator-controlled release. This is a manual review workflow; the runtime has no
-separate registration step or machine-enforced approval record.
+operator-controlled release. Approval is manual, and deploy-time verification
+mechanically checks the folder against the reviewed release index. Runtime discovery
+has no separate registration service or checksum gate; it enforces the operator's
+withdrawal policy when discovering and rendering plugins.
 
 ## Not yet true, though the design record describes it
 

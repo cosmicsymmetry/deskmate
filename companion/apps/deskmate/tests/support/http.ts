@@ -3,9 +3,9 @@ import { afterEach, beforeEach, expect } from "bun:test";
 type HttpCall = { method: string; path: string; body: unknown };
 type Handler = (body: unknown, init: RequestInit | undefined) => Response | Promise<Response>;
 
-export function jsonResponse(value: unknown) {
+export function jsonResponse(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), {
-    status: 200,
+    status,
     headers: { "content-type": "application/json" },
   });
 }

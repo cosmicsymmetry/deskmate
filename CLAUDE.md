@@ -126,7 +126,7 @@ default. This section states only what is true now.
   was, and it kept three dead templates alive to have something to compare against.
 - **THE COMPANION IS A WEB APP, and there is no desktop app.** Every surface for a
   networked device is served by the server it configures, at
-  `https://deskmate.rodi.one/`. The browser API is `crates/server/src/app_api/`, gated by
+  `https://app.deskboy.sh/` (moved from `deskmate.rodi.one` on 2026-10-04). The browser API is `crates/server/src/app_api/`, gated by
   account sessions created through an email link, Google sign-in or the first-run setup
   code; the admin token is for CLI operations and account recovery only. Nothing in the
   tree is scaffolding for a desktop app: if one is wanted it is written from scratch, and it
@@ -149,8 +149,10 @@ default. This section states only what is true now.
     a built `dist/`, read per request, so a UI change is `bun run build` plus an rsync
     with no Rust build and no restart. That is the whole point; do not "simplify" it into
     the binary.
-- **Live deployment**: `deskmate.rodi.one` on the owner's homelab (docker-vm, reachable
-  over Tailscale), behind Cloudflare -> cloudflared -> Caddy, systemd unit in
+- **Live deployment**: `app.deskboy.sh` for browsers (`DESKMATE_PUBLIC_URL`) and
+  `deskmate.rodi.one` for `/v1/*` and `/feeds/*` (the panel's link, image push, OTA;
+  every other path there 308s to `app.deskboy.sh`), on the owner's homelab (docker-vm,
+  reachable over Tailscale), behind Cloudflare -> cloudflared -> Caddy, systemd unit in
   `companion/crates/server/deploy/`. Built for linux/x86_64 in a throwaway
   `rust:1.98-bookworm` container over an rsync'd `git archive HEAD` export -- never the
   working tree. **The export is `companion/` AND `firmware/` now**, because the server
@@ -303,12 +305,14 @@ Each of these cost this project real time at least once.
   using `toFixed` differs in the last digit of a few coordinates. Go through
   `kit/svg.ts`'s `fixed`, never `toFixed`, for anything that reaches the document. A
   deliberate design change is `bun run dump --update`, reviewed as a diff.
-- **A second save control beside "Save to server" silently discards what it guards.** The
-  server faces' fields once had their own small "Save source settings" button. Type a coin,
-  press the prominent save, and the coin was gone: the face stayed blank, was never
-  fetched, the panel said "Waiting for the first picture" and the window said "Saved to
-  the server". Face fields now save themselves (blur, Enter, at once for a choice). **Do
-  not add a control whose unsaved state the window's one save ignores.**
+- **Unsaved state in the window strands things on the server, so the window saves
+  itself (2026-10-07, owner).** Twice an edit that looked done was not: a face's own
+  "Save source settings" button discarded a coin when the main save was pressed, and a
+  card removed but never saved kept its picture source, so the eight-source ceiling later
+  refused a new card for no visible reason. The draft now saves 600 ms after the last
+  valid edit (`AUTOSAVE_DELAY_MS` in `App.tsx`); the save bar shows status and offers
+  only "Try again" after a failure. Face fields save themselves too. **Do not add a
+  control whose state waits for a button.**
 - **A face that cannot draw must say so in the window, because the panel cannot.** The
   device has three states for a picture card -- waiting, stale, drawn -- and none of them
   is "your coin was not found" or "the API said 429". `face_status` on `GET /v1/images`

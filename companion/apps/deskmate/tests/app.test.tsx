@@ -4,12 +4,19 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { App } from "../src/App";
 
-import type { AppConfig, AppSnapshot, NetworkSettings, ValidationIssue } from "../src/lib/types";
+import type {
+  AppConfig,
+  AppSnapshot,
+  DraftValidation,
+  NetworkSettings,
+  ValidationIssue,
+} from "../src/lib/types";
 import { apiContractFixtures } from "../src/lib/types.contract";
 
 import { backendModule, backendMocks, resetBackendMocks } from "./support/backendMock";
-import { snapshot, clockCard, pomodoroCard, cardListConfig } from "./support/fixtures";
+import { snapshot, clockCard, pictureCard, pomodoroCard, cardListConfig } from "./support/fixtures";
 import { installDomLifecycle, waitFor, buttonWithText } from "./support/dom";
+import { installWindowClock } from "./support/clock";
 import {
   installHttpLifecycle,
   httpState,
@@ -23,6 +30,10 @@ import {
 beforeEach(resetBackendMocks);
 const { mount, cleanupMountedRoots } = installDomLifecycle();
 installHttpLifecycle(cleanupMountedRoots);
+const clock = installWindowClock(cleanupMountedRoots);
+const VALIDATION_DELAY_MS = 180;
+const AUTOSAVE_DELAY_MS = 600;
+const SAVE_SETTLE_MS = VALIDATION_DELAY_MS + AUTOSAVE_DELAY_MS;
 afterEach(resetBackendMocks);
 
 const previewFrame = { png_base64: "cHJldmlldw==", sample: false, state: null };
@@ -33,6 +44,231 @@ test("renders a non-blocking loading state before the first backend snapshot", (
   expect(html).toContain("Waking the display");
   // The server owns display updates, so closing the page does not interrupt them.
   expect(html).toContain("whether or not this page is open");
+});
+
+function recordSaves(config = cardListConfig([clockCard("clock")])) {
+  let liveSnapshot: AppSnapshot = {
+    ...structuredClone(snapshot),
+    config,
+    has_saved_config: true,
+    pomodoros: [],
+    card_data: [],
+    card_errors: [],
+  };
+  const saved: AppConfig[] = [];
+  backendMocks.snapshotImpl = async () => liveSnapshot;
+  backendMocks.previewImpl = async () => emptyPreviewFrame;
+  backendMocks.saveConfigImpl = async (next) => {
+    saved.push(next);
+    liveSnapshot = { ...liveSnapshot, config: next };
+    return { save: { generation: saved.length, warning: null } };
+  };
+  return saved;
+}
+
+test("removing a picture automatically saves the card and source removal without a save click", async () => {
+  const saved = recordSaves(cardListConfig([clockCard("clock"), pictureCard()]));
+  const { container } = await mount(<App />);
+  await clock.advance(SAVE_SETTLE_MS * 2);
+  expect(saved).toHaveLength(0);
+  expect(container.textContent).toContain("Everything is saved");
+  expect(buttonWithText(container, "Save to server")).toBeUndefined();
+  expect(buttonWithText(container, "Try again")).toBeUndefined();
+
+  const remove = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Remove Picture — Claude limits"]',
+  );
+  expect(remove).not.toBeNull();
+  await act(async () => remove?.click());
+  expect(container.querySelectorAll(".card-tile__body")).toHaveLength(1);
+  await clock.advance(VALIDATION_DELAY_MS);
+  expect(container.textContent).toContain("Saving shortly…");
+  await clock.advance(AUTOSAVE_DELAY_MS - 1);
+  expect(saved).toHaveLength(0);
+  await clock.advance(1);
+  expect(saved).toHaveLength(1);
+  expect(saved[0].cards.map((card) => card.id)).toEqual(["clock"]);
+  expect(saved[0].image_sources).toEqual([]);
+  expect(container.textContent).toContain(
+    "Saved to the server. The server will update your display.",
+  );
+  await clock.advance(SAVE_SETTLE_MS * 2);
+  expect(saved).toHaveLength(1);
+});
+
+test("a burst of edits within the delay sends exactly one save containing the latest draft", async () => {
+  const saved = recordSaves();
+  const { container } = await mount(<App />);
+  await act(async () => buttonWithText(container, "Manual")?.click());
+  await clock.advance(250);
+  expect(saved).toHaveLength(0);
+  await act(async () => buttonWithText(container, "Timed")?.click());
+  await clock.advance(250);
+  expect(saved).toHaveLength(0);
+  const seconds = container.querySelector<HTMLInputElement>('input[type="checkbox"]');
+  expect(seconds?.checked).toBe(true);
+  await act(async () => seconds?.click());
+  await clock.advance(SAVE_SETTLE_MS - 1);
+  expect(saved).toHaveLength(0);
+  await clock.advance(1);
+  expect(saved).toHaveLength(1);
+  expect(saved[0].advance.kind).toBe("timed");
+  expect(saved[0].cards[0]).toMatchObject({ id: "clock", show_seconds: false });
+  await clock.advance(SAVE_SETTLE_MS * 2);
+  expect(saved).toHaveLength(1);
+});
+
+test("an invalid draft is never auto-saved and can save after its issue is corrected", async () => {
+  const saved = recordSaves();
+  backendMocks.validateImpl = async (config) =>
+    config.preferences.timezone === "Invalid/Timezone"
+      ? {
+          valid: false,
+          issues: [
+            {
+              path: "preferences.timezone",
+              code: "invalid-timezone",
+              message: "Unknown timezone.",
+            },
+          ],
+        }
+      : { valid: true, issues: [] };
+  const { container } = await mount(<App />);
+  await clock.advance(VALIDATION_DELAY_MS);
+  await act(async () => container.querySelector<HTMLButtonElement>(".topbar__settings")?.click());
+  const timezone = container.querySelector<HTMLInputElement>('input[list="common-timezones"]');
+  expect(timezone).not.toBeNull();
+  const changeTimezone = async (value: string) =>
+    act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(
+        timezone,
+        value,
+      );
+      timezone?.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  await changeTimezone("Invalid/Timezone");
+  await clock.advance(SAVE_SETTLE_MS * 3);
+  expect(saved).toHaveLength(0);
+  expect(timezone?.value).toBe("Invalid/Timezone");
+  expect(container.textContent).toContain("Unknown timezone.");
+  expect(container.textContent).toContain("Fix 1 highlighted issue before saving.");
+  expect(buttonWithText(container, "Try again")).toBeUndefined();
+  await changeTimezone("Europe/Berlin");
+  await clock.advance(SAVE_SETTLE_MS);
+  expect(saved).toHaveLength(1);
+  expect(saved[0].preferences.timezone).toBe("Europe/Berlin");
+});
+
+for (const outcome of ["valid", "invalid", "unavailable"] as const) {
+  test(`an edit just before autosave waits for its own validation (${outcome})`, async () => {
+    const saved = recordSaves();
+    const validation = Promise.withResolvers<DraftValidation>();
+    const { container } = await mount(<App />);
+    await act(async () => buttonWithText(container, "Manual")?.click());
+    await clock.advance(VALIDATION_DELAY_MS + AUTOSAVE_DELAY_MS - 1);
+    expect(container.textContent).toContain("Saving shortly…");
+    backendMocks.validateImpl = () => validation.promise;
+    await act(async () => buttonWithText(container, "Timed")?.click());
+    await clock.advance(1);
+    expect(saved).toHaveLength(0);
+    await clock.advance(SAVE_SETTLE_MS * 2);
+    expect(saved).toHaveLength(0);
+    expect(container.textContent).toContain("Checking settings…");
+    await act(async () => {
+      if (outcome === "unavailable") validation.reject(new Error("Validation offline"));
+      else
+        validation.resolve({
+          valid: outcome === "valid",
+          issues:
+            outcome === "valid"
+              ? []
+              : [{ path: "advance", code: "out-of-range", message: "Invalid pacing." }],
+        });
+    });
+    await clock.advance(AUTOSAVE_DELAY_MS - 1);
+    expect(saved).toHaveLength(0);
+    await clock.advance(1);
+    expect(saved).toHaveLength(outcome === "valid" ? 1 : 0);
+    if (outcome === "valid") expect(saved[0].advance.kind).toBe("timed");
+    else {
+      expect(container.textContent).toContain(
+        outcome === "invalid" ? "Invalid pacing." : "Validation unavailable: Validation offline",
+      );
+      await clock.advance(SAVE_SETTLE_MS * 2);
+      expect(saved).toHaveLength(0);
+    }
+  });
+}
+
+for (const retry of ["Try again", "edit"] as const) {
+  test(`a failed autosave waits without retrying until ${retry}`, async () => {
+    const saved = recordSaves();
+    const successfulSave = backendMocks.saveConfigImpl;
+    let attempts = 0;
+    backendMocks.saveConfigImpl = async (config) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("Server unavailable");
+      return successfulSave(config);
+    };
+    const { container } = await mount(<App />);
+    await act(async () => buttonWithText(container, "Manual")?.click());
+    await clock.advance(SAVE_SETTLE_MS);
+    expect(attempts).toBe(1);
+    expect(container.textContent).toContain("Server unavailable");
+    expect(buttonWithText(container, "Try again")?.disabled).toBe(false);
+    await clock.advance(SAVE_SETTLE_MS * 5);
+    expect(attempts).toBe(1);
+    expect(saved).toHaveLength(0);
+    if (retry === "Try again") {
+      await act(async () => buttonWithText(container, "Try again")?.click());
+    } else {
+      await act(async () => buttonWithText(container, "Timed")?.click());
+      await clock.advance(SAVE_SETTLE_MS);
+    }
+    expect(attempts).toBe(2);
+    expect(saved).toHaveLength(1);
+    expect(saved[0].advance.kind).toBe(retry === "Try again" ? "manual" : "timed");
+    expect(container.textContent).toContain(
+      "Saved to the server. The server will update your display.",
+    );
+    expect(buttonWithText(container, "Try again")).toBeUndefined();
+    await clock.advance(SAVE_SETTLE_MS * 2);
+    expect(attempts).toBe(2);
+  });
+}
+
+test("a new edit blocks an already-due autosave before validation state paints", async () => {
+  const saved = recordSaves();
+  const { container } = await mount(<App />);
+  await act(async () => buttonWithText(container, "Manual")?.click());
+  await clock.advance(VALIDATION_DELAY_MS + AUTOSAVE_DELAY_MS - 1);
+  await act(async () => {
+    buttonWithText(container, "Timed")?.click();
+    clock.tick(1);
+  });
+  expect(saved).toHaveLength(0);
+  await clock.advance(SAVE_SETTLE_MS);
+  expect(saved).toHaveLength(1);
+  expect(saved[0].advance.kind).toBe("timed");
+});
+
+test("the unload warning lasts while dirty and is removed after saving or unmounting", async () => {
+  recordSaves();
+  const { container, cleanup } = await mount(<App />);
+  const warnsOnUnload = () => {
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  };
+  expect(warnsOnUnload()).toBe(false);
+  await act(async () => buttonWithText(container, "Manual")?.click());
+  expect(warnsOnUnload()).toBe(true);
+  await clock.advance(SAVE_SETTLE_MS);
+  expect(warnsOnUnload()).toBe(false);
+  await act(async () => buttonWithText(container, "Timed")?.click());
+  expect(warnsOnUnload()).toBe(true);
+  await cleanup();
+  expect(warnsOnUnload()).toBe(false);
 });
 
 test("the page mints and adds a picture while keeping the token ephemeral", async () => {
@@ -154,14 +390,11 @@ test("editing an already-saved config does not resurface first-run guidance", as
   expect(manualTab).not.toBeUndefined();
   await act(async () => manualTab?.click());
 
-  await waitFor(() => expect(container.textContent).toContain("Unsaved changes"));
+  await clock.advance(VALIDATION_DELAY_MS);
+  expect(container.textContent).toContain("Saving shortly…");
   expect(container.textContent).not.toContain("Make the display yours");
   expect(buttonWithText(container, "Manual")?.getAttribute("aria-pressed")).toBe("true");
-  await waitFor(() => {
-    const save = buttonWithText(container, "Save to server");
-    expect(save?.disabled).toBe(false);
-  });
-  await act(async () => buttonWithText(container, "Save to server")?.click());
+  await clock.advance(AUTOSAVE_DELAY_MS);
   await waitFor(() => expect(saved).toHaveLength(1));
   expect(saved[0].advance).toEqual({ kind: "manual" });
 });
@@ -183,16 +416,15 @@ test("fresh default settings show first-run guidance until they have been saved"
   expect(container.textContent).toContain("Save your settings");
 
   await act(async () => buttonWithText(container, "Manual")?.click());
-  await waitFor(() => expect(container.textContent).toContain("Unsaved changes"));
+  await clock.advance(VALIDATION_DELAY_MS);
+  expect(container.textContent).toContain("Saving shortly…");
   expect(container.textContent).toContain("Make the display yours");
-  await waitFor(() => {
-    expect(buttonWithText(container, "Save to server")?.disabled).toBe(false);
-  });
-  await act(async () => buttonWithText(container, "Save to server")?.click());
+  await clock.advance(AUTOSAVE_DELAY_MS);
   await waitFor(() => expect(container.textContent).not.toContain("Make the display yours"));
 
   await act(async () => buttonWithText(container, "Timed")?.click());
-  await waitFor(() => expect(container.textContent).toContain("Unsaved changes"));
+  await clock.advance(VALIDATION_DELAY_MS);
+  expect(container.textContent).toContain("Saving shortly…");
   expect(container.textContent).not.toContain("Make the display yours");
 });
 
@@ -215,35 +447,50 @@ test("the mounted app saves an offline display configuration through the server"
   backendMocks.previewImpl = async () => previewFrame;
 
   const { container } = await mount(<App />);
-  await waitFor(() => expect(buttonWithText(container, "Save to server")).toBeDefined());
+  await waitFor(() => expect(buttonWithText(container, "Manual")).toBeDefined());
   await act(async () => buttonWithText(container, "Manual")?.click());
-  await waitFor(() => expect(buttonWithText(container, "Save to server")?.disabled).toBe(false));
-  await act(async () => buttonWithText(container, "Save to server")?.click());
+  await clock.advance(SAVE_SETTLE_MS);
   await waitFor(() => expect(serverWrites).toBe(1));
 });
 
-test("the mounted app refuses saving beside the button until ownership loads", async () => {
-  backendMocks.snapshotImpl = async () => ({
-    ...(structuredClone(snapshot) as AppSnapshot),
-    device: {
-      ...(structuredClone(snapshot.device) as AppSnapshot["device"]),
-      tier: null,
-    },
-  });
-  backendMocks.networkSettingsImpl = () => new Promise<NetworkSettings>(() => {});
+test("no automatic save is sent until server ownership loads", async () => {
+  let liveSnapshot: AppSnapshot = {
+    ...structuredClone(snapshot),
+    device: { ...structuredClone(snapshot.device), tier: null },
+  };
+  const ownership = Promise.withResolvers<NetworkSettings>();
+  const saved: AppConfig[] = [];
+  backendMocks.snapshotImpl = async () => liveSnapshot;
+  backendMocks.networkSettingsImpl = () => ownership.promise;
+  backendMocks.saveConfigImpl = async (config) => {
+    saved.push(config);
+    liveSnapshot = { ...liveSnapshot, config };
+    return { save: { generation: 1, warning: null } };
+  };
   backendMocks.previewImpl = async () => previewFrame;
 
   const { container } = await mount(<App />);
-  await waitFor(() => expect(buttonWithText(container, "Manual")).toBeDefined());
-  const unavailable = buttonWithText(container, "Ownership unavailable");
-  expect(unavailable?.disabled).toBe(true);
+  await act(async () => buttonWithText(container, "Manual")?.click());
+  await clock.advance(SAVE_SETTLE_MS * 2);
+  expect(saved).toHaveLength(0);
   expect(container.textContent).toContain(
     "Server ownership is unavailable. Check the device link before saving.",
   );
   expect(buttonWithText(container, "Save & apply")).toBeUndefined();
+  await act(async () =>
+    ownership.resolve({
+      server_url: "https://desk.example",
+      device_id: "desk-1",
+      tier: "networked",
+    }),
+  );
+  await clock.advance(AUTOSAVE_DELAY_MS);
+  expect(saved).toHaveLength(1);
+  expect(saved[0].advance).toEqual({ kind: "manual" });
 });
 
-test("a local tier in the server snapshot renders the neutral ownership fallback", async () => {
+test("a local tier renders the neutral ownership fallback and never auto-saves", async () => {
+  let saves = 0;
   backendMocks.snapshotImpl = async () => ({
     ...(structuredClone(snapshot) as AppSnapshot),
     device: {
@@ -251,10 +498,14 @@ test("a local tier in the server snapshot renders the neutral ownership fallback
       tier: "local",
     },
   });
+  backendMocks.saveConfigImpl = async () => {
+    saves += 1;
+    return { save: { generation: 1, warning: null } };
+  };
   backendMocks.previewImpl = async () => previewFrame;
 
   const { container } = await mount(<App />);
-  await waitFor(() => expect(buttonWithText(container, "Ownership unavailable")).toBeDefined());
+  await waitFor(() => expect(buttonWithText(container, "Manual")).toBeDefined());
   const settingsButton = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
     (button) => button.textContent?.includes("Settings"),
   );
@@ -262,9 +513,12 @@ test("a local tier in the server snapshot renders the neutral ownership fallback
   const badge = container.querySelector(".ownership-badge");
   expect(badge?.textContent).toBe("Ownership unavailable");
   expect(badge?.classList.contains("ownership-badge--unknown")).toBe(true);
+  await act(async () => buttonWithText(container, "Manual")?.click());
+  await clock.advance(SAVE_SETTLE_MS * 2);
+  expect(saves).toBe(0);
 });
 
-test("server validation rejections show a bounded issue list beside the save action", async () => {
+test("server validation rejections show a bounded issue list beside Try again", async () => {
   const networkedSnapshot: AppSnapshot = {
     ...(structuredClone(snapshot) as AppSnapshot),
     has_saved_config: true,
@@ -290,8 +544,7 @@ test("server validation rejections show a bounded issue list beside the save act
   const { container } = await mount(<App />);
   await waitFor(() => expect(buttonWithText(container, "Manual")).toBeDefined());
   await act(async () => buttonWithText(container, "Manual")?.click());
-  await waitFor(() => expect(buttonWithText(container, "Save to server")?.disabled).toBe(false));
-  await act(async () => buttonWithText(container, "Save to server")?.click());
+  await clock.advance(SAVE_SETTLE_MS);
 
   await waitFor(() =>
     expect(container.textContent).toContain(
@@ -304,6 +557,7 @@ test("server validation rejections show a bounded issue list beside the save act
   expect(container.textContent).not.toContain("Server issue 7.");
   expect(container.textContent).toContain("and 2 more");
   expect(container.textContent).not.toContain("last working");
+  expect(buttonWithText(container, "Try again")?.disabled).toBe(false);
 });
 
 test("validation-failed persistence shows the saved-settings banner and issue messages", async () => {
@@ -359,8 +613,7 @@ test("a display speaking the server's own protocol raises nothing", async () => 
   backendMocks.previewImpl = async () => previewFrame;
 
   const { container } = await mount(<App />);
-  // Wait for the main page, then assert by absence. The save button's
-  // label depends on ownership, so it is the wrong thing to wait on here.
+  // Wait for the main page before asserting the absence of a warning.
   await waitFor(() =>
     expect(
       [...container.querySelectorAll("button")].some((button) =>
@@ -456,6 +709,7 @@ test("the mounted app routes validation issues to their visible owning surfaces"
   backendMocks.validateImpl = async () => ({ valid: false, issues });
   backendMocks.previewImpl = async () => emptyPreviewFrame;
   const { container } = await mount(<App />);
+  await clock.advance(VALIDATION_DELAY_MS);
   await waitFor(() =>
     expect(container.querySelector(".library > .field-errors")?.textContent).toBe(
       issues[0].message,
@@ -509,7 +763,7 @@ test("the mounted app routes validation issues to their visible owning surfaces"
 });
 
 for (const outcome of ["success", "rejection"] as const) {
-  test(`a pending save ${outcome} preserves newer edits and permits saving them next`, async () => {
+  test(`a pending save ${outcome} preserves newer edits and automatically saves them next`, async () => {
     let liveSnapshot: AppSnapshot = structuredClone(snapshot);
     const pending = Promise.withResolvers<void>();
     const refreshing = Promise.withResolvers<AppSnapshot>();
@@ -533,25 +787,28 @@ for (const outcome of ["success", "rejection"] as const) {
     };
     const { container } = await mount(<App />);
     await act(async () => buttonWithText(container, "Manual")?.click());
-    await waitFor(() => expect(buttonWithText(container, "Save to server")?.disabled).toBe(false));
-    await act(async () => buttonWithText(container, "Save to server")?.click());
+    await clock.advance(SAVE_SETTLE_MS);
     expect(saved).toHaveLength(1);
     expect(saved[0].advance).toEqual({ kind: "manual" });
     await act(async () => buttonWithText(container, "Timed")?.click());
+    await clock.advance(SAVE_SETTLE_MS * 2);
+    expect(saved).toHaveLength(1);
+    expect(container.querySelector(".save-bar")?.textContent).toContain("Saving…");
     if (outcome === "success") {
       await act(async () => pending.resolve());
       await waitFor(() => expect(refreshStarted).toBe(true));
       expect(buttonWithText(container, "Timed")?.getAttribute("aria-pressed")).toBe("true");
+      await clock.advance(SAVE_SETTLE_MS * 2);
+      expect(saved).toHaveLength(1);
       await act(async () => refreshing.resolve(liveSnapshot));
     } else {
       await act(async () => pending.reject(new Error("old draft rejected")));
     }
     expect(container.textContent).not.toContain("old draft rejected");
     expect(buttonWithText(container, "Timed")?.getAttribute("aria-pressed")).toBe("true");
-    expect(container.textContent).toContain("Unsaved changes");
+    expect(container.textContent).toContain("Saving shortly…");
     backendMocks.snapshotImpl = async () => liveSnapshot;
-    await waitFor(() => expect(buttonWithText(container, "Save to server")?.disabled).toBe(false));
-    await act(async () => buttonWithText(container, "Save to server")?.click());
+    await clock.advance(AUTOSAVE_DELAY_MS);
     expect(saved).toHaveLength(2);
     expect(saved[1].advance.kind).toBe("timed");
     expect(container.textContent).toContain(
@@ -560,30 +817,36 @@ for (const outcome of ["success", "rejection"] as const) {
   });
 }
 
-test("both SaveBars reject reentry before paint and stay disabled after a pending edit", async () => {
+test("both SaveBar retries reject reentry before paint and share saving status after a pending edit", async () => {
   const pending = Promise.withResolvers<void>();
   let saves = 0;
   backendMocks.saveConfigImpl = async () => {
     saves += 1;
+    if (saves === 1) throw new Error("Save failed");
     await pending.promise;
     return { save: { generation: 1, warning: null } };
   };
   const { container } = await mount(<App />);
   await act(async () => buttonWithText(container, "Manual")?.click());
   await act(async () => container.querySelector<HTMLButtonElement>(".topbar__settings")?.click());
-  await waitFor(() => expect(buttonWithText(container, "Save to server")?.disabled).toBe(false));
+  await clock.advance(SAVE_SETTLE_MS);
   const savesButtons = [...container.querySelectorAll<HTMLButtonElement>("button")].filter(
-    (button) => button.textContent === "Save to server",
+    (button) => button.textContent === "Try again",
   );
   expect(savesButtons).toHaveLength(2);
+  expect(savesButtons.every((button) => !button.disabled)).toBe(true);
   await act(async () => {
     savesButtons[0].click();
     savesButtons[1].click();
   });
-  expect(saves).toBe(1);
+  expect(saves).toBe(2);
   await act(async () => buttonWithText(container, "Timed")?.click());
-  expect(savesButtons.every((button) => button.disabled)).toBe(true);
-  expect(savesButtons.every((button) => button.textContent === "Saving to server…")).toBe(true);
+  await clock.advance(SAVE_SETTLE_MS * 2);
+  expect(saves).toBe(2);
+  expect(buttonWithText(container, "Try again")).toBeUndefined();
+  const bars = [...container.querySelectorAll(".save-bar")];
+  expect(bars).toHaveLength(2);
+  expect(bars.every((bar) => bar.textContent === "Saving…")).toBe(true);
   await act(async () => pending.resolve());
 });
 
@@ -636,16 +899,16 @@ for (const write of ["save", "resume"] as const) {
       const { container } = await mount(<App />);
       if (write === "save") {
         await act(async () => buttonWithText(container, "Manual")?.click());
-        await waitFor(() =>
-          expect(buttonWithText(container, "Save to server")?.disabled).toBe(false),
-        );
+        await clock.advance(VALIDATION_DELAY_MS);
+        expect(container.textContent).toContain("Saving shortly…");
       } else {
         expect(buttonWithText(container, "Resume sending")?.disabled).toBe(false);
       }
       await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
       const mint = menuItem(container, source);
       await act(async () => {
-        buttonWithText(container, write === "save" ? "Save to server" : "Resume sending")?.click();
+        if (write === "save") clock.tick(AUTOSAVE_DELAY_MS);
+        else buttonWithText(container, "Resume sending")?.click();
         mint.click();
       });
       expect(saved.length + resumes).toBe(1);
@@ -660,16 +923,16 @@ for (const write of ["save", "resume"] as const) {
       expect(menuItem(container, "Existing picture").disabled).toBe(false);
       await act(async () => menuItem(container, "Digital clock").click());
       expect(container.querySelectorAll(".card-tile__body")).toHaveLength(2);
+      await clock.advance(SAVE_SETTLE_MS * 2);
+      expect(saved.length + resumes).toBe(1);
       await act(async () => pending.resolve());
       expect(container.querySelectorAll(".card-tile__body")).toHaveLength(2);
       await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
       expect(menuItem(container, source).disabled).toBe(false);
       await act(async () => menuItem(container, source).click());
       expect(httpCalls.filter((call) => call.path === "/v1/images")).toHaveLength(1);
-      await waitFor(() =>
-        expect(buttonWithText(container, "Save to server")?.disabled).toBe(false),
-      );
-      await act(async () => buttonWithText(container, "Save to server")?.click());
+      await clock.advance(SAVE_SETTLE_MS);
+      expect(saved).toHaveLength(write === "save" ? 2 : 1);
       const config = saved.at(-1);
       expect(config?.cards).toHaveLength(3);
       expect(config?.cards.at(-1)).toMatchObject({ kind: "picture", source_id: "picture-source" });
@@ -681,50 +944,59 @@ for (const write of ["save", "resume"] as const) {
   }
 }
 
-test("pending mint excludes both SaveBars and Resume sending before paint until draft insertion", async () => {
-  let liveSnapshot = sourceRaceSnapshot();
-  const mint = Promise.withResolvers<Response>();
-  const saved: AppConfig[] = [];
-  let resumes = 0;
-  backendMocks.snapshotImpl = async () => liveSnapshot;
-  backendMocks.saveConfigImpl = async (config) => {
-    saved.push(config);
-    liveSnapshot = { ...liveSnapshot, config };
-    return { save: { generation: 1, warning: null } };
-  };
-  backendMocks.resumeImpl = async () => {
-    resumes += 1;
-  };
-  httpHandlers.set("POST /v1/images", () => mint.promise);
-  const { container } = await mount(<App />);
-  await act(async () => buttonWithText(container, "Manual")?.click());
-  await act(async () => container.querySelector<HTMLButtonElement>(".topbar__settings")?.click());
-  await waitFor(() => expect(buttonWithText(container, "Save to server")?.disabled).toBe(false));
-  const saves = [...container.querySelectorAll<HTMLButtonElement>("button")].filter(
-    (button) => button.textContent === "Save to server",
-  );
-  expect(saves).toHaveLength(2);
-  await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
-  const create = menuItem(container, "New picture source");
-  await act(async () => {
-    create.click();
-    create.click();
-    for (const save of saves) save.click();
-    buttonWithText(container, "Resume sending")?.click();
+for (const trigger of ["autosave", "retry"] as const) {
+  test(`pending mint excludes ${trigger} and Resume sending before paint until draft insertion`, async () => {
+    let liveSnapshot = sourceRaceSnapshot();
+    const mint = Promise.withResolvers<Response>();
+    const saved: AppConfig[] = [];
+    let resumes = 0;
+    backendMocks.snapshotImpl = async () => liveSnapshot;
+    backendMocks.saveConfigImpl = async (config) => {
+      saved.push(config);
+      if (trigger === "retry" && saved.length === 1) throw new Error("Save failed");
+      liveSnapshot = { ...liveSnapshot, config };
+      return { save: { generation: 1, warning: null } };
+    };
+    backendMocks.resumeImpl = async () => {
+      resumes += 1;
+    };
+    httpHandlers.set("POST /v1/images", () => mint.promise);
+    const { container } = await mount(<App />);
+    await act(async () => buttonWithText(container, "Manual")?.click());
+    await act(async () => container.querySelector<HTMLButtonElement>(".topbar__settings")?.click());
+    await clock.advance(trigger === "retry" ? SAVE_SETTLE_MS : VALIDATION_DELAY_MS);
+    const saves = [...container.querySelectorAll<HTMLButtonElement>("button")].filter(
+      (button) => button.textContent === "Try again",
+    );
+    expect(saves).toHaveLength(trigger === "retry" ? 2 : 0);
+    await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
+    const create = menuItem(container, "New picture source");
+    await act(async () => {
+      create.click();
+      create.click();
+      if (trigger === "autosave") clock.tick(AUTOSAVE_DELAY_MS);
+      for (const save of saves) save.click();
+      buttonWithText(container, "Resume sending")?.click();
+    });
+    const attemptsBeforeMint = trigger === "retry" ? 1 : 0;
+    expect(saved).toHaveLength(attemptsBeforeMint);
+    expect(resumes).toBe(0);
+    expect(httpCalls.filter((call) => call.path === "/v1/images")).toHaveLength(1);
+    expect(saves.every((save) => save.disabled)).toBe(true);
+    expect(buttonWithText(container, "Resume sending")?.disabled).toBe(true);
+    await clock.advance(SAVE_SETTLE_MS * 2);
+    expect(saved).toHaveLength(attemptsBeforeMint);
+    await act(async () => mint.resolve(jsonResponse({ id: "picture-source", token: "once" })));
+    expect(container.querySelectorAll(".card-tile__body")).toHaveLength(2);
+    await clock.advance(SAVE_SETTLE_MS);
+    expect(saved).toHaveLength(attemptsBeforeMint + 1);
+    expect(saved.at(-1)?.cards.at(-1)).toMatchObject({
+      kind: "picture",
+      source_id: "picture-source",
+    });
+    expect(saved.at(-1)?.image_sources).toContainEqual({ id: "picture-source", name: "Picture" });
   });
-  expect(saved).toHaveLength(0);
-  expect(resumes).toBe(0);
-  expect(httpCalls.filter((call) => call.path === "/v1/images")).toHaveLength(1);
-  expect(saves.every((save) => save.disabled)).toBe(true);
-  expect(buttonWithText(container, "Resume sending")?.disabled).toBe(true);
-  await act(async () => mint.resolve(jsonResponse({ id: "picture-source", token: "once" })));
-  expect(container.querySelectorAll(".card-tile__body")).toHaveLength(2);
-  await waitFor(() => expect(saves.every((save) => !save.disabled)).toBe(true));
-  await act(async () => saves[0].click());
-  expect(saved).toHaveLength(1);
-  expect(saved[0].cards.at(-1)).toMatchObject({ kind: "picture", source_id: "picture-source" });
-  expect(saved[0].image_sources).toContainEqual({ id: "picture-source", name: "Picture" });
-});
+}
 
 test("pending mint reserves the seventh draft's final card slot", async () => {
   const mint = Promise.withResolvers<Response>();
@@ -750,8 +1022,11 @@ test("pending mint reserves the seventh draft's final card slot", async () => {
 for (const operation of ["mint", "save", "resume"] as const) {
   test(`a rejected ${operation} releases the source/configuration gate`, async () => {
     const pending = Promise.withResolvers<void>();
-    backendMocks.snapshotImpl = async () => sourceRaceSnapshot();
-    backendMocks.saveConfigImpl = async () => {
+    let liveSnapshot = sourceRaceSnapshot();
+    const saved: AppConfig[] = [];
+    backendMocks.snapshotImpl = async () => liveSnapshot;
+    backendMocks.saveConfigImpl = async (config) => {
+      saved.push(config);
       await pending.promise;
       return { save: { generation: 1, warning: null } };
     };
@@ -763,23 +1038,20 @@ for (const operation of ["mint", "save", "resume"] as const) {
     const { container } = await mount(<App />);
     if (operation !== "resume") {
       await act(async () => buttonWithText(container, "Manual")?.click());
-      await waitFor(() =>
-        expect(buttonWithText(container, "Save to server")?.disabled).toBe(false),
-      );
+      await clock.advance(VALIDATION_DELAY_MS);
     } else {
       expect(buttonWithText(container, "Resume sending")?.disabled).toBe(false);
     }
     if (operation === "mint") {
       await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
       await act(async () => menuItem(container, "New picture source").click());
-      expect(buttonWithText(container, "Save to server")?.disabled).toBe(true);
+      await clock.advance(SAVE_SETTLE_MS * 2);
+      expect(saved).toHaveLength(0);
+    } else if (operation === "save") {
+      await clock.advance(AUTOSAVE_DELAY_MS);
+      expect(saved).toHaveLength(1);
     } else {
-      await act(async () =>
-        buttonWithText(
-          container,
-          operation === "save" ? "Save to server" : "Resume sending",
-        )?.click(),
-      );
+      await act(async () => buttonWithText(container, "Resume sending")?.click());
     }
     await act(async () => pending.reject(new Error(`${operation} rejected`)));
     expect(container.textContent).toContain(`${operation} rejected`);
@@ -787,13 +1059,27 @@ for (const operation of ["mint", "save", "resume"] as const) {
     if (operation === "resume") {
       await act(async () => buttonWithText(container, "Manual")?.click());
     }
-    await waitFor(() => expect(buttonWithText(container, "Save to server")?.disabled).toBe(false));
+    if (operation === "save") {
+      expect(buttonWithText(container, "Try again")?.disabled).toBe(false);
+    }
     expect(buttonWithText(container, "Resume sending")?.disabled).toBe(true);
+    backendMocks.saveConfigImpl = async (config) => {
+      saved.push(config);
+      liveSnapshot = { ...liveSnapshot, config };
+      return { save: { generation: 2, warning: null } };
+    };
     allowImageMint("Picture");
     await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
     expect(menuItem(container, "New picture source").disabled).toBe(false);
     await act(async () => menuItem(container, "New picture source").click());
     expect(container.querySelectorAll(".card-tile__body")).toHaveLength(2);
+    await clock.advance(SAVE_SETTLE_MS);
+    expect(saved).toHaveLength(operation === "save" ? 2 : 1);
+    expect(saved.at(-1)?.cards.at(-1)).toMatchObject({
+      kind: "picture",
+      source_id: "picture-source",
+    });
+    expect(saved.at(-1)?.image_sources).toContainEqual({ id: "picture-source", name: "Picture" });
   });
 }
 
@@ -828,8 +1114,7 @@ test("a completed mint keeps Resume disabled until the picture draft is saved", 
   expect(container.textContent).toContain("Save your changes before resuming.");
   await act(async () => resume?.click());
   expect(resumed).toHaveLength(0);
-  await waitFor(() => expect(buttonWithText(container, "Save to server")?.disabled).toBe(false));
-  await act(async () => buttonWithText(container, "Save to server")?.click());
+  await clock.advance(SAVE_SETTLE_MS);
   expect(resume?.disabled).toBe(true);
   await act(async () => saving.resolve());
   expect(resume?.disabled).toBe(false);
@@ -857,7 +1142,7 @@ test("Resume rejects a draft edit before its disabled state paints", async () =>
 });
 
 for (const supported of [false, true]) {
-  test(`brightness saves through the settings Save with firmware support=${supported}`, async () => {
+  test(`brightness auto-saves while the settings sheet stays open with firmware support=${supported}`, async () => {
     const live: AppSnapshot = structuredClone(snapshot);
     live.device.connection = { kind: "online" };
     live.device.capabilities = supported ? ["display-brightness"] : [];
@@ -895,8 +1180,11 @@ for (const supported of [false, true]) {
     );
     const dialog = container.querySelector("dialog");
     if (!dialog) throw new Error("Settings sheet missing");
-    await waitFor(() => expect(buttonWithText(dialog, "Save to server")?.disabled).toBe(false));
-    await act(async () => buttonWithText(dialog, "Save to server")?.click());
+    await clock.advance(SAVE_SETTLE_MS);
+    expect(dialog.open).toBe(true);
+    expect(dialog.textContent).toContain(
+      "Saved to the server. The server will update your display.",
+    );
     await waitFor(() => expect(saved).toHaveLength(1));
     expect(saved[0].preferences.brightness).toBe(35);
     expect(saved[0].schema_version).toBe(11);

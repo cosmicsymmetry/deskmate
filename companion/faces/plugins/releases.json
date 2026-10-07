@@ -68,5 +68,15 @@
     "id": "xkcd",
     "version": "1.0.1",
     "sha256": "572982b363a8a487ac9da58bd0323ba2f9e1dfee3ab587da7cc1d80065e6142c"
+  },
+  {
+    "id": "github-stats",
+    "version": "1.0.1",
+    "sha256": "939e9a7b7e2a26263413f408f0c2f091bc4fcbe6a64a7349b032d0c62eea276f"
+  },
+  {
+    "id": "terminal-command",
+    "version": "1.0.0",
+    "sha256": "ab2966046c0b2d2fe35869d9110f9524df9ce6a290ff769521fe4cfb01e613f5"
   }
 ]

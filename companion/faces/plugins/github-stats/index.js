@@ -1,15 +1,12 @@
 // GitHub stats -- the worked example from
 // docs/superpowers/specs/2026-09-23-deskmate-plugin-contract-design.md. One request
 // to api.github.com's public user endpoint, a headline number and two tiles. Real
-// plugin code, not a test fixture: it can change freely, unlike
-// test/plugins/discovery.test.ts's own throwaway folders.
+// plugin code, not a test fixture: changes require a new reviewed release.
 //
 // `plan`/`render` never call anything themselves -- they only declare what they
 // need, and the host performs it (`docs/superpowers/specs/2026-09-23-deskmate-plugin-contract-design.md`).
-// Both are handed an EMPTY context at discovery time (`src/plugins/discovery.ts`
-// runs `plan()` once against `{}` just to confirm this file parses and exports both
-// functions), so both read every field defensively rather than assuming `settings`
-// or `answers` exist.
+// Discovery runs `plan()` once against `{}` to confirm this file parses and plan
+// can run, so it reads fields defensively. Render runs with the full context.
 
 function username(context) {
   const settings = (context && context.settings) || {};
@@ -33,11 +30,10 @@ export function plan(context) {
       headers: {
         Accept: "application/vnd.github+json",
         // Substituted only when a github_token secret is configured for this
-        // plugin (`src/plugins/secrets.ts`); left as literal text otherwise, which
-        // GitHub answers as an ordinary unauthenticated (rate-limited) request would
-        // fail to authenticate -- render() below treats that the same as any other
-        // fetch failure, by falling back to "--".
-        Authorization: "Bearer {{secret:github_token}}",
+        // plugin (`src/plugins/secrets.ts`). The host adds the Bearer prefix.
+        // With no credential the placeholder stays literal; render() falls back
+        // to "--" when the reply lacks the expected numeric fields.
+        Authorization: "{{secret:github_token}}",
       },
     },
   ];

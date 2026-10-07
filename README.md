@@ -1,9 +1,28 @@
-# deskmate
+# Deskmate
 
-Deskmate is a monitor-clip ESP32-S3 AMOLED display with a Rust server and a React web
-companion. The current product description is [PRODUCT.md](PRODUCT.md), and the
-repository’s durable implementation contract is [CLAUDE.md](CLAUDE.md).
+Deskmate is the codename and the repository for **Deskboy**: a small panel that clips to
+your monitor and cycles a loop of cards. A clock, a pomodoro timer, and pictures. A
+"picture" is anything that can POST a PNG -- weather, a feed, a token price, a script you
+wrote this afternoon:
 
+    curl -X POST --data-binary @panel.png \
+      -H 'Content-Type: image/png' \
+      https://your-server/v1/images/YOUR_TOKEN
+
+448×368, ESP32-S3, an emissive AMOLED panel. The firmware, the Rust server, the React web
+companion and the plugin sandbox are all in this repository, GPL-3.0. You configure it from
+a browser; there is no desktop app and no phone app.
+
+**You cannot buy one yet.** There is no price, no date and no store. If you want to know
+when that changes, [deskboy.sh](https://deskboy.sh) has a one-time email field and a
+[log with a feed](https://deskboy.sh/log), or watch this repository's releases.
+
+**You can run the server yourself today**, for free, against your own hardware:
+[build and run your own](docs/self-host.md). Self-hosting brings your own API keys and has
+no hosted plugin directory; everything else is the same code.
+
+The product description is [PRODUCT.md](PRODUCT.md), and the repository's durable
+implementation contract is [CLAUDE.md](CLAUDE.md).
 ## Current state
 
 The companion is a browser application served by `companion/crates/server`; its React SPA

@@ -201,6 +201,7 @@ class FakePort implements PanelPort {
       silent?: boolean;
       disconnectAfterAck?: boolean;
       noiseBeforeStatus?: boolean;
+      ignoresRestart?: boolean;
     },
   ) {}
 
@@ -256,6 +257,16 @@ class FakePort implements PanelPort {
 
   async close(): Promise<void> {
     this.opened = false;
+    this.wake();
+  }
+
+  restartCount = 0;
+
+  async restart(): Promise<void> {
+    this.restartCount += 1;
+    if (this.options.ignoresRestart) return;
+    this.opened = false;
+    this.disconnectListener();
     this.wake();
   }
 
@@ -423,7 +434,8 @@ test("Wi-Fi up but no server link within 60 s ends in unreachable-server and kee
   await setup.submitWifi("Home", "secret");
 
   expect(steps.at(-1)).toEqual({ kind: "unreachable-server", deviceId: "dev-0042" });
-  expect(now()).toBe(60_000);
+  // One reopen interval after the restart, then the 60 s link window.
+  expect(now()).toBe(61_000);
   expect(claim).toHaveBeenCalledTimes(1);
   expect(isLinked).toHaveBeenCalledTimes(60);
 });
@@ -452,6 +464,45 @@ test("requests start at one and ignore DeviceEvent and stale response frames", a
   await setup.connect();
   await setup.submitWifi("Home", "secret");
 
-  expect(port.written.map((frame) => frame.requestId)).toEqual([1, 2, 3]);
+  // The restart reopens the port, and a new link numbers its requests from one.
+  expect(port.written.map((frame) => frame.requestId)).toEqual([1, 2, 1]);
   expect(steps.at(-1)).toEqual({ kind: "linked", deviceId: "dev-0042" });
+});
+
+test("the panel is restarted after the write, and the old network's failure is not reported", async () => {
+  // Before the restart the board still runs the previous config, whose join
+  // failed; that status must never reach the owner as this network's result.
+  const port = new FakePort({ statuses: [{}, { wifiState: 2 }] });
+  const { setup, steps } = harness(port);
+
+  await setup.connect();
+  await setup.submitWifi("Home", "secret");
+
+  expect(port.restartCount).toBe(1);
+  expect(steps.map((step) => step.kind)).toEqual([
+    "connecting",
+    "wifi-form",
+    "writing",
+    "restarting",
+    "wifi-joining",
+    "linking",
+    "linked",
+  ]);
+  const afterWrite = port.written.slice(
+    port.written.findIndex((frame) => frame.type === "network-config") + 1,
+  );
+  expect(port.openCount).toBe(2);
+  expect(afterWrite.every((frame) => frame.type === "status-request")).toBe(true);
+});
+
+test("a board that does not restart on its own asks for a replug and waits", async () => {
+  const port = new FakePort({ statuses: [{}, { wifiState: 2 }], ignoresRestart: true });
+  const { setup, steps } = harness(port);
+
+  await setup.connect();
+  await setup.submitWifi("Home", "secret");
+
+  expect(steps.map((step) => step.kind)).toContain("replug");
+  expect(steps.at(-1)).toEqual({ kind: "no-response" });
+  expect(port.written.filter((frame) => frame.type === "status-request")).toHaveLength(1);
 });

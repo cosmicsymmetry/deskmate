@@ -14,6 +14,11 @@ export interface PanelPort {
   write(bytes: Uint8Array): Promise<void>;
   readable(): AsyncIterable<Uint8Array>;
   close(): Promise<void>;
+  /**
+   * Restarts the board. NetworkConfig is persisted but only read at boot, so a
+   * write means nothing until this (or an unplug) happens.
+   */
+  restart(): Promise<void>;
   onDisconnect(listener: () => void): void;
 }
 
@@ -24,6 +29,7 @@ type BrowserSerialPort = EventTarget & {
   writable: WritableStream<Uint8Array> | null;
   open(options: { baudRate: number }): Promise<void>;
   close(): Promise<void>;
+  setSignals(signals: { dataTerminalReady?: boolean; requestToSend?: boolean }): Promise<void>;
 };
 
 type BrowserSerial = EventTarget & {
@@ -120,6 +126,15 @@ export class WebSerialPort implements PanelPort {
     if (!this.opened) return;
     this.opened = false;
     await this.port.close();
+  }
+
+  async restart(): Promise<void> {
+    if (!this.opened) return;
+    // The ESP32-S3's USB-Serial-JTAG resets the chip when RTS is asserted with
+    // DTR low -- the same sequence esptool uses for a hard reset.
+    await this.port.setSignals({ dataTerminalReady: false, requestToSend: true });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await this.port.setSignals({ requestToSend: false });
   }
 
   onDisconnect(listener: () => void): void {

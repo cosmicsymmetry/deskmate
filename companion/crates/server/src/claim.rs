@@ -21,6 +21,7 @@ pub(crate) fn routes() -> Router<ServerState> {
         .route("/v1/app/devices", get(list_devices))
         .route("/v1/app/devices/claim", post(claim_device))
         .route("/v1/app/devices/{id}", delete(remove_device))
+        .route("/v1/app/devices/{id}/credentials", post(reissue_device))
 }
 
 pub(crate) async fn list_devices(
@@ -127,6 +128,44 @@ async fn claim_device(
             link_url,
         }),
     ))
+}
+
+/// New credentials for a panel the account already owns, so its Wi-Fi can be
+/// changed over the cable without minting another `dev-NNNN`.
+async fn reissue_device(
+    State(state): State<ServerState>,
+    session: AccountSession,
+    Path(device_id): Path<String>,
+) -> Result<Json<ClaimResponse>, ClaimError> {
+    let account_id = session.account.id;
+    let link_url = device_link_url(state.public_url())?;
+    let identity = tokio::task::spawn_blocking(move || {
+        state.with_device_lifecycle(|| reissue_owned_device(&state, &account_id, &device_id))
+    })
+    .await
+    .map_err(|_| ClaimError::WorkerFailed)??;
+    Ok(Json(ClaimResponse {
+        device_id: identity.device_id,
+        token: identity.token,
+        link_url,
+    }))
+}
+
+fn reissue_owned_device(
+    state: &ServerState,
+    account_id: &AccountId,
+    device_id: &str,
+) -> Result<crate::registry::DeviceIdentity, ClaimError> {
+    let owner = state.identity().device_owner(device_id)?;
+    if !owner.is_some_and(|owner| &owner.account_id == account_id) {
+        return Err(ClaimError::NotFound);
+    }
+    let identity = state
+        .registry()
+        .reissue(device_id)?
+        .ok_or(ClaimError::NotFound)?;
+    state.close_link(device_id);
+    Ok(identity)
 }
 
 async fn remove_device(
@@ -405,6 +444,47 @@ mod tests {
             Err(ClaimError::NotFound)
         ));
         assert!(state.registry().contains_device(&device.device_id));
+    }
+
+    #[test]
+    fn reissuing_keeps_the_device_and_only_for_its_owner() {
+        let state = ServerState::in_memory();
+        let owner = state
+            .identity()
+            .create_account("owner@example.com", true, true, Utc::now())
+            .unwrap();
+        let other = state
+            .identity()
+            .create_account("other@example.com", true, false, Utc::now())
+            .unwrap();
+        let device = state.registry().mint().unwrap();
+        state
+            .identity()
+            .assign_device(
+                &device.device_id,
+                &owner.id,
+                DeviceState::Active,
+                Utc::now(),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            reissue_owned_device(&state, &other.id, &device.device_id),
+            Err(ClaimError::NotFound)
+        ));
+        assert_eq!(
+            state.registry().authenticate(&device.token),
+            Some(device.device_id.clone())
+        );
+
+        let fresh = reissue_owned_device(&state, &owner.id, &device.device_id).unwrap();
+        assert_eq!(fresh.device_id, device.device_id);
+        assert_eq!(state.registry().authenticate(&device.token), None);
+        assert_eq!(
+            state.registry().authenticate(&fresh.token),
+            Some(device.device_id.clone())
+        );
+        assert_eq!(state.identity().devices_for(&owner.id).unwrap().len(), 1);
     }
 
     #[tokio::test]

@@ -242,6 +242,43 @@ impl Registry {
             .any(|candidate| candidate.device_id == device_id)
     }
 
+    /// Replaces a device's token with a fresh one, keeping its id. This is how
+    /// a panel already on the account gets new Wi-Fi settings: the cable write
+    /// replaces the panel's whole network config, token included, and only the
+    /// digest of the old token is stored, so it cannot be written back. The old
+    /// token stops authenticating as soon as the new digest is committed.
+    pub fn reissue(&self, device_id: &str) -> Result<Option<DeviceIdentity>, RegistryError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(index) = state
+            .tokens
+            .iter()
+            .position(|record| record.device_id == device_id)
+        else {
+            return Ok(None);
+        };
+        let token = random_token();
+        let mut tokens = state
+            .tokens
+            .iter()
+            .map(|record| TokenRecord {
+                digest: record.digest,
+                device_id: record.device_id.clone(),
+            })
+            .collect::<Vec<_>>();
+        tokens[index].digest = token_digest(&token);
+        if let Some(path) = &self.path {
+            save_records(path, state.next_sequence, &tokens)?;
+        }
+        state.tokens = tokens;
+        Ok(Some(DeviceIdentity {
+            device_id: device_id.to_owned(),
+            token,
+        }))
+    }
+
     /// Revokes a device identity. Persistent registries commit the removal
     /// before changing the in-memory authentication table.
     pub fn revoke(&self, device_id: &str) -> Result<bool, RegistryError> {
@@ -747,6 +784,32 @@ mod tests {
                 .expect("read archive test dir")
                 .all(|entry| entry.expect("read archive entry").path() == store_path)
         );
+    }
+
+    #[test]
+    fn reissue_keeps_the_id_and_retires_the_old_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(DEVICE_IDENTITY_STORE_FILE);
+        let registry = Registry::load(&path);
+        let first = registry.mint().unwrap();
+        let fresh = registry.reissue(&first.device_id).unwrap().unwrap();
+
+        assert_eq!(fresh.device_id, first.device_id);
+        assert_ne!(fresh.token, first.token);
+        assert_eq!(registry.authenticate(&first.token), None);
+        assert_eq!(
+            registry.authenticate(&fresh.token),
+            Some(first.device_id.clone())
+        );
+
+        let reloaded = Registry::load(&path);
+        assert_eq!(reloaded.authenticate(&first.token), None);
+        assert_eq!(
+            reloaded.authenticate(&fresh.token),
+            Some(first.device_id.clone())
+        );
+        assert_eq!(reloaded.mint().unwrap().device_id, "dev-0002");
+        assert!(registry.reissue("dev-9999").unwrap().is_none());
     }
 
     #[test]

@@ -98,6 +98,7 @@ test("PanelSetup renders every setup state and keeps the Wi-Fi form for a retry"
       write: async () => {},
       readable: async function* () {},
       close: async () => {},
+      restart: async () => {},
       onDisconnect: () => {},
     }),
     createSetup: (_deps, onStep) => {
@@ -269,6 +270,38 @@ test("removing a panel confirms, calls the server, and drops its row", async () 
     await waitFor(() => expect(removed).toEqual([activePanel.id]));
     expect(container.textContent).not.toContain(activePanel.id);
   } finally {
+    await cleanup();
+  }
+});
+
+test("an existing panel offers Change Wi-Fi, which opens the cable flow for that panel", async () => {
+  const requests: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    requests.push(`${init?.method ?? "GET"} ${String(input)}`);
+    return new Response(
+      JSON.stringify({ device_id: "desk-0001", token: "t", link_url: "wss://x/v1/device/link" }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as typeof fetch;
+  Object.defineProperty(navigator, "serial", { value: {}, configurable: true });
+  const { container, cleanup } = await mount(
+    <AccountSection
+      instance={instance}
+      api={accountApi()}
+      serialSupported={() => true}
+      open
+      onSessionEnded={() => {}}
+      onPanelsChanged={() => {}}
+    />,
+  );
+  try {
+    await waitFor(() => expect(buttonWithText(container, "Change Wi-Fi")).toBeDefined());
+    await act(async () => buttonWithText(container, "Change Wi-Fi")?.click());
+    expect(container.textContent).toContain("Change Wi-Fi on desk-0001");
+  } finally {
+    globalThis.fetch = originalFetch;
+    Reflect.deleteProperty(navigator, "serial");
     await cleanup();
   }
 });

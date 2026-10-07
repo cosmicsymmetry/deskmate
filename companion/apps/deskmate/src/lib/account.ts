@@ -77,6 +77,17 @@ export function claimPanel(): Promise<{ device_id: string; token: string; link_u
   return request("POST", "/v1/app/devices/claim");
 }
 
+/**
+ * Fresh credentials for a panel already on the account, keeping its id. The
+ * cable write replaces the panel's token along with its Wi-Fi, so changing
+ * networks needs one; the old token stops working at once.
+ */
+export function reissuePanel(
+  id: string,
+): Promise<{ device_id: string; token: string; link_url: string }> {
+  return request("POST", `/v1/app/devices/${encodeURIComponent(id)}/credentials`);
+}
+
 export function removePanel(id: string): Promise<void> {
   return request<void>("DELETE", `/v1/app/devices/${encodeURIComponent(id)}`);
 }

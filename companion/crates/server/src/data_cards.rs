@@ -3564,7 +3564,19 @@ esac
     async fn a_builtin_still_stages_and_selects() {
         let server = CapabilityServer::new("headlines");
         server.wait_for_verbs(3).await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // The third verb is logged when the staging render STARTS; tap only once
+        // its frame is stored, or a loaded host turns a staged hit into a render.
+        poll_until(
+            || {
+                server
+                    .space
+                    .image_sources
+                    .has_view_for_test(&server.source_id, "page-1")
+                    .then_some(())
+            },
+            || format!("page-1 was never staged: {:?}", server.verbs()),
+        )
+        .await;
         assert_eq!(server.verbs(), ["render", "views", "render"]);
         server.tap().await;
         let verbs = server.wait_for_verbs(4).await;

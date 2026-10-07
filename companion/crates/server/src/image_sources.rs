@@ -474,6 +474,16 @@ impl ImageSourceStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Whether `view` is stored for `id`, without selecting it.
+    #[cfg(test)]
+    pub(crate) fn has_view_for_test(&self, id: &str, view: &str) -> bool {
+        self.lock()
+            .sources
+            .iter()
+            .find(|source| source.id == id)
+            .is_some_and(|source| source.frames.contains_key(view))
+    }
+
     #[cfg(test)]
     pub(crate) fn forget_staged_view_for_test(&self, id: &str, view: &str) {
         assert!(!view.is_empty());

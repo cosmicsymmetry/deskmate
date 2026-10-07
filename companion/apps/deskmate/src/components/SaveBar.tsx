@@ -44,10 +44,9 @@ interface SaveBarProps {
   ownershipTier: DeviceTier | null;
   dirty: boolean;
   busy?: boolean;
-  /** The sheet is modal, so the page's primary save bar is unreachable while it is
-   *  open. Rather than let a preference edit strand itself behind a dialog, the
-   *  sheet renders this same bar — one implementation, so the two can never
-   *  disagree about whether the draft is saveable. */
+  /** The sheet is modal and covers the page's bar, so it renders this same bar to
+   *  show the save status and offer the retry -- one implementation, so the two
+   *  can never disagree. */
   variant?: "page" | "sheet";
   onSave: () => void;
 }
@@ -62,13 +61,9 @@ export function SaveBar({
   onSave,
 }: SaveBarProps) {
   const serverOwned = ownershipTier === "networked";
-  const blocked =
-    busy ||
-    !dirty ||
-    !serverOwned ||
-    validation.kind !== "ready" ||
-    !validation.result.valid ||
-    saveState.kind === "saving";
+  // Saving is automatic; the only control left is a retry after a failure.
+  const retryBlocked =
+    busy || !dirty || !serverOwned || validation.kind !== "ready" || !validation.result.valid;
 
   return (
     <footer className={variant === "sheet" ? "save-bar save-bar--sheet" : "save-bar"}>
@@ -95,18 +90,22 @@ export function SaveBar({
             Server ownership is unavailable. Check the device link before saving.
           </span>
         )}
+        {saveState.kind === "saving" && <span>Saving…</span>}
         {validation.kind === "ready" &&
           validation.result.valid &&
           saveState.kind === "idle" &&
-          serverOwned && <span>{dirty ? "Unsaved changes" : "Everything is up to date"}</span>}
+          serverOwned && <span>{dirty ? "Saving shortly…" : "Everything is saved"}</span>}
       </div>
-      <button className="button button--primary" type="button" disabled={blocked} onClick={onSave}>
-        {saveState.kind === "saving"
-          ? "Saving to server…"
-          : serverOwned
-            ? "Save to server"
-            : "Ownership unavailable"}
-      </button>
+      {saveState.kind === "error" && (
+        <button
+          className="button button--primary"
+          type="button"
+          disabled={retryBlocked}
+          onClick={onSave}
+        >
+          Try again
+        </button>
+      )}
     </footer>
   );
 }

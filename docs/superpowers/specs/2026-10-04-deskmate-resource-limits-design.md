@@ -1,6 +1,8 @@
 # Deskmate resource limits and the self-host boundary
 
-2026-10-04 -- Track A -- **revision 6** of the ROD-4 limits spec, proposed for review.
+2026-10-04 -- Track A -- **revision 6** of the ROD-4 limits spec.
+**Status: approved by the owner 2026-10-07; phase 1 plan
+`docs/superpowers/plans/2026-10-07-deskmate-limits-phase-1.md`.**
 The board called this "revision 4"; the tracker's revisions 4 and 5 (Vault, 2026-10-01)
 were interim drafts against `cfdb3a0`, and this supersedes them. The repository file is
 the source; the ROD-4 plan document carries the same text.
@@ -432,10 +434,11 @@ What each item covered:
   desirable.
 - **M3 -- a paging built-in refresh end to end.** Done for Hacker News: render, views
   and the three staged pages, .98-1.04 CPU-s against the .95 extrapolation.
-- **M4 -- 24 h of the service's own accounting.** Open. The window started at the
-  17:57:27 UTC restart; read it on or after 2026-10-05 17:57 UTC with
-  `systemctl show deskmate-server -p MemoryPeak -p CPUUsageNSec -p ActiveEnterTimestamp`,
-  and only if `ActiveEnterTimestamp` has not moved.
+- **M4 -- the service's own accounting over a long window.** Done, read 2026-10-07
+  08:41:54 UTC. The service restarted again at 2026-10-05 21:00:12 UTC, so the window is
+  35 h 42 min from that restart rather than 24 h from 17:57: `CPUUsageNSec` 1,054.6 s =
+  **.0082 CPU average**, `MemoryPeak` 514,973,696 B = **491 MiB**. Same average as the
+  8 h sample; the peak is lower than the 555 MiB seen before.
 
 Not in this session: OS kill behaviour, overshoot, cgroup delegation, OOM. Those are
 implementation gates (M2/M3 in revision 5's sense) and run when the supervision code

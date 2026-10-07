@@ -11,10 +11,14 @@ Hosted allowance tables, paid-policy code, billing UI/services and the managed r
 plugin directory are absent. There is no licence key or activation request. Install
 plugins locally instead; there is no directory button or checkout stub to configure.
 Self-host has no commercial panel cap. Existing safety bounds remain: eight cards per
-panel, eight image sources per account, one current frame per source, 60-second minimum
-scheduled refresh, and the instance's 32 concurrent-link guard. These are capacity
-limits, not an invitation to upgrade. Proposed hosted CPU budgets are not implemented
-by this package. Keep registration closed unless you intend to operate a shared service.
+panel, eight image sources per account, a staged set of at most fifteen frames per
+account, a 60-second minimum scheduled refresh, and the instance's 32 concurrent-link
+guard. These are capacity limits, not an invitation to upgrade. External producers keep
+one frame per source. Server-rendered sources stage up to four views each, and an
+account's staged set is bounded at fifteen frames in RAM and on disk. That is a server
+bound, not a promise about what is resident on the panel. Proposed hosted CPU budgets
+are not implemented by this package. Keep registration closed unless you intend to
+operate a shared service.
 
 ## 1. Prepare a machine
 

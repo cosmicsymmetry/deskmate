@@ -50,6 +50,9 @@ import type {
 } from "./lib/types";
 import { useAppState } from "./lib/useAppState";
 
+/** How long the page waits after the last valid edit before saving it. */
+const AUTOSAVE_DELAY_MS = 600;
+
 /** The device link in one phrase for the troubleshooting facts in the settings sheet. */
 function linkLabel(snapshot: AppSnapshot): string {
   switch (snapshot.device.connection.kind) {
@@ -180,6 +183,7 @@ function DeviceApp({
   const [draft, setDraft] = useState<AppConfig | null>(null);
   const draftRef = useRef<AppConfig | null>(draft);
   draftRef.current = draft;
+  const validatedDraftRef = useRef<AppConfig | null>(null);
   const draftRevisionRef = useRef(0);
   const saveInFlightRef = useRef(false);
   const mintInFlightRef = useRef(false);
@@ -255,6 +259,7 @@ function DeviceApp({
       void validateConfigDraft(draft)
         .then((result) => {
           if (active) {
+            validatedDraftRef.current = draft;
             setValidation({ kind: "ready", result });
           }
         })
@@ -273,6 +278,40 @@ function DeviceApp({
       window.clearTimeout(timeout);
     };
   }, [draft]);
+
+  // Every edit saves itself. A removed card that only lived in an unsaved draft
+  // kept its picture source on the server, and the eight-source ceiling then
+  // refused a new card with no visible reason; a page that can hold unsaved state
+  // invites exactly that. The save waits for validation and a short pause so a
+  // burst of typing is one write, and a failure waits for the next edit or a retry
+  // instead of looping.
+  const autoSaveRef = useRef<() => void>(() => {});
+  const serverOwnedForSave = ownershipTier === "networked";
+  useEffect(() => {
+    if (
+      !dirty ||
+      !serverOwnedForSave ||
+      minting ||
+      resuming ||
+      saveState.kind === "saving" ||
+      saveState.kind === "error" ||
+      validation.kind !== "ready" ||
+      !validation.result.valid
+    ) {
+      return;
+    }
+    const timeout = window.setTimeout(() => autoSaveRef.current(), AUTOSAVE_DELAY_MS);
+    return () => window.clearTimeout(timeout);
+  }, [dirty, serverOwnedForSave, minting, resuming, saveState.kind, validation]);
+
+  useEffect(() => {
+    if (!dirty) {
+      return;
+    }
+    const warn = (event: BeforeUnloadEvent) => event.preventDefault();
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
 
   if (stateError && isSessionMissing(stateError)) {
     return <SignInScreen instance={instance} signInError={signInError} />;
@@ -364,6 +403,10 @@ function DeviceApp({
   const replaceDraft = (next: AppConfig) => {
     draftRevisionRef.current += 1;
     draftRef.current = next;
+    // An already-armed autosave (or retry before paint) must not submit this
+    // draft using the previous edit's validation during the validation debounce.
+    validatedDraftRef.current = null;
+    setValidation((current) => ({ kind: "checking", result: current.result }));
     setDraft(next);
     dirtyRef.current = true;
     setDirty(true);
@@ -473,6 +516,7 @@ function DeviceApp({
     if (
       saveInFlightRef.current ||
       mintInFlightRef.current ||
+      validatedDraftRef.current !== draftRef.current ||
       validation.kind !== "ready" ||
       !validation.result.valid
     ) {
@@ -511,6 +555,7 @@ function DeviceApp({
       saveInFlightRef.current = false;
     }
   };
+  autoSaveRef.current = () => void handleSave();
   const handleResume = async () => {
     if (dirtyRef.current || saveInFlightRef.current || mintInFlightRef.current) {
       return;

@@ -305,12 +305,14 @@ Each of these cost this project real time at least once.
   using `toFixed` differs in the last digit of a few coordinates. Go through
   `kit/svg.ts`'s `fixed`, never `toFixed`, for anything that reaches the document. A
   deliberate design change is `bun run dump --update`, reviewed as a diff.
-- **A second save control beside "Save to server" silently discards what it guards.** The
-  server faces' fields once had their own small "Save source settings" button. Type a coin,
-  press the prominent save, and the coin was gone: the face stayed blank, was never
-  fetched, the panel said "Waiting for the first picture" and the window said "Saved to
-  the server". Face fields now save themselves (blur, Enter, at once for a choice). **Do
-  not add a control whose unsaved state the window's one save ignores.**
+- **Unsaved state in the window strands things on the server, so the window saves
+  itself (2026-10-07, owner).** Twice an edit that looked done was not: a face's own
+  "Save source settings" button discarded a coin when the main save was pressed, and a
+  card removed but never saved kept its picture source, so the eight-source ceiling later
+  refused a new card for no visible reason. The draft now saves 600 ms after the last
+  valid edit (`AUTOSAVE_DELAY_MS` in `App.tsx`); the save bar shows status and offers
+  only "Try again" after a failure. Face fields save themselves too. **Do not add a
+  control whose state waits for a button.**
 - **A face that cannot draw must say so in the window, because the panel cannot.** The
   device has three states for a picture card -- waiting, stale, drawn -- and none of them
   is "your coin was not found" or "the API said 429". `face_status` on `GET /v1/images`

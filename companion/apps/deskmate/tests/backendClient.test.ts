@@ -36,7 +36,11 @@ test("minting a picture source makes a server round trip with the source name", 
   // faceKind rides along on every mint: null for an external producer, a kind
   // when the owner picked a server-drawn face from the menu.
   expect(httpCalls).toEqual([
-    { method: "POST", path: "/v1/images", body: { name: "Picture", face_kind: null } },
+    {
+      method: "POST",
+      path: "/v1/images",
+      body: { name: "Picture", face_kind: null },
+    },
   ]);
 });
 
@@ -114,13 +118,20 @@ test("account calls use the committed routes and unwrap their response envelopes
     "POST /v1/app/devices/claim",
     () =>
       new Response(
-        JSON.stringify({ device_id: "desk-2", token: "once", link_url: "wss://desk/link" }),
+        JSON.stringify({
+          device_id: "desk-2",
+          token: "once",
+          link_url: "wss://desk/link",
+        }),
         { status: 201 },
       ),
   );
   httpHandlers.set("DELETE /v1/app/devices/desk%2F2", () => new Response(null, { status: 204 }));
 
-  expect(await account.getInstance()).toMatchObject({ edition: "hosted", google_enabled: true });
+  expect(await account.getInstance()).toMatchObject({
+    edition: "hosted",
+    google_enabled: true,
+  });
   expect(await account.completeSetup("ABCD-EFGH", row.email)).toEqual(row);
   await account.requestSignInLink(row.email);
   expect(await account.consumeSignInLink("link-token")).toEqual(row);
@@ -164,8 +175,18 @@ test("account route errors keep the server's recovery sentence", async () => {
 test("a linked display outranks a newer refused-config row", async () => {
   const remembered = window.localStorage.getItem("deskmate.device_id");
   const devices = [
-    { id: "refused", connected: false, has_saved_config: true, configured_at: 200 },
-    { id: "healthy", connected: true, has_saved_config: true, configured_at: 100 },
+    {
+      id: "refused",
+      connected: false,
+      has_saved_config: true,
+      configured_at: 200,
+    },
+    {
+      id: "healthy",
+      connected: true,
+      has_saved_config: true,
+      configured_at: 100,
+    },
   ];
   httpHandlers.set("GET /v1/app/devices", () => new Response(JSON.stringify(devices)));
 
@@ -209,7 +230,12 @@ test("real event streams preserve credentials, parsing and stale-source cleanup"
     () =>
       new Response(
         JSON.stringify([
-          { id: "desk A/α", connected: true, has_saved_config: true, configured_at: 100 },
+          {
+            id: "desk A/α",
+            connected: true,
+            has_saved_config: true,
+            configured_at: 100,
+          },
         ]),
       ),
   );
@@ -279,7 +305,9 @@ test("session loss forgets the previous account's selected panel", async () => {
   httpHandlers.set("GET /v1/app/devices", () =>
     jsonResponse([{ id: "first-panel", connected: true }]),
   );
-  expect(await client.getNetworkSettings()).toMatchObject({ device_id: "first-panel" });
+  expect(await client.getNetworkSettings()).toMatchObject({
+    device_id: "first-panel",
+  });
   httpHandlers.set("GET /v1/app/account", () => new Response(null, { status: 401 }));
   await expect(client.request("GET", "/v1/app/account")).rejects.toThrow(
     client.SESSION_REQUIRED_MESSAGE,
@@ -287,6 +315,37 @@ test("session loss forgets the previous account's selected panel", async () => {
   httpHandlers.set("GET /v1/app/devices", () =>
     jsonResponse([{ id: "second-panel", connected: true }]),
   );
-  expect(await client.getNetworkSettings()).toMatchObject({ device_id: "second-panel" });
+  expect(await client.getNetworkSettings()).toMatchObject({
+    device_id: "second-panel",
+  });
   client.resetAccountState();
+});
+
+test("a picture-source refusal shows its own sentence, never [object Object]", async () => {
+  httpHandlers.set("POST /v1/images", () =>
+    jsonResponse(
+      {
+        kind: "capacity",
+        message: "the image-source capacity has been reached",
+      },
+      409,
+    ),
+  );
+  const failure = await realMintImageSource("Terminal Command").catch((error: unknown) => error);
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error).message).toBe(
+    "This account already has 8 picture sources, the most a panel can hold. Remove a picture card to add another.",
+  );
+
+  httpHandlers.set("POST /v1/images", () =>
+    jsonResponse(
+      {
+        kind: "invalid-face-fields",
+        message: "platform must be one of both, linux, macos",
+      },
+      422,
+    ),
+  );
+  const invalid = await realMintImageSource("Terminal Command").catch((error: unknown) => error);
+  expect((invalid as Error).message).toBe("platform must be one of both, linux, macos");
 });

@@ -32,6 +32,7 @@ import {
   SESSION_REQUIRED_MESSAGE,
   toApiError,
 } from "./apiErrors";
+import { MAX_IMAGE_SOURCES } from "./configDraft";
 
 export {
   DeskmateApiError,
@@ -102,6 +103,33 @@ function pickDevice(devices: DeviceRow[]): DeviceRow | undefined {
   );
 }
 
+/**
+ * The picture-source routes answer `{kind, message}` rather than the app API's
+ * `{category, message}`. Without this, a refusal such as the eight-source ceiling
+ * fell through to `String(parsed)` and the page showed "[object Object]".
+ */
+function imageRouteError(parsed: unknown): ApiError | null {
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !("kind" in parsed) ||
+    typeof parsed.kind !== "string" ||
+    !("message" in parsed) ||
+    typeof parsed.message !== "string"
+  ) {
+    return null;
+  }
+  if (parsed.kind === "capacity") {
+    return {
+      category: "invalid-payload",
+      message: parsed.message.startsWith("the image-source capacity")
+        ? `This account already has ${MAX_IMAGE_SOURCES} picture sources, the most a panel can hold. Remove a picture card to add another.`
+        : `${parsed.message} Remove a picture card to add another.`,
+    };
+  }
+  return { category: "invalid-payload", message: parsed.message };
+}
+
 export async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   let response: Response;
   try {
@@ -143,7 +171,7 @@ export async function request<T>(method: string, path: string, body?: unknown): 
       "error" in parsed &&
       typeof parsed.error === "string"
         ? { category: "invalid-payload", message: parsed.error }
-        : toApiError(parsed);
+        : (imageRouteError(parsed) ?? toApiError(parsed));
     if (parsed === null) {
       details.message = `${response.status} ${response.statusText}`.trim();
     }

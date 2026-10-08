@@ -202,6 +202,27 @@ test("a linked display outranks a newer refused-config row", async () => {
   }
 });
 
+test("an abandoned setup never outranks the real panel, even before it links", async () => {
+  // The live account: dev-0006 and dev-0007 claimed by setups that never
+  // finished, dev-0008 the working panel, not yet linked when the page loaded.
+  const remembered = window.localStorage.getItem("deskmate.device_id");
+  const devices = [
+    { id: "dev-0006", connected: false, has_saved_config: false, state: "pending" },
+    { id: "dev-0007", connected: false, has_saved_config: false, state: "pending" },
+    { id: "dev-0008", connected: false, has_saved_config: false, state: "active" },
+  ];
+  httpHandlers.set("GET /v1/app/devices", () => new Response(JSON.stringify(devices)));
+
+  try {
+    window.localStorage.setItem("deskmate.device_id", "dev-0006");
+    const client = await import("../src/lib/backendClient.ts?abandoned-setup");
+    expect(await client.getNetworkSettings()).toMatchObject({ device_id: "dev-0008" });
+  } finally {
+    if (remembered === null) window.localStorage.removeItem("deskmate.device_id");
+    else window.localStorage.setItem("deskmate.device_id", remembered);
+  }
+});
+
 test("real event streams preserve credentials, parsing and stale-source cleanup", async () => {
   const { startAppStateSubscription } = await import("../src/lib/useAppState");
   const { snapshot } = await import("./support/fixtures");

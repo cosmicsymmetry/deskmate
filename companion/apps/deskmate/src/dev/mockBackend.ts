@@ -452,6 +452,7 @@ export class MockPanelPort implements PanelPort {
   private wakeReader: (() => void) | null = null;
   private opened = false;
   private configured = false;
+  private disconnectListener = () => {};
 
   async open(): Promise<void> {
     this.opened = true;
@@ -498,7 +499,16 @@ export class MockPanelPort implements PanelPort {
     this.wakeReader?.();
   }
 
-  onDisconnect(_listener: () => void): void {}
+  async restart(): Promise<void> {
+    // A real board drops off USB while it reboots; the setup flow waits for that.
+    this.opened = false;
+    this.wakeReader?.();
+    queueMicrotask(() => this.disconnectListener());
+  }
+
+  onDisconnect(listener: () => void): void {
+    this.disconnectListener = listener;
+  }
 
   private enqueue(chunk: Uint8Array): void {
     this.chunks.push(chunk);
@@ -564,6 +574,15 @@ export async function mockAccountRequest(
       });
     }
     default:
+      if (method === "POST" && /^\/v1\/app\/devices\/[^/]+\/credentials$/.test(path)) {
+        const id = decodeURIComponent(path.split("/")[4] ?? "");
+        if (!panels.some((panel) => panel.id === id)) throw new Error("404 Not Found");
+        return delay({
+          device_id: id,
+          token: "reissued-token-shown-once",
+          link_url: "wss://deskmate.rodi.one/v1/device/link",
+        });
+      }
       if (method === "DELETE" && path.startsWith("/v1/app/devices/")) {
         const id = decodeURIComponent(path.slice("/v1/app/devices/".length));
         panels = panels.filter((panel) => panel.id !== id);

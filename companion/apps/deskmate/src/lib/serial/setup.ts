@@ -7,6 +7,8 @@ export type SetupStep =
   | { kind: "no-response" }
   | { kind: "wifi-form" }
   | { kind: "writing" }
+  | { kind: "restarting" }
+  | { kind: "replug" }
   | { kind: "wifi-joining" }
   | { kind: "wifi-failed"; boardError: string }
   | { kind: "linking" }
@@ -34,6 +36,10 @@ export const WIFI_JOIN_TIMEOUT_MESSAGE =
   "The panel is still trying to join this network. Check the network name and password.";
 const LINK_INTERVAL_MS = 1_000;
 const MAX_REOPEN_ATTEMPTS = 3;
+/** How long a restarted board takes to drop off USB before we ask for a replug. */
+const RESTART_DEADLINE_MS = 5_000;
+/** How long to wait for the owner to unplug and replug the panel. */
+const REPLUG_DEADLINE_MS = 120_000;
 
 export class PanelSetup {
   private link: PanelLink | undefined;
@@ -138,11 +144,31 @@ export class PanelSetup {
       }
     }
 
-    if (this.disconnected) {
-      if (!(await reopen())) {
+    // The board stores the settings and keeps running on the old ones until it
+    // boots again, so every status before a restart describes the previous
+    // network. Restart it and trust nothing it says until it has dropped off
+    // USB and come back.
+    this.onStep({ kind: "restarting" });
+    if (!this.disconnected) await this.deps.port.restart().catch(() => {});
+    const restartDeadline = this.deps.now() + RESTART_DEADLINE_MS;
+    while (!this.disconnected && this.deps.now() < restartDeadline) {
+      await this.deps.sleep(STATUS_INTERVAL_MS);
+    }
+    if (!this.disconnected) {
+      this.onStep({ kind: "replug" });
+      const replugDeadline = this.deps.now() + REPLUG_DEADLINE_MS;
+      while (!this.disconnected && this.deps.now() < replugDeadline) {
+        await this.deps.sleep(STATUS_INTERVAL_MS);
+      }
+      if (!this.disconnected) {
         this.onStep({ kind: "no-response" });
         return;
       }
+      reopenAttempts = -Math.floor(REPLUG_DEADLINE_MS / REOPEN_INTERVAL_MS);
+    }
+    if (!(await reopen())) {
+      this.onStep({ kind: "no-response" });
+      return;
     }
 
     this.onStep({ kind: "wifi-joining" });

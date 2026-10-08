@@ -1,6 +1,6 @@
 import { type FormEvent, useEffect, useRef, useState } from "react";
 
-import { claimPanel, listPanels } from "../lib/account";
+import { claimPanel, listPanels, reissuePanel } from "../lib/account";
 import {
   type PanelPort,
   requestPanelPort,
@@ -116,9 +116,12 @@ export function PanelSetup({
   onDone,
   standalone = false,
   headingId,
+  deviceId,
   dependencies = dependenciesForBrowser,
 }: {
   onDone: () => void;
+  /** An existing panel whose Wi-Fi is being changed; omitted when adding one. */
+  deviceId?: string;
   standalone?: boolean;
   headingId?: string;
   dependencies?: PanelSetupDependencies;
@@ -129,6 +132,17 @@ export function PanelSetup({
   const [submittingWifi, setSubmittingWifi] = useState(false);
   const setupRef = useRef<SetupController | null>(null);
   const portRef = useRef<PanelPort | null>(null);
+  // One identity per visit to this screen, however many times "Connect" or
+  // "Try again" is pressed: a fresh claim per attempt is what left dev-0006,
+  // dev-0007... behind every failed setup.
+  const claimRef = useRef<ReturnType<typeof claimPanel> | null>(null);
+  const claim = () => {
+    claimRef.current ??= deviceId === undefined ? claimPanel() : reissuePanel(deviceId);
+    claimRef.current.catch(() => {
+      claimRef.current = null;
+    });
+    return claimRef.current;
+  };
 
   useEffect(
     () => () => {
@@ -153,7 +167,7 @@ export function PanelSetup({
       const setup = dependencies.createSetup(
         {
           port,
-          claim: claimPanel,
+          claim,
           isLinked: async (deviceId) =>
             (await listPanels()).some(
               (panel) => panel.id === deviceId && panel.connected && panel.state === "active",
@@ -187,11 +201,8 @@ export function PanelSetup({
       .finally(() => setSubmittingWifi(false));
   };
 
-  const heading = standalone ? (
-    <h1 id={headingId}>Add your panel</h1>
-  ) : (
-    <h3 id={headingId}>Add your panel</h3>
-  );
+  const title = deviceId === undefined ? "Add your panel" : `Change Wi-Fi on ${deviceId}`;
+  const heading = standalone ? <h1 id={headingId}>{title}</h1> : <h3 id={headingId}>{title}</h3>;
   const wifiError =
     step.kind === "wifi-failed" ? `The panel couldn't join ${ssid}: ${step.boardError}` : undefined;
 
@@ -238,6 +249,10 @@ export function PanelSetup({
         />
       )}
       {step.kind === "writing" && <p>Sending the network settings to your panel…</p>}
+      {step.kind === "restarting" && <p>Restarting the panel…</p>}
+      {step.kind === "replug" && (
+        <p role="alert">Unplug the panel and plug it back in to apply the new settings.</p>
+      )}
       {step.kind === "wifi-joining" && <p>{`Joining ${ssid}…`}</p>}
       {step.kind === "linking" && (
         <p>Connected to Wi-Fi. Waiting for the panel to reach the server…</p>

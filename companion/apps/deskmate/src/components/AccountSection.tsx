@@ -62,7 +62,9 @@ export function AccountSection({
   const [signupsOpen, setLocalSignupsOpen] = useState(instance.signups_open);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
-  const [showPanelSetup, setShowPanelSetup] = useState(false);
+  // null: the panel list. Otherwise the cable flow, adding a panel or, with an
+  // id, changing an existing panel's Wi-Fi.
+  const [panelSetup, setPanelSetup] = useState<{ deviceId?: string } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -218,13 +220,14 @@ export function AccountSection({
 
       <section
         className="sheet__section"
-        aria-labelledby={showPanelSetup ? "panel-setup-heading" : "panels-heading"}
+        aria-labelledby={panelSetup ? "panel-setup-heading" : "panels-heading"}
       >
-        {showPanelSetup ? (
+        {panelSetup ? (
           <PanelSetup
             headingId="panel-setup-heading"
+            deviceId={panelSetup.deviceId}
             onDone={() => {
-              setShowPanelSetup(false);
+              setPanelSetup(null);
               void run("load-panels", async () => {
                 await loadPanels();
                 onPanelsChanged();
@@ -290,14 +293,27 @@ export function AccountSection({
                             {panelStatus(panel)}
                           </small>
                         </span>
-                        <button
-                          className="text-button text-button--danger"
-                          type="button"
-                          disabled={busy !== null}
-                          onClick={() => setConfirmRemove(panel.id)}
-                        >
-                          Remove
-                        </button>
+                        <span className="network-actions">
+                          {serialSupported() && (
+                            <button
+                              className="text-button"
+                              type="button"
+                              disabled={busy !== null}
+                              aria-label={`Change Wi-Fi on ${panel.id}`}
+                              onClick={() => setPanelSetup({ deviceId: panel.id })}
+                            >
+                              Change Wi-Fi
+                            </button>
+                          )}
+                          <button
+                            className="text-button text-button--danger"
+                            type="button"
+                            disabled={busy !== null}
+                            onClick={() => setConfirmRemove(panel.id)}
+                          >
+                            Remove
+                          </button>
+                        </span>
                       </div>
                     )}
                   </li>
@@ -309,7 +325,7 @@ export function AccountSection({
                 <button
                   className="button button--secondary"
                   type="button"
-                  onClick={() => setShowPanelSetup(true)}
+                  onClick={() => setPanelSetup({})}
                 >
                   Add a panel
                 </button>

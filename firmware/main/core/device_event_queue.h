@@ -33,3 +33,6 @@ bool device_event_queue_pop(device_event_queue_t *queue,
 
 uint32_t device_event_queue_dropped(device_event_queue_t *queue);
 uint32_t device_event_queue_high_water(device_event_queue_t *queue);
+
+/* A scene replacement invalidates queued indexes, but never consumes taps. */
+void device_event_queue_clear_view_indexes(device_event_queue_t *queue);

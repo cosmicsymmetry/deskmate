@@ -67,3 +67,9 @@ bool scene_view_destroy(void);
 
 bool scene_view_active(void);
 lv_obj_t *scene_view_screen(void);
+
+/* Stored in the current screen's heap state, never in a new static. Invoked
+ * only from an LVGL callback. A handler may replace that screen. */
+typedef void (*scene_local_tap_fn)(void *context, protocol_device_event_t *event);
+void scene_view_set_local_tap_handler(scene_local_tap_fn handler, void *context);
+void scene_view_apply_local_tap(protocol_device_event_t *event);

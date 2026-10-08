@@ -30,8 +30,9 @@ pub use render_negotiation::{
     DeviceRenderProfile, RenderRequirements, analyze_scene, validate_native_scene,
 };
 pub use runtime::{
-    DeviceConnection, ImageSourceFrame, ImageSourceHost, RuntimeDevice, RuntimeHandle,
-    RuntimeOptions, RuntimeSubscription, empty_device, initial_snapshot, preview_card_scene,
+    DeviceConnection, ImageSourceFrame, ImageSourceHost, ImageTapRing, ImageTapStep, RuntimeDevice,
+    RuntimeHandle, RuntimeOptions, RuntimeSubscription, empty_device, initial_snapshot,
+    preview_card_scene,
 };
 pub use runtime_command::{PomodoroAction, RuntimeError};
 pub use scene_build::{

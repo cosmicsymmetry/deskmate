@@ -65,7 +65,7 @@ export function describeCatalog(faces: readonly FaceDefinition[] = FACES): strin
   );
 }
 
-function tapEvent(value: unknown): TapEvent | undefined {
+function tapEvent(value: unknown, allowZero = false): TapEvent | undefined {
   if (typeof value !== "object" || value === null) {
     return undefined;
   }
@@ -73,7 +73,7 @@ function tapEvent(value: unknown): TapEvent | undefined {
   if (typeof taps !== "number" || !Number.isFinite(taps) || !Number.isInteger(taps)) {
     return undefined;
   }
-  const boundedTaps = Math.min(32, Math.max(1, taps));
+  const boundedTaps = allowZero && taps === 0 ? 0 : Math.min(32, Math.max(1, taps));
   // An absent point is as valid as an explicit null: C1 has no point to send, and a
   // dropped event here would silently swallow the tap.
   if (point === null || point === undefined) {
@@ -134,7 +134,8 @@ export function tapRequest(
   if (definition.onTap === undefined) {
     throw new Error("this face handles taps through render");
   }
-  const event = tapEvent(request.event);
+  // Zero asks the selector which view its current state names, without advancing.
+  const event = tapEvent(request.event, true);
   if (event === undefined) {
     throw new Error("the tap request has no valid event");
   }

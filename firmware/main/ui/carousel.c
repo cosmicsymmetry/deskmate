@@ -74,6 +74,7 @@ static void emit_event(navigation_gesture_t gesture)
         strcpy(event.card_id, s_carousel.binding.card_id);
         /* Optimistic feedback is intentionally reconciled by the next
          * authoritative PushTimer, including when this enqueue drops. */
+        scene_view_apply_local_tap(&event);
         scene_view_apply_local_action(event.action);
     } else if (gesture == NAVIGATION_GESTURE_PREVIOUS) {
         if (strcmp(s_carousel.binding.previous_card_id,

@@ -606,6 +606,8 @@ fn contract_fixture_covers_scalar_config_enums() {
         DeviceCapability::VolatileAssets => "volatile-assets",
         DeviceCapability::DurableAssetEncoding => "durable-asset-encoding",
         DeviceCapability::DisplayBrightness => "display-brightness",
+        DeviceCapability::PipelinedAssetChunks => "pipelined-asset-chunks",
+        DeviceCapability::LocalTapViews => "local-tap-views",
     });
     assert_enum_contract!(&fixtures.validation_codes, ValidationCode, string_contract_tag, {
         ValidationCode::UnsupportedVersion => "unsupported-version",

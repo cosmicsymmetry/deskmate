@@ -1,6 +1,7 @@
 #include "protocol_message.h"
 
 #include <string.h>
+#include <stdlib.h>
 
 #include "cbor.h"
 #include "core/apply_config_validation.h"
@@ -682,6 +683,8 @@ static protocol_message_result_t decode_push_scene(
     if (result != PROTOCOL_MESSAGE_OK) {
         return result;
     }
+    CborValue primary;
+    push->tap_wrap = true;
     uint32_t present = 0U;
     uint64_t previous = 0U;
     bool has_previous = false;
@@ -706,7 +709,30 @@ static protocol_message_result_t decode_push_scene(
                 push->revision = (uint32_t)raw;
             }
         } else if (key == 2U) {
-            result = scene_result(scene_decode_map(&contents, &push->scene));
+            primary = contents;
+            result = skip_value(&contents);
+        } else if (key == 3U) {
+            size_t views = 0U;
+            CborValue array;
+            if (!cbor_value_is_array(&contents) ||
+                cbor_value_get_array_length(&contents, &views) != CborNoError ||
+                views == 0U || views > PROTOCOL_MAX_TAP_VIEWS ||
+                cbor_value_enter_container(&contents, &array) != CborNoError) {
+                return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+            }
+            push->tap_view_count = (uint8_t)views;
+            for (size_t j = 0U; j < views; ++j) {
+                push->tap_views[j] = cbor_value_get_next_byte(&array);
+                result = scene_result(scene_decode_map(&array, &push->scene));
+                if (result != PROTOCOL_MESSAGE_OK) return result;
+                push->tap_view_lengths[j] = (size_t)(cbor_value_get_next_byte(&array) - push->tap_views[j]);
+            }
+            if (cbor_value_leave_container(&contents, &array) != CborNoError) {
+                return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+            }
+        } else if (key == 4U) {
+            if (push->tap_view_count == 0U) return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+            result = read_boolean(&contents, &push->tap_wrap);
         } else {
             result = skip_value(&contents);
         }
@@ -721,7 +747,7 @@ static protocol_message_result_t decode_push_scene(
     if ((present & required) != required) {
         return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
     }
-    return PROTOCOL_MESSAGE_OK;
+    return scene_result(scene_decode_map(&primary, &push->scene));
 }
 
 static protocol_message_result_t decode_asset_chunk(
@@ -1132,7 +1158,8 @@ static protocol_message_result_t validate_device_event(
     const protocol_device_event_t *event)
 {
     size_t length = 0U;
-    if (event->sequence == 0U ||
+    if ((event->has_view_index && event->kind != PROTOCOL_EVENT_TAP) ||
+        event->sequence == 0U ||
         !bounded_length(event->card_id, sizeof(event->card_id), &length) ||
         length == 0U) {
         return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
@@ -1177,7 +1204,7 @@ static protocol_message_result_t decode_device_event(
         if (key == 0U) {
             result = read_unsigned(&contents, &event->sequence);
             present |= REQUIRED_BIT(0);
-        } else if (key == 1U || key == 4U || key == 5U) {
+        } else if (key == 1U || key == 4U || key == 5U || key == 6U) {
             uint64_t raw = 0U;
             result = read_unsigned(&contents, &raw);
             if (result == PROTOCOL_MESSAGE_OK && raw > UINT32_MAX) {
@@ -1199,6 +1226,10 @@ static protocol_message_result_t decode_device_event(
             } else if (result == PROTOCOL_MESSAGE_OK && key == 5U) {
                 event->has_interrupt_token = true;
                 event->interrupt_token = (uint32_t)raw;
+            } else if (result == PROTOCOL_MESSAGE_OK && key == 6U) {
+                if (raw > UINT8_MAX) return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+                event->has_view_index = true;
+                event->view_index = (uint8_t)raw;
             }
             present |= REQUIRED_BIT((uint32_t)key);
         } else if (key == 2U) {
@@ -2866,37 +2897,53 @@ static protocol_message_result_t encode_scene_node(CborEncoder *parent,
     return result;
 }
 
-static protocol_message_result_t encode_push_scene_payload(
-    CborEncoder *root,
-    const protocol_push_scene_t *push)
+static protocol_message_result_t encode_scene_map(CborEncoder *parent, const scene_t *value)
 {
-    CborEncoder map;
-    protocol_message_result_t result = begin_map(root, &map, 3U);
-    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
-    if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, push->card_id);
-    if (result == PROTOCOL_MESSAGE_OK) {
-        result = encode_pair_uint(&map, 1U, push->revision);
-    }
-    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
-    CborEncoder scene;
-    if (result == PROTOCOL_MESSAGE_OK) result = begin_map(&map, &scene, 3U);
-    if (result == PROTOCOL_MESSAGE_OK) {
-        result = encode_pair_uint(&scene, 0U, push->scene.revision);
-    }
-    if (result == PROTOCOL_MESSAGE_OK) {
-        result = encode_pair_uint(&scene, 1U, push->scene.background);
-    }
+    CborEncoder scene, nodes;
+    protocol_message_result_t result = begin_map(parent, &scene, 3U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&scene, 0U, value->revision);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&scene, 1U, value->background);
     if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&scene, 2U);
-    CborEncoder nodes;
-    if (result == PROTOCOL_MESSAGE_OK) {
-        result = begin_array(&scene, &nodes, push->scene.node_count);
-    }
-    for (uint32_t i = 0U;
-         result == PROTOCOL_MESSAGE_OK && i < push->scene.node_count; ++i) {
-        result = encode_scene_node(&nodes, &push->scene.nodes[i]);
+    if (result == PROTOCOL_MESSAGE_OK) result = begin_array(&scene, &nodes, value->node_count);
+    for (uint32_t i = 0U; result == PROTOCOL_MESSAGE_OK && i < value->node_count; ++i) {
+        result = encode_scene_node(&nodes, &value->nodes[i]);
     }
     if (result == PROTOCOL_MESSAGE_OK) result = end_map(&scene, &nodes);
-    if (result == PROTOCOL_MESSAGE_OK) result = end_map(&map, &scene);
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &scene);
+    return result;
+}
+
+static protocol_message_result_t encode_push_scene_payload(
+    CborEncoder *root, const protocol_push_scene_t *push)
+{
+    if (push->tap_view_count > PROTOCOL_MAX_TAP_VIEWS) return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+    CborEncoder map;
+    size_t count = 3U + (push->tap_view_count ? 1U + (push->tap_wrap ? 0U : 1U) : 0U);
+    protocol_message_result_t result = begin_map(root, &map, count);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, push->card_id);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 1U, push->revision);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_scene_map(&map, &push->scene);
+    if (result == PROTOCOL_MESSAGE_OK && push->tap_view_count) {
+        /* Encoder used by host fixtures; firmware only receives PushScene.
+         * One scratch scene on the heap, never on the protocol task stack. */
+        scene_t *scratch = malloc(sizeof(*scratch));
+        if (scratch == NULL) return PROTOCOL_MESSAGE_ERR_TOO_LARGE;
+        CborEncoder views;
+        result = encode_uint(&map, 3U);
+        if (result == PROTOCOL_MESSAGE_OK) result = begin_array(&map, &views, push->tap_view_count);
+        for (size_t i = 0U; result == PROTOCOL_MESSAGE_OK && i < push->tap_view_count; ++i) {
+            result = scene_result(scene_decode(push->tap_views[i], push->tap_view_lengths[i], scratch));
+            if (result == PROTOCOL_MESSAGE_OK) result = encode_scene_map(&views, scratch);
+        }
+        free(scratch);
+        if (result == PROTOCOL_MESSAGE_OK) result = end_map(&map, &views);
+        if (result == PROTOCOL_MESSAGE_OK && !push->tap_wrap) {
+            result = encode_uint(&map, 4U);
+            if (result == PROTOCOL_MESSAGE_OK) result = encode_bool(&map, false);
+        }
+    }
     if (result == PROTOCOL_MESSAGE_OK) result = end_map(root, &map);
     return result;
 }
@@ -2983,9 +3030,8 @@ static protocol_message_result_t encode_payload(
         break;
     case PROTOCOL_TYPE_DEVICE_EVENT:
         result = begin_map(&root, &map,
-                           message->value.device_event.has_interrupt_token
-                               ? 5U
-                               : 4U);
+                           4U + (message->value.device_event.has_interrupt_token ? 1U : 0U) +
+                           (message->value.device_event.has_view_index ? 1U : 0U));
         if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 0U, message->value.device_event.sequence);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 1U, message->value.device_event.kind);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
@@ -2993,6 +3039,9 @@ static protocol_message_result_t encode_payload(
         if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 4U, message->value.device_event.action);
         if (result == PROTOCOL_MESSAGE_OK && message->value.device_event.has_interrupt_token) {
             result = encode_pair_uint(&map, 5U, message->value.device_event.interrupt_token);
+        }
+        if (result == PROTOCOL_MESSAGE_OK && message->value.device_event.has_view_index) {
+            result = encode_pair_uint(&map, 6U, message->value.device_event.view_index);
         }
         if (result == PROTOCOL_MESSAGE_OK) result = end_map(&root, &map);
         break;

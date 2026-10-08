@@ -101,3 +101,14 @@ uint32_t device_event_queue_high_water(device_event_queue_t *queue)
     unlock_queue(queue);
     return value;
 }
+
+void device_event_queue_clear_view_indexes(device_event_queue_t *queue)
+{
+    if (queue == NULL) return;
+    lock_queue(queue);
+    for (size_t i = 0U; i < queue->count; ++i) {
+        size_t slot = (queue->head + i) % DEVICE_EVENT_QUEUE_CAPACITY;
+        queue->events[slot].has_view_index = false;
+    }
+    unlock_queue(queue);
+}

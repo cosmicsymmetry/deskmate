@@ -64,6 +64,8 @@ pub(super) fn build_card_scene(
         build_template_card_scene(card, card_id, fields, revision)?
     };
     let push = PushScene {
+        tap_views: Vec::new(),
+        tap_wrap: true,
         card_id: card_id.to_owned(),
         revision,
         scene,
@@ -254,6 +256,7 @@ pub(super) fn native_requirements(
 /// Device-side bindings keep clock and pomodoro facts moving between these
 /// event-driven pushes; picture faces are rebuilt when their producer changes
 /// the digest or when the server-inferred staleness state flips.
+#[allow(clippy::too_many_lines)] // Scene construction, ring negotiation and one atomic push.
 pub(super) fn push_active_scene(
     state: &mut WorkerState,
     device: &mut dyn RuntimeDevice,
@@ -281,7 +284,7 @@ pub(super) fn push_active_scene(
         .get(&card_id)
         .cloned()
         .unwrap_or_default();
-    let push = match build_card_scene(
+    let mut push = match build_card_scene(
         &state.config,
         &card_id,
         &fields,
@@ -295,6 +298,37 @@ pub(super) fn push_active_scene(
             return;
         }
     };
+    let ring = if state.device.capability_bits() & protocol::CAPABILITY_LOCAL_TAP_VIEWS != 0 {
+        picture_source(&state.config, &card_id)
+            .map(str::to_owned)
+            .and_then(|source| {
+                state
+                    .image_source_host
+                    .as_mut()
+                    .and_then(|host| host.local_tap_ring(&source))
+            })
+    } else {
+        None
+    };
+    let ring = ring.filter(|ring| {
+        ring.steps.len() > 1
+            && ring.steps.len() <= protocol::MAX_TAP_VIEWS + 1
+            && built_picture_face(&state.config, &card_id, &push)
+                .1
+                .is_some_and(|(digest, _)| ring.steps[0].digest == digest)
+    });
+    let is_stale = built_picture_face(&state.config, &card_id, &push)
+        .1
+        .is_some_and(|(_, stale)| stale);
+    if let Some(ring) = &ring {
+        push.tap_views = ring
+            .steps
+            .iter()
+            .skip(1)
+            .map(|step| with_stale_footer(frame_face_scene(revision, step.digest), is_stale))
+            .collect();
+        push.tap_wrap = ring.wrap;
+    }
     let (is_picture_card, picture_face) = built_picture_face(&state.config, &card_id, &push);
     if is_picture_card {
         match picture_face {
@@ -311,7 +345,7 @@ pub(super) fn push_active_scene(
     // Analyze every freshly-built scene against this device. In particular,
     // a picture digest must be confirmed or installable before its scene can
     // name it; otherwise the panel would accept a face it cannot draw.
-    let requirements = match native_requirements(state, &push.scene) {
+    let mut requirements = match native_requirements(state, &push.scene) {
         Ok(requirements) => requirements,
         Err(message) => {
             state.active_scene_dirty = false;
@@ -319,6 +353,18 @@ pub(super) fn push_active_scene(
             return;
         }
     };
+    for view in &push.tap_views {
+        match native_requirements(state, view) {
+            Ok(view_requirements) => requirements
+                .asset_digests
+                .extend(view_requirements.asset_digests),
+            Err(message) => {
+                record_scene_refusal(state, card_id, message);
+                return;
+            }
+        }
+    }
+    let ring_card = card_id.clone();
     execute_native_push(
         state,
         device,
@@ -328,6 +374,9 @@ pub(super) fn push_active_scene(
         &requirements,
         reconnect_interval,
     );
+    if !state.active_scene_dirty && !state.push_rejections.contains_key(&ring_card) {
+        state.local_tap_ring = ring.map(|ring| (ring_card, ring, 0));
+    }
 }
 
 pub(super) fn execute_native_push(
@@ -349,11 +398,11 @@ pub(super) fn execute_native_push(
         return;
     }
     state.active_scene_dirty = false;
+    let visible_assets = render_negotiation::analyze_scene(&push.scene).asset_digests;
     match device.push_scene(push) {
         Ok(()) => {
-            state
-                .live_scene_assets
-                .clone_from(&requirements.asset_digests);
+            state.local_tap_ring = None;
+            state.live_scene_assets = visible_assets;
             clear_scene_refusal(state, &card_id);
         }
         Err(error) => {

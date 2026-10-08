@@ -204,6 +204,7 @@ mod tests {
         };
 
         replay.observe_event(&DeviceEvent {
+            view_index: None,
             sequence: 1,
             kind: EventKind::InterruptDismissed,
             card_id: "timer".into(),
@@ -232,6 +233,7 @@ mod tests {
         };
 
         replay.observe_event(&DeviceEvent {
+            view_index: None,
             sequence: 1,
             kind: EventKind::Navigation,
             card_id: "absent".into(),

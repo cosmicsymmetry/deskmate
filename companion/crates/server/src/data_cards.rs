@@ -37,7 +37,9 @@ mod face_state;
 mod faces_package;
 #[cfg(test)]
 mod latency_bench;
+mod local_taps;
 mod worker;
+pub(crate) use local_taps::{request_local_tap_staging, tapped_local};
 
 use face_state::FaceStateStore;
 pub use faces_package::FaceCommand;

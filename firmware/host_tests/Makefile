@@ -26,12 +26,13 @@ SCENE_SRCS = ../main/core/scene_decode.c ../main/core/scene_model.c \
 PROTOCOL_SRCS = ../main/core/protocol_frame.c ../main/core/protocol_message.c \
 	$(SCENE_SRCS) $(CBOR_SRCS)
 
-test: test_timefmt test_protocol test_link_state \
+test: test_local_tap_views test_timefmt test_protocol test_link_state \
 	test_widget_model test_ui_command_queue test_navigation \
 	test_interrupt_state test_device_event_queue \
 	test_clock_source test_net_config test_net_ring test_reconnect_backoff \
 	test_ota_policy test_asset_store test_asset_transfer test_scene_model \
 	test_rle565 test_volatile_asset_store test_scene_binding test_scene_decode test_font_registry
+	./test_local_tap_views
 	./test_timefmt
 	./test_protocol
 	./test_link_state
@@ -53,6 +54,9 @@ test: test_timefmt test_protocol test_link_state \
 	./test_scene_binding
 	./test_scene_decode
 	./test_font_registry
+
+test_local_tap_views: test_local_tap_views.c ../main/core/local_tap_views.c
+	$(CC) $(CFLAGS) -I../main -o $@ $^
 
 test_timefmt: test_timefmt.c ../main/core/timefmt.c
 	$(CC) $(CFLAGS) -o $@ $^
@@ -136,6 +140,8 @@ sanitize: clean
 	$(MAKE) CFLAGS="$(CFLAGS) -O1 -g -fsanitize=address,undefined" test
 
 clean:
+	rm -f test_local_tap_views
+	rm -rf test_local_tap_views.dSYM
 	rm -f test_timefmt test_protocol test_link_state \
 		test_widget_model test_ui_command_queue
 	rm -f test_navigation

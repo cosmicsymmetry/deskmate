@@ -6165,3 +6165,19 @@ substance: "the brightness slider works."** Taken as the on-glass observation of
 applied through the window's Settings slider (save -> `ApplyConfig` key 4 -> panel). Not separately
 recorded: which levels were tried, the mounting, the reported raw level after apply, a reboot
 restoring the saved level, and the standalone diagnostic -- none of those is claimed here.
+
+
+## 2026-10-08 — local tap views: off-board implementation only
+
+Part 2 of the approved local-taps design adds bit 13, bounded tap-view decoding,
+PSRAM-first ring storage, and local rendering before the Tap event. The event's
+new flags occupy existing padding (`sizeof(protocol_device_event_t) == 64` in the
+host test); the protocol context and scene renderer's added state are heap-backed.
+No source static/global was added or enlarged. This is not a binary layout claim.
+
+The implementation brief explicitly forbids `idf.py`, firmware version changes,
+committing and hardware operations in this session. None was performed. Full
+firmware build/layout verification, USB flash/version publication, the mandatory
+on-board OTA download check, local taps with the server unreachable and measured
+throughput remain **UNOBSERVED**. See the implementation report in
+`../superpowers/plans/2026-10-08-local-tap-views.md` for exact host gate results.

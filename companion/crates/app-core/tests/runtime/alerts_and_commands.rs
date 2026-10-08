@@ -117,6 +117,7 @@ fn pomodoro_events_complete_once_and_dismissed_interrupts_do_not_replay() {
         control.operations().contains(&Operation::Interrupt(1))
     });
     control.push_event(DeviceEvent {
+        view_index: None,
         sequence: 2,
         kind: EventKind::InterruptDismissed,
         card_id: "pomodoro".into(),

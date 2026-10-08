@@ -21,9 +21,9 @@ use std::sync::Arc;
 use crate::RuntimeDevice;
 use device::DeviceError;
 use protocol::{
-    ASSET_DIGEST_LEN, ASSET_ENCODING_RAW, ASSET_ENCODING_RLE565, AssetBegin, AssetChunk,
-    AssetCommit, AssetKind, AssetRelease, CAPABILITY_DURABLE_ASSET_ENCODING,
-    CAPABILITY_VOLATILE_ASSETS, MAX_ASSET_CHUNK_BYTES, MAX_ASSET_DIGESTS, encode_rle565,
+    ASSET_DIGEST_LEN, ASSET_ENCODING_RAW, ASSET_ENCODING_RLE565, AssetBegin, AssetCommit,
+    AssetKind, AssetRelease, CAPABILITY_DURABLE_ASSET_ENCODING, CAPABILITY_VOLATILE_ASSETS,
+    MAX_ASSET_DIGESTS, encode_rle565,
 };
 
 /// One asset resolved to bytes and ready to stream: the digest both sides
@@ -213,23 +213,13 @@ impl AssetSync {
             return Ok(());
         }
 
-        let mut offset: u32 = 0;
-        for chunk in wire_bytes.chunks(MAX_ASSET_CHUNK_BYTES) {
-            let chunk_len = u32::try_from(chunk.len())
-                .expect("Vec::chunks yields pieces bounded by MAX_ASSET_CHUNK_BYTES");
-            device
-                .send_asset_chunk(AssetChunk {
-                    digest: asset.digest,
-                    offset,
-                    data: chunk.to_vec(),
-                })
-                .map_err(|source| AssetSyncError::Chunk {
-                    digest: asset.digest,
-                    offset,
-                    source,
-                })?;
-            offset += chunk_len;
-        }
+        device
+            .send_asset_chunks(asset.digest, wire_bytes)
+            .map_err(|(offset, source)| AssetSyncError::Chunk {
+                digest: asset.digest,
+                offset,
+                source,
+            })?;
 
         device
             .send_asset_commit(AssetCommit {
@@ -353,8 +343,8 @@ mod tests {
     use crate::{DeviceConnection, RuntimeDevice};
     use device::{ReceivedEvent, SessionDiagnostics};
     use protocol::{
-        Ack, CAPABILITY_VOLATILE_ASSETS, CardConfig, PushScene, StatusResponse, TYPE_ASSET_BEGIN,
-        TimeSync, TriggerInterrupt,
+        Ack, AssetChunk, CAPABILITY_VOLATILE_ASSETS, CardConfig, MAX_ASSET_CHUNK_BYTES, PushScene,
+        StatusResponse, TYPE_ASSET_BEGIN, TimeSync, TriggerInterrupt,
     };
 
     use super::*;

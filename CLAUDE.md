@@ -35,7 +35,7 @@ default. This section states only what is true now.
 
 - **Config schema v11** (`docs/config/v11.md`), **protocol v2** (`docs/protocol/v2.md`,
   frozen; v1 is marked superseded and kept as the record of what flashed firmware
-  speaks), `PROTOCOL_CURRENT_CAPABILITIES` **4064**. Protocol v2 is **NOT additive over v1**: it
+  speaks), `PROTOCOL_CURRENT_CAPABILITIES` **16352**. Protocol v2 is **NOT additive over v1**: it
   removes `PushData` (type 5 is now `PushTimer`), the template/size-class/
   interrupt-policy registry, `ApplyConfig.screens`, `DeviceEvent`'s second identifier,
   the `field.*` scene binding, error codes 11-13 and capability bits 0-4. A v1 host and a
@@ -48,6 +48,12 @@ default. This section states only what is true now.
   (raw 200, the existing final boot level); load never rewrites the file. Other
   integer versions are typed `UnsupportedVersion` refusals, preserved until an
   explicit successful save. A `docs/config/vN.md` exists iff the store reads vN.
+  **The 2026-10-08 local-tap amendment is additive within v2**: bit 13 gates
+  PushScene keys 3/4 (up to four additional scenes, wrap policy); Tap key 6 reports
+  the locally shown index. Rings decode into heap memory, with no new firmware
+  statics. Built-in selections commit without a scene push; plugins promote a
+  prefetched next and replenish it. Old firmware keeps the server tap path.
+  This is source-tree state, not a claim that firmware has been flashed or deployed.
   **The 2026-10-02 brightness amendment is additive within v2**: ApplyConfig key 4
   is sent only to firmware advertising bit 11 (`DisplayBrightness`), including replay.
   The replay cache retains desired brightness across upgrade/downgrade cycles. The

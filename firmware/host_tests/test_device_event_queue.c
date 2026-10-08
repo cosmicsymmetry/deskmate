@@ -52,9 +52,25 @@ static void test_invalid_arguments_do_not_consume_sequence(void)
     assert(s_event.sequence == 1U);
 }
 
+static void test_scene_replacement_keeps_taps_but_clears_old_indexes(void)
+{
+    device_event_queue_init(&s_queue);
+    s_event.kind = PROTOCOL_EVENT_TAP;
+    s_event.has_view_index = true;
+    s_event.view_index = 3U;
+    assert(device_event_queue_push(&s_queue, &s_event));
+    device_event_queue_clear_view_indexes(&s_queue);
+    assert(device_event_queue_push(&s_queue, &s_event));
+    assert(device_event_queue_pop(&s_queue, &s_event));
+    assert(s_event.sequence == 1U && !s_event.has_view_index);
+    assert(device_event_queue_pop(&s_queue, &s_event));
+    assert(s_event.sequence == 2U && s_event.has_view_index && s_event.view_index == 3U);
+}
+
 int main(void)
 {
     test_fifo_and_pressure_gap();
+    test_scene_replacement_keeps_taps_but_clears_old_indexes();
     test_invalid_arguments_do_not_consume_sequence();
     printf("test_device_event_queue: OK (%zu-byte queue, capacity %u)\n",
            sizeof(s_queue), (unsigned)DEVICE_EVENT_QUEUE_CAPACITY);

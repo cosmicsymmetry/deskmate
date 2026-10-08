@@ -364,6 +364,8 @@ fn push_scene(
 ) -> Result<(), CaseError> {
     match client
         .request(&Message::PushScene(PushScene {
+            tap_views: Vec::new(),
+            tap_wrap: true,
             card_id: CARD_ID.into(),
             revision,
             scene: scene.clone(),

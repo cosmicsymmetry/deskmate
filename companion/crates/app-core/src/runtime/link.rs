@@ -52,6 +52,25 @@ pub trait RuntimeDevice: Send + 'static {
     /// protocol -- a caller that sees `true` sends no chunks.
     fn send_asset_begin(&mut self, begin: AssetBegin) -> Result<Ack, DeviceError>;
     fn send_asset_chunk(&mut self, chunk: AssetChunk) -> Result<(), DeviceError>;
+    /// Send one transfer's wire bytes. The error retains the failing offset.
+    /// Transports may pipeline only when their negotiated capability permits it.
+    fn send_asset_chunks(
+        &mut self,
+        digest: [u8; protocol::ASSET_DIGEST_LEN],
+        wire: &[u8],
+    ) -> Result<(), (u32, DeviceError)> {
+        for (index, data) in wire.chunks(protocol::MAX_ASSET_CHUNK_BYTES).enumerate() {
+            let offset = u32::try_from(index * protocol::MAX_ASSET_CHUNK_BYTES)
+                .expect("asset wire length was validated before AssetBegin");
+            self.send_asset_chunk(AssetChunk {
+                digest,
+                offset,
+                data: data.to_vec(),
+            })
+            .map_err(|error| (offset, error))?;
+        }
+        Ok(())
+    }
     fn send_asset_commit(&mut self, commit: AssetCommit) -> Result<(), DeviceError>;
     /// Tell the device the full set of digests that should survive. The
     /// device aborts any transfer still in flight, marks committed records
@@ -74,6 +93,24 @@ pub struct ImageSourceFrame {
     pub stale: bool,
 }
 
+/// Immutable index mapping for one pushed ring. State is opaque to the runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageTapStep {
+    pub selector_view: String,
+    pub view: String,
+    pub digest: [u8; protocol::ASSET_DIGEST_LEN],
+    pub state: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageTapRing {
+    pub generation: u64,
+    /// Includes the primary scene at index zero.
+    pub steps: Vec<ImageTapStep>,
+    pub wrap: bool,
+    pub plugin: bool,
+}
+
 /// Host boundary used by the background runtime for durable picture frames.
 pub trait ImageSourceHost: Send + 'static {
     /// Every image source frame that should remain resident on the device,
@@ -84,6 +121,13 @@ pub trait ImageSourceHost: Send + 'static {
     /// ever been pushed to it.
     ///
     fn image_source_frame(&mut self, source_id: &str) -> Option<ImageSourceFrame>;
+    fn local_tap_ring(&mut self, _source_id: &str) -> Option<ImageTapRing> {
+        None
+    }
+    /// Update the in-memory selection before the next face-change poll. No IO.
+    fn local_tap_selected(&mut self, _source_id: &str, _digest: [u8; 32]) -> bool {
+        false
+    }
 }
 
 pub(super) fn ownership_was_refused(state: &WorkerState) -> bool {

@@ -14,6 +14,11 @@ pub use frame::{
     decode_wire_frame, encode_frame,
 };
 pub use message::{
+    ASSET_CHUNK_WINDOW, CAPABILITY_DISPLAY_BRIGHTNESS, CAPABILITY_DURABLE_ASSET_ENCODING,
+    CAPABILITY_LOCAL_TAP_VIEWS, CAPABILITY_PIPELINED_ASSET_CHUNKS, MAX_TAP_VIEWS,
+    MIN_DISPLAY_BRIGHTNESS,
+};
+pub use message::{
     ASSET_DIGEST_LEN, ASSET_ENCODING_RAW, ASSET_ENCODING_RLE565, Ack, ActivateCard, ApplyConfig,
     AssetBegin, AssetChunk, AssetCommit, AssetKind, AssetRelease, AssetStoreStats,
     CAPABILITY_ASSET_TRANSFER, CAPABILITY_FIRMWARE_UPDATE, CAPABILITY_NETWORKING,
@@ -30,9 +35,6 @@ pub use message::{
     TYPE_TRIGGER_INTERRUPT, TapAction, Tier, TimeSync, TriggerInterrupt,
     VOLATILE_IMAGE_DECODED_LENGTH, VolatileAssetStats, WifiState, decode_message, encode_message,
     expected_response_type, validate_message,
-};
-pub use message::{
-    CAPABILITY_DISPLAY_BRIGHTNESS, CAPABILITY_DURABLE_ASSET_ENCODING, MIN_DISPLAY_BRIGHTNESS,
 };
 pub use rle::{Rle565Error, decode_rle565, encode_rle565};
 pub use scene::{

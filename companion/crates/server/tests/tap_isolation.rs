@@ -169,6 +169,7 @@ async fn a_device_tap_changes_only_its_own_accounts_face_state() {
             protocol::encode_message(
                 0,
                 &Message::DeviceEvent(DeviceEvent {
+                    view_index: None,
                     sequence: 1,
                     kind: EventKind::Tap,
                     card_id: "headlines".into(),

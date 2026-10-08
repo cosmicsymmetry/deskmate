@@ -173,6 +173,8 @@ fn build_operator_scene(request: PushSceneRequest) -> Result<PushScene, AdminErr
                 show_seconds,
             });
             let push = PushScene {
+                tap_views: Vec::new(),
+                tap_wrap: true,
                 card_id,
                 revision,
                 scene,

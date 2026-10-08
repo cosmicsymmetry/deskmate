@@ -461,7 +461,9 @@ export const apiContractFixtures = {
     "scene-render",
     "volatile-assets",
     "durable-asset-encoding",
-    "display-brightness"
+    "display-brightness",
+    "pipelined-asset-chunks",
+    "local-tap-views"
   ],
   "runtime_states": [
     {

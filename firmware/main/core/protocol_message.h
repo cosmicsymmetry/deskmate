@@ -48,6 +48,9 @@
  * compressed bytes were pixels. */
 #define PROTOCOL_CAPABILITY_DURABLE_ASSET_ENCODING (UINT64_C(1) << 10)
 #define PROTOCOL_CAPABILITY_DISPLAY_BRIGHTNESS (UINT64_C(1) << 11)
+#define PROTOCOL_CAPABILITY_PIPELINED_ASSET_CHUNKS (UINT64_C(1) << 12)
+#define PROTOCOL_CAPABILITY_LOCAL_TAP_VIEWS (UINT64_C(1) << 13)
+#define PROTOCOL_MAX_TAP_VIEWS 4U
 #define PROTOCOL_MIN_DISPLAY_BRIGHTNESS 26U
 /* Protocol v2 retired bits 0-4: they described a device that rendered
  * templates itself, which this one has not since stage 3a. The numbers are NOT
@@ -59,7 +62,9 @@
      PROTOCOL_CAPABILITY_SCENE_RENDER |                          \
      PROTOCOL_CAPABILITY_VOLATILE_ASSETS |                       \
      PROTOCOL_CAPABILITY_DURABLE_ASSET_ENCODING |                 \
-     PROTOCOL_CAPABILITY_DISPLAY_BRIGHTNESS)
+     PROTOCOL_CAPABILITY_DISPLAY_BRIGHTNESS | \
+     PROTOCOL_CAPABILITY_PIPELINED_ASSET_CHUNKS | \
+     PROTOCOL_CAPABILITY_LOCAL_TAP_VIEWS)
 #define PROTOCOL_MAX_SSID_LENGTH 32U
 #define PROTOCOL_MAX_PSK_LENGTH 64U
 #define PROTOCOL_MAX_SERVER_URL_LENGTH 128U
@@ -231,6 +236,8 @@ typedef struct {
     char card_id[PROTOCOL_MAX_CARD_ID_LENGTH + 1U];
     protocol_event_action_t action;
     bool has_interrupt_token;
+    bool has_view_index;
+    uint8_t view_index;
     uint32_t interrupt_token;
 } protocol_device_event_t;
 
@@ -248,8 +255,9 @@ typedef struct {
 
 /* PushScene: one card's whole display list, replacing whatever that card
  * drew before. `scene` is embedded by value rather than pointed at because
- * protocol_message_t is the decoder's single destination and nothing here
- * allocates -- but it is ~6 KB, which makes protocol_message_t ~6.4 KB.
+ * protocol_message_t is the decoder's single destination. Decoding allocates
+ * nothing: additional scenes borrow encoded maps until dispatch. The primary
+ * scene is ~6 KB, so this message must never live on the task stack.
  * link/protocol_task.c holds its one instance inside the PSRAM-allocated
  * protocol_context_t, so this costs no internal DRAM and nothing on the
  * 8 KiB task stack; a new caller putting a protocol_message_t on a stack
@@ -258,6 +266,13 @@ typedef struct {
     char card_id[PROTOCOL_MAX_CARD_ID_LENGTH + 1U];
     uint32_t revision;
     scene_t scene;
+    /* Borrowed canonical scene maps, valid until the input frame is reused.
+     * Each is validated with the same decoder as scene. No scene array in
+     * the message union; the dispatcher decodes into its PSRAM allocation. */
+    const uint8_t *tap_views[PROTOCOL_MAX_TAP_VIEWS];
+    size_t tap_view_lengths[PROTOCOL_MAX_TAP_VIEWS];
+    uint8_t tap_view_count;
+    bool tap_wrap;
 } protocol_push_scene_t;
 
 typedef struct {

@@ -8,3 +8,8 @@ declare module "*?production-client" {
   const backend: typeof import("../src/lib/backendClient");
   export = backend;
 }
+
+declare module "*?abandoned-setup" {
+  const backend: typeof import("../src/lib/backendClient");
+  export = backend;
+}

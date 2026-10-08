@@ -188,6 +188,7 @@ fn alert_from_a_non_visible_loop_card_still_fires() {
         control.operations().contains(&Operation::Interrupt(1))
     });
     control.push_event(DeviceEvent {
+        view_index: None,
         sequence: 1,
         kind: EventKind::InterruptDismissed,
         card_id: "off-screen".into(),
@@ -359,6 +360,7 @@ fn a_dismissal_for_an_untracked_token_is_counted_rather_than_silently_dropped() 
     wait_until_online(&runtime);
     // No interrupt was ever scheduled, so token 4242 is tracked by nobody.
     control.push_event(DeviceEvent {
+        view_index: None,
         sequence: 1,
         kind: EventKind::InterruptDismissed,
         card_id: "pomodoro".into(),

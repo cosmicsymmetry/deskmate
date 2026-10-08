@@ -79,6 +79,8 @@ typedef struct {
     lv_obj_t *screen;
     scene_binding_context_t binding;
     scene_timer_snapshot_t timer;
+    scene_local_tap_fn local_tap;
+    void *local_tap_context;
     uint32_t bound_count;
     scene_bound_node_t bound[]; /* exactly bound_count entries */
 } scene_view_state_t;
@@ -1424,4 +1426,21 @@ bool scene_view_active(void)
 lv_obj_t *scene_view_screen(void)
 {
     return s_state != NULL ? s_state->screen : NULL;
+}
+
+void scene_view_set_local_tap_handler(scene_local_tap_fn handler, void *context)
+{
+    if (s_state != NULL) {
+        s_state->local_tap = handler;
+        s_state->local_tap_context = context;
+    }
+}
+
+void scene_view_apply_local_tap(protocol_device_event_t *event)
+{
+    if (s_state != NULL && lv_screen_active() == s_state->screen && s_state->local_tap != NULL) {
+        scene_local_tap_fn handler = s_state->local_tap;
+        void *context = s_state->local_tap_context;
+        handler(context, event);
+    }
 }

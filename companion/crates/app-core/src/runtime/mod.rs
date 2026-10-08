@@ -55,6 +55,9 @@ const DEFAULT_MAX_SUBSCRIBERS: usize = 8;
 pub trait CardTapSink: Send + Sync {
     /// Called on the runtime worker thread. MUST NOT block.
     fn tapped(&self, card_id: &str, source_id: &str);
+    fn tapped_local(&self, card_id: &str, source_id: &str, _ring: ImageTapRing, _index: u8) {
+        self.tapped(card_id, source_id);
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -386,6 +389,7 @@ struct WorkerState {
     /// Card ID -> the exact durable picture face most recently evaluated for
     /// delivery. Comparing this pair with the host detects cadence-driven
     /// digest/staleness changes without retrying an unchanged terminal refusal.
+    local_tap_ring: Option<(String, ImageTapRing, u8)>,
     last_evaluated_picture_face: BTreeMap<String, ([u8; protocol::ASSET_DIGEST_LEN], bool)>,
     image_source_host: Option<Box<dyn ImageSourceHost>>,
     tap_sink: Option<Arc<dyn CardTapSink>>,
@@ -473,6 +477,7 @@ impl WorkerState {
             runtime: RuntimeState::Starting,
             device: empty_device(ConnectionState::Connecting),
             latest_fields: BTreeMap::new(),
+            local_tap_ring: None,
             last_evaluated_picture_face: BTreeMap::new(),
             image_source_host,
             tap_sink,
@@ -1297,7 +1302,45 @@ fn drain_device_events(
                     picture_source(&state.config, &received.event.card_id).map(str::to_owned)
                 {
                     match &state.tap_sink {
-                        Some(sink) => sink.tapped(&received.event.card_id, &source_id),
+                        Some(sink) => {
+                            let local = received.event.view_index.and_then(|index| {
+                                let (card, ring, previous) = state.local_tap_ring.as_mut()?;
+                                if card != &received.event.card_id
+                                    || usize::from(index) >= ring.steps.len()
+                                {
+                                    return None;
+                                }
+                                // A repeated terminal index requests the ordinary server path.
+                                if !ring.wrap && *previous == index {
+                                    return None;
+                                }
+                                *previous = index;
+                                Some((ring.clone(), index))
+                            });
+                            if let Some((ring, index)) = local {
+                                let digest = ring.steps[usize::from(index)].digest;
+                                state.live_scene_assets = BTreeSet::from([digest]);
+                                if !ring.plugin {
+                                    let selected =
+                                        state.image_source_host.as_mut().is_some_and(|host| {
+                                            host.local_tap_selected(&source_id, digest)
+                                        });
+                                    if !selected {
+                                        sink.tapped(&received.event.card_id, &source_id);
+                                        continue;
+                                    }
+                                    if let Some(face) = state
+                                        .last_evaluated_picture_face
+                                        .get_mut(&received.event.card_id)
+                                    {
+                                        face.0 = digest;
+                                    }
+                                }
+                                sink.tapped_local(&received.event.card_id, &source_id, ring, index);
+                            } else {
+                                sink.tapped(&received.event.card_id, &source_id);
+                            }
+                        }
                         None => {
                             diagnostics.taps_dropped.fetch_add(1, Ordering::Relaxed);
                         }
@@ -1372,6 +1415,8 @@ mod tests {
         assert!(!super::command_drives_a_full_sync(
             &RuntimeCommand::PushScene {
                 push: PushScene {
+                    tap_views: Vec::new(),
+                    tap_wrap: true,
                     revision: 1,
                     card_id: "clock".into(),
                     scene: protocol::Scene::default(),
@@ -1588,6 +1633,8 @@ mod tests {
         process_command(
             RuntimeCommand::PushScene {
                 push: PushScene {
+                    tap_views: Vec::new(),
+                    tap_wrap: true,
                     card_id: "clock".into(),
                     revision: 1,
                     scene: protocol::Scene::default(),
@@ -1966,7 +2013,9 @@ mod tests {
 
     fn navigation_event(card_id: &str) -> ReceivedEvent {
         ReceivedEvent {
+            scene_revision: None,
             event: protocol::DeviceEvent {
+                view_index: None,
                 sequence: 1,
                 kind: EventKind::Navigation,
                 card_id: card_id.into(),
@@ -1979,7 +2028,9 @@ mod tests {
 
     fn interrupt_dismissed_event(card_id: &str, token: u32) -> ReceivedEvent {
         ReceivedEvent {
+            scene_revision: None,
             event: protocol::DeviceEvent {
+                view_index: None,
                 sequence: 1,
                 kind: EventKind::InterruptDismissed,
                 card_id: card_id.into(),

@@ -218,6 +218,7 @@ impl MockDeviceControl {
 
     fn push_event(&self, event: DeviceEvent) {
         self.state.lock().unwrap().events.push_back(ReceivedEvent {
+            scene_revision: None,
             event,
             missed_before: 0,
         });
@@ -240,6 +241,7 @@ impl MockDeviceControl {
 
     fn navigate_next(&self, sequence: u64, card_id: &str) {
         self.push_event(DeviceEvent {
+            view_index: None,
             sequence,
             kind: EventKind::Navigation,
             card_id: card_id.into(),
@@ -325,6 +327,7 @@ impl MockDeviceControl {
 
 fn tap_event(sequence: u64, card_id: &str) -> DeviceEvent {
     DeviceEvent {
+        view_index: None,
         sequence,
         kind: EventKind::Tap,
         card_id: card_id.into(),

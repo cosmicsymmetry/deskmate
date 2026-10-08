@@ -65,35 +65,71 @@ fn should_warn_unowned_link() -> bool {
 /// Tokio. The runtime worker also owns the device link, so it must never wait on
 /// the data-card mutex or catalog lookup.
 struct ServerTapSink {
-    state: ServerState,
-    space: std::sync::Arc<AccountSpace>,
-    runtime: tokio::runtime::Handle,
+    sender: tokio::sync::mpsc::Sender<TapRoute>,
+}
+
+struct TapRoute {
+    card: String,
+    source: String,
+    local: Option<(app_core::ImageTapRing, u8)>,
+    started: Instant,
+}
+
+impl ServerTapSink {
+    fn new(state: ServerState, space: std::sync::Arc<AccountSpace>) -> Self {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<TapRoute>(64);
+        tokio::spawn(async move {
+            // Preserve device event order even when blocking-pool tasks would
+            // otherwise acquire the source transition lock out of order.
+            while let Some(route) = receiver.recv().await {
+                let state = state.clone();
+                let space = std::sync::Arc::clone(&space);
+                let _ = tokio::task::spawn_blocking(move || {
+                    let span = tracing::info_span!(target: "server::tap_latency", "tap_route",
+                        account_id = %space.account_id, card_id = %route.card, source_id = %route.source);
+                    let _entered = span.enter();
+                    tracing::info!(target: "server::tap_latency", queue_us = route.started.elapsed().as_micros(),
+                        unix_us = chrono::Utc::now().timestamp_micros(), "tap routing started");
+                    let committed = route.local.is_some_and(|(ring, index)| {
+                        crate::data_cards::tapped_local(&state, &space, &route.source, &ring, index)
+                    });
+                    if !committed { crate::data_cards::tapped(&state, &space, &route.source); }
+                    tracing::info!(target: "server::tap_latency", elapsed_us = route.started.elapsed().as_micros(),
+                        unix_us = chrono::Utc::now().timestamp_micros(), "tap routing finished");
+                }).await;
+            }
+        });
+        Self { sender }
+    }
+
+    fn route(&self, card: &str, source: &str, local: Option<(app_core::ImageTapRing, u8)>) {
+        if self
+            .sender
+            .try_send(TapRoute {
+                card: card.to_owned(),
+                source: source.to_owned(),
+                local,
+                started: Instant::now(),
+            })
+            .is_err()
+        {
+            tracing::warn!(card, source, "tap routing queue full or closed");
+        }
+    }
 }
 
 impl CardTapSink for ServerTapSink {
+    fn tapped_local(
+        &self,
+        card_id: &str,
+        source_id: &str,
+        ring: app_core::ImageTapRing,
+        index: u8,
+    ) {
+        self.route(card_id, source_id, Some((ring, index)));
+    }
     fn tapped(&self, card_id: &str, source_id: &str) {
-        let started = Instant::now();
-        let span = tracing::info_span!(target: "server::tap_latency", "tap_route",
-            account_id = %self.space.account_id, card_id, source_id);
-        tracing::info!(target: "server::tap_latency", parent: &span,
-            unix_us = chrono::Utc::now().timestamp_micros(), taps = 1, "tap dispatched by runtime");
-        let state = self.state.clone();
-        let space = std::sync::Arc::clone(&self.space);
-        let source_id = source_id.to_owned();
-        // `spawn_blocking`, not `spawn`: routing a tap now asks the faces package
-        // which view it selects, and that is a subprocess. It is bounded at five
-        // seconds, but five seconds on an async worker thread would stall every
-        // other task sharing it.
-        std::mem::drop(self.runtime.spawn_blocking(move || {
-            let _entered = span.enter();
-            tracing::info!(target: "server::tap_latency",
-                unix_us = chrono::Utc::now().timestamp_micros(),
-                queue_us = started.elapsed().as_micros(), "tap routing started");
-            crate::data_cards::tapped(&state, &space, &source_id);
-            tracing::info!(target: "server::tap_latency",
-                unix_us = chrono::Utc::now().timestamp_micros(),
-                elapsed_us = started.elapsed().as_micros(), "tap routing finished");
-        }));
+        self.route(card_id, source_id, None);
     }
 }
 
@@ -177,19 +213,19 @@ async fn run(
 
         let (device, connector) = WebSocketRuntimeDevice::channel(device_id.clone());
         let peer = connector.attach();
-        let image_sources = std::sync::Arc::clone(&space.image_sources);
+        let image_source_host =
+            ServerImageSourceHost::with_local_taps(state.clone(), std::sync::Arc::clone(&space));
         let options = state.runtime_options();
-        let tap_sink: std::sync::Arc<dyn CardTapSink> = std::sync::Arc::new(ServerTapSink {
-            state: state.clone(),
-            space: std::sync::Arc::clone(&space),
-            runtime: tokio::runtime::Handle::current(),
-        });
+        let tap_sink: std::sync::Arc<dyn CardTapSink> = std::sync::Arc::new(ServerTapSink::new(
+            state.clone(),
+            std::sync::Arc::clone(&space),
+        ));
         let runtime = tokio::task::spawn_blocking(move || {
             RuntimeHandle::start_with_ports(
                 config,
                 Box::new(device),
                 options,
-                Some(Box::new(ServerImageSourceHost::new(image_sources))),
+                Some(Box::new(image_source_host)),
                 Some(tap_sink),
             )
         })
@@ -303,11 +339,10 @@ mod tests {
             .create_account("owner@example.com", true, true, chrono::Utc::now())
             .expect("create account");
         let space = state.account_space(&account.id);
-        let sink = std::sync::Arc::new(ServerTapSink {
-            state: state.clone(),
-            space: std::sync::Arc::clone(&space),
-            runtime: tokio::runtime::Handle::current(),
-        });
+        let sink = std::sync::Arc::new(ServerTapSink::new(
+            state.clone(),
+            std::sync::Arc::clone(&space),
+        ));
         let data_cards = space.data_cards.lock().expect("data cards");
         let (returned, observed) = std::sync::mpsc::channel();
         let caller = std::thread::spawn(move || {

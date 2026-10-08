@@ -55,17 +55,48 @@ pub(crate) struct ImageSourceStore {
 /// through unchanged, preserving the digest provenance established at ingest.
 pub(crate) struct ServerImageSourceHost {
     store: Arc<ImageSourceStore>,
+    local_taps: Option<(
+        crate::ServerState,
+        Arc<crate::accounts::AccountSpace>,
+        tokio::runtime::Handle,
+    )>,
 }
 
 impl ServerImageSourceHost {
+    pub(crate) fn with_local_taps(
+        state: crate::ServerState,
+        space: Arc<crate::accounts::AccountSpace>,
+    ) -> Self {
+        Self {
+            store: Arc::clone(&space.image_sources),
+            local_taps: Some((state, space, tokio::runtime::Handle::current())),
+        }
+    }
+    #[cfg(test)]
     pub(crate) fn new(store: Arc<ImageSourceStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            local_taps: None,
+        }
     }
 }
 
 impl app_core::ImageSourceHost for ServerImageSourceHost {
     fn desired_assets(&mut self) -> Vec<app_core::DesiredAsset> {
         self.store.desired_assets()
+    }
+
+    fn local_tap_ring(&mut self, source_id: &str) -> Option<app_core::ImageTapRing> {
+        if self.store.enable_local_taps(source_id)
+            && let Some((state, space, runtime)) = &self.local_taps
+        {
+            crate::data_cards::request_local_tap_staging(state, space, source_id, runtime);
+        }
+        self.store.local_tap_ring(source_id)
+    }
+
+    fn local_tap_selected(&mut self, source_id: &str, digest: [u8; 32]) -> bool {
+        self.store.select_digest(source_id, digest)
     }
 
     fn image_source_frame(&mut self, source_id: &str) -> Option<app_core::ImageSourceFrame> {
@@ -103,6 +134,9 @@ struct SourceRecord {
     /// the resting view is the right answer, and a volatile frame did not
     /// survive the reboot either.
     selected: ViewId,
+    local_taps_enabled: bool,
+    selection_epoch: u64,
+    tap_ring: Option<app_core::ImageTapRing>,
 }
 
 /// A face's name for one of the pictures it can draw. Opaque to the server
@@ -241,6 +275,9 @@ impl ImageSourceStore {
             recent_push_times: Vec::new(),
             frames: BTreeMap::new(),
             selected: RESTING_VIEW.to_owned(),
+            local_taps_enabled: false,
+            selection_epoch: 0,
+            tap_ring: None,
         };
         let mut candidate = state.clone();
         candidate.sources.push(record);
@@ -401,8 +438,20 @@ impl ImageSourceStore {
     pub(crate) fn select_view(&self, id: &str, view: &str) -> Option<[u8; 32]> {
         let mut state = self.lock();
         let source = state.sources.iter_mut().find(|source| source.id == id)?;
-        let digest = source.frames.get(view)?.digest;
-        view.clone_into(&mut source.selected);
+        let key = if source.frames.contains_key(view) {
+            view.to_owned()
+        } else {
+            source
+                .tap_ring
+                .as_ref()?
+                .steps
+                .iter()
+                .find(|step| step.selector_view == view)?
+                .view
+                .clone()
+        };
+        let digest = source.frames.get(&key)?.digest;
+        source.selected = key;
         Some(digest)
     }
 
@@ -420,6 +469,146 @@ impl ImageSourceStore {
             bytes: Arc::clone(&frame.bytes),
             stale: is_stale(&source.recent_push_times, now),
         })
+    }
+
+    /// Reuse this source's share of the staging budget. The selected frame is
+    /// first preserved as primary; stale staged slots must not permanently
+    /// prevent a legacy account with all seven extras from acquiring a ring.
+    pub(crate) fn prepare_local_tap_staging(&self, id: &str) -> Result<(), ImageSourceError> {
+        let mut state = self.lock();
+        let source = state
+            .sources
+            .iter_mut()
+            .find(|source| source.id == id)
+            .ok_or(ImageSourceError::UnknownToken)?;
+        let primary = source
+            .frames
+            .get(&source.selected)
+            .or_else(|| source.frames.get(RESTING_VIEW))
+            .cloned()
+            .ok_or(ImageSourceError::UnknownToken)?;
+        if source.selected != RESTING_VIEW {
+            write_frame(&self.root, id, RESTING_VIEW, &primary.bytes)?;
+        }
+        for view in source.frames.keys().filter(|view| !view.is_empty()) {
+            if let Err(error) = fs::remove_file(frame_path(&self.root, id, view))
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                tracing::warn!(source_id = id, view, %error, "could not remove an obsolete staged frame");
+            }
+        }
+        source.frames.clear();
+        source.frames.insert(RESTING_VIEW.to_owned(), primary);
+        source.selected.clear();
+        source.tap_ring = None;
+        Ok(())
+    }
+
+    pub(crate) fn selection_epoch(&self, id: &str) -> u64 {
+        self.lock()
+            .sources
+            .iter()
+            .find(|source| source.id == id)
+            .map_or(0, |source| source.selection_epoch)
+    }
+
+    pub(crate) fn enable_local_taps(&self, id: &str) -> bool {
+        let mut state = self.lock();
+        let Some(source) = state.sources.iter_mut().find(|source| source.id == id) else {
+            return false;
+        };
+        !std::mem::replace(&mut source.local_taps_enabled, true)
+    }
+
+    pub(crate) fn local_taps_enabled(&self, id: &str) -> bool {
+        self.lock()
+            .sources
+            .iter()
+            .any(|source| source.id == id && source.local_taps_enabled)
+    }
+
+    pub(crate) fn local_tap_ring(&self, id: &str) -> Option<app_core::ImageTapRing> {
+        let state = self.lock();
+        let source = state.sources.iter().find(|source| source.id == id)?;
+        let ring = source.tap_ring.as_ref()?;
+        let selected = source.frames.get(&source.selected)?;
+        if ring.steps.first()?.digest != selected.digest
+            || ring.steps.iter().any(|step| {
+                !source
+                    .frames
+                    .values()
+                    .any(|frame| frame.digest == step.digest)
+            })
+        {
+            return None;
+        }
+        Some(ring.clone())
+    }
+
+    pub(crate) fn set_local_tap_ring(&self, id: &str, ring: app_core::ImageTapRing) {
+        if let Some(source) = self
+            .lock()
+            .sources
+            .iter_mut()
+            .find(|source| source.id == id)
+        {
+            source.tap_ring = Some(ring);
+        }
+    }
+
+    pub(crate) fn select_digest(&self, id: &str, digest: [u8; 32]) -> bool {
+        let mut state = self.lock();
+        let Some(source) = state.sources.iter_mut().find(|source| source.id == id) else {
+            return false;
+        };
+        let Some((view, _)) = source
+            .frames
+            .iter()
+            .find(|(_, frame)| frame.digest == digest)
+        else {
+            return false;
+        };
+        source.selected = view.clone();
+        source.selection_epoch = source.selection_epoch.wrapping_add(1);
+        true
+    }
+
+    /// Promotion writes the prefetched bytes to the ordinary resting slot.
+    /// A consumed generation cannot be promoted a second time.
+    pub(crate) fn promote_local_next(
+        &self,
+        id: &str,
+        ring: &app_core::ImageTapRing,
+    ) -> Result<bool, ImageSourceError> {
+        let mut state = self.lock();
+        let source = state
+            .sources
+            .iter_mut()
+            .find(|source| source.id == id)
+            .ok_or(ImageSourceError::UnknownToken)?;
+        if source
+            .tap_ring
+            .as_ref()
+            .is_none_or(|current| current.generation != ring.generation)
+        {
+            return Ok(false);
+        }
+        let Some(step) = ring.steps.get(1) else {
+            return Ok(false);
+        };
+        let Some(frame) = source
+            .frames
+            .get(&step.view)
+            .filter(|frame| frame.digest == step.digest)
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        write_frame(&self.root, id, RESTING_VIEW, &frame.bytes)?;
+        source.frames.insert(RESTING_VIEW.to_owned(), frame);
+        RESTING_VIEW.clone_into(&mut source.selected);
+        source.tap_ring = None;
+        Ok(true)
     }
 
     /// Liveness metadata for the management surface.
@@ -566,6 +755,9 @@ fn load_store(root: &Path) -> Result<ImageSourceState, ImageSourceError> {
             recent_push_times,
             frames,
             selected: RESTING_VIEW.to_owned(),
+            local_taps_enabled: false,
+            selection_epoch: 0,
+            tap_ring: None,
         });
     }
 

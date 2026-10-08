@@ -428,3 +428,17 @@ for (const kind of ["rss", "hackernews"] as const) {
     expect(explicit.png).toBe((await request(initial, { view: "page-4" })).png);
   }, 15_000);
 }
+
+test("zero-tap selection names the current view and repeated steps form a ring", () => {
+  const now = new Date("2026-10-08T00:00:00Z");
+  let state: unknown = { view: "now" };
+  const current = tapRequest({ kind: "weather", state, event: { taps: 0 } }, undefined, now);
+  expect(current.view).toBe("");
+  const steps: string[] = [];
+  for (let i = 0; i < 2; i++) {
+    const next = tapRequest({ kind: "weather", state, event: { taps: 1 } }, undefined, now);
+    steps.push(next.view);
+    state = next.state;
+  }
+  expect(steps).toEqual(["days", ""]);
+});

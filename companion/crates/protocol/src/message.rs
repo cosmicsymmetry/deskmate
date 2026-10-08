@@ -47,6 +47,8 @@ pub const CAPABILITY_VOLATILE_ASSETS: u64 = 1 << 9;
 pub const CAPABILITY_DURABLE_ASSET_ENCODING: u64 = 1 << 10;
 pub const CAPABILITY_DISPLAY_BRIGHTNESS: u64 = 1 << 11;
 pub const CAPABILITY_PIPELINED_ASSET_CHUNKS: u64 = 1 << 12;
+pub const CAPABILITY_LOCAL_TAP_VIEWS: u64 = 1 << 13;
+pub const MAX_TAP_VIEWS: usize = 4;
 pub const ASSET_CHUNK_WINDOW: usize = 8;
 pub const MIN_DISPLAY_BRIGHTNESS: u8 = 26;
 pub const CURRENT_CAPABILITIES: u64 = CAPABILITY_ASSET_TRANSFER
@@ -56,7 +58,8 @@ pub const CURRENT_CAPABILITIES: u64 = CAPABILITY_ASSET_TRANSFER
     | CAPABILITY_VOLATILE_ASSETS
     | CAPABILITY_DURABLE_ASSET_ENCODING
     | CAPABILITY_DISPLAY_BRIGHTNESS
-    | CAPABILITY_PIPELINED_ASSET_CHUNKS;
+    | CAPABILITY_PIPELINED_ASSET_CHUNKS
+    | CAPABILITY_LOCAL_TAP_VIEWS;
 const _: () = assert!(CURRENT_CAPABILITIES & RETIRED_V1_CAPABILITY_BITS == 0);
 /// A card id is an identifier the host chose, not free text.
 ///
@@ -217,6 +220,8 @@ pub struct PushScene {
     /// scene already on the panel.
     pub revision: u32,
     pub scene: Scene,
+    pub tap_views: Vec<Scene>,
+    pub tap_wrap: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,6 +269,7 @@ pub struct DeviceEvent {
     pub card_id: String,
     pub action: EventAction,
     pub interrupt_token: Option<u32>,
+    pub view_index: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -715,6 +721,9 @@ fn validate_apply_config(config: &ApplyConfig) -> Result<(), MessageError> {
 }
 
 fn validate_device_event(event: &DeviceEvent) -> Result<(), MessageError> {
+    if event.view_index.is_some() && event.kind != EventKind::Tap {
+        return Err(MessageError::InvalidValue("view index on non-Tap"));
+    }
     if event.sequence == 0 {
         return Err(MessageError::InvalidValue("event sequence"));
     }
@@ -855,6 +864,13 @@ pub fn validate_message(message: &Message) -> Result<(), MessageError> {
             if push.revision == 0 {
                 return Err(MessageError::InvalidValue("scene revision"));
             }
+            if push.tap_views.len() > MAX_TAP_VIEWS || (push.tap_views.is_empty() && !push.tap_wrap)
+            {
+                return Err(MessageError::InvalidValue("tap views"));
+            }
+            for scene in &push.tap_views {
+                validate_scene(scene)?;
+            }
             validate_scene(&push.scene)
         }
         _ => Ok(()),
@@ -883,11 +899,9 @@ fn encode_config_payload(encoder: &mut Encoder, config: &ApplyConfig) {
 }
 
 fn encode_device_event_payload(encoder: &mut Encoder, event: &DeviceEvent) {
-    encoder.map(if event.interrupt_token.is_some() {
-        5
-    } else {
-        4
-    });
+    encoder.map(
+        4 + usize::from(event.interrupt_token.is_some()) + usize::from(event.view_index.is_some()),
+    );
     encoder.unsigned(0);
     encoder.unsigned(event.sequence);
     encoder.unsigned(1);
@@ -899,6 +913,10 @@ fn encode_device_event_payload(encoder: &mut Encoder, event: &DeviceEvent) {
     if let Some(token) = event.interrupt_token {
         encoder.unsigned(5);
         encoder.unsigned(u64::from(token));
+    }
+    if let Some(index) = event.view_index {
+        encoder.unsigned(6);
+        encoder.unsigned(u64::from(index));
     }
 }
 
@@ -1384,6 +1402,7 @@ fn decode_device_event(payload: &[u8]) -> Result<DeviceEvent, MessageError> {
     let mut card_id = None;
     let mut action = None;
     let mut interrupt_token = None;
+    let mut view_index = None;
     for _ in 0..len {
         match next_numeric_key(&mut decoder, &mut previous)? {
             0 => sequence = Some(decoder.unsigned()?),
@@ -1391,6 +1410,7 @@ fn decode_device_event(payload: &[u8]) -> Result<DeviceEvent, MessageError> {
             2 => card_id = Some(decoder.text()?.to_owned()),
             4 => action = Some(event_action(read_u8(&mut decoder, "event action")?)?),
             5 => interrupt_token = Some(read_u32(&mut decoder, "interrupt token")?),
+            6 => view_index = Some(read_u8(&mut decoder, "view index")?),
             _ => decoder.skip()?,
         }
     }
@@ -1401,6 +1421,7 @@ fn decode_device_event(payload: &[u8]) -> Result<DeviceEvent, MessageError> {
         card_id: card_id.ok_or(MessageError::MissingField(2))?,
         action: action.ok_or(MessageError::MissingField(4))?,
         interrupt_token,
+        view_index,
     })
 }
 
@@ -1428,13 +1449,30 @@ fn decode_ack(payload: &[u8]) -> Result<Ack, MessageError> {
 }
 
 fn encode_push_scene_payload(encoder: &mut Encoder, push: &PushScene) {
-    encoder.map(3);
+    encoder.map(
+        3 + if push.tap_views.is_empty() {
+            0
+        } else {
+            1 + usize::from(!push.tap_wrap)
+        },
+    );
     encoder.unsigned(0);
     encoder.text(&push.card_id);
     encoder.unsigned(1);
     encoder.unsigned(u64::from(push.revision));
     encoder.unsigned(2);
     encode_scene(encoder, &push.scene);
+    if !push.tap_views.is_empty() {
+        encoder.unsigned(3);
+        encoder.array(push.tap_views.len());
+        for scene in &push.tap_views {
+            encode_scene(encoder, scene);
+        }
+        if !push.tap_wrap {
+            encoder.unsigned(4);
+            encoder.boolean(false);
+        }
+    }
 }
 
 fn decode_push_scene(payload: &[u8]) -> Result<PushScene, MessageError> {
@@ -1444,19 +1482,36 @@ fn decode_push_scene(payload: &[u8]) -> Result<PushScene, MessageError> {
     let mut card_id = None;
     let mut revision = None;
     let mut scene = None;
+    let mut tap_views = Vec::new();
+    let mut tap_wrap = None;
     for _ in 0..len {
         match next_numeric_key(&mut decoder, &mut previous)? {
             0 => card_id = Some(decoder.text()?.to_owned()),
             1 => revision = Some(read_u32(&mut decoder, "scene revision")?),
             2 => scene = Some(decode_scene(&mut decoder)?),
+            3 => {
+                let count = decoder.array_len()?;
+                if !(1..=MAX_TAP_VIEWS).contains(&count) {
+                    return Err(MessageError::InvalidValue("tap views"));
+                }
+                for _ in 0..count {
+                    tap_views.push(decode_scene(&mut decoder)?);
+                }
+            }
+            4 => tap_wrap = Some(decoder.boolean()?),
             _ => decoder.skip()?,
         }
     }
     decoder.finish()?;
+    if tap_wrap.is_some() && tap_views.is_empty() {
+        return Err(MessageError::InvalidValue("tap_wrap without tap_views"));
+    }
     Ok(PushScene {
         card_id: card_id.ok_or(MessageError::MissingField(0))?,
         revision: revision.ok_or(MessageError::MissingField(1))?,
         scene: scene.ok_or(MessageError::MissingField(2))?,
+        tap_views,
+        tap_wrap: tap_wrap.unwrap_or(true),
     })
 }
 
@@ -1937,6 +1992,7 @@ mod tests {
                 reason: "done".into(),
             });
             "device_event", 0, Message::DeviceEvent(DeviceEvent {
+        view_index: None,
                 sequence: 5,
                 kind: EventKind::InterruptDismissed,
                 card_id: "timer".into(),
@@ -1954,6 +2010,7 @@ mod tests {
             });
             "factory_reset_round_trips", 42, Message::FactoryReset;
             "push_scene_roundtrips", 45, Message::PushScene(PushScene {
+        tap_views: Vec::new(), tap_wrap: true,
                 card_id: "clock".into(),
                 revision: 7,
                 scene: sample_scene(),
@@ -2185,8 +2242,8 @@ mod tests {
         // what now follows them on the wire. The tail is
         // CURRENT_CAPABILITIES, which protocol v2 re-based: bits 0-4 described
         // a device that rendered templates and are retired, leaving
-        // 8160 (0x1fe0). It moves whenever a capability bit changes.
-        let pattern = [0x15, 0x09, 0x16, 0x02, 0x17, 0x19, 0x1f, 0xe0];
+        // 16352 (0x3fe0). It moves whenever a capability bit changes.
+        let pattern = [0x15, 0x09, 0x16, 0x02, 0x17, 0x19, 0x3f, 0xe0];
         let offset = payload
             .windows(pattern.len())
             .position(|window| window == pattern)
@@ -2556,6 +2613,8 @@ mod tests {
             ..SceneRect::default()
         });
         let at_cap = PushScene {
+            tap_views: Vec::new(),
+            tap_wrap: true,
             card_id: "clock".into(),
             revision: 3,
             scene: Scene {
@@ -2596,6 +2655,8 @@ mod tests {
     #[test]
     fn push_scene_skips_an_unknown_key_after_the_scene() {
         let push = PushScene {
+            tap_views: Vec::new(),
+            tap_wrap: true,
             card_id: "clock".into(),
             revision: 6,
             scene: sample_scene(),
@@ -2610,7 +2671,7 @@ mod tests {
         encoder.unsigned(u64::from(push.revision));
         encoder.unsigned(2);
         crate::scene::encode_scene(&mut encoder, &push.scene);
-        encoder.unsigned(3);
+        encoder.unsigned(5);
         encoder.unsigned(42);
 
         let frame = Frame::new(TYPE_PUSH_SCENE, 45, encoder.into_bytes());
@@ -2621,6 +2682,8 @@ mod tests {
     #[test]
     fn push_scene_rejects_an_off_canvas_node() {
         let message = Message::PushScene(PushScene {
+            tap_views: Vec::new(),
+            tap_wrap: true,
             card_id: "clock".into(),
             revision: 3,
             scene: Scene {
@@ -2641,6 +2704,8 @@ mod tests {
     #[test]
     fn push_scene_rejects_a_zero_revision() {
         let message = Message::PushScene(PushScene {
+            tap_views: Vec::new(),
+            tap_wrap: true,
             card_id: "clock".into(),
             revision: 0,
             scene: sample_scene(),
@@ -2828,5 +2893,102 @@ mod tests {
             already_present: None,
         });
         assert!(encode_message(12, &message).is_err());
+    }
+}
+
+#[cfg(test)]
+mod local_tap_tests {
+    use super::*;
+
+    fn scene() -> Scene {
+        Scene {
+            revision: 1,
+            background: 0,
+            nodes: Vec::new(),
+        }
+    }
+    fn payload(views: Option<usize>, wrap: Option<bool>) -> Vec<u8> {
+        let mut encoder = Encoder::new();
+        encoder.map(3 + usize::from(views.is_some()) + usize::from(wrap.is_some()));
+        encoder.unsigned(0);
+        encoder.text("card");
+        encoder.unsigned(1);
+        encoder.unsigned(1);
+        encoder.unsigned(2);
+        encode_scene(&mut encoder, &scene());
+        if let Some(count) = views {
+            encoder.unsigned(3);
+            encoder.array(count);
+            for _ in 0..count {
+                encode_scene(&mut encoder, &scene());
+            }
+        }
+        if let Some(wrap) = wrap {
+            encoder.unsigned(4);
+            encoder.boolean(wrap);
+        }
+        encoder.into_bytes()
+    }
+
+    #[test]
+    fn local_tap_scene_bounds_defaults_and_round_trips() {
+        for count in [1, 4] {
+            for wrap in [None, Some(false), Some(true)] {
+                let frame = Frame::new(TYPE_PUSH_SCENE, 3, payload(Some(count), wrap));
+                let Message::PushScene(push) = decode_message(&frame).unwrap() else {
+                    panic!()
+                };
+                assert_eq!(push.tap_views.len(), count);
+                assert_eq!(push.tap_wrap, wrap.unwrap_or(true));
+                let wire = encode_message(3, &Message::PushScene(push.clone())).unwrap();
+                let decoded = crate::decode_wire_frame(&wire).unwrap();
+                assert_eq!(
+                    decoded.payload,
+                    payload(Some(count), wrap.filter(|value| !value))
+                );
+                assert_eq!(decode_message(&decoded), Ok(Message::PushScene(push)));
+            }
+        }
+        for bytes in [
+            payload(Some(0), None),
+            payload(Some(5), None),
+            payload(None, Some(false)),
+            payload(None, Some(true)),
+        ] {
+            assert!(decode_message(&Frame::new(TYPE_PUSH_SCENE, 3, bytes)).is_err());
+        }
+        let mut bytes = payload(Some(1), None);
+        *bytes.last_mut().unwrap() = 0xf5; // nodes must be an array, in every view.
+        assert!(decode_message(&Frame::new(TYPE_PUSH_SCENE, 3, bytes)).is_err());
+    }
+
+    #[test]
+    fn local_view_index_is_optional_u8_and_tap_only() {
+        for index in [None, Some(0), Some(4), Some(255)] {
+            let event = DeviceEvent {
+                sequence: 1,
+                kind: EventKind::Tap,
+                card_id: "c".into(),
+                action: EventAction::StartPause,
+                interrupt_token: None,
+                view_index: index,
+            };
+            let wire = encode_message(0, &Message::DeviceEvent(event.clone())).unwrap();
+            assert_eq!(
+                decode_message(&crate::decode_wire_frame(&wire).unwrap()),
+                Ok(Message::DeviceEvent(event))
+            );
+        }
+        let event = DeviceEvent {
+            sequence: 1,
+            kind: EventKind::Navigation,
+            card_id: "c".into(),
+            action: EventAction::NavigateNext,
+            interrupt_token: None,
+            view_index: Some(0),
+        };
+        assert!(encode_message(0, &Message::DeviceEvent(event)).is_err());
+        let bytes = vec![0xa5, 0, 1, 1, 1, 2, 0x61, b'c', 4, 1, 6, 0x19, 1, 0];
+        assert!(decode_message(&Frame::new(TYPE_DEVICE_EVENT, 0, bytes)).is_err());
     }
 }

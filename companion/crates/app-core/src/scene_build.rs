@@ -1272,6 +1272,8 @@ mod tests {
         let wire = encode_message(
             1,
             &Message::PushScene(PushScene {
+                tap_views: Vec::new(),
+                tap_wrap: true,
                 card_id: "desk-clock".to_string(),
                 revision: 7,
                 scene,

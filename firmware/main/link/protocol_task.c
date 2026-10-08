@@ -1,3 +1,4 @@
+#include "core/local_tap_views.h"
 #include "protocol_task.h"
 
 #include <limits.h>
@@ -124,6 +125,8 @@ typedef struct {
     // one lives in `message`, which every subsequent Ack or Error overwrites.
     // ~6 KB, and in PSRAM for the same reason protocol_message_t's copy is.
     scene_t scene;
+    /* Base plus up to four views. Access/replacement is under the LVGL lock. */
+    local_tap_views_t tap_views;
     char scene_card_id[PROTOCOL_MAX_CARD_ID_LENGTH + 1U];
     // A HINT, never an authority. The thing that actually decides whether a
     // scene is on the panel -- and therefore whether anything is pinning
@@ -390,12 +393,13 @@ static void bind_scene_carousel(protocol_context_t *context)
  * calls made outside LVGL callbacks and the one dispatch_asset_release()
  * already uses for font_registry_reset(). The LVGL task cannot be inside a
  * callback while this lock is held. */
-static show_scene_result_t show_scene(protocol_context_t *context,
+static void apply_local_tap(void *opaque, protocol_device_event_t *event);
+
+static show_scene_result_t show_scene_locked(protocol_context_t *context,
                                       const scene_t *scene)
 {
     scene_binding_context_t binding;
     fill_scene_binding_context(context, &binding);
-    lvgl_port_lock(0U);
     show_scene_result_t result = SHOW_SCENE_BUSY;
     // The OTA task owns the panel until it reboots or restores the clock.
     // ui_runtime's queue consumer drops SHOW_* commands for that reason and
@@ -403,13 +407,41 @@ static show_scene_result_t show_scene(protocol_context_t *context,
     if (!ota_screen_active_in_lvgl()) {
         if (scene_view_show(scene, &binding)) {
             bind_scene_carousel(context);
+            scene_view_set_local_tap_handler(apply_local_tap, context);
             result = SHOW_SCENE_OK;
         } else {
             result = SHOW_SCENE_REFUSED;
         }
     }
+    return result;
+}
+
+static show_scene_result_t show_scene(protocol_context_t *context, const scene_t *scene)
+{
+    lvgl_port_lock(0U);
+    show_scene_result_t result = show_scene_locked(context, scene);
     lvgl_port_unlock();
     return result;
+}
+
+/* Already in the LVGL callback context. Show before emitting the event, and
+ * retain the old index on failure so the host can take its ordinary path. */
+static bool show_local_tap(void *opaque, const scene_t *scene)
+{
+    protocol_context_t *context = opaque;
+    if (show_scene_locked(context, scene) != SHOW_SCENE_OK) return false;
+    context->scene = *scene;
+    context->scene_live = true;
+    context->scene_tick_ms = uptime_ms();
+    return true;
+}
+
+static void apply_local_tap(void *opaque, protocol_device_event_t *event)
+{
+    protocol_context_t *context = opaque;
+    if (strcmp(event->card_id, context->scene_card_id) != 0) return;
+    event->has_view_index = local_tap_views_advance(
+        &context->tap_views, show_local_tap, context, &event->view_index);
 }
 
 /* Re-evaluates the live scene's bindings in place, and returns whether a
@@ -653,6 +685,25 @@ static void dispatch_push_scene(protocol_context_t *context,
                                 uint32_t request_id)
 {
     const protocol_push_scene_t *push = &context->message.value.push_scene;
+    scene_t *tap_scenes = NULL;
+    if (push->tap_view_count != 0U) {
+        size_t bytes = (push->tap_view_count + 1U) * sizeof(scene_t);
+        tap_scenes = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (tap_scenes == NULL) tap_scenes = heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (tap_scenes == NULL) {
+            transmit_error(context, request_id, PROTOCOL_ERROR_BUSY, "tap view allocation failed");
+            return;
+        }
+        tap_scenes[0] = push->scene;
+        for (size_t i = 0U; i < push->tap_view_count; ++i) {
+            if (scene_decode(push->tap_views[i], push->tap_view_lengths[i], &tap_scenes[i + 1U]) != SCENE_MODEL_OK) {
+                heap_caps_free(tap_scenes);
+                transmit_error(context, request_id, PROTOCOL_ERROR_INVALID_PAYLOAD, "invalid tap view");
+                return;
+            }
+        }
+    }
+    lvgl_port_lock(0U);
     // Published before the show so the first paint's `field.` and `timer.`
     // bindings resolve against THIS card rather than the outgoing one, and
     // restored on refusal so a scene that never rendered cannot redirect the
@@ -672,7 +723,7 @@ static void dispatch_push_scene(protocol_context_t *context,
      * LVGL command timer cannot replace the freshly rendered face afterward.
      * A refused scene restores the fallback request below. */
     bool fallback_discarded = ui_runtime_discard_card_fallbacks();
-    show_scene_result_t result = show_scene(context, &push->scene);
+    show_scene_result_t result = show_scene_locked(context, &push->scene);
     if (result != SHOW_SCENE_OK) {
         if (fallback_discarded) {
             (void)ui_runtime_show_card_fallback();
@@ -680,6 +731,8 @@ static void dispatch_push_scene(protocol_context_t *context,
         memcpy(context->scene_card_id, previous_card_id,
                sizeof(context->scene_card_id));
         context->scene_timer_anchor_ms = previous_timer_anchor_ms;
+        heap_caps_free(tap_scenes);
+        lvgl_port_unlock();
         // scene_view_show() refuses without touching the live screen (it
         // builds onto a candidate screen and loads it only once every node
         // and every asset succeeded), so whatever was on the panel -- the
@@ -696,10 +749,17 @@ static void dispatch_push_scene(protocol_context_t *context,
     }
     // Retained only after the show succeeded, and copied before
     // transmit_ack() reuses context->message for the reply.
+    device_event_queue_clear_view_indexes(&context->events);
+    heap_caps_free(context->tap_views.scenes);
+    context->tap_views.scenes = tap_scenes;
+    context->tap_views.count = push->tap_view_count;
+    context->tap_views.index = 0U;
+    context->tap_views.wrap = push->tap_wrap;
     context->scene = push->scene;
     context->scene_live = true;
     context->scene_tick_ms = uptime_ms();
     uint32_t revision = push->revision;
+    lvgl_port_unlock();
     transmit_ack(context, request_id, PROTOCOL_TYPE_PUSH_SCENE, true,
                  revision);
 }

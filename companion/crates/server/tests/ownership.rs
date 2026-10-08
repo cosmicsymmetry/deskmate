@@ -239,6 +239,7 @@ async fn start_pomodoro(socket: &mut support::DeviceSocket) {
             protocol::encode_message(
                 0,
                 &Message::DeviceEvent(DeviceEvent {
+                    view_index: None,
                     sequence: 1,
                     kind: EventKind::Tap,
                     card_id: "pomodoro".into(),

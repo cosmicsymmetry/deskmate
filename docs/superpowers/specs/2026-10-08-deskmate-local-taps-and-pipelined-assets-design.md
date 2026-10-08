@@ -80,7 +80,10 @@ At 440 ms RTT a 60 KB frame drops from ~14 s to ~2 s.
 - The existing resident budget holds: 15 frames, 8 current plus 7 staged views shared by
   the account.
 - A plugin's prefetched next is one staged view. Ring views beyond the budget are simply
-  not sent, so a shorter ring falls back to the server path at its end.
+  not sent, so a shorter ring falls back to the server path at its end. Such a
+  truncated ring uses `tap_wrap = false`; otherwise its last tap could only wrap
+  and could never reach the specified server fallback. Complete built-in cycles
+  use `tap_wrap = true`.
 
 ## Costs and verification
 

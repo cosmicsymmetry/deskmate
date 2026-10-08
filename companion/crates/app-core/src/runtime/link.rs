@@ -93,6 +93,24 @@ pub struct ImageSourceFrame {
     pub stale: bool,
 }
 
+/// Immutable index mapping for one pushed ring. State is opaque to the runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageTapStep {
+    pub selector_view: String,
+    pub view: String,
+    pub digest: [u8; protocol::ASSET_DIGEST_LEN],
+    pub state: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageTapRing {
+    pub generation: u64,
+    /// Includes the primary scene at index zero.
+    pub steps: Vec<ImageTapStep>,
+    pub wrap: bool,
+    pub plugin: bool,
+}
+
 /// Host boundary used by the background runtime for durable picture frames.
 pub trait ImageSourceHost: Send + 'static {
     /// Every image source frame that should remain resident on the device,
@@ -103,6 +121,13 @@ pub trait ImageSourceHost: Send + 'static {
     /// ever been pushed to it.
     ///
     fn image_source_frame(&mut self, source_id: &str) -> Option<ImageSourceFrame>;
+    fn local_tap_ring(&mut self, _source_id: &str) -> Option<ImageTapRing> {
+        None
+    }
+    /// Update the in-memory selection before the next face-change poll. No IO.
+    fn local_tap_selected(&mut self, _source_id: &str, _digest: [u8; 32]) -> bool {
+        false
+    }
 }
 
 pub(super) fn ownership_was_refused(state: &WorkerState) -> bool {

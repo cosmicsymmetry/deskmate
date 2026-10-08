@@ -201,11 +201,17 @@ async fn refresh_once(
         let render_transition = Arc::clone(&transition);
         let render_face_state = Arc::clone(face_state);
         let rendered = tokio::task::spawn_blocking(move || {
-            let (previous_state, generation) = {
+            let (previous_state, generation, selection_epoch) = {
                 let guard = render_transition
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                (render_face_state.get(&render_spec.source_id), *guard)
+                (
+                    render_face_state.get(&render_spec.source_id),
+                    *guard,
+                    clock_space
+                        .image_sources
+                        .selection_epoch(&render_spec.source_id),
+                )
             };
             let timezone =
                 clock::source_timezone(&clock_state, &clock_space, &render_spec.source_id);
@@ -218,7 +224,7 @@ async fn refresh_once(
                 taps,
                 None,
             )
-            .map(|rendered| (rendered, generation))
+            .map(|rendered| (rendered, generation, selection_epoch))
         })
         .await;
         if taps > 0 {
@@ -227,7 +233,7 @@ async fn refresh_once(
             elapsed_us = started.elapsed().as_micros(), ok = matches!(&rendered, Ok(Ok(_))),
             "tap render completed");
         }
-        let (rendered, generation) = match rendered {
+        let (rendered, generation, selection_epoch) = match rendered {
             Ok(Ok(rendered)) => rendered,
             Ok(Err(RefreshFailure::Configuration(error))) => {
                 tracing::warn!(target: "server::data_cards", source_id = %source_id, kind, %error,
@@ -261,7 +267,9 @@ async fn refresh_once(
             let mut guard = transition
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if *guard != generation {
+            if *guard != generation
+                || accept_space.image_sources.selection_epoch(&accept_source) != selection_epoch
+            {
                 // Selection is allowed during this render. Its newer frame and
                 // durable state win; never rewind the page when stale work finishes.
                 return Ok(None);
@@ -274,7 +282,12 @@ async fn refresh_once(
             // A fallback's result lives in the resting slot. Selecting a staged
             // view meanwhile must not leave the newly committed tap invisible,
             // even when these pixels equal the previous resting frame.
-            let outcome = if taps > 0 && outcome.is_ok() {
+            let outcome = if (taps > 0
+                || accept_space
+                    .image_sources
+                    .local_taps_enabled(&accept_source))
+                && outcome.is_ok()
+            {
                 accept_space
                     .image_sources
                     .select_view(&accept_source, "")
@@ -336,6 +349,7 @@ const MAX_STAGED_FRAMES_PER_SOURCE: usize = 4;
 /// its second view must not turn a delivered refresh into a failed one. A view
 /// that is not staged is simply rendered on the tap that asks for it, which is
 /// what happened before any of this existed.
+#[allow(clippy::too_many_lines)] // Keeps the legacy staging path unchanged.
 async fn stage_other_views(
     state: &ServerState,
     space: &Arc<AccountSpace>,
@@ -343,6 +357,17 @@ async fn stage_other_views(
     face_state: Arc<FaceStateStore>,
     spec: &DataCardSpec,
 ) {
+    if space.image_sources.local_taps_enabled(&spec.source_id) {
+        let state = state.clone();
+        let space = Arc::clone(space);
+        let faces = faces.clone();
+        let spec = spec.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            stage_local_taps(&state, &space, &faces, &face_state, &spec);
+        })
+        .await;
+        return;
+    }
     // A face that declares no views has nothing to stage, and asking costs a
     // whole child (with plugin discovery). An older catalog says nothing, and
     // then the child runs exactly as before.
@@ -525,6 +550,145 @@ fn notify_image_source_outcome(
             true
         }
         AcceptOutcome::Unchanged => false,
+    }
+}
+
+/// Runs off the async executor. Generation checks surround every storage write,
+/// so neither a selection nor a newer refresh can be overwritten by a prefetch.
+#[allow(clippy::too_many_lines)] // Snapshot, bounded render loop and generation-checked publish.
+pub(super) fn stage_local_taps(
+    state: &ServerState,
+    space: &Arc<AccountSpace>,
+    faces: &FaceCommand,
+    stored: &Arc<FaceStateStore>,
+    spec: &DataCardSpec,
+) {
+    if !super::face_takes_taps(state, space, &spec.source_id) {
+        return;
+    }
+    let plugin =
+        super::face_capabilities(state, &spec.face.kind).is_some_and(|(_, selector)| !selector);
+    let transition = stored.transition(&spec.source_id);
+    let (generation, initial, primary, selection_epoch) = {
+        let guard = transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(frame) = space.image_sources.frame(&spec.source_id, Utc::now()) else {
+            return;
+        };
+        (
+            *guard,
+            stored.get(&spec.source_id),
+            frame.digest,
+            space.image_sources.selection_epoch(&spec.source_id),
+        )
+    };
+    let (steps, wraps) = if plugin {
+        (
+            vec![
+                (String::new(), initial.clone()),
+                ("next".to_owned(), initial.clone()),
+            ],
+            false,
+        )
+    } else {
+        let Ok(ring) = super::local_taps::compute_ring(initial.clone(), |value, taps| {
+            faces_package::tap(faces, &spec.face.kind, &spec.face.settings, value, taps)
+        }) else {
+            return;
+        };
+        ring
+    };
+    if steps.len() < 2 {
+        return;
+    }
+    {
+        let guard = transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *guard != generation
+            || space.image_sources.selection_epoch(&spec.source_id) != selection_epoch
+        {
+            return;
+        }
+        if space
+            .image_sources
+            .prepare_local_tap_staging(&spec.source_id)
+            .is_err()
+        {
+            return;
+        }
+    }
+    let mut ring = app_core::ImageTapRing {
+        generation,
+        steps: vec![super::local_taps::step(String::new(), primary, initial)],
+        wrap: wraps,
+        plugin,
+    };
+    ring.steps[0].selector_view.clone_from(&steps[0].0);
+    let timezone = clock::source_timezone(state, space, &spec.source_id);
+    for (index, (view, step_state)) in steps.iter().enumerate().skip(1) {
+        let rendered = render_frame(
+            faces,
+            &space.root,
+            &timezone,
+            spec,
+            step_state.as_ref(),
+            u32::from(plugin),
+            if plugin { None } else { Some(view) },
+        );
+        let Ok(rendered) = rendered else {
+            ring.wrap = false;
+            break;
+        };
+        let guard = transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *guard != generation
+            || space.image_sources.selection_epoch(&spec.source_id) != selection_epoch
+        {
+            return;
+        }
+        let key = format!("tap-{index}");
+        let digest = rendered.frame.digest;
+        if space
+            .image_sources
+            .accept_staged_view(&spec.source_id, &key, rendered.frame, Utc::now())
+            .is_err()
+        {
+            ring.wrap = false;
+            break;
+        }
+        let next_state = if plugin {
+            rendered.state.unwrap_or_else(|| step_state.clone())
+        } else {
+            step_state.clone()
+        };
+        let mut step = super::local_taps::step(key, digest, next_state);
+        step.selector_view.clone_from(view);
+        ring.steps.push(step);
+    }
+    let guard = transition
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if *guard != generation
+        || space.image_sources.selection_epoch(&spec.source_id) != selection_epoch
+        || ring.steps.len() < 2
+    {
+        return;
+    }
+    let changed = space.image_sources.local_tap_ring(&spec.source_id).as_ref() != Some(&ring);
+    space
+        .image_sources
+        .set_local_tap_ring(&spec.source_id, ring);
+    drop(guard);
+    if changed {
+        state.notify_image_source_changed(
+            &space.account_id,
+            spec.source_id.clone(),
+            primary,
+            ImageNotificationOrigin::ServerRenderedRefresh,
+        );
     }
 }
 

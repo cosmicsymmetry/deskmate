@@ -171,6 +171,8 @@ fn push_scene_uses_the_runtime_owned_device_without_reconnecting() {
     wait_until_online(&runtime);
     let connections_before = control.connection_count();
     let push = PushScene {
+        tap_views: Vec::new(),
+        tap_wrap: true,
         card_id: "clock".into(),
         revision: 7,
         scene: Scene {
@@ -281,6 +283,8 @@ fn explicit_scene_command_follows_one_automatic_attempt_without_spawning_another
     automatic_gate.wait_until_entered();
 
     let explicit = PushScene {
+        tap_views: Vec::new(),
+        tap_wrap: true,
         card_id: "clock".into(),
         revision: 77,
         scene: Scene {

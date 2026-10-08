@@ -45,6 +45,8 @@ impl Default for SessionOptions {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceivedEvent {
+    /// Transport-local scene acknowledgement at receive time; never a wire key.
+    pub scene_revision: Option<u32>,
     pub event: DeviceEvent,
     pub missed_before: u64,
 }
@@ -639,6 +641,7 @@ mod tests {
 
     fn event(sequence: u64, kind: EventKind, token: Option<u32>) -> DeviceEvent {
         DeviceEvent {
+            view_index: None,
             sequence,
             kind,
             card_id: "timer".into(),

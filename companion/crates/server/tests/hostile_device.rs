@@ -114,6 +114,7 @@ async fn hostile_device_frames_are_bounded_and_concatenated_frames_decode() {
 
     let event = |sequence| {
         Message::DeviceEvent(DeviceEvent {
+            view_index: None,
             sequence,
             kind: EventKind::Tap,
             card_id: "clock".to_string(),

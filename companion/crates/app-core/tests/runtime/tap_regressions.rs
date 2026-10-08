@@ -121,3 +121,119 @@ fn dropping_handle_with_full_wake_queue_stops_runtime() {
         "event waker must not keep the orphan runtime alive"
     );
 }
+
+struct RingHost {
+    selected: Arc<Mutex<[u8; 32]>>,
+    wrap: bool,
+}
+
+impl app_core::ImageSourceHost for RingHost {
+    fn desired_assets(&mut self) -> Vec<DesiredAsset> {
+        [1_u8, 2]
+            .into_iter()
+            .map(|id| DesiredAsset {
+                digest: [id; 32],
+                kind: protocol::AssetKind::Image,
+                bytes: Arc::from(PICTURE_BLOB),
+            })
+            .collect()
+    }
+    fn image_source_frame(&mut self, _: &str) -> Option<ImageSourceFrame> {
+        Some(ImageSourceFrame {
+            digest: *self.selected.lock().unwrap(),
+            bytes: Arc::from(PICTURE_BLOB),
+            stale: false,
+        })
+    }
+    fn local_tap_ring(&mut self, _: &str) -> Option<app_core::ImageTapRing> {
+        Some(app_core::ImageTapRing {
+            generation: 1,
+            steps: [1_u8, 2]
+                .into_iter()
+                .map(|id| app_core::ImageTapStep {
+                    selector_view: id.to_string(),
+                    view: id.to_string(),
+                    digest: [id; 32],
+                    state: None,
+                })
+                .collect(),
+            wrap: self.wrap,
+            plugin: false,
+        })
+    }
+    fn local_tap_selected(&mut self, _: &str, digest: [u8; 32]) -> bool {
+        *self.selected.lock().unwrap() = digest;
+        true
+    }
+}
+#[derive(Default)]
+struct LocalTapSink(Mutex<Vec<Option<u8>>>);
+impl CardTapSink for LocalTapSink {
+    fn tapped(&self, _: &str, _: &str) {
+        self.0.lock().unwrap().push(None);
+    }
+    fn tapped_local(&self, _: &str, _: &str, _: app_core::ImageTapRing, index: u8) {
+        self.0.lock().unwrap().push(Some(index));
+    }
+}
+
+#[test]
+fn local_taps_are_gated_resident_and_do_not_repush_on_selection_or_wrap() {
+    for (capable, wrap) in [(false, true), (true, true), (true, false)] {
+        let control = MockDeviceControl::default();
+        let mut device_status = status(1);
+        if !capable {
+            device_status.capabilities &= !protocol::CAPABILITY_LOCAL_TAP_VIEWS;
+        }
+        control.set_status(device_status);
+        let selected = Arc::new(Mutex::new([1; 32]));
+        let sink = Arc::new(LocalTapSink::default());
+        let runtime = RuntimeHandle::start_with_ports(
+            picture_config(true),
+            Box::new(MockDevice::new(control.clone())),
+            options(),
+            Some(Box::new(RingHost { selected, wrap })),
+            Some(sink.clone()),
+        )
+        .unwrap();
+        wait_for(Duration::from_secs(2), || {
+            latest_picture_push(&control.operations()).is_some()
+        });
+        let operations = control.operations();
+        let push = latest_picture_push(&operations).unwrap();
+        assert_eq!(push.tap_views.len(), usize::from(capable));
+        if capable {
+            assert_eq!(push.tap_wrap, wrap);
+            let scene_at = operations
+                .iter()
+                .position(|op| matches!(op, Operation::PushScene(_)))
+                .unwrap();
+            assert!(
+                operations[..scene_at].contains(&Operation::AssetCommit([2; 32])),
+                "tap asset must be resident before PushScene"
+            );
+        }
+        let count = control.count_operations(|op| matches!(op, Operation::PushScene(_)));
+        for (offset, index) in [1, u8::from(!wrap)].into_iter().enumerate() {
+            let mut event = tap_event(u64::try_from(offset + 1).unwrap(), "picture-card");
+            event.view_index = Some(index);
+            control.push_event(event);
+        }
+        wait_for(Duration::from_secs(1), || sink.0.lock().unwrap().len() == 2);
+        let expected = if !capable {
+            vec![None, None]
+        } else if wrap {
+            vec![Some(1), Some(0)]
+        } else {
+            vec![Some(1), None]
+        };
+        assert_eq!(*sink.0.lock().unwrap(), expected);
+        // Force a scheduler pass, which also polls the selected frame.
+        runtime.snapshot().unwrap();
+        assert_eq!(
+            control.count_operations(|op| matches!(op, Operation::PushScene(_))),
+            count
+        );
+        runtime.shutdown().unwrap();
+    }
+}

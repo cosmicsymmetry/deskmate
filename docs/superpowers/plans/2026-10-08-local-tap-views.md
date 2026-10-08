@@ -87,3 +87,257 @@ Read `CLAUDE.md`, `docs/protocol/v2.md` (including Part 1's amendment), then thi
 Same as `2026-10-08-pipelined-asset-chunks.md`: no commit, no `idf.py`, do not touch
 `firmware/version.txt`, run every gate you can, list what you could not, and report
 files, tests, verbatim gate results and every unsettled decision.
+
+
+## Implementation report — 2026-10-08
+
+Status: implemented, uncommitted. No `idf.py`, firmware version change, flash,
+deployment, or physical-board verification was performed. Hardware verification
+and the listener-dependent gates below remain outstanding, not passing.
+
+### Files
+
+- `CLAUDE.md`
+- `companion/apps/deskmate/src/lib/types.contract.ts`
+- `companion/apps/deskmate/src/lib/types.ts`
+- `companion/apps/deskmate/tests/serialCodec.test.ts`
+- `companion/crates/app-core/examples/scene_panel_check.rs`
+- `companion/crates/app-core/src/lib.rs`
+- `companion/crates/app-core/src/runtime/link.rs`
+- `companion/crates/app-core/src/runtime/mod.rs`
+- `companion/crates/app-core/src/runtime/scene.rs`
+- `companion/crates/app-core/src/scene_build.rs`
+- `companion/crates/app-core/src/state.rs`
+- `companion/crates/app-core/tests/runtime.rs`
+- `companion/crates/app-core/tests/runtime/alerts_and_commands.rs`
+- `companion/crates/app-core/tests/runtime/loop_and_events.rs`
+- `companion/crates/app-core/tests/runtime/scene_delivery.rs`
+- `companion/crates/app-core/tests/runtime/tap_regressions.rs`
+- `companion/crates/device/examples/framebuffer_diff.rs`
+- `companion/crates/device/src/replay.rs`
+- `companion/crates/device/src/session.rs`
+- `companion/crates/protocol/examples/generate-fixtures.rs`
+- `companion/crates/protocol/src/lib.rs`
+- `companion/crates/protocol/src/message.rs`
+- `companion/crates/protocol/tests/fixtures.rs`
+- `companion/crates/server/src/admin.rs`
+- `companion/crates/server/src/app_api/contract.rs`
+- `companion/crates/server/src/data_cards.rs`
+- `companion/crates/server/src/data_cards/latency_bench.rs`
+- `companion/crates/server/src/data_cards/local_taps.rs`
+- `companion/crates/server/src/data_cards/worker.rs`
+- `companion/crates/server/src/device_link.rs`
+- `companion/crates/server/src/image_sources.rs`
+- `companion/crates/server/src/runtime_device.rs`
+- `companion/crates/server/src/runtime_device/chunk_tests.rs`
+- `companion/crates/server/tests/hostile_device.rs`
+- `companion/crates/server/tests/ownership.rs`
+- `companion/crates/server/tests/tap_isolation.rs`
+- `companion/faces/src/main.ts`
+- `companion/faces/test/main.test.ts`
+- `docs/hardware/board-notes.md`
+- `docs/protocol/v2.md`
+- `docs/superpowers/plans/2026-10-08-local-tap-views.md`
+- `docs/superpowers/specs/2026-10-08-deskmate-local-taps-and-pipelined-assets-design.md`
+- `firmware/host_tests/Makefile`
+- `firmware/host_tests/test_device_event_queue.c`
+- `firmware/host_tests/test_local_tap_views.c`
+- `firmware/host_tests/test_protocol.c`
+- `firmware/main/CMakeLists.txt`
+- `firmware/main/core/device_event_queue.c`
+- `firmware/main/core/device_event_queue.h`
+- `firmware/main/core/local_tap_views.c`
+- `firmware/main/core/local_tap_views.h`
+- `firmware/main/core/protocol_message.c`
+- `firmware/main/core/protocol_message.h`
+- `firmware/main/link/protocol_task.c`
+- `firmware/main/ui/carousel.c`
+- `firmware/main/ui/scene_view.c`
+- `firmware/main/ui/scene_view.h`
+- `protocol/fixtures/v2/device_event_tap_view.bin`
+- `protocol/fixtures/v2/manifest.txt`
+- `protocol/fixtures/v2/push_scene_tap_stop.bin`
+- `protocol/fixtures/v2/push_scene_tap_views.bin`
+- `protocol/fixtures/v2/status_response.bin`
+- `protocol/fixtures/v2/status_response_networked.bin`
+- `protocol/fixtures/v2/status_response_ota_failed.bin`
+
+The small changes to existing examples/test constructors supply the new optional
+fields; they do not change the old test behavior. The Rust and C unknown-key scene
+tests now use key 5 because key 3 is no longer unknown. Status fixtures and their
+manifest were regenerated; three new fixtures pin wrapping views, nonwrapping
+views and a Tap view index. The web serial status fixture pins 16352.
+
+### Tests added
+
+- Rust protocol: `local_tap_scene_bounds_defaults_and_round_trips` and
+  `local_view_index_is_optional_u8_and_tap_only`, plus all three golden fixtures
+  through both Rust and C byte-exact decode/re-encode tests.
+- Runtime: `local_taps_are_gated_resident_and_do_not_repush_on_selection_or_wrap`:
+  capability gating, asset commit before the ring push, selection/wrap without
+  another push, and repeated terminal-index fallback.
+- Server: ring repeat/step cap, budget truncation, migration from a full legacy
+  staging budget, indexed state commit without notification, plugin promotion
+  exactly once followed by prefetch, bit-13 wire gating, and queued indexes
+  across a scene Ack (real socket actor over an in-memory stream).
+- Firmware: local index wrap/stop, no redundant show at the terminal index,
+  refused-show index preservation, count bounds, key-4-without-key-3 rejection,
+  malformed nested tap scenes, primary-scene preservation, and queued events
+  retaining their taps while obsolete index hints are cleared. The event type
+  remains 64 bytes; the host event queue remains 552 bytes.
+- Faces: zero-tap selector query and repeated stateful weather transitions.
+
+### Decisions and limits
+
+- **Truncated rings do not wrap.** The brief says built-ins wrap but the design
+  also requires fallback past the resident budget. Those cannot both hold for a
+  partial ring. Complete cycles wrap; capped/budget-truncated sequences stop and
+  repeated terminal indexes use the existing selector/render path. This
+  clarification is recorded in the spec and protocol amendment. The four-step
+  limit means four additional scenes plus the primary scene, matching key 3.
+- C decoding validates each nested view through the existing scene-map decoder,
+  using the primary destination as scratch and then decoding the primary last.
+  It retains only borrowed encoded-map slices in the union. Dispatch decodes
+  into one heap array (base plus views), PSRAM first with internal fallback;
+  replacement/refusal preserves correct ownership. No source static/global is
+  added or enlarged. Binary layout is unverified without the forbidden build.
+- The selector accepts `taps = 0` only as a current-view query; render's existing
+  event clamping is unchanged. Every additional selector call receives the
+  preceding returned state, including absent-vs-null state semantics.
+- Local staging starts on demand from a capable runtime. Legacy-only accounts
+  retain the existing staging/selection path. When local staging takes over a
+  source, it preserves its selected frame as primary and reuses obsolete staged
+  slots; otherwise an account already using all seven extras could never get a
+  local ring. Account capacity remains fifteen frames.
+- Each runtime retains the exact pushed ring for index interpretation; committing
+  a built-in tap recomputes only the next-push ring, without notifying a scene
+  update. The runtime updates in-memory selection immediately; durable commits
+  are processed in device order on a bounded 64-entry routing queue off its
+  thread. Generation plus selection-epoch checks discard stale render/prefetch
+  work. Legacy selectors can resolve logical view names through the local ring.
+- Plugins keep one staged next frame/state, promote it once and prefetch from the
+  promoted state. Repeat terminal events and absent/unusable indexes take the
+  existing path. Prefetch failure leaves normal server rendering available.
+- All ring digests must be confirmed resident before PushScene. Only the visible
+  digest is protected as live during later replacement; the indexed Tap updates
+  that digest too. This preserves the fifteen-resident/one-incoming slot budget.
+- Queued index hints cannot outlive their scene. Firmware clears their presence
+  on accepted replacement without dropping the events; the host correlates event
+  receive time with its scene Ack using transport-local metadata, not another
+  wire key. Cross-boundary and unacknowledged indexes fall back instead of
+  selecting a different ring's state.
+- No additional product decision is pending for the implementation. Existing
+  ten-second host-loss fallback to the standalone clock is unchanged; this work
+  does not establish indefinite offline display of a host card. The requested
+  offline local-tap observation, OTA download and throughput measurement still
+  require a physical board session.
+
+### Gate results
+
+- `make -C firmware/host_tests clean test`: exit 0; raw log `/tmp/local-taps-firmware-test.log`.
+- `make -C firmware/host_tests sanitize`: exit 0; raw log `/tmp/local-taps-firmware-sanitize.log`.
+- `cargo fmt --all --check`: exit 0; raw log `/tmp/local-taps-fmt.log`.
+- `cargo clippy --workspace --all-targets -- -D warnings`: exit 0; raw log `/tmp/local-taps-clippy.log`.
+- `cargo test --workspace --all-targets --no-fail-fast`: exit 101; raw log `/tmp/local-taps-workspace-tests.log`.
+- `cargo test --workspace --doc`: exit 0; raw log `/tmp/local-taps-doc-tests.log`.
+- `bun test`: exit 0; raw log `/tmp/local-taps-web-tests.log`.
+- `bun run check`: exit 0; raw log `/tmp/local-taps-web-check.log`.
+- `bun run format:check`: exit 0; raw log `/tmp/local-taps-web-format.log`.
+- `bun run build`: exit 0; raw log `/tmp/local-taps-web-build.log`.
+- `bun test`: exit 1; raw log `/tmp/local-taps-faces-tests.log`.
+- `bun run check`: exit 0; raw log `/tmp/local-taps-faces-check.log`.
+- `bun run lint`: exit 0; raw log `/tmp/local-taps-faces-lint.log`.
+- `bun run format:check`: exit 0; raw log `/tmp/local-taps-faces-format.log`.
+
+Firmware plain and sanitized suites both exit 0. Verbatim relevant output:
+
+```text
+test_local_tap_views: OK
+test_protocol: OK
+test_device_event_queue: OK (552-byte queue, capacity 8)
+```
+
+No sanitizer diagnostics. Rust formatting exits 0 with no output. Clippy:
+
+```text
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 12.06s
+```
+
+The full Rust run uses `--no-fail-fast` to collect every denied target. Aggregate:
+**814 passed, 115 failed, 2 ignored**. All 115 failure blocks contain this exact
+OS error; no assertion failure with another cause was observed:
+
+```text
+Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }
+```
+
+Server library result, verbatim:
+
+```text
+test result: FAILED. 403 passed; 7 failed; 2 ignored; 0 measured; 0 filtered out; finished in 15.93s
+```
+
+The failed targets are:
+
+```text
+`-p server --lib`
+    `-p server --test accounts`
+    `-p server --test companion_api`
+    `-p server --test device_link`
+    `-p server --test firmware_download`
+    `-p server --test hostile_device`
+    `-p server --test image_routes`
+    `-p server --test isolation`
+    `-p server --test ownership`
+    `-p server --test tap_isolation`
+```
+
+The new targeted server tests pass, verbatim:
+
+```text
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 405 filtered out; finished in 1.15s
+```
+
+All ten new Rust tests also pass in the final workspace run. Workspace doctests
+exit 0 (all five crates currently report zero doctests). App checks/format/build all
+exit 0; app test output:
+
+```text
+ 242 pass
+ 0 fail
+ 1316 expect() calls
+Ran 242 tests across 17 files. [3.48s]
+```
+
+Faces typecheck, lint and format all exit 0. Full faces test output:
+
+```text
+ 808 pass
+ 7 fail
+ 7077 expect() calls
+Ran 815 tests across 28 files. [31.12s]
+```
+
+The seven faces failures are confined to `test/http.test.ts`: four loopback
+server startup failures and three subsequent teardown errors. Bun reports:
+
+```text
+error: Failed to start server. Is port 0 in use?
+ syscall: "listen",
+   errno: 0,
+    code: "EADDRINUSE"
+```
+
+The directly affected faces main/selector suite passes:
+
+```text
+ 18 pass
+ 0 fail
+ 177 expect() calls
+Ran 18 tests across 1 file. [6.13s]
+```
+
+The sandbox forbids the needed listeners and its approval policy is `never`;
+these integration checks need an unrestricted rerun. `idf.py`, firmware binary
+layout checks, flashing, OTA, on-board throughput and offline-tap observations
+were not run, as required by this brief. No commit was created.

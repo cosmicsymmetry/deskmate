@@ -317,6 +317,8 @@ fn push_case_scene(
 ) -> Result<(), String> {
     match client
         .request(&Message::PushScene(PushScene {
+            tap_views: Vec::new(),
+            tap_wrap: true,
             card_id: "diff".into(),
             revision,
             scene: request.scene.clone(),

@@ -313,6 +313,7 @@ impl TransportSlot {
 }
 
 struct EventRouter {
+    scene_revision: Option<u32>,
     sender: SyncSender<ReceivedEvent>,
     last_seen_sequence: Option<u64>,
     last_queued_sequence: Option<u64>,
@@ -363,6 +364,7 @@ impl EventRouter {
         });
         let sequence = event.sequence;
         match self.sender.try_send(ReceivedEvent {
+            scene_revision: self.scene_revision,
             event,
             missed_before,
         }) {
@@ -402,6 +404,7 @@ impl SocketConnector {
         SocketPeer {
             commands: command_receiver,
             event_router: EventRouter {
+                scene_revision: None,
                 wake: self.wake.clone(),
                 sender: self.event_sender.clone(),
                 last_seen_sequence: None,
@@ -438,6 +441,7 @@ pub(crate) struct WebSocketRuntimeDevice {
     replay: Arc<Mutex<ReplayState>>,
     last_ota_error: Arc<Mutex<Option<String>>>,
     connected_generation: Option<u64>,
+    scene_revision: Option<u32>,
     ever_connected: bool,
     latest_data_revision: u32,
     latest_config_revision: u32,
@@ -487,6 +491,7 @@ impl WebSocketRuntimeDevice {
                 replay,
                 last_ota_error,
                 connected_generation: None,
+                scene_revision: None,
                 ever_connected: false,
                 latest_data_revision: 0,
                 latest_config_revision: 0,
@@ -767,7 +772,7 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
         Ok(())
     }
 
-    fn push_scene(&mut self, push: PushScene) -> Result<(), DeviceError> {
+    fn push_scene(&mut self, mut push: PushScene) -> Result<(), DeviceError> {
         if self.connected_generation.is_none() {
             return Err(DeviceError::NoDevice);
         }
@@ -778,12 +783,20 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
                 available: self.capabilities,
             });
         }
+        if self.capabilities & protocol::CAPABILITY_LOCAL_TAP_VIEWS == 0 {
+            push.tap_views.clear();
+            push.tap_wrap = true;
+        }
         let revision = push.revision;
         let card_id = push.card_id.clone();
+        self.scene_revision = None;
         let (result, elapsed) = timed(|| {
             let response = self.connected_request(Message::PushScene(push))?;
             require_ack(&response, protocol::TYPE_PUSH_SCENE, Some(revision))
         });
+        if result.is_ok() {
+            self.scene_revision = Some(revision);
+        }
         tracing::info!(target: "server::tap_latency", device_id = %self.device_id,
             card_id, revision, unix_us = chrono::Utc::now().timestamp_micros(),
             elapsed_us = elapsed.as_micros(), ok = result.is_ok(),
@@ -991,7 +1004,11 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
     }
 
     fn try_recv_event(&mut self) -> Option<ReceivedEvent> {
-        self.events.try_recv().ok()
+        let mut received = self.events.try_recv().ok()?;
+        if self.scene_revision.is_none() || received.scene_revision != self.scene_revision {
+            received.event.view_index = None;
+        }
+        Some(received)
     }
 
     fn diagnostics(&self) -> SessionDiagnostics {
@@ -1095,6 +1112,9 @@ impl SocketPeer {
                             continue;
                         }
                     };
+                    if matches!(command.message, Message::PushScene(_)) {
+                        self.event_router.scene_revision = None;
+                    }
                     if let Err(error) = send_visual_request(&mut sender, device_id, self.generation,
                         request_id, &command.message, wire).await {
                         let _ = command.response.send(Err(error));
@@ -1250,6 +1270,9 @@ impl SocketPeer {
             // Log only replies to visual requests; chunk summaries remain in
             // AssetTransfer, avoiding a line for every healthy chunk.
             if let Message::Ack(ack) = &message {
+                if ack.acknowledged_type == protocol::TYPE_PUSH_SCENE {
+                    self.event_router.scene_revision = ack.revision;
+                }
                 if matches!(
                     ack.acknowledged_type,
                     protocol::TYPE_PUSH_SCENE
@@ -1514,6 +1537,7 @@ mod tests {
         let (device, _connector) = super::WebSocketRuntimeDevice::channel("diagnostics".into());
         (
             EventRouter {
+                scene_revision: None,
                 wake: super::EventWake::default(),
                 sender,
                 last_seen_sequence: None,
@@ -1527,6 +1551,7 @@ mod tests {
 
     fn navigation(sequence: u64, card_id: &str) -> DeviceEvent {
         DeviceEvent {
+            view_index: None,
             sequence,
             kind: EventKind::Navigation,
             card_id: card_id.into(),
@@ -1558,6 +1583,8 @@ mod tests {
 
     fn sample_scene() -> protocol::PushScene {
         protocol::PushScene {
+            tap_views: Vec::new(),
+            tap_wrap: true,
             card_id: "clock".into(),
             revision: 7,
             scene: protocol::Scene {
@@ -1610,6 +1637,7 @@ mod tests {
         }));
         let (mut router, _events) = event_router(1, Arc::clone(&replay));
         router.route(DeviceEvent {
+            view_index: None,
             sequence: 1,
             kind: EventKind::Tap,
             card_id: "timer".into(),
@@ -1619,6 +1647,7 @@ mod tests {
 
         router.route(navigation(2, "calendar"));
         router.route(DeviceEvent {
+            view_index: None,
             sequence: 3,
             kind: EventKind::InterruptDismissed,
             card_id: "timer".into(),
@@ -1697,6 +1726,7 @@ mod tests {
             let (_device, connector) = super::WebSocketRuntimeDevice::channel("dev-log".into());
             let mut peer = connector.attach();
             let event = DeviceEvent {
+                view_index: None,
                 sequence: 42,
                 kind: EventKind::Tap,
                 card_id: "picture-log".into(),
@@ -1963,6 +1993,7 @@ mod tests {
     #[test]
     fn reconnect_preserves_interrupt_dismissal_received_during_replay() {
         let replayed = replay_after_concurrent_event(DeviceEvent {
+            view_index: None,
             sequence: 1,
             kind: EventKind::InterruptDismissed,
             card_id: "timer".into(),
@@ -2036,6 +2067,33 @@ mod tests {
         assert!(matches!(requests.first(), Some(Message::StatusRequest)));
         assert_eq!(requests.get(1), Some(&Message::PushScene(push)));
         assert_eq!(requests.len(), 2);
+    }
+
+    #[test]
+    fn local_tap_keys_are_sent_only_with_bit_13() {
+        for enabled in [false, true] {
+            let (mut device, connector) =
+                super::WebSocketRuntimeDevice::channel("local-taps".into());
+            let mut status = sample_status();
+            if enabled {
+                status.capabilities |= protocol::CAPABILITY_LOCAL_TAP_VIEWS;
+            } else {
+                status.capabilities &= !protocol::CAPABILITY_LOCAL_TAP_VIEWS;
+            }
+            let actor = spawn_test_actor_with_status(connector.attach(), status);
+            device.connect().unwrap();
+            let mut push = sample_scene();
+            push.tap_views = vec![push.scene.clone()];
+            push.tap_wrap = false;
+            device.push_scene(push.clone()).unwrap();
+            connector.detach();
+            let requests = actor.join().unwrap();
+            if !enabled {
+                push.tap_views.clear();
+                push.tap_wrap = true;
+            }
+            assert_eq!(requests.get(1), Some(&Message::PushScene(push)));
+        }
     }
 
     #[test]

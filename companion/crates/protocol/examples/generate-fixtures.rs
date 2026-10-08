@@ -498,6 +498,7 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
             "device_event_tap.bin",
             0,
             Message::DeviceEvent(DeviceEvent {
+                view_index: None,
                 sequence: 1,
                 kind: EventKind::Tap,
                 card_id: "timer".into(),
@@ -509,6 +510,7 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
             "device_event_previous.bin",
             0,
             Message::DeviceEvent(DeviceEvent {
+                view_index: None,
                 sequence: 2,
                 kind: EventKind::Navigation,
                 card_id: "clock".into(),
@@ -520,6 +522,7 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
             "device_event_next.bin",
             0,
             Message::DeviceEvent(DeviceEvent {
+                view_index: None,
                 sequence: 3,
                 kind: EventKind::Navigation,
                 card_id: "timer".into(),
@@ -531,6 +534,7 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
             "device_event_dismissed.bin",
             0,
             Message::DeviceEvent(DeviceEvent {
+                view_index: None,
                 sequence: 4,
                 kind: EventKind::InterruptDismissed,
                 card_id: "timer".into(),
@@ -627,6 +631,8 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
             "push_scene.bin",
             24,
             Message::PushScene(PushScene {
+                tap_views: Vec::new(),
+                tap_wrap: true,
                 card_id: "clock".into(),
                 revision: 12,
                 scene: rich_scene(),
@@ -648,9 +654,51 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
             "push_scene_min.bin",
             25,
             Message::PushScene(PushScene {
+                tap_views: Vec::new(),
+                tap_wrap: true,
                 card_id: "c".into(),
                 revision: 1,
                 scene: minimal_scene(),
+            }),
+        ),
+        (
+            "push_scene_tap_views.bin",
+            26,
+            Message::PushScene(PushScene {
+                card_id: "c".into(),
+                revision: 2,
+                scene: minimal_scene(),
+                tap_views: (1..=4)
+                    .map(|index| {
+                        let mut scene = minimal_scene();
+                        scene.background = index;
+                        scene
+                    })
+                    .collect(),
+                tap_wrap: true,
+            }),
+        ),
+        (
+            "push_scene_tap_stop.bin",
+            27,
+            Message::PushScene(PushScene {
+                card_id: "c".into(),
+                revision: 3,
+                scene: minimal_scene(),
+                tap_views: vec![minimal_scene()],
+                tap_wrap: false,
+            }),
+        ),
+        (
+            "device_event_tap_view.bin",
+            0,
+            Message::DeviceEvent(DeviceEvent {
+                sequence: 8,
+                kind: EventKind::Tap,
+                card_id: "c".into(),
+                action: EventAction::StartPause,
+                interrupt_token: None,
+                view_index: Some(4),
             }),
         ),
         (
@@ -797,6 +845,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event = encode_message(
         0,
         &Message::DeviceEvent(DeviceEvent {
+            view_index: None,
             sequence: 9,
             kind: EventKind::Tap,
             card_id: "timer".into(),

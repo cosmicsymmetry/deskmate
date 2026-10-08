@@ -60,7 +60,7 @@ test("decodes every status response fixture", () => {
   expect(networked.status).toEqual({
     protocolVersion: 2,
     firmwareVersion: "deskmate-m1",
-    capabilities: 8160n,
+    capabilities: 16352n,
     tier: 1,
     wifiState: 2,
     ip: "192.168.1.42",

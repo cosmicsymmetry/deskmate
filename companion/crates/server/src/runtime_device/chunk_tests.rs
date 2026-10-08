@@ -192,6 +192,7 @@ async fn chunk_window_is_eight_with_ordered_offsets_and_event_delivery() {
                 fake.reply(
                     0,
                     &Message::DeviceEvent(protocol::DeviceEvent {
+                        view_index: None,
                         sequence: 1,
                         kind: protocol::EventKind::Tap,
                         card_id: "picture".into(),
@@ -358,4 +359,97 @@ async fn chunk_window_is_one_without_capability_and_eight_with_it() {
             data().len()
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn local_tap_indexes_crossing_a_scene_ack_fall_back_without_losing_events() {
+    let (mut device, connector) = WebSocketRuntimeDevice::channel("tap-boundary".into());
+    let mut fake = FakeDevice::new(connector.attach());
+    let scene = |revision| protocol::PushScene {
+        card_id: "picture".into(),
+        revision,
+        scene: protocol::Scene {
+            revision,
+            background: 0,
+            nodes: vec![],
+        },
+        tap_views: vec![protocol::Scene {
+            revision,
+            background: 1,
+            nodes: vec![],
+        }],
+        tap_wrap: true,
+    };
+    let first = scene(1);
+    let connected = tokio::task::spawn_blocking(move || {
+        device.connect().unwrap();
+        device.push_scene(first).unwrap();
+        device
+    });
+    let (id, message) = fake.request().await;
+    assert!(matches!(message, Message::StatusRequest));
+    fake.reply(
+        id,
+        &Message::StatusResponse(protocol::test_support::sample_status_response()),
+    );
+    let (id, message) = fake.request().await;
+    assert!(matches!(message, Message::PushScene(_)));
+    let ack = |revision| {
+        Message::Ack(protocol::Ack {
+            acknowledged_type: protocol::TYPE_PUSH_SCENE,
+            revision: Some(revision),
+            already_present: None,
+        })
+    };
+    fake.reply(id, &ack(1));
+    let mut device = connected.await.unwrap();
+    let tap = |sequence| {
+        Message::DeviceEvent(protocol::DeviceEvent {
+            sequence,
+            card_id: "picture".into(),
+            kind: protocol::EventKind::Tap,
+            action: protocol::EventAction::StartPause,
+            interrupt_token: None,
+            view_index: Some(1),
+        })
+    };
+    fake.reply(0, &tap(1));
+    let next = scene(2);
+    let replaced = tokio::task::spawn_blocking(move || {
+        device.push_scene(next).unwrap();
+        device
+    });
+    let (id, message) = fake.request().await;
+    assert!(matches!(message, Message::PushScene(_)));
+    fake.reply(0, &tap(2));
+    fake.reply(id, &ack(2));
+    fake.reply(0, &tap(3));
+    let mut device = replaced.await.unwrap();
+    let events = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut events = Vec::new();
+        while events.len() < 3 {
+            if let Some(event) = device.try_recv_event() {
+                events.push(event.event);
+            } else {
+                tokio::task::yield_now().await;
+            }
+        }
+        events
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.view_index)
+            .collect::<Vec<_>>(),
+        [None, None, Some(1)]
+    );
 }

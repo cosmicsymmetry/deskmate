@@ -5,6 +5,7 @@ idf_component_register(
          "core/rle565.c"
          "core/volatile_asset_store.c"
          "core/device_event_queue.c" "core/interrupt_state.c"
+         "core/local_tap_views.c"
          "core/link_state.c" "core/navigation.c"
          "core/net_config.c"
          "core/net_ring.c"

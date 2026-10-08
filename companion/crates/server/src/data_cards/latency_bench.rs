@@ -78,7 +78,7 @@ impl Peer {
                         let Some(reply) = request else { break };
                         sequence += 1;
                         let tap = Message::DeviceEvent(DeviceEvent {
-                            sequence, kind: EventKind::Tap, card_id: "bench".into(),
+                            sequence, view_index: None, kind: EventKind::Tap, card_id: "bench".into(),
                             action: EventAction::StartPause, interrupt_token: None,
                         });
                         let bytes = protocol::encode_message(0, &tap).unwrap();

@@ -90,16 +90,23 @@ function rememberedDeviceId(): string | null {
  * one, because the working one is the one being saved to.
  */
 function pickDevice(devices: DeviceRow[]): DeviceRow | undefined {
+  // A pending panel was claimed but never reached the server: a setup that did
+  // not finish. Editing one sends every card to a panel that does not exist,
+  // which is how a working dev-0008 showed only its clock while its cards were
+  // saved to an abandoned dev-0006. Pending panels are chosen only when there
+  // is nothing else.
+  const real = devices.filter((device) => device.state !== "pending");
+  const candidates = real.length > 0 ? real : devices;
   const remembered = rememberedDeviceId();
-  const mostRecentlyConfigured = devices
+  const mostRecentlyConfigured = candidates
     .filter((device) => device.has_saved_config)
     .sort((left, right) => (right.configured_at ?? 0) - (left.configured_at ?? 0))
     .at(0);
   return (
-    devices.find((device) => device.id === remembered) ??
-    devices.find((device) => device.connected) ??
+    candidates.find((device) => device.id === remembered) ??
+    candidates.find((device) => device.connected) ??
     mostRecentlyConfigured ??
-    devices.at(0)
+    candidates.at(-1)
   );
 }
 

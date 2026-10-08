@@ -461,7 +461,8 @@ export const apiContractFixtures = {
     "scene-render",
     "volatile-assets",
     "durable-asset-encoding",
-    "display-brightness"
+    "display-brightness",
+    "pipelined-asset-chunks"
   ],
   "runtime_states": [
     {

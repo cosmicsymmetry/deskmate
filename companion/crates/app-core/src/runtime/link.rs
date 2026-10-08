@@ -52,6 +52,25 @@ pub trait RuntimeDevice: Send + 'static {
     /// protocol -- a caller that sees `true` sends no chunks.
     fn send_asset_begin(&mut self, begin: AssetBegin) -> Result<Ack, DeviceError>;
     fn send_asset_chunk(&mut self, chunk: AssetChunk) -> Result<(), DeviceError>;
+    /// Send one transfer's wire bytes. The error retains the failing offset.
+    /// Transports may pipeline only when their negotiated capability permits it.
+    fn send_asset_chunks(
+        &mut self,
+        digest: [u8; protocol::ASSET_DIGEST_LEN],
+        wire: &[u8],
+    ) -> Result<(), (u32, DeviceError)> {
+        for (index, data) in wire.chunks(protocol::MAX_ASSET_CHUNK_BYTES).enumerate() {
+            let offset = u32::try_from(index * protocol::MAX_ASSET_CHUNK_BYTES)
+                .expect("asset wire length was validated before AssetBegin");
+            self.send_asset_chunk(AssetChunk {
+                digest,
+                offset,
+                data: data.to_vec(),
+            })
+            .map_err(|error| (offset, error))?;
+        }
+        Ok(())
+    }
     fn send_asset_commit(&mut self, commit: AssetCommit) -> Result<(), DeviceError>;
     /// Tell the device the full set of digests that should survive. The
     /// device aborts any transfer still in flight, marks committed records

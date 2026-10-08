@@ -46,6 +46,8 @@ pub const CAPABILITY_VOLATILE_ASSETS: u64 = 1 << 9;
 /// tunnel does not survive that. The same frame RLE565-encoded is a handful.
 pub const CAPABILITY_DURABLE_ASSET_ENCODING: u64 = 1 << 10;
 pub const CAPABILITY_DISPLAY_BRIGHTNESS: u64 = 1 << 11;
+pub const CAPABILITY_PIPELINED_ASSET_CHUNKS: u64 = 1 << 12;
+pub const ASSET_CHUNK_WINDOW: usize = 8;
 pub const MIN_DISPLAY_BRIGHTNESS: u8 = 26;
 pub const CURRENT_CAPABILITIES: u64 = CAPABILITY_ASSET_TRANSFER
     | CAPABILITY_FIRMWARE_UPDATE
@@ -53,7 +55,8 @@ pub const CURRENT_CAPABILITIES: u64 = CAPABILITY_ASSET_TRANSFER
     | CAPABILITY_SCENE_RENDER
     | CAPABILITY_VOLATILE_ASSETS
     | CAPABILITY_DURABLE_ASSET_ENCODING
-    | CAPABILITY_DISPLAY_BRIGHTNESS;
+    | CAPABILITY_DISPLAY_BRIGHTNESS
+    | CAPABILITY_PIPELINED_ASSET_CHUNKS;
 const _: () = assert!(CURRENT_CAPABILITIES & RETIRED_V1_CAPABILITY_BITS == 0);
 /// A card id is an identifier the host chose, not free text.
 ///
@@ -2182,8 +2185,8 @@ mod tests {
         // what now follows them on the wire. The tail is
         // CURRENT_CAPABILITIES, which protocol v2 re-based: bits 0-4 described
         // a device that rendered templates and are retired, leaving
-        // 4064 (0x0fe0). It moves whenever a capability bit changes.
-        let pattern = [0x15, 0x09, 0x16, 0x02, 0x17, 0x19, 0x0f, 0xe0];
+        // 8160 (0x1fe0). It moves whenever a capability bit changes.
+        let pattern = [0x15, 0x09, 0x16, 0x02, 0x17, 0x19, 0x1f, 0xe0];
         let offset = payload
             .windows(pattern.len())
             .position(|window| window == pattern)

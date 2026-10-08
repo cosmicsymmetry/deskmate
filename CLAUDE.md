@@ -35,7 +35,7 @@ default. This section states only what is true now.
 
 - **Config schema v11** (`docs/config/v11.md`), **protocol v2** (`docs/protocol/v2.md`,
   frozen; v1 is marked superseded and kept as the record of what flashed firmware
-  speaks), `PROTOCOL_CURRENT_CAPABILITIES` **4064**. Protocol v2 is **NOT additive over v1**: it
+  speaks), `PROTOCOL_CURRENT_CAPABILITIES` **8160**. Protocol v2 is **NOT additive over v1**: it
   removes `PushData` (type 5 is now `PushTimer`), the template/size-class/
   interrupt-policy registry, `ApplyConfig.screens`, `DeviceEvent`'s second identifier,
   the `field.*` scene binding, error codes 11-13 and capability bits 0-4. A v1 host and a

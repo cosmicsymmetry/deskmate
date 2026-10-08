@@ -310,7 +310,8 @@ export type DeviceCapability =
   | "scene-render"
   | "volatile-assets"
   | "durable-asset-encoding"
-  | "display-brightness";
+  | "display-brightness"
+  | "pipelined-asset-chunks";
 
 export interface DeviceCounters {
   host_reconnects: number;

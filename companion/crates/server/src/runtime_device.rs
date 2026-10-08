@@ -7,6 +7,11 @@
 //! channel boundary avoids trying to enter a Tokio runtime from synchronous
 //! trait methods and keeps request IDs single-owned.
 
+#[cfg(test)]
+mod chunk_tests;
+mod chunks;
+use chunks::ChunkTransfer;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -19,7 +24,7 @@ use device::{
     session_state::{DiagnosticCounters, require_ack},
 };
 use futures_util::stream::SplitSink;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use protocol::{
     Ack, ActivateCard, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, AssetRelease, CardConfig,
     Message, PushScene, PushTimer, RequestIdAllocator, StatusResponse, TimeSync, TriggerInterrupt,
@@ -134,6 +139,38 @@ fn timed<T>(
     (result, started.elapsed())
 }
 
+fn record_chunk(
+    device_id: &str,
+    accounting: &mut Option<AssetTransfer>,
+    offset: u32,
+    bytes: usize,
+    result: Result<(), &DeviceError>,
+    elapsed: Duration,
+) {
+    match (result, accounting.as_mut()) {
+        (Ok(()), Some(transfer)) => {
+            transfer.record_chunk(bytes, elapsed);
+            if elapsed >= SLOW_ASSET_REQUEST {
+                tracing::info!(target: "server::runtime_device",
+                        device_id = %device_id, offset, bytes,
+                        chunk_number = transfer.chunks, elapsed_ms = elapsed.as_millis(),
+                        "an asset chunk stalled");
+            }
+        }
+        (Err(error), transfer) => {
+            let (chunks, since_begin_ms) = transfer.map_or((0, 0), |transfer| {
+                (transfer.chunks, transfer.started.elapsed().as_millis())
+            });
+            tracing::warn!(target: "server::runtime_device",
+                    device_id = %device_id, offset, bytes, chunks_delivered = chunks,
+                    elapsed_ms = elapsed.as_millis(), since_begin_ms, %error,
+                    "an asset chunk failed; the transfer is abandoned");
+            *accounting = None;
+        }
+        (Ok(()), None) => {}
+    }
+}
+
 /// Bounds every WebSocket send, including requests, keepalives, and close
 /// frames. A peer that stops reading would otherwise park the socket actor and
 /// prevent both response deadlines and idle checks from making progress.
@@ -193,6 +230,11 @@ const IDLE_TIMEOUT: Duration =
 /// allowing an untrusted device to grow memory without limit.
 const EVENT_QUEUE_CAPACITY: usize = device::DEFAULT_EVENT_QUEUE_CAPACITY;
 
+enum DeviceCommand {
+    Request(DeviceRequest),
+    Chunks(ChunkTransfer),
+}
+
 struct DeviceRequest {
     message: Message,
     response: SyncSender<Result<Message, DeviceError>>,
@@ -217,7 +259,7 @@ impl PendingRequest {
 #[derive(Default)]
 struct TransportState {
     generation: u64,
-    commands: Option<UnboundedSender<DeviceRequest>>,
+    commands: Option<UnboundedSender<DeviceCommand>>,
 }
 
 #[derive(Default)]
@@ -226,7 +268,7 @@ struct TransportSlot {
 }
 
 impl TransportSlot {
-    fn attach(&self, commands: UnboundedSender<DeviceRequest>) -> u64 {
+    fn attach(&self, commands: UnboundedSender<DeviceCommand>) -> u64 {
         let mut state = self
             .state
             .lock()
@@ -236,7 +278,7 @@ impl TransportSlot {
         state.generation
     }
 
-    fn current(&self) -> Option<(u64, UnboundedSender<DeviceRequest>)> {
+    fn current(&self) -> Option<(u64, UnboundedSender<DeviceCommand>)> {
         let state = self
             .state
             .lock()
@@ -411,7 +453,7 @@ pub(crate) struct WebSocketRuntimeDevice {
 
 /// The async half retained by the upgraded socket task.
 pub(crate) struct SocketPeer {
-    commands: UnboundedReceiver<DeviceRequest>,
+    commands: UnboundedReceiver<DeviceCommand>,
     event_router: EventRouter,
     diagnostics: Arc<DiagnosticCounters>,
     transport: Arc<TransportSlot>,
@@ -473,10 +515,10 @@ impl WebSocketRuntimeDevice {
         // strictly longer than the actor's own deadline for it.
         let wait_timeout = response_wait_timeout(&message);
         commands
-            .send(DeviceRequest {
+            .send(DeviceCommand::Request(DeviceRequest {
                 message,
                 response: response_sender,
-            })
+            }))
             .map_err(|_| DeviceError::Transport(TransportError::Disconnected))?;
         match response_receiver.recv_timeout(wait_timeout) {
             Ok(response) => response.map(|message| (generation, message)),
@@ -814,29 +856,86 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
             self.connected_request(Message::AssetChunk(chunk))
                 .and_then(|response| require_ack(&response, protocol::TYPE_ASSET_CHUNK, None))
         });
-        match (&result, self.asset_transfer.as_mut()) {
-            (Ok(()), Some(transfer)) => {
-                transfer.record_chunk(bytes, elapsed);
-                if elapsed >= SLOW_ASSET_REQUEST {
-                    tracing::info!(target: "server::runtime_device",
-                        device_id = %self.device_id, offset, bytes,
-                        chunk_number = transfer.chunks, elapsed_ms = elapsed.as_millis(),
-                        "an asset chunk stalled");
+        record_chunk(
+            &self.device_id,
+            &mut self.asset_transfer,
+            offset,
+            bytes,
+            result.as_ref().copied(),
+            elapsed,
+        );
+        result
+    }
+
+    fn send_asset_chunks(
+        &mut self,
+        digest: [u8; protocol::ASSET_DIGEST_LEN],
+        wire: &[u8],
+    ) -> Result<(), (u32, DeviceError)> {
+        if self.capabilities & protocol::CAPABILITY_PIPELINED_ASSET_CHUNKS == 0 {
+            for (index, data) in wire.chunks(protocol::MAX_ASSET_CHUNK_BYTES).enumerate() {
+                let offset = u32::try_from(index * protocol::MAX_ASSET_CHUNK_BYTES)
+                    .expect("asset wire length was validated before AssetBegin");
+                self.send_asset_chunk(AssetChunk {
+                    digest,
+                    offset,
+                    data: data.to_vec(),
+                })
+                .map_err(|error| (offset, error))?;
+            }
+            return Ok(());
+        }
+        if wire.is_empty() {
+            return Ok(());
+        }
+        let (result, elapsed) = timed(|| {
+            let expected = self.connected_generation.ok_or(DeviceError::NoDevice)?;
+            let (generation, commands) = self
+                .transport
+                .current()
+                .ok_or(DeviceError::Transport(TransportError::Disconnected))?;
+            if generation != expected {
+                return Err(DeviceError::NoDevice);
+            }
+            let (sender, receiver) = mpsc::sync_channel(1);
+            commands
+                .send(DeviceCommand::Chunks(ChunkTransfer::new(
+                    digest,
+                    wire.to_vec(),
+                    sender,
+                    self.asset_transfer.take(),
+                )))
+                .map_err(|_| DeviceError::Transport(TransportError::Disconnected))?;
+            // Each chunk has its own actor deadline. Bound this caller as well,
+            // allowing the worst case of one full request budget per chunk.
+            let count = u32::try_from(wire.len().div_ceil(protocol::MAX_ASSET_CHUNK_BYTES))
+                .expect("asset wire length was validated before AssetBegin");
+            match receiver.recv_timeout(REQUEST_TIMEOUT * count + RESPONSE_WAIT_MARGIN) {
+                Ok(result) => Ok(result),
+                Err(RecvTimeoutError::Timeout) => Err(DeviceError::Timeout),
+                Err(RecvTimeoutError::Disconnected) => {
+                    Err(DeviceError::Transport(TransportError::Disconnected))
                 }
             }
-            (Err(error), transfer) => {
-                let (chunks, since_begin_ms) = transfer.map_or((0, 0), |transfer| {
-                    (transfer.chunks, transfer.started.elapsed().as_millis())
-                });
-                tracing::warn!(target: "server::runtime_device",
-                    device_id = %self.device_id, offset, bytes, chunks_delivered = chunks,
-                    elapsed_ms = elapsed.as_millis(), since_begin_ms, %error,
-                    "an asset chunk failed; the transfer is abandoned");
-                self.asset_transfer = None;
+        });
+        match result {
+            Ok(Ok(accounting)) => {
+                self.asset_transfer = accounting;
+                Ok(())
             }
-            (Ok(()), None) => {}
+            Ok(Err(error)) => Err(error),
+            Err(error) => {
+                record_chunk(
+                    &self.device_id,
+                    &mut self.asset_transfer,
+                    0,
+                    wire.len().min(protocol::MAX_ASSET_CHUNK_BYTES),
+                    Err(&error),
+                    elapsed,
+                );
+                Err((0, error))
+            }
         }
-        result
     }
 
     fn send_asset_commit(&mut self, commit: AssetCommit) -> Result<(), DeviceError> {
@@ -902,13 +1001,28 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
 
 impl SocketPeer {
     pub(crate) async fn run(
-        mut self,
+        self,
         socket: WebSocket,
         device_id: &str,
         last_seen_unix_ms: Arc<AtomicU64>,
     ) {
+        self.run_socket(socket, device_id, last_seen_unix_ms).await;
+    }
+
+    // Keep the socket select and both mutually exclusive request modes together.
+    #[allow(clippy::too_many_lines)]
+    async fn run_socket<S, E>(
+        mut self,
+        socket: S,
+        device_id: &str,
+        last_seen_unix_ms: Arc<AtomicU64>,
+    ) where
+        S: Stream<Item = Result<WsMessage, E>> + Sink<WsMessage, Error = E> + Unpin,
+        E: std::fmt::Display,
+    {
         let (mut sender, mut receiver) = socket.split();
         let mut pending: Option<PendingRequest> = None;
+        let mut chunks: Option<ChunkTransfer> = None;
         let mut last_activity = std::time::Instant::now();
         mark_seen(&last_seen_unix_ms);
 
@@ -917,7 +1031,16 @@ impl SocketPeer {
         ping_tick.tick().await;
 
         loop {
-            let pending_deadline = pending_deadline(pending.as_ref());
+            if let Some(transfer) = chunks.as_mut() {
+                transfer.expire(device_id, self.generation);
+                if transfer.finished() {
+                    chunks = None;
+                }
+            }
+            let pending_deadline = chunks
+                .as_ref()
+                .and_then(ChunkTransfer::deadline)
+                .unwrap_or_else(|| pending_deadline(pending.as_ref()));
             tokio::select! {
                 next_message = receiver.next() => {
                     match next_message {
@@ -930,7 +1053,7 @@ impl SocketPeer {
                         Some(Ok(WsMessage::Binary(bytes))) => {
                             last_activity = std::time::Instant::now();
                             mark_seen(&last_seen_unix_ms);
-                            if !self.handle_binary(&bytes, device_id, &mut pending) {
+                            if !self.handle_binary(&bytes, device_id, &mut pending, &mut chunks) {
                                 close_socket(&mut sender).await;
                                 break;
                             }
@@ -948,9 +1071,13 @@ impl SocketPeer {
                         }
                     }
                 }
-                command = self.commands.recv(), if pending.is_none() => {
+                command = self.commands.recv(), if pending.is_none() && chunks.is_none() => {
                     let Some(command) = command else {
                         break;
+                    };
+                    let command = match command {
+                        DeviceCommand::Request(command) => command,
+                        DeviceCommand::Chunks(transfer) => { chunks = Some(transfer); continue; }
                     };
                     let Some(expected_type) =
                         protocol::expected_response_type(command.message.type_id())
@@ -980,7 +1107,28 @@ impl SocketPeer {
                         response: command.response,
                     });
                 }
-                () = tokio::time::sleep_until(pending_deadline), if pending.is_some() => {
+                () = std::future::ready(()), if chunks.as_ref().is_some_and(ChunkTransfer::can_send) => {
+                    let transfer = chunks.as_mut().expect("active chunk transfer");
+                    let request_id = self.request_ids.allocate();
+                    let message = transfer.next(request_id);
+                    let result = match protocol::encode_message(request_id, &message) {
+                        Ok(wire) => {
+                            // A stalled write must not mask an earlier chunk's deadline.
+                            match tokio::time::timeout_at(transfer.deadline().expect("pending chunk"),
+                                send_visual_request(&mut sender, device_id, self.generation, request_id, &message, wire)).await {
+                                Ok(result) => result,
+                                Err(_) => Err(DeviceError::Timeout),
+                            }
+                        }
+                        Err(error) => Err(DeviceError::MalformedResponse(format!("cannot encode host request: {error}"))),
+                    };
+                    if let Err(error) = result {
+                        transfer.expire(device_id, self.generation);
+                        if !transfer.finished() { transfer.send_failed(error, device_id); }
+                        break;
+                    }
+                }
+                () = tokio::time::sleep_until(pending_deadline), if pending.is_some() || chunks.is_some() => {
                     if let Some(expired) = pending.take() {
                         expired.expire(device_id, self.generation);
                     }
@@ -1005,6 +1153,9 @@ impl SocketPeer {
                 .response
                 .send(Err(DeviceError::Transport(TransportError::Disconnected)));
         }
+        if let Some(transfer) = chunks.as_mut() {
+            transfer.disconnected(device_id);
+        }
         self.transport.detach(self.generation);
     }
 
@@ -1013,6 +1164,7 @@ impl SocketPeer {
         bytes: &[u8],
         device_id: &str,
         pending: &mut Option<PendingRequest>,
+        chunks: &mut Option<ChunkTransfer>,
     ) -> bool {
         if bytes.is_empty() {
             self.malformed(device_id, "empty binary message");
@@ -1051,6 +1203,23 @@ impl SocketPeer {
                         .fetch_add(1, Ordering::Relaxed);
                 }
                 continue;
+            }
+
+            if let Some(transfer) = chunks.as_mut() {
+                transfer.expire(device_id, self.generation);
+                if !transfer.finished() && transfer.receive(frame.request_id, &message, device_id) {
+                    if require_ack(&message, protocol::TYPE_ASSET_CHUNK, None).is_err() {
+                        self.diagnostics
+                            .unexpected_device_frames
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    if let Message::Error(error) = &message {
+                        tracing::info!(target: "server::tap_latency", device_id,
+                            generation = self.generation, request_id = frame.request_id, ?error,
+                            unix_us = chrono::Utc::now().timestamp_micros(), "device request rejected");
+                    }
+                    continue;
+                }
             }
 
             // Correlate AFTER decoding, never before. Decoding is what rejects a
@@ -1121,14 +1290,18 @@ impl SocketPeer {
     }
 }
 
-async fn send_visual_request(
-    sender: &mut SplitSink<WebSocket, WsMessage>,
+async fn send_visual_request<S, E>(
+    sender: &mut SplitSink<S, WsMessage>,
     device_id: &str,
     generation: u64,
     request_id: u32,
     message: &Message,
     wire: Vec<u8>,
-) -> Result<(), DeviceError> {
+) -> Result<(), DeviceError>
+where
+    S: Sink<WsMessage, Error = E> + Unpin,
+    E: std::fmt::Display,
+{
     trace_visual_request(device_id, generation, request_id, message, "send_start");
     let started = std::time::Instant::now();
     let result = send_ws(sender, WsMessage::Binary(wire.into())).await;
@@ -1194,10 +1367,14 @@ fn pending_deadline(pending: Option<&PendingRequest>) -> Instant {
     )
 }
 
-async fn send_ws(
-    sender: &mut SplitSink<WebSocket, WsMessage>,
+async fn send_ws<S, E>(
+    sender: &mut SplitSink<S, WsMessage>,
     message: WsMessage,
-) -> Result<(), DeviceError> {
+) -> Result<(), DeviceError>
+where
+    S: Sink<WsMessage, Error = E> + Unpin,
+    E: std::fmt::Display,
+{
     match timeout(SEND_TIMEOUT, sender.send(message)).await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(error)) => Err(DeviceError::Transport(TransportError::Io(
@@ -1207,7 +1384,11 @@ async fn send_ws(
     }
 }
 
-async fn close_socket(sender: &mut SplitSink<WebSocket, WsMessage>) {
+async fn close_socket<S, E>(sender: &mut SplitSink<S, WsMessage>)
+where
+    S: Sink<WsMessage, Error = E> + Unpin,
+    E: std::fmt::Display,
+{
     let _ = send_ws(sender, WsMessage::Close(None)).await;
 }
 
@@ -1523,7 +1704,7 @@ mod tests {
                 interrupt_token: None,
             };
             let wire = protocol::encode_message(0, &Message::DeviceEvent(event)).unwrap();
-            assert!(peer.handle_binary(&wire, "dev-log", &mut None));
+            assert!(peer.handle_binary(&wire, "dev-log", &mut None, &mut None));
             let mut push = sample_scene();
             push.card_id = "picture-log".into();
             push.scene
@@ -1663,7 +1844,7 @@ mod tests {
             protocol::encode_message(2, &Message::StatusResponse(sample_status())).unwrap(),
         );
 
-        assert!(peer.handle_binary(&responses, "dev-1", &mut pending));
+        assert!(peer.handle_binary(&responses, "dev-1", &mut pending, &mut None));
         assert_eq!(
             response_receiver
                 .recv_timeout(Duration::from_millis(50))
@@ -2001,7 +2182,11 @@ mod tests {
 
             for supported in [true, false, true] {
                 status.config_revision = revision_offset.map_or(0, |offset| revision + offset);
-                status.capabilities = if supported { 4064 } else { 2016 };
+                status.capabilities = if supported {
+                    protocol::CURRENT_CAPABILITIES
+                } else {
+                    2016
+                };
                 let actor = spawn_test_actor_with_status(connector.attach(), status.clone());
                 device.connect().expect("firmware change reconnects");
                 connector.detach();
@@ -2081,7 +2266,7 @@ mod tests {
     ) -> std::thread::JoinHandle<Vec<Message>> {
         std::thread::spawn(move || {
             let mut requests = Vec::new();
-            while let Some(command) = peer.commands.blocking_recv() {
+            while let Some(super::DeviceCommand::Request(command)) = peer.commands.blocking_recv() {
                 let response = match &command.message {
                     Message::StatusRequest => Message::StatusResponse(status.clone()),
                     Message::TimeSync(_) => ack(protocol::TYPE_TIME_SYNC, None),

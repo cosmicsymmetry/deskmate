@@ -146,6 +146,8 @@ fn maximum_config_fixture_stays_inside_one_frame() {
 
 #[test]
 fn current_capabilities_advertise_implemented_features() {
+    assert_eq!(protocol::CAPABILITY_PIPELINED_ASSET_CHUNKS, 4096);
+    assert_eq!(protocol::ASSET_CHUNK_WINDOW, 8);
     assert_eq!(protocol::CAPABILITY_SCENE_RENDER, 256);
     assert_eq!(protocol::CAPABILITY_VOLATILE_ASSETS, 512);
     assert_eq!(protocol::CAPABILITY_DURABLE_ASSET_ENCODING, 1024);
@@ -157,13 +159,14 @@ fn current_capabilities_advertise_implemented_features() {
             | protocol::CAPABILITY_SCENE_RENDER
             | protocol::CAPABILITY_VOLATILE_ASSETS
             | protocol::CAPABILITY_DURABLE_ASSET_ENCODING
-            | protocol::CAPABILITY_DISPLAY_BRIGHTNESS,
+            | protocol::CAPABILITY_DISPLAY_BRIGHTNESS
+            | protocol::CAPABILITY_PIPELINED_ASSET_CHUNKS,
         "implemented asset transfer, firmware update, networking, scene \
          rendering, volatile-asset, and durable-asset encoding features must be advertised"
     );
     // Protocol v2 re-based the word: bits 0-4 described a device that rendered
     // templates itself and are retired, never re-issued.
-    assert_eq!(protocol::CURRENT_CAPABILITIES, 4064);
+    assert_eq!(protocol::CURRENT_CAPABILITIES, 8160);
 }
 
 fn assert_rot_rect_clip_is_pinned(nodes: &[protocol::SceneNode]) {

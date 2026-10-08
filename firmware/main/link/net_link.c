@@ -15,13 +15,17 @@
 #include "esp_timer.h"
 #include "esp_websocket_client.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
+#include "freertos/event_groups.h"
+#include "freertos/task.h"
 #include "link/net_store.h"
 #include "link/protocol_task.h"
 #include "link/usb_link.h"
 #include "link/wifi_station.h"
 
-#define NET_LINK_RX_RING_CAPACITY (USB_LINK_MAX_WIRE_FRAME_SIZE * 4U)
+#define NET_LINK_RX_RING_CAPACITY (USB_LINK_MAX_WIRE_FRAME_SIZE * 16U)
+#define NET_LINK_RX_WAIT_MS 1000U
+#define RX_DATA_READY BIT0
+#define RX_SPACE_READY BIT1
 #define NET_LINK_TIMEOUT_MS 45000U
 #define NET_LINK_STABLE_CONNECTION_MS 10000U
 #define NET_LINK_AUTH_HEADER_CAPACITY                                      \
@@ -32,7 +36,7 @@ static const char *TAG = "net_link";
 static esp_websocket_client_handle_t s_client;
 static uint8_t *s_rx_storage;
 static net_ring_t s_rx_ring;
-static SemaphoreHandle_t s_rx_ready;
+static EventGroupHandle_t s_rx_ready;
 static portMUX_TYPE s_rx_lock = portMUX_INITIALIZER_UNLOCKED;
 static reconnect_backoff_t s_reconnect_backoff;
 static bool s_connected;
@@ -69,12 +73,34 @@ static void ring_append(const uint8_t *data, size_t length)
         return;
     }
 
-    portENTER_CRITICAL(&s_rx_lock);
-    size_t accepted = net_ring_write(&s_rx_ring, data, length);
-    portEXIT_CRITICAL(&s_rx_lock);
-
-    if (accepted != 0U) {
-        (void)xSemaphoreGive(s_rx_ready);
+    TickType_t started = xTaskGetTickCount();
+    TickType_t budget = pdMS_TO_TICKS(NET_LINK_RX_WAIT_MS);
+    size_t offset = 0U;
+    while (offset < length) {
+        TickType_t elapsed = xTaskGetTickCount() - started;
+        portENTER_CRITICAL(&s_rx_lock);
+        size_t remaining = length - offset;
+        size_t available = s_rx_ring.capacity - s_rx_ring.used;
+        // Before the deadline, offer only bytes that fit: net_ring_write counts
+        // anything else as dropped. At expiry it records the final overflow.
+        size_t offered = elapsed >= budget || remaining < available
+            ? remaining : available;
+        size_t accepted = net_ring_write(&s_rx_ring, data + offset, offered);
+        portEXIT_CRITICAL(&s_rx_lock);
+        offset += accepted;
+        if (accepted != 0U) {
+            (void)xEventGroupSetBits(s_rx_ready, RX_DATA_READY);
+        }
+        if (offset == length || elapsed >= budget) {
+            break;
+        }
+        elapsed = xTaskGetTickCount() - started;
+        if (elapsed < budget) {
+            // Space is signalled after draining and retained until consumed,
+            // including a drain racing the full-ring check. Never wait locked.
+            (void)xEventGroupWaitBits(s_rx_ready, RX_SPACE_READY, pdTRUE,
+                                      pdFALSE, budget - elapsed);
+        }
     }
 }
 
@@ -83,6 +109,9 @@ static size_t ring_drain(uint8_t *out, size_t capacity)
     portENTER_CRITICAL(&s_rx_lock);
     size_t count = net_ring_read(&s_rx_ring, out, capacity);
     portEXIT_CRITICAL(&s_rx_lock);
+    if (count != 0U) {
+        (void)xEventGroupSetBits(s_rx_ready, RX_SPACE_READY);
+    }
     return count;
 }
 
@@ -179,7 +208,7 @@ static void release_start_resources(void)
         s_client = NULL;
     }
     if (s_rx_ready != NULL) {
-        vSemaphoreDelete(s_rx_ready);
+        vEventGroupDelete(s_rx_ready);
         s_rx_ready = NULL;
     }
     heap_caps_free(s_rx_storage);
@@ -215,7 +244,7 @@ esp_err_t net_link_start(void)
         memset(&stored, 0, sizeof(stored));
         return ESP_ERR_NO_MEM;
     }
-    s_rx_ready = xSemaphoreCreateBinary();
+    s_rx_ready = xEventGroupCreate();
     if (s_rx_ready == NULL) {
         memset(&stored, 0, sizeof(stored));
         release_start_resources();
@@ -324,7 +353,8 @@ static size_t net_link_read(uint8_t *out, size_t capacity,
     if (received != 0U || timeout_ticks == 0U) {
         return received;
     }
-    if (xSemaphoreTake(s_rx_ready, timeout_ticks) != pdTRUE) {
+    if ((xEventGroupWaitBits(s_rx_ready, RX_DATA_READY, pdTRUE, pdFALSE,
+                             timeout_ticks) & RX_DATA_READY) == 0U) {
         return 0U;
     }
     return ring_drain(out, capacity);

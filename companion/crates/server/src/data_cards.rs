@@ -586,9 +586,50 @@ pub(crate) fn start_account_data_cards(
             .spec_path
             .clone()
     };
+    release_sources_no_panel_uses(state, space);
     let specs = load_specs(&spec_path)?;
     spawn_refreshers(state, space, &spec_path, specs);
     Ok(())
+}
+
+/// Revokes picture sources that no panel's saved configuration declares.
+///
+/// Removing a panel deleted its cards but left their sources on the account,
+/// where they counted against the source limit: an account that had removed a
+/// panel with eight picture cards could not add a picture card to the next one.
+/// Removal now releases them; this clears what earlier removals left behind.
+/// It runs at startup only, when no draft can hold a just-minted source that
+/// its autosave has not yet declared, and only on an account with a panel to
+/// judge use by. The spec pruning in `spawn_refreshers`
+/// then drops the faces of whatever was revoked.
+fn release_sources_no_panel_uses(state: &ServerState, space: &AccountSpace) {
+    // With no panel at all there is nothing to judge use by; leave the sources.
+    if state
+        .identity()
+        .devices_for(&space.account_id)
+        .map_or(true, |devices| devices.is_empty())
+    {
+        return;
+    }
+    let Some(used) = crate::app_api::sources_used_by_saved_panels(state, space, None) else {
+        return;
+    };
+    for source in space.image_sources.summaries(chrono::Utc::now()) {
+        if used.contains(&source.id) {
+            continue;
+        }
+        match space.image_sources.revoke(&source.id) {
+            Ok(()) => tracing::info!(
+                source_id = %source.id,
+                "revoked an image source no panel's configuration declares"
+            ),
+            Err(error) => tracing::warn!(
+                source_id = %source.id,
+                %error,
+                "could not revoke an image source no panel uses"
+            ),
+        }
+    }
 }
 
 /// Reads the spec file, or returns nothing when there is none.

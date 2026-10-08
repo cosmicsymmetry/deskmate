@@ -174,11 +174,40 @@ async fn remove_device(
     Path(device_id): Path<String>,
 ) -> Result<StatusCode, ClaimError> {
     let account_id = session.account.id;
+    let removal = state.clone();
+    let removed_account = account_id.clone();
     tokio::task::spawn_blocking(move || {
-        state.with_device_lifecycle(|| remove_owned_device_data(&state, &account_id, &device_id))
+        removal.with_device_lifecycle(|| {
+            remove_owned_device_data(&removal, &removed_account, &device_id)
+        })
     })
     .await
     .map_err(|_| ClaimError::WorkerFailed)??;
+    // The panel's cards went with its config, but picture sources are per
+    // account: without this they stay, count against the source limit, and the
+    // next panel cannot add a picture card. The panel is already released, so
+    // it is not among those whose sources are kept.
+    let space = state.account_space(&account_id);
+    match crate::app_api::sources_used_by_panels(&state, &space, None).await {
+        Ok(Some(used)) => {
+            if let Err(error) = crate::app_api::reconcile_image_sources(
+                space,
+                &app_core::AppConfig::default(),
+                &used,
+            )
+            .await
+            {
+                tracing::warn!(
+                    ?error,
+                    "could not release a removed panel's picture sources"
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(?error, "could not read the remaining panels' sources");
+        }
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

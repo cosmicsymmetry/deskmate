@@ -590,7 +590,11 @@ async fn save_config(
             },
         })?;
 
-    reconcile_image_sources(Arc::clone(&space), &config).await?;
+    // Sources are per account and panels are per device: another panel's cards
+    // may still use a source this config does not name.
+    if let Some(others) = sources_used_by_panels(&state, &space, Some(&device_id)).await? {
+        reconcile_image_sources(Arc::clone(&space), &config, &others).await?;
+    }
 
     if let Some(runtime) = live_runtime(&state, &device_id) {
         tokio::task::spawn_blocking(move || runtime.apply_config(config))
@@ -620,14 +624,16 @@ async fn save_config(
 /// rejects a configuration whose picture card names a source the document does
 /// not declare -- so a config that authorises a deletion is one that provably
 /// still names every source a card uses. Do not move this above the validation.
-async fn reconcile_image_sources(
+pub(crate) async fn reconcile_image_sources(
     space: Arc<AccountSpace>,
     config: &AppConfig,
+    also_keep: &std::collections::BTreeSet<String>,
 ) -> Result<(), AppApiError> {
     let declared: std::collections::BTreeSet<&str> = config
         .image_sources
         .iter()
         .map(|source| source.id.as_str())
+        .chain(also_keep.iter().map(String::as_str))
         .collect();
     let undeclared: Vec<String> = space
         .image_sources
@@ -663,6 +669,48 @@ async fn reconcile_image_sources(
         );
     }
     Ok(())
+}
+
+/// Every source declared by the saved configuration of the account's panels,
+/// `except` one. `None` when any of them cannot be read cleanly: a source is
+/// then possibly still in use, and nothing may be revoked on its account.
+pub(crate) fn sources_used_by_saved_panels(
+    state: &ServerState,
+    space: &AccountSpace,
+    except: Option<&str>,
+) -> Option<std::collections::BTreeSet<String>> {
+    let devices = state.identity().devices_for(&space.account_id).ok()?;
+    let mut used = std::collections::BTreeSet::new();
+    for device in devices {
+        if except == Some(device.device_id.as_str()) {
+            continue;
+        }
+        let store = space.configs.for_device(&device.device_id);
+        if !store.store.path().exists() {
+            continue;
+        }
+        let LoadOutcome::Loaded { config, .. } = store.store.load() else {
+            return None;
+        };
+        used.extend(config.image_sources.iter().map(|source| source.id.clone()));
+    }
+    Some(used)
+}
+
+/// [`sources_used_by_saved_panels`] off the async runtime.
+pub(crate) async fn sources_used_by_panels(
+    state: &ServerState,
+    space: &Arc<AccountSpace>,
+    except: Option<&str>,
+) -> Result<Option<std::collections::BTreeSet<String>>, AppApiError> {
+    let state = state.clone();
+    let space = Arc::clone(space);
+    let except = except.map(str::to_owned);
+    tokio::task::spawn_blocking(move || {
+        sources_used_by_saved_panels(&state, &space, except.as_deref())
+    })
+    .await
+    .map_err(|_| worker_failed())
 }
 
 // ---------------------------------------------------------------------------
@@ -968,9 +1016,13 @@ mod tests {
                 .join(crate::image_sources::IMAGE_SOURCE_STORE_FILE),
         );
 
-        reconcile_image_sources(Arc::clone(&space), &AppConfig::default())
-            .await
-            .expect("ordinary source storage failure does not fail a saved config");
+        reconcile_image_sources(
+            Arc::clone(&space),
+            &AppConfig::default(),
+            &std::collections::BTreeSet::new(),
+        )
+        .await
+        .expect("ordinary source storage failure does not fail a saved config");
 
         assert_eq!(
             space.image_sources.authenticate(&source.token),
@@ -986,11 +1038,63 @@ mod tests {
         let source = mint_face(&state);
         replace_file_with_directory(&space.root.join("data-cards.json"));
 
-        reconcile_image_sources(Arc::clone(&space), &AppConfig::default())
-            .await
-            .expect("ordinary face storage failure does not fail a saved config");
+        reconcile_image_sources(
+            Arc::clone(&space),
+            &AppConfig::default(),
+            &std::collections::BTreeSet::new(),
+        )
+        .await
+        .expect("ordinary face storage failure does not fail a saved config");
 
         assert_eq!(space.image_sources.authenticate(&source.token), None);
         assert!(crate::data_cards::descriptor_for_source(&state, &space, &source.id).is_some());
+    }
+
+    #[tokio::test]
+    async fn reconciliation_keeps_a_source_another_panel_uses() {
+        let (_root, state) = state();
+        let space = state.account_space(&state.instance_owner().unwrap().id);
+        let source = mint_face(&state);
+
+        reconcile_image_sources(
+            Arc::clone(&space),
+            &AppConfig::default(),
+            &std::collections::BTreeSet::from([source.id.clone()]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            space.image_sources.authenticate(&source.token),
+            Some(source.id.clone())
+        );
+    }
+
+    #[test]
+    fn startup_releases_sources_no_panel_declares() {
+        // The live account after its only panel was removed: eight sources,
+        // no panel naming any of them, and no room to add a picture card.
+        let (_root, state) = state();
+        let owner = state.instance_owner().unwrap().id;
+        let space = state.account_space(&owner);
+        let device = state.registry().mint().unwrap();
+        state
+            .identity()
+            .assign_device(
+                &device.device_id,
+                &owner,
+                crate::identity::DeviceState::Active,
+                Utc::now(),
+            )
+            .unwrap();
+        let orphan = space.image_sources.mint("Orphan").unwrap();
+
+        assert_eq!(
+            sources_used_by_saved_panels(&state, &space, None),
+            Some(std::collections::BTreeSet::new())
+        );
+        crate::data_cards::start_account_data_cards(&state, &space).unwrap();
+
+        assert_eq!(space.image_sources.authenticate(&orphan.token), None);
     }
 }

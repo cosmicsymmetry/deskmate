@@ -315,6 +315,13 @@ function PictureFaceSettings({
     >
       <fieldset className="source-settings__fields">
         <legend>{descriptor.label}</legend>
+        {/* What is missing goes above the fields, where it is seen: below them it sat
+            off-screen while the preview only said "No frame yet". */}
+        {status?.state === "needs-settings" && !saving && shown && (
+          <p className="data-note" role="alert">
+            <span>{shown.text}</span>
+          </p>
+        )}
         {descriptor.fields.map((field) =>
           field.type === "enum" ? (
             <fieldset className="source-settings__enum" key={field.key}>
@@ -341,7 +348,10 @@ function PictureFaceSettings({
                 required
                 maxLength={2048}
                 value={values[field.key] ?? ""}
-                placeholder={field.placeholder}
+                // A bare example ("SOL", "Dubai") in an empty field reads as a value
+                // already entered; two cards sat blank for days behind one.
+                placeholder={field.placeholder ? `e.g. ${field.placeholder}` : undefined}
+                aria-invalid={!(values[field.key] ?? "").trim() || undefined}
                 onChange={(event) => setValue(field.key, event.currentTarget.value)}
                 onBlur={() => save(values)}
               />
@@ -357,7 +367,7 @@ function PictureFaceSettings({
         <p className="data-note" role="alert">
           <span>{shown.text}</span>
         </p>
-      ) : shown ? (
+      ) : shown && !(status?.state === "needs-settings" && !saving) ? (
         <p className="source-settings__status" role="status">
           {shown.text}
         </p>

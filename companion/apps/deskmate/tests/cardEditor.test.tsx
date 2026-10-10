@@ -223,7 +223,7 @@ async function mountFaceSettings(face: FaceDescriptor, status: FaceStatus | null
   await waitFor(() => expect(mounted.container.textContent).toContain(face.label));
   const type = async (placeholder: string, value: string) => {
     const input = mounted.container.querySelector<HTMLInputElement>(
-      `input[placeholder="${placeholder}"]`,
+      `input[placeholder="e.g. ${placeholder}"]`,
     );
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, value);
@@ -284,6 +284,21 @@ test("the window says why a face is not drawing, in the server's own words", asy
     at_unix_seconds: null,
   });
   expect(editor.container.textContent).toContain("Fill in Coin ID to start this face.");
+  // The missing field is flagged and announced above the fields, and its example
+  // cannot pass for a value already typed.
+  const fieldset = editor.container.querySelector("fieldset");
+  expect(fieldset?.querySelector('[role="alert"]')?.textContent).toBe(
+    "Fill in Coin ID to start this face.",
+  );
+  const blankInput = editor.container.querySelector<HTMLInputElement>(
+    'input[placeholder="e.g. solana"]',
+  );
+  expect(blankInput?.getAttribute("aria-invalid")).toBe("true");
+  expect(
+    editor.container
+      .querySelector<HTMLInputElement>('input[placeholder="e.g. usd"]')
+      ?.hasAttribute("aria-invalid"),
+  ).toBe(false);
 
   // A ticker where an id belongs: the server reports it, and saving re-reads the status.
   editor.setStatus({

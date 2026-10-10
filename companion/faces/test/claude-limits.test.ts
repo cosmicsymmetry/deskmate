@@ -456,4 +456,5 @@ test("a bad feed response crosses the actual CLI as a transient face_status sent
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
-});
+  // A cold `bun` child on a CI runner can take longer than the 5 s default to start.
+}, 30_000);

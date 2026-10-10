@@ -7,6 +7,7 @@ import {
   type Settings,
   TransientError,
 } from "../src/face";
+import { claudeLimits } from "../src/faces/claude-limits";
 import {
   fetchHackerNews,
   hackernews,
@@ -1067,7 +1068,7 @@ describe("the views seam", () => {
   // device already holds. A face that fetched inside views() or onTap() would put
   // a network round trip back in front of the owner's finger and nothing else
   // here would notice.
-  const faces: FaceDefinition[] = [weather, hackernews, rss, token];
+  const faces: FaceDefinition[] = [weather, hackernews, rss, token, claudeLimits];
 
   test("views and onTap neither fetch nor draw", () => {
     const original = globalThis.fetch;

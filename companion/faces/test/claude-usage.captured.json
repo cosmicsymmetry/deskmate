@@ -1,0 +1,18 @@
+{
+  "updated": "2026-10-10T06:35:15Z",
+  "plan": "Max 5\u00d7",
+  "windows": [
+    {
+      "name": "Session",
+      "used_pct": 1,
+      "resets_at_label": "Sat 2:10 PM",
+      "resets_in_label": "3 hours 29 minutes"
+    },
+    {
+      "name": "Weekly",
+      "used_pct": 11,
+      "resets_at_label": "Wed 8:00 PM",
+      "resets_in_label": "4 days 9 hours"
+    }
+  ]
+}

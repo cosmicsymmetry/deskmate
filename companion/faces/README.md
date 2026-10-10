@@ -1,6 +1,6 @@
 # Deskmate faces
 
-The server-rendered card faces: weather, Hacker News, RSS, token. Each one fetches its
+The server-rendered card faces: weather, Hacker News, RSS, token, Claude limits. Each one fetches its
 data, draws a 448x368 SVG, and the server pushes the rastered frame to an ordinary
 picture card. A face is **never a card kind** -- see `CLAUDE.md`, "Product rules".
 
@@ -29,6 +29,32 @@ echo '{"kind":"hackernews","settings":{}}' | bun run src/main.ts render > /tmp/f
 | `src/kit/http.ts` | The only way a face reaches the network. |
 | `src/kit/theme.ts` | `DESIGN.md`'s dark column and the type scale. |
 | `src/main.ts` | The seam the Rust server runs: `describe` and `render`. |
+
+## Claude limits
+
+`claude-limits` offers one text setting, **Usage feed** (`url`), accepting a public
+HTTPS URL. It uses the guarded HTTP client and requests a 180-second refresh when
+the card is created. The feed is a JSON object with `updated` (an ISO timestamp with
+timezone), optional `plan`, and a nonempty `windows` array. Each window carries
+`name`, numeric `used_pct`, `resets_at_label`, and optional `resets_in_label`.
+
+The face keeps the producer's neutral bars, plan badge and reset labels, using the
+shared Inter type, 8px grid and 24px margins. Two rows per page keep percentages
+readable; tap for further windows, up to twelve across six views. A single window
+is centered. Percentages clamp to 0–100; missing percentages display “—”. Missing
+reset and update times are explicit. Relative reset labels are identified as being
+from the update, rather than presented as a running countdown.
+
+An `updated` time older than one hour shows an amber **Stale** sentence even when
+the HTTP fetch succeeds. Empty, malformed or oversized-window feeds throw a
+`TransientError`; invalid/non-HTTPS URLs throw a `ConfigurationError`. Both reach
+the existing `face_status` path and leave the stored frame intact. HTTP failures
+and egress refusals retain the guard's own typed sentences.
+
+The two `test/claude-usage*.captured.json` fixtures are actual responses from
+2026-10-10 (06:35:15Z and 06:45:15Z feed timestamps). Ten golden/dump cases include
+those captures and explicitly mutated edge cases. Run `bun run dump out/` and
+inspect `out/claude-limits--*.desk.png` alongside the full-size PNGs.
 
 ## Rules that are not obvious
 

@@ -8,6 +8,7 @@
 // output from before the move to TypeScript: the port was accepted on being
 // byte-identical to them.
 
+import { parseClaudeUsage, renderClaudeLimits } from "./faces/claude-limits";
 import {
   type HackerNewsFace,
   renderHackerNews,
@@ -758,5 +759,104 @@ function hackerNewsCases(): Case[] {
 }
 
 export function allCases(): Case[] {
-  return [...rssCases(), ...tokenCases(), ...weatherCases(), ...hackerNewsCases()];
+  return [
+    ...rssCases(),
+    ...tokenCases(),
+    ...weatherCases(),
+    ...hackerNewsCases(),
+    ...claudeLimitsCases(),
+  ];
+}
+
+// Captured from the owner's published feed on 2026-10-10 at 06:44 UTC; the
+// response still matched the owner's 06:35 capture. Variants below deliberately
+// mutate that response to exercise missing data, bounds and layout pressure.
+const CLAUDE_CAPTURED = await Bun.file(
+  new URL("../test/claude-usage.captured.json", import.meta.url),
+).json();
+// A second live GET at 06:51 UTC had advanced updated and the session countdown.
+const CLAUDE_LIVE_CAPTURED = await Bun.file(
+  new URL("../test/claude-usage-live.captured.json", import.meta.url),
+).text();
+function claudeLimitsCases(): Case[] {
+  const now = new Date("2026-10-10T06:40:00Z");
+  const captured = parseClaudeUsage(JSON.stringify(CLAUDE_CAPTURED));
+  const variant = (patch: Record<string, unknown>) =>
+    parseClaudeUsage(JSON.stringify({ ...CLAUDE_CAPTURED, ...patch }));
+  const many = variant({
+    windows: Array.from({ length: 12 }, (_, index) => ({
+      ...CLAUDE_CAPTURED.windows[index % 2],
+      name: `Window ${index + 1}`,
+    })),
+  });
+  const three = variant({
+    windows: [
+      ...CLAUDE_CAPTURED.windows,
+      { ...CLAUDE_CAPTURED.windows[1], name: "Weekly · Sonnet" },
+    ],
+  });
+  return [
+    { name: "claude-limits--captured", svg: renderClaudeLimits(captured, now) },
+    {
+      name: "claude-limits--live-captured",
+      svg: renderClaudeLimits(
+        parseClaudeUsage(CLAUDE_LIVE_CAPTURED),
+        new Date("2026-10-10T06:50:28Z"),
+      ),
+    },
+    {
+      name: "claude-limits--stale",
+      svg: renderClaudeLimits(captured, new Date("2026-10-10T08:40:00Z")),
+    },
+    {
+      name: "claude-limits--single-window",
+      svg: renderClaudeLimits(variant({ windows: CLAUDE_CAPTURED.windows.slice(0, 1) }), now),
+    },
+    {
+      name: "claude-limits--missing-fields",
+      svg: renderClaudeLimits(
+        variant({
+          updated: " ",
+          plan: " ",
+          windows: [
+            {},
+            { ...CLAUDE_CAPTURED.windows[1], name: "", used_pct: null, resets_at_label: "" },
+          ],
+        }),
+        now,
+      ),
+    },
+    {
+      name: "claude-limits--clamped",
+      svg: renderClaudeLimits(
+        variant({
+          windows: CLAUDE_CAPTURED.windows.map(
+            (window: Record<string, unknown>, index: number) => ({
+              ...window,
+              used_pct: index === 0 ? -12 : 123,
+            }),
+          ),
+        }),
+        now,
+      ),
+    },
+    { name: "claude-limits--three-windows", svg: renderClaudeLimits(three, now) },
+    { name: "claude-limits--third-window", svg: renderClaudeLimits(three, now, 1) },
+    { name: "claude-limits--sixth-page", svg: renderClaudeLimits(many, now, 5) },
+    {
+      name: "claude-limits--long-labels",
+      svg: renderClaudeLimits(
+        variant({
+          plan: `${captured.plan} with a very long plan description`,
+          windows: CLAUDE_CAPTURED.windows.map((window: Record<string, unknown>) => ({
+            ...window,
+            name: `${window.name} with a very long window description`,
+            resets_at_label: `${window.resets_at_label} in the feed's own local timezone`,
+            used_pct: 99.5,
+          })),
+        }),
+        now,
+      ),
+    },
+  ];
 }

@@ -7,13 +7,14 @@
 // `main.ts describe` -- there is no Rust change and no binary redeploy.
 
 import { ConfigurationError, type FaceDefinition } from "./face";
+import { claudeLimits } from "./faces/claude-limits";
 import { hackernews } from "./faces/hackernews";
 import { rss } from "./faces/rss";
 import { token } from "./faces/token";
 import { weather } from "./faces/weather";
 import { discoverPlugins } from "./plugins/discovery";
 
-export const FACES: readonly FaceDefinition[] = [weather, hackernews, rss, token];
+export const FACES: readonly FaceDefinition[] = [weather, hackernews, rss, token, claudeLimits];
 
 export function faceOfKind(kind: string): FaceDefinition | undefined {
   return FACES.find((face) => face.kind === kind);

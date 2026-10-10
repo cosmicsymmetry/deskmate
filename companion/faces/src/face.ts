@@ -87,10 +87,10 @@ export interface FaceDefinition {
     now: Date,
   ): { view: ViewId; state?: unknown };
   /**
-   * How often this face wants pushing, in seconds. Only a plugin sets this today, from
-   * its manifest; a built-in face is silent and the server's own default applies. Read
+   * How often this face wants pushing, in seconds. A plugin gets this from its
+   * manifest; a built-in can declare it too, or use the server's default. Read
    * by the server ONLY when creating a new card's spec (`data_cards.rs`, Task 10) --
-   * changing a plugin's declared cadence after a card already exists does not move it.
+   * changing a face's declared cadence after a card already exists does not move it.
    */
   refreshSeconds?: number;
   /** Fetches and draws. Resolves to the SVG document, optionally with new state. */

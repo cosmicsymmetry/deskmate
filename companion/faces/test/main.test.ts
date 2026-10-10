@@ -51,6 +51,7 @@ test("describe prints the catalog the server builds the add menu from", async ()
     "hackernews",
     "rss",
     "token",
+    "claude-limits",
     ...pluginFolders(join(import.meta.dir, "../plugins")),
   ]);
   expect(catalog.map((face) => face.kind)).not.toContain("calvin-and-hobbes");
@@ -321,6 +322,7 @@ test(
       "hackernews",
       "rss",
       "token",
+      "claude-limits",
       "sound-plugin",
     ]);
     expect(err).toContain("broken-plugin");

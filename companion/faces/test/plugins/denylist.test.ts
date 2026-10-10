@@ -136,7 +136,7 @@ test("live CLI hides withdrawn plugins through tombstones and refuses every rend
       catalog
         .filter((entry: { withdrawn?: string }) => !entry.withdrawn)
         .map((entry: { kind: string }) => entry.kind),
-    ).toEqual(["weather", "hackernews", "rss", "token"]);
+    ).toEqual(["weather", "hackernews", "rss", "token", "claude-limits"]);
     expect(catalog.find((entry: { kind: string }) => entry.kind === "sample").withdrawn).toContain(
       malformed ? "denylist is unreadable" : "Safety review",
     );
